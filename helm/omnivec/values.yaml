@@ -1,0 +1,451 @@
+# OmniVec Helm Chart Values
+
+global:
+  namespace: omnivec
+  imageRegistry: "" # Set to your ACR, e.g., myacr.azurecr.io
+
+# =============================================================================
+# OMNIVEC WEB (nginx — static UI + API proxy)
+# =============================================================================
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: omnivec-web
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: LoadBalancer
+    port: 80
+    targetPort: 8080
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "250m"
+  probes:
+    liveness:
+      path: /nginx-health
+      initialDelaySeconds: 5
+      periodSeconds: 30
+    readiness:
+      path: /nginx-health
+      initialDelaySeconds: 3
+      periodSeconds: 10
+
+# =============================================================================
+# OMNIVEC API (Control Plane)
+# =============================================================================
+api:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: omnivec-api
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+  probes:
+    liveness:
+      path: /health
+      port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    readiness:
+      path: /health
+      port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+  env:
+    DOCGROK_URL: "http://docgrok:80"
+    OMNIVEC_ADMIN_TOKEN: ""  # Set via --set api.env.OMNIVEC_ADMIN_TOKEN=<token> for bootstrap admin access
+
+# =============================================================================
+# OMNIVEC CONTROLLER (bookkeeper — single replica)
+# =============================================================================
+controller:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: omnivec-api   # Same image, different entrypoint
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "250m"
+    limits:
+      memory: "2Gi"
+      cpu: "500m"
+
+# =============================================================================
+# OMNIVEC WORKERS (job processors — autoscaled)
+# =============================================================================
+worker:
+  enabled: false  # Replaced by dotnet worker (dotnetWorker)
+  replicaCount: 1
+  image:
+    repository: omnivec-api   # Same image, different entrypoint
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "2"
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# SOURCE CONNECTOR (.NET — handles CosmosDB, PostgreSQL, and MSSQL sources)
+# =============================================================================
+changefeed:
+  enabled: true
+  replicaCount: 15
+  serviceBusEnabled: false  # Set true to publish queue-mode jobs to Service Bus
+  image:
+    repository: omnivec-changefeed
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  autoscaling:
+    enabled: true
+    minReplicas: 15
+    maxReplicas: 15
+    targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# .NET WORKER (Service Bus consumer — embeds + writes to destinations)
+# =============================================================================
+dotnetWorker:
+  enabled: true
+  replicaCount: 2
+  subscriptionName: worker
+  maxConcurrentCalls: 10
+  embedBatchSize: 50
+  batchAccumulateMs: 500
+  image:
+    repository: omnivec-dotnet-worker
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "2"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# BLOB ENUMERATOR (per-source blob enumeration with checkpointing)
+# NOTE: These are created dynamically via API, not via Helm install
+# =============================================================================
+blobEnumerator:
+  # Default settings for dynamically created enumerators
+  image:
+    repository: omnivec-api
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  env:
+    ENUMERATION_INTERVAL: "60"
+    PAGE_SIZE: "1000"
+
+# =============================================================================
+# SOURCE WORKER (per-source job processing with autoscaling)
+# NOTE: These are created dynamically via API, not via Helm install
+# =============================================================================
+sourceWorker:
+  # Default settings for dynamically created workers
+  image:
+    repository: omnivec-api
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "2"
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# BLOB WATCHER (Event Grid → Storage Queue → job processing)
+# =============================================================================
+blobWatcher:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: omnivec-api
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+
+# =============================================================================
+# AZURE CONFIGURATION
+# =============================================================================
+azure:
+  # Managed Identity
+  workloadIdentity:
+    enabled: true
+    clientId: "" # Set via --set azure.workloadIdentity.clientId=<from azd/bicep output>
+
+  # CosmosDB
+  cosmos:
+    endpoint: "" # Set from Terraform output
+    database: omnivec
+    metadataContainer: metadata
+
+  # Blob Storage
+  storage:
+    accountName: "" # Set from Terraform output
+    blobEndpoint: "" # Set from Terraform output
+
+  # Service Bus
+  serviceBus:
+    namespace: "" # Set from Terraform output
+    jobsQueue: jobs
+    embeddingsTopic: embeddings
+
+  # Key Vault
+  keyVault:
+    uri: "" # Set from Terraform output
+
+# =============================================================================
+# DOCGROK (Submodule)
+# =============================================================================
+docgrok:
+  enabled: true
+  global:
+    namespace: omnivec
+    imageRegistry: "" # Will use parent registry
+
+  # DocGrok orchestrator (Rust router — default)
+  docgrok:
+    enabled: true
+    replicaCount: 1
+    image:
+      repository: docgrok-router
+      tag: latest
+    service:
+      type: ClusterIP
+      port: 80
+      targetPort: 8080
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "1"
+    probes:
+      liveness:
+        path: /health
+        initialDelaySeconds: 10
+        periodSeconds: 30
+      readiness:
+        path: /health
+        initialDelaySeconds: 5
+        periodSeconds: 10
+    env:
+      DSE_QWEN2_URL: "http://dse-qwen2-svc:8000"
+      CLIP_URL: "http://clip-svc:8000"
+      BGE_URL: "http://bge-svc:8000"
+
+  # DocGrok controller (background health checks, autoscaling)
+  controller:
+    enabled: true
+    replicaCount: 1
+    port: 8081
+    healthCheckInterval: "60"
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  # Pipeline Worker (PDF → OCR → Embedding via router)
+  pipelineWorker:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: docgrok-pipeline-worker
+      tag: latest
+    service:
+      name: pipeline-worker-svc
+      port: 8080
+      targetPort: 8080
+    resources:
+      requests:
+        memory: "8Gi"
+        cpu: "2"
+      limits:
+        memory: "12Gi"
+        cpu: "4"
+    env:
+      DOCGROK_ROUTER_URL: "http://docgrok:80"
+      DEFAULT_MODEL_ID: ""
+
+  # ML Models — disabled by default, start on-demand via UI/API
+  models:
+    embedding:
+      dse-qwen2:
+        enabled: false
+        replicaCount: 1
+        image:
+          repository: dse-qwen2-api-ms
+          tag: v6
+        service:
+          name: dse-qwen2-svc
+          port: 8000
+          targetPort: 8001
+        resources:
+          requests:
+            memory: "16Gi"
+            cpu: "4"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "24Gi"
+            cpu: "8"
+            nvidia.com/gpu: 1
+        probes:
+          liveness:
+            path: /health
+            port: 8001
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          readiness:
+            path: /health
+            port: 8001
+            initialDelaySeconds: 120
+            periodSeconds: 10
+
+      clip:
+        enabled: false
+        replicaCount: 1
+        image:
+          repository: docgrok-clip
+          tag: v8
+        service:
+          name: clip-svc
+          port: 8000
+          targetPort: 8000
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "16Gi"
+            cpu: "4"
+            nvidia.com/gpu: 1
+        probes:
+          liveness:
+            path: /health
+            port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          readiness:
+            path: /health
+            port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+
+      bge:
+        enabled: false
+        replicaCount: 1
+        image:
+          repository: docgrok-bge
+          tag: v2
+        service:
+          name: bge-svc
+          port: 8000
+          targetPort: 8000
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+            nvidia.com/gpu: 1
+        probes:
+          liveness:
+            path: /health
+            port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readiness:
+            path: /health
+            port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+# =============================================================================
+# INGRESS (Optional)
+# =============================================================================
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: omnivec.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# =============================================================================
+# SERVICE ACCOUNT
+# =============================================================================
+serviceAccount:
+  create: true
+  name: omnivec-api
+  annotations: {}
+    # azure.workload.identity/client-id: <client-id>

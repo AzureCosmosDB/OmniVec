@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "kubernetesVersion": {
+      "value": "1.33"
+    },
+    "systemNodeVmSize": {
+      "value": "${OMNIVEC_SYSTEM_NODE_VM_SIZE}"
+    },
+    "systemNodeCount": {
+      "value": "${OMNIVEC_SYSTEM_NODE_COUNT}"
+    },
+    "gpuNodeVmSize": {
+      "value": "${OMNIVEC_GPU_NODE_VM_SIZE}"
+    },
+    "gpuNodeCount": {
+      "value": "${OMNIVEC_GPU_NODE_COUNT}"
+    },
+    "enableBlobSource": {
+      "value": "${OMNIVEC_ENABLE_BLOB_SOURCE}"
+    }
+  }
+}
