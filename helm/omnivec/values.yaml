@@ -69,7 +69,6 @@ api:
       periodSeconds: 10
   env:
     DOCGROK_URL: "http://docgrok:80"
-    OMNIVEC_ADMIN_TOKEN: ""  # Set via --set api.env.OMNIVEC_ADMIN_TOKEN=<token> for bootstrap admin access
 
 # =============================================================================
 # OMNIVEC CONTROLLER (bookkeeper — single replica)
@@ -93,7 +92,7 @@ controller:
 # OMNIVEC WORKERS (job processors — autoscaled)
 # =============================================================================
 worker:
-  enabled: false  # Replaced by dotnet worker (dotnetWorker)
+  enabled: true
   replicaCount: 1
   image:
     repository: omnivec-api   # Same image, different entrypoint
@@ -113,12 +112,11 @@ worker:
     targetCPUUtilizationPercentage: 70
 
 # =============================================================================
-# SOURCE CONNECTOR (.NET — handles CosmosDB, PostgreSQL, and MSSQL sources)
+# COSMOS CHANGE FEED PROCESSOR (.NET — push model for CosmosDB sources)
 # =============================================================================
 changefeed:
   enabled: true
   replicaCount: 15
-  serviceBusEnabled: false  # Set true to publish queue-mode jobs to Service Bus
   image:
     repository: omnivec-changefeed
     tag: latest
@@ -134,33 +132,6 @@ changefeed:
     enabled: true
     minReplicas: 15
     maxReplicas: 15
-    targetCPUUtilizationPercentage: 70
-
-# =============================================================================
-# .NET WORKER (Service Bus consumer — embeds + writes to destinations)
-# =============================================================================
-dotnetWorker:
-  enabled: true
-  replicaCount: 2
-  subscriptionName: worker
-  maxConcurrentCalls: 10
-  embedBatchSize: 50
-  batchAccumulateMs: 500
-  image:
-    repository: omnivec-dotnet-worker
-    tag: latest
-    pullPolicy: Always
-  resources:
-    requests:
-      memory: "512Mi"
-      cpu: "500m"
-    limits:
-      memory: "2Gi"
-      cpu: "2"
-  autoscaling:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 10
     targetCPUUtilizationPercentage: 70
 
 # =============================================================================
@@ -248,7 +219,6 @@ azure:
   serviceBus:
     namespace: "" # Set from Terraform output
     jobsQueue: jobs
-    embeddingsTopic: embeddings
 
   # Key Vault
   keyVault:

@@ -1,0 +1,62 @@
+{{- if .Values.pipelineWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docgrok-pipeline-worker
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: docgrok-pipeline-worker
+    component: pipeline-worker
+spec:
+  replicas: {{ .Values.pipelineWorker.replicaCount }}
+  selector:
+    matchLabels:
+      app: docgrok-pipeline-worker
+  template:
+    metadata:
+      labels:
+        app: docgrok-pipeline-worker
+        component: pipeline-worker
+    spec:
+      containers:
+      - name: pipeline-worker
+        image: {{ .Values.global.imageRegistry }}/{{ .Values.pipelineWorker.image.repository }}:{{ .Values.pipelineWorker.image.tag }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        resources:
+          {{- toYaml .Values.pipelineWorker.resources | nindent 10 }}
+        env:
+        - name: DOCGROK_ROUTER_URL
+          value: {{ .Values.pipelineWorker.env.DOCGROK_ROUTER_URL | quote }}
+        - name: DEFAULT_MODEL_ID
+          value: {{ .Values.pipelineWorker.env.DEFAULT_MODEL_ID | quote }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 120
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.pipelineWorker.service.name }}
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: docgrok-pipeline-worker
+    component: pipeline-worker
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.pipelineWorker.service.port }}
+    targetPort: {{ .Values.pipelineWorker.service.targetPort }}
+  selector:
+    app: docgrok-pipeline-worker
+{{- end }}

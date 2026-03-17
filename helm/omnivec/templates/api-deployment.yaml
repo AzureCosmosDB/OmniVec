@@ -29,10 +29,6 @@ spec:
           env:
             - name: DOCGROK_URL
               value: {{ .Values.api.env.DOCGROK_URL | quote }}
-            {{- if .Values.api.env.OMNIVEC_ADMIN_TOKEN }}
-            - name: OMNIVEC_ADMIN_TOKEN
-              value: {{ .Values.api.env.OMNIVEC_ADMIN_TOKEN | quote }}
-            {{- end }}
             - name: COSMOS_ENDPOINT
               value: {{ .Values.azure.cosmos.endpoint | quote }}
             - name: COSMOS_DATABASE
