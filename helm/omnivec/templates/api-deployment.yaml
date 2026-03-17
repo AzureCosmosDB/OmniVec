@@ -1,0 +1,72 @@
+{{- if .Values.api.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-api
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      app: omnivec-api
+  template:
+    metadata:
+      labels:
+        app: omnivec-api
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      containers:
+        - name: api
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DOCGROK_URL
+              value: {{ .Values.api.env.DOCGROK_URL | quote }}
+            {{- if .Values.api.env.OMNIVEC_ADMIN_TOKEN }}
+            - name: OMNIVEC_ADMIN_TOKEN
+              value: {{ .Values.api.env.OMNIVEC_ADMIN_TOKEN | quote }}
+            {{- end }}
+            - name: COSMOS_ENDPOINT
+              value: {{ .Values.azure.cosmos.endpoint | quote }}
+            - name: COSMOS_DATABASE
+              value: {{ .Values.azure.cosmos.database | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.api.probes.liveness.path }}
+              port: {{ .Values.api.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.api.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.api.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.api.probes.readiness.path }}
+              port: {{ .Values.api.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.api.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.api.probes.readiness.periodSeconds }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnivec-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-api
+spec:
+  type: {{ .Values.api.service.type }}
+  ports:
+    - port: {{ .Values.api.service.port }}
+      targetPort: {{ .Values.api.service.targetPort }}
+      protocol: TCP
+  selector:
+    app: omnivec-api
+{{- end }}

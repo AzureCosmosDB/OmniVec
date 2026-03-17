@@ -1,0 +1,63 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/tfplan
+terraform/.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Secrets
+*.env
+.env.*
+secrets/
+
+
+openia.7m.key
+openia.7m.key
+
+scripts/bench_embedding_rs/target/
+
+# .NET build output
+bin/
+obj/
+
+# Build artifacts
+*.tar.gz
+
+# Test files
+test_*.pdf
+make_test_pdfs.py
+
+# Data exports
+*_dev3.json
+dev3_*.json
+skf_*.json
+id_mappings.json
+
+# Windows
+nul

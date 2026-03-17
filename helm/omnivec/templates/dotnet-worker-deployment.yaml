@@ -1,0 +1,69 @@
+{{- if .Values.dotnetWorker.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-dotnet-worker
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-dotnet-worker
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dotnetWorker.replicaCount }}
+  selector:
+    matchLabels:
+      app: omnivec-dotnet-worker
+  template:
+    metadata:
+      labels:
+        app: omnivec-dotnet-worker
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      containers:
+        - name: dotnet-worker
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.dotnetWorker.image.repository }}:{{ .Values.dotnetWorker.image.tag }}
+          imagePullPolicy: {{ .Values.dotnetWorker.image.pullPolicy }}
+          env:
+            - name: Worker__ServiceBusNamespace
+              value: {{ .Values.azure.serviceBus.namespace | quote }}
+            - name: Worker__TopicName
+              value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            - name: Worker__SubscriptionName
+              value: {{ .Values.dotnetWorker.subscriptionName | default "worker" | quote }}
+            - name: Worker__DocGrokBaseUrl
+              value: "http://docgrok.omnivec.svc.cluster.local:80"
+            - name: Worker__OmniVecApiBaseUrl
+              value: "http://omnivec-api:80"
+            - name: Worker__MaxConcurrentCalls
+              value: {{ .Values.dotnetWorker.maxConcurrentCalls | default 10 | quote }}
+            - name: Worker__EmbedBatchSize
+              value: {{ .Values.dotnetWorker.embedBatchSize | default 50 | quote }}
+            - name: Worker__BatchAccumulateMs
+              value: {{ .Values.dotnetWorker.batchAccumulateMs | default 500 | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+          resources:
+            {{- toYaml .Values.dotnetWorker.resources | nindent 12 }}
+{{- if .Values.dotnetWorker.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: omnivec-dotnet-worker
+  namespace: {{ .Values.global.namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: omnivec-dotnet-worker
+  minReplicas: {{ .Values.dotnetWorker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.dotnetWorker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.dotnetWorker.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

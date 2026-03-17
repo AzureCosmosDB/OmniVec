@@ -1,0 +1,17 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+httpx>=0.25.0
+azure-storage-blob>=12.19.0
+azure-storage-queue>=12.9.0
+azure-cosmos>=4.5.0
+azure-servicebus>=7.11.0
+azure-identity>=1.15.0
+azure-eventgrid>=4.16.0
+azure-mgmt-eventgrid>=10.2.0
+azure-mgmt-storage>=21.0.0
+python-multipart>=0.0.6
+aiofiles>=23.2.0
+kubernetes>=28.1.0
+asyncpg>=0.29.0
+pyodbc>=5.1.0

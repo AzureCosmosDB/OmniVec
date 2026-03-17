@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-api
+  namespace: omnivec
+  labels:
+    app: omnivec-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omnivec-api
+  template:
+    metadata:
+      labels:
+        app: omnivec-api
+    spec:
+      serviceAccountName: omnivec-api
+      containers:
+        - name: api
+          image: cdbmvsacr4cc259.azurecr.io/omnivec-api:v22
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DOCGROK_URL
+              value: "http://docgrok.docgrok.svc.cluster.local:80"
+            - name: AZURE_SUBSCRIPTION_ID
+              value: "074d02eb-4d74-486a-b299-b262264d1536"
+            - name: OMNIVEC_EXTERNAL_IP
+              value: "20.242.139.166"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnivec-api
+  namespace: omnivec
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app: omnivec-api

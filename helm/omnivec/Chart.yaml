@@ -1,0 +1,23 @@
+apiVersion: v2
+name: omnivec
+description: OmniVec - Universal Vector Ingestion Platform
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - vector
+  - embeddings
+  - ingestion
+  - rag
+  - ai
+home: https://github.com/your-org/omnivec
+sources:
+  - https://github.com/your-org/omnivec
+maintainers:
+  - name: OmniVec Team
+    email: team@omnivec.io
+dependencies:
+  - name: docgrok
+    version: "1.0.0"
+    repository: "file://../docgrok"
+    condition: docgrok.enabled

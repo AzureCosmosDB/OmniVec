@@ -1,0 +1,56 @@
+# Ignore node_modules and other large directories
+node_modules/
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.env
+.env.*
+*.log
+
+# Ignore helm charts and k8s configs (not needed in image)
+helm/
+k8s/
+terraform/
+.terraform/
+
+# Ignore docs and tests
+docs/
+tests/
+*.md
+!api/*.md
+
+# Ignore other connectors (not needed in API image)
+connectors/
+
+# Ignore CLI (not needed in API image)
+cli/
+
+# Ignore scripts (not needed in API image)
+scripts/
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore temp files
+*.tmp
+*.bak
+nul
+
+# Ignore large files
+*.tar.gz
+*.json
+docgrok/
+web/static/lib/
+.claude/
+connectors/ingestion/dotnet/bin/
+connectors/ingestion/dotnet/obj/

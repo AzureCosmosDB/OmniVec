@@ -1,0 +1,6 @@
+dependencies:
+- name: docgrok
+  repository: file://../docgrok
+  version: 1.0.0
+digest: sha256:2e2010468e8b90bd94499b95e61ef013324c83e00fc8f627a383197d7b2ed138
+generated: "2026-03-03T14:33:41.107763+05:30"
