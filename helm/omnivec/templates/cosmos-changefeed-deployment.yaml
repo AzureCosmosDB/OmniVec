@@ -2,20 +2,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: omnivec-source-connector
+  name: omnivec-cosmos-changefeed
   namespace: {{ .Values.global.namespace }}
   labels:
-    app: omnivec-source-connector
+    app: omnivec-cosmos-changefeed
     {{- include "omnivec.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.changefeed.replicaCount }}
   selector:
     matchLabels:
-      app: omnivec-source-connector
+      app: omnivec-cosmos-changefeed
   template:
     metadata:
       labels:
-        app: omnivec-source-connector
+        app: omnivec-cosmos-changefeed
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
@@ -32,12 +32,6 @@ spec:
               value: "http://omnivec-api:80"
             - name: ChangeFeed__DocGrokBaseUrl
               value: "http://docgrok.omnivec.svc.cluster.local:80"
-            - name: ChangeFeed__ServiceBusNamespace
-              value: {{ .Values.azure.serviceBus.namespace | quote }}
-            - name: ChangeFeed__ServiceBusTopicName
-              value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
-            - name: ChangeFeed__ServiceBusEnabled
-              value: {{ .Values.changefeed.serviceBusEnabled | default false | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
           resources:
@@ -47,13 +41,13 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: omnivec-source-connector
+  name: omnivec-cosmos-changefeed
   namespace: {{ .Values.global.namespace }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: omnivec-source-connector
+    name: omnivec-cosmos-changefeed
   minReplicas: {{ .Values.changefeed.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.changefeed.autoscaling.maxReplicas }}
   metrics:

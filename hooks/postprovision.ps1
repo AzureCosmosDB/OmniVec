@@ -99,7 +99,7 @@ if ($DO_BUILD) {
     Write-Host "`n`e[33mPhase 1: Building images from source...`e[0m"
 
     function Build-Image {
-        param($Name, $Dockerfile, $Context, $Tag = "v1")
+        param($Name, $Dockerfile, $Context, $Tag = "latest")
 
         if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $Name -Tag $Tag)) {
             Write-Host "  `e[32m${Name}:${Tag} exists, skipping.`e[0m"
@@ -119,15 +119,15 @@ if ($DO_BUILD) {
         Write-Host "  `e[32m${Name}:${Tag} pushed.`e[0m"
     }
 
-    Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "v1"
-    Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "v1"
-    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "v1"
+    Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest"
+    Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
+    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/cosmosdb/dotnet/Dockerfile" -Context "$RootDir/connectors/cosmosdb/dotnet/" -Tag "latest"
 
     if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
-        Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "v1"
+        Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
     }
     if (Test-Path "$RootDir/docgrok/router/Dockerfile") {
-        Build-Image -Name "docgrok-router" -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "v1"
+        Build-Image -Name "docgrok-router" -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest"
     }
 
     Write-Host "`e[32mAll images built and pushed.`e[0m"
@@ -141,21 +141,21 @@ if ($DO_BUILD) {
     $skipCount = 0
 
     foreach ($image in $IMAGES) {
-        if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "v1")) {
-            Write-Host "  `e[32m${image}:v1 exists, skipping.`e[0m"
+        if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
+            Write-Host "  `e[32m${image}:latest exists, skipping.`e[0m"
             $skipCount++
             continue
         }
 
-        Write-Host "  `e[36mImporting ${image}:v1...`e[0m"
+        Write-Host "  `e[36mImporting ${image}:latest...`e[0m"
 
         # Import from shared registry to user's ACR with retry
         $importSuccess = $false
         for ($attempt = 1; $attempt -le 2; $attempt++) {
             $importError = az acr import `
                 --name $ACR_NAME `
-                --source "${SHARED_REGISTRY}/${image}:v1" `
-                --image "${image}:v1" `
+                --source "${SHARED_REGISTRY}/${image}:latest" `
+                --image "${image}:latest" `
                 --username $SHARED_REGISTRY_USER `
                 --password $SHARED_REGISTRY_TOKEN `
                 --force 2>&1
@@ -171,16 +171,16 @@ if ($DO_BUILD) {
             }
 
             if ($attempt -lt 2) {
-                Write-Host "  `e[33mRetrying ${image}:v1...`e[0m"
+                Write-Host "  `e[33mRetrying ${image}:latest...`e[0m"
                 Start-Sleep -Seconds 2
             }
         }
 
         if ($importSuccess) {
-            Write-Host "  `e[32m${image}:v1 imported.`e[0m"
+            Write-Host "  `e[32m${image}:latest imported.`e[0m"
             $importCount++
         } else {
-            Write-Host "  `e[31m${image}:v1 import FAILED`e[0m"
+            Write-Host "  `e[31m${image}:latest import FAILED`e[0m"
             Write-Host "  `e[31mError: $importError`e[0m"
             if ($importError -match "unauthorized|authentication|401") {
                 Write-Host "  `e[31mHint: Token may be expired. Contact repo maintainer to regenerate.`e[0m"
@@ -233,7 +233,7 @@ Write-Host "`n`e[33mPhase 4: Deploying OmniVec via Helm...`e[0m"
 Write-Host "  `e[36mResolving helm dependencies...`e[0m"
 helm dependency build "$RootDir/helm/omnivec"
 
-$IMAGE_TAG = "v1"
+$IMAGE_TAG = "latest"
 
 $helmArgs = @(
     "upgrade", "--install", "omnivec", "$RootDir/helm/omnivec",

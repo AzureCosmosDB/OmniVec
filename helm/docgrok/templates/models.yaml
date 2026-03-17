@@ -1,0 +1,89 @@
+{{/*
+Generic model deployment template
+Iterates over all model categories and deploys enabled models
+*/}}
+
+{{- range $category, $models := .Values.models }}
+{{- range $name, $model := $models }}
+{{- if $model.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    app: {{ $name }}
+    component: {{ $category }}
+    omnivec/role: model
+spec:
+  replicas: {{ $model.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        component: {{ $category }}
+        omnivec/role: model
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: docgrok-sa
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: {{ $name }}
+        image: {{ $.Values.global.imageRegistry }}/{{ $model.image.repository }}:{{ $model.image.tag }}
+        ports:
+        - containerPort: {{ $model.service.targetPort | default $model.service.port }}
+        resources:
+          requests:
+            memory: {{ $model.resources.requests.memory | quote }}
+            cpu: {{ $model.resources.requests.cpu | quote }}
+            {{- if index $model.resources.requests "nvidia.com/gpu" }}
+            nvidia.com/gpu: {{ index $model.resources.requests "nvidia.com/gpu" }}
+            {{- end }}
+          limits:
+            memory: {{ $model.resources.limits.memory | quote }}
+            cpu: {{ $model.resources.limits.cpu | quote }}
+            {{- if index $model.resources.limits "nvidia.com/gpu" }}
+            nvidia.com/gpu: {{ index $model.resources.limits "nvidia.com/gpu" }}
+            {{- end }}
+        env:
+        - name: HF_HOME
+          value: "/app/.cache/huggingface"
+        livenessProbe:
+          httpGet:
+            path: {{ $model.probes.liveness.path }}
+            port: {{ $model.probes.liveness.port | default $model.service.targetPort | default $model.service.port }}
+          initialDelaySeconds: {{ $model.probes.liveness.initialDelaySeconds }}
+          periodSeconds: {{ $model.probes.liveness.periodSeconds }}
+        readinessProbe:
+          httpGet:
+            path: {{ $model.probes.readiness.path }}
+            port: {{ $model.probes.readiness.port | default $model.service.targetPort | default $model.service.port }}
+          initialDelaySeconds: {{ $model.probes.readiness.initialDelaySeconds }}
+          periodSeconds: {{ $model.probes.readiness.periodSeconds }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $model.service.name }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    app: {{ $name }}
+    component: {{ $category }}
+    omnivec/role: model
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ $model.service.port }}
+    targetPort: {{ $model.service.targetPort | default $model.service.port }}
+  selector:
+    app: {{ $name }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -102,7 +102,7 @@ if [ "$OMNIVEC_BUILD" = "true" ]; then
     name=$1
     dockerfile=$2
     context=$3
-    tag=${4:-v1}
+    tag=${4:-latest}
 
     if [ "$FORCE_IMPORT" != "true" ] && image_exists "$name" "$tag"; then
       printf "  ${GREEN}${name}:${tag} exists, skipping.${NC}\n"
@@ -122,15 +122,15 @@ if [ "$OMNIVEC_BUILD" = "true" ]; then
     printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
   }
 
-  build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "v1"
-  build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "v1"
-  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "v1"
+  build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest"
+  build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
+  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/cosmosdb/dotnet/Dockerfile" "${ROOT_DIR}/connectors/cosmosdb/dotnet/" "latest"
 
   if [ -d "${ROOT_DIR}/docgrok/pipeline-worker" ]; then
-    build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "v1"
+    build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
   fi
   if [ -d "${ROOT_DIR}/docgrok/router" ]; then
-    build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "v1"
+    build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
   fi
 
   printf "${GREEN}All images built and pushed.${NC}\n"
@@ -144,13 +144,13 @@ else
   skip_count=0
 
   for image in $IMAGES; do
-    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "v1"; then
-      printf "  ${GREEN}${image}:v1 exists, skipping.${NC}\n"
+    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
+      printf "  ${GREEN}${image}:latest exists, skipping.${NC}\n"
       skip_count=$((skip_count + 1))
       continue
     fi
 
-    printf "  ${CYAN}Importing ${image}:v1...${NC}\n"
+    printf "  ${CYAN}Importing ${image}:latest...${NC}\n"
 
     # Import from shared registry to user's ACR using token credentials
     # Retry up to 2 times on transient failures
@@ -158,8 +158,8 @@ else
     for attempt in 1 2; do
       import_error=$(az acr import \
           --name "$ACR_NAME" \
-          --source "${SHARED_REGISTRY}/${image}:v1" \
-          --image "${image}:v1" \
+          --source "${SHARED_REGISTRY}/${image}:latest" \
+          --image "${image}:latest" \
           --username "$SHARED_REGISTRY_USER" \
           --password "$SHARED_REGISTRY_TOKEN" \
           --force 2>&1) && import_success=true || import_success=false
@@ -174,16 +174,16 @@ else
       fi
 
       if [ "$attempt" -lt 2 ]; then
-        printf "  ${YELLOW}Retrying ${image}:v1...${NC}\n"
+        printf "  ${YELLOW}Retrying ${image}:latest...${NC}\n"
         sleep 2
       fi
     done
 
     if [ "$import_success" = "true" ]; then
-      printf "  ${GREEN}${image}:v1 imported.${NC}\n"
+      printf "  ${GREEN}${image}:latest imported.${NC}\n"
       import_count=$((import_count + 1))
     else
-      printf "  ${RED}${image}:v1 import FAILED${NC}\n"
+      printf "  ${RED}${image}:latest import FAILED${NC}\n"
       printf "  ${RED}Error: ${import_error}${NC}\n"
       if echo "$import_error" | grep -qi "unauthorized\|authentication\|401"; then
         printf "  ${RED}Hint: Token may be expired. Contact repo maintainer to regenerate.${NC}\n"
@@ -243,7 +243,7 @@ printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
 helm dependency build "${ROOT_DIR}/helm/omnivec"
 
 # Image tag used for all images built in Phase 1
-IMAGE_TAG="v1"
+IMAGE_TAG="latest"
 
 # Build helm command (POSIX-compatible — no bash arrays)
 HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \

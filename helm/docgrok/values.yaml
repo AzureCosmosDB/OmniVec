@@ -1,0 +1,256 @@
+# DocGrok Helm Chart Values
+
+global:
+  namespace: docgrok
+  imageRegistry: "" # Set to ACR login server, e.g., myacr.azurecr.io
+
+# =============================================================================
+# AZURE CONFIGURATION
+# =============================================================================
+azure:
+  workloadIdentity:
+    clientId: "" # Set from Bicep output
+  cosmos:
+    endpoint: "" # Set from Bicep output
+    database: "omnivec"
+    container: "metadata"
+
+# =============================================================================
+# MODEL REGISTRY
+# =============================================================================
+models:
+  embedding:
+    dse-qwen2:
+      enabled: false
+      description: "Visual document embeddings for PDFs"
+      image:
+        repository: dse-qwen2-api-ms
+        tag: v6
+      replicaCount: 1
+      service:
+        name: dse-qwen2-svc
+        port: 8000
+        targetPort: 8001
+      resources:
+        requests:
+          memory: "16Gi"
+          cpu: "4"
+          nvidia.com/gpu: 1
+        limits:
+          memory: "24Gi"
+          cpu: "8"
+          nvidia.com/gpu: 1
+      probes:
+        liveness:
+          path: /health
+          port: 8001
+          initialDelaySeconds: 120
+          periodSeconds: 30
+        readiness:
+          path: /health
+          port: 8001
+          initialDelaySeconds: 120
+          periodSeconds: 10
+
+    clip:
+      enabled: false
+      description: "Image embeddings using CLIP ViT-Large/14"
+      image:
+        repository: docgrok-clip
+        tag: v8
+      replicaCount: 1
+      service:
+        name: clip-svc
+        port: 8000
+        targetPort: 8000
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "2"
+          nvidia.com/gpu: 1
+        limits:
+          memory: "16Gi"
+          cpu: "4"
+          nvidia.com/gpu: 1
+      probes:
+        liveness:
+          path: /health
+          port: 8000
+          initialDelaySeconds: 120
+          periodSeconds: 30
+        readiness:
+          path: /health
+          port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+
+    bge:
+      enabled: false
+      description: "Text embeddings using BGE-Large-EN"
+      image:
+        repository: docgrok-bge
+        tag: v2
+      replicaCount: 1
+      service:
+        name: bge-svc
+        port: 8000
+        targetPort: 8000
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "2"
+          nvidia.com/gpu: 1
+        limits:
+          memory: "8Gi"
+          cpu: "4"
+          nvidia.com/gpu: 1
+      probes:
+        liveness:
+          path: /health
+          port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readiness:
+          path: /health
+          port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+    bge-small:
+      enabled: false
+      description: "Text embeddings using BAAI/bge-small-en-v1.5 (384 dims)"
+      image:
+        repository: docgrok-bge-small
+        tag: v1
+      replicaCount: 4
+      service:
+        name: bge-small-svc
+        port: 8000
+        targetPort: 8000
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1"
+          nvidia.com/gpu: 1
+        limits:
+          memory: "4Gi"
+          cpu: "2"
+          nvidia.com/gpu: 1
+      probes:
+        liveness:
+          path: /health
+          port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readiness:
+          path: /health
+          port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+# =============================================================================
+# EXTERNAL EMBEDDING PROVIDERS
+# =============================================================================
+providers:
+  azure-openai:
+    enabled: true
+    type: "azure-openai"
+    endpoint: "https://prsas-mbvxnk32-swedencentral.cognitiveservices.azure.com"
+    apiVersion: "2024-06-01"
+    apiKey: "CwYwHdfoExDyQMZvgJTnrjktaJDYtUak3Fdm5efAguIdp97kHNWxJQQJ99BFACfhMk5XJ3w3AAAAACOGyeck"
+    models:
+      text-embedding-3-large:
+        deployment: "text-embedding-3-large"
+        embeddingDim: 3072
+      # Add more models as needed:
+      # text-embedding-3-small:
+      #   deployment: "text-embedding-3-small"
+      #   embeddingDim: 1536
+      # text-embedding-ada-002:
+      #   deployment: "ada-002-deployment"
+      #   embeddingDim: 1536
+
+  # openai:
+  #   enabled: false
+  #   type: "openai"
+  #   endpoint: "https://api.openai.com/v1"
+  #   apiKey: "sk-xxx"
+  #   models:
+  #     text-embedding-3-small:
+  #       embeddingDim: 1536
+  #     text-embedding-3-large:
+  #       embeddingDim: 3072
+
+# =============================================================================
+# DOCGROK ORCHESTRATOR
+# =============================================================================
+docgrok:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: docgrok
+    tag: v1
+  service:
+    type: LoadBalancer
+    port: 80
+    targetPort: 8080
+  env:
+    DSE_QWEN2_URL: "http://dse-qwen2-svc:8000"
+    CLIP_URL: "http://clip-svc:8000"
+    BGE_URL: "http://bge-svc:8000"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+  probes:
+    liveness:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    readiness:
+      path: /health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+# =============================================================================
+# DOCGROK CONTROLLER (background health checks, autoscaling)
+# =============================================================================
+controller:
+  enabled: true
+  replicaCount: 1
+  port: 8081
+  healthCheckInterval: "60"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# =============================================================================
+# PIPELINE WORKER (PDF → OCR → Embedding)
+# =============================================================================
+pipelineWorker:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: docgrok-pipeline-worker
+    tag: v1
+  service:
+    name: pipeline-worker-svc
+    port: 8080
+    targetPort: 8080
+  resources:
+    requests:
+      memory: "8Gi"
+      cpu: "2"
+    limits:
+      memory: "12Gi"
+      cpu: "4"
+  env:
+    DOCGROK_ROUTER_URL: "http://docgrok:80"
+    DEFAULT_MODEL_ID: ""
