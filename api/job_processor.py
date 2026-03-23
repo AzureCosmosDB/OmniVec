@@ -784,14 +784,27 @@ async def process_jobs_batch(jobs: List[Job]) -> None:
                             job.id, embedding, vector_metadata,
                         )
                     elif source.type == SourceType.COSMOSDB and destination.type == DestinationType.COSMOSDB_VECTOR:
-                        # Patch in-place for CosmosDB source -> CosmosDB vector
-                        pk_hint = job.metadata.get("_pk_value") or None
-                        await asyncio.to_thread(
-                            _sync_patch_vector, destination.config,
-                            job.source_ref, embedding, pipeline.id,
-                            pipeline.name, text_hashes[i], pk_hint,
-                            pipeline.generation,
+                        # Check if source and destination are the same container (patch in-place)
+                        same_container = (
+                            source.config.get("endpoint") == destination.config.get("endpoint")
+                            and source.config.get("database") == destination.config.get("database")
+                            and source.config.get("container") == destination.config.get("container")
                         )
+                        if same_container:
+                            # Patch in-place for same container
+                            pk_hint = job.metadata.get("_pk_value") or None
+                            await asyncio.to_thread(
+                                _sync_patch_vector, destination.config,
+                                job.source_ref, embedding, pipeline.id,
+                                pipeline.name, text_hashes[i], pk_hint,
+                                pipeline.generation,
+                            )
+                        else:
+                            # Upsert to separate destination container
+                            await asyncio.to_thread(
+                                _sync_write_vector, destination.config,
+                                job.source_ref, embedding, vector_metadata,
+                            )
                     else:
                         # Write to CosmosDB vector destination
                         if source.type == SourceType.AZURE_BLOB:
