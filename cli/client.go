@@ -13,12 +13,14 @@ import (
 
 type Client struct {
 	BaseURL    string
+	Token      string
 	HTTPClient *http.Client
 }
 
-func NewClient(baseURL string) *Client {
+func NewClient(baseURL, token string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
+		Token:   token,
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -75,6 +77,9 @@ func (c *Client) do(method, url string, body io.Reader) (json.RawMessage, error)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 
 	resp, err := c.HTTPClient.Do(req)

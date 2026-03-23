@@ -233,6 +233,16 @@ Write-Host "`n`e[33mPhase 4: Deploying OmniVec via Helm...`e[0m"
 Write-Host "  `e[36mResolving helm dependencies...`e[0m"
 helm dependency build "$RootDir/helm/omnivec"
 
+# Generate admin token if not already set
+$ADMIN_TOKEN = Get-AzdValue "OMNIVEC_ADMIN_TOKEN"
+if (-not $ADMIN_TOKEN) {
+    $ADMIN_TOKEN = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+    azd env set OMNIVEC_ADMIN_TOKEN $ADMIN_TOKEN
+    Write-Host "  `e[32mGenerated new admin token.`e[0m"
+} else {
+    Write-Host "  `e[32mUsing existing admin token.`e[0m"
+}
+
 $IMAGE_TAG = "latest"
 
 $helmArgs = @(
@@ -251,7 +261,8 @@ $helmArgs = @(
     "--set", "docgrok.azure.cosmos.endpoint=$COSMOS_ENDPOINT",
     "--set", "docgrok.azure.cosmos.database=omnivec",
     "--set", "docgrok.azure.cosmos.container=metadata",
-    "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG"
+    "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
+    "--set", "api.adminToken=$ADMIN_TOKEN"
 )
 
 if ($ENABLE_BLOB_SOURCE -eq "true") {
@@ -299,6 +310,8 @@ Write-Host "  Environment:   `e[36m$($env:AZURE_ENV_NAME)`e[0m"
 Write-Host "  AKS Cluster:   `e[36m$AKS_CLUSTER`e[0m"
 Write-Host "  ACR Registry:  `e[36m$ACR_LOGIN_SERVER`e[0m"
 Write-Host "  CosmosDB:      `e[36m$COSMOS_ENDPOINT`e[0m"
+
+Write-Host "  Admin Token:   `e[36m$ADMIN_TOKEN`e[0m"
 
 if ($externalIp) {
     Write-Host ""

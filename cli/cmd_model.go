@@ -103,7 +103,7 @@ func newModelAddCmd() *cobra.Command {
 				body["dimensions"] = dimensions
 			}
 			c := getClient()
-			_, err := c.Post("/api/docgrok/providers", body)
+			_, err := c.Post("/api/models", body)
 			if err != nil {
 				exitErr("%v", err)
 			}
@@ -133,7 +133,7 @@ func newModelDeleteCmd() *cobra.Command {
 				return nil
 			}
 			c := getClient()
-			_, err := c.Delete(fmt.Sprintf("/api/docgrok/providers/%s", name))
+			_, err := c.Delete(fmt.Sprintf("/api/models/%s", name))
 			if err != nil {
 				exitErr("%v", err)
 			}
@@ -256,7 +256,7 @@ func newProviderListCmd() *cobra.Command {
 		Short: "List external embedding providers",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := getClient()
-			data, err := c.Get("/api/docgrok/providers", nil)
+			data, err := c.Get("/api/models", map[string]string{"source": "external"})
 			if err != nil {
 				exitErr("%v", err)
 			}

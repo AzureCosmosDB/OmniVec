@@ -9,6 +9,7 @@ import (
 
 var (
 	flagServer  string
+	flagToken   string
 	flagOutput  string
 	flagPerPage int
 )
@@ -21,10 +22,12 @@ func main() {
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&flagServer, "server", "s", "", "OmniVec server URL (overrides config)")
+	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "Bearer token for authentication (overrides config)")
 	rootCmd.PersistentFlags().StringVarP(&flagOutput, "output", "o", "table", "Output format: table, json, yaml")
 	rootCmd.PersistentFlags().IntVar(&flagPerPage, "per-page", 15, "Rows per page in table output (0 = no pagination)")
 
 	rootCmd.AddCommand(
+		newAuthCmd(),
 		newSourceCmd(),
 		newDestinationCmd(),
 		newPipelineCmd(),
@@ -33,7 +36,9 @@ func main() {
 		newModelCmd(),
 		newTransformCmd(),
 		newSearchCmd(),
+		newAssistantCmd(),
 		newStatusCmd(),
+		newSettingsCmd(),
 		newConfigCmd(),
 	)
 
@@ -45,7 +50,8 @@ func main() {
 
 func getClient() *Client {
 	server := resolveServer(flagServer)
-	return NewClient(server)
+	token := resolveToken(flagToken)
+	return NewClient(server, token)
 }
 
 // fetchHealthMap fetches /api/health/checks and returns lookup maps keyed by id.

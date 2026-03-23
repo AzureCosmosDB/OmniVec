@@ -35,6 +35,10 @@ spec:
               value: {{ .Values.azure.cosmos.database | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            {{- if .Values.api.adminToken }}
+            - name: OMNIVEC_ADMIN_TOKEN
+              value: {{ .Values.api.adminToken | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           livenessProbe:
