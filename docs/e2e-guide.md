@@ -362,6 +362,145 @@ Clears all jobs and stats. The change feed processor restarts and reprocesses al
 
 ---
 
+## Test 2: Inline Mode (Same Container as Source and Destination)
+
+In inline mode, the embedding is patched directly into the source document — no separate vectors container needed. The source container IS the destination.
+
+This is useful when you want to keep documents and their embeddings together in a single container.
+
+### Create the container with vector policy
+
+The source container needs a vector embedding policy since it will also hold embeddings:
+
+```powershell
+kubectl exec -i deployment/omnivec-api -n omnivec -- python3 - "<test-cosmos-endpoint>" <<'PYEOF'
+import sys, os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
+client = CosmosClient(sys.argv[1], credential=cred)
+db = client.get_database_client("testdb")
+try:
+    db.delete_container("inline-docs")
+except: pass
+vp = {"vectorEmbeddings": [{"path": "/embedding", "dataType": "float32", "distanceFunction": "cosine", "dimensions": 1536}]}
+ip = {"includedPaths": [{"path": "/*"}], "excludedPaths": [{"path": "/embedding/*"}], "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}]}
+db.create_container(id="inline-docs", partition_key={"paths": ["/id"], "kind": "Hash"}, vector_embedding_policy=vp, indexing_policy=ip)
+print("inline-docs container created (1536d, cosine, quantizedFlat)")
+PYEOF
+```
+
+### Create source and destination pointing to the SAME container
+
+```powershell
+# Source
+curl -X POST http://<IP>/api/sources \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "inline-source",
+    "type": "cosmosdb",
+    "config": {
+      "endpoint": "<test-cosmos-endpoint>",
+      "database": "testdb",
+      "container": "inline-docs",
+      "auth_type": "managed-identity",
+      "client_id": "<identity-client-id>"
+    }
+  }'
+
+# Destination — same endpoint, database, and container as source
+curl -X POST http://<IP>/api/destinations \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "inline-destination",
+    "type": "cosmosdb-vector",
+    "config": {
+      "endpoint": "<test-cosmos-endpoint>",
+      "database": "testdb",
+      "container": "inline-docs",
+      "auth_type": "managed-identity",
+      "client_id": "<identity-client-id>",
+      "vector_dimensions": 1536
+    }
+  }'
+```
+
+### Create pipeline (paused), insert docs, resume
+
+```powershell
+# Create pipeline
+curl -X POST http://<IP>/api/pipelines \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo-inline-pipeline",
+    "sources": [{"source_id": "<inline-src-id>", "filters": {}}],
+    "destination_id": "<inline-dst-id>",
+    "docgrok_pipeline": "<model-id>",
+    "process_existing": true
+  }'
+
+# Insert documents
+kubectl exec -i deployment/omnivec-api -n omnivec -- python3 - "<test-cosmos-endpoint>" <<'PYEOF'
+import sys, os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
+client = CosmosClient(sys.argv[1], credential=cred)
+c = client.get_database_client("testdb").get_container_client("inline-docs")
+docs = [
+    {"id": "inline-001", "title": "Vector Databases", "content": "Vector databases store high-dimensional embeddings for similarity search and retrieval augmented generation."},
+    {"id": "inline-002", "title": "Cosine Similarity", "content": "Cosine similarity measures the angle between two vectors, commonly used to compare text embeddings."},
+    {"id": "inline-003", "title": "RAG Pattern", "content": "Retrieval augmented generation combines vector search with LLMs to answer questions using your own data."},
+]
+for doc in docs:
+    c.upsert_item(doc)
+    print(f"Inserted: {doc['id']} - {doc['title']}")
+PYEOF
+
+# Resume pipeline
+curl -X POST http://<IP>/api/pipelines/<pip-id>/resume -H "Authorization: Bearer <token>"
+curl -X POST http://<IP>/api/pipelines/<pip-id>/run -H "Authorization: Bearer <token>"
+```
+
+Wait 60 seconds for processing.
+
+### Verify inline embedding
+
+After processing, the source documents now have the `embedding` field patched in-place:
+
+```powershell
+kubectl exec -i deployment/omnivec-api -n omnivec -- python3 - "<test-cosmos-endpoint>" <<'PYEOF'
+import sys, os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
+client = CosmosClient(sys.argv[1], credential=cred)
+c = client.get_database_client("testdb").get_container_client("inline-docs")
+for doc in c.query_items("SELECT c.id, c.title, c.embedding_dims, c.pipeline_id FROM c", enable_cross_partition_query=True):
+    dims = doc.get("embedding_dims", "none")
+    pip = doc.get("pipeline_id", "none")
+    print(f"  {doc['id']} — {doc['title']} — dims: {dims}, pipeline: {pip}")
+PYEOF
+```
+
+Expected: each document has `embedding_dims: 1536` and `pipeline_id` set — the embedding was patched into the original document.
+
+### How inline mode differs from separate mode
+
+| Aspect | Separate Containers | Inline (Same Container) |
+|--------|-------------------|------------------------|
+| Write operation | `upsert_item` to destination | `patch_item` on source document |
+| Document structure | New doc with id + embedding + metadata | Original doc + embedding field added |
+| Container count | 2 (source + vectors) | 1 (source = destination) |
+| Vector policy | Required on destination container | Required on source container |
+| Use case | Keep raw data separate from vectors | Keep everything together |
+| Search | Search destination container | Search source container directly |
+
+---
+
 ## Architecture
 
 ```
