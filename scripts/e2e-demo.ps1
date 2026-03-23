@@ -23,7 +23,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
-$CLI = "$RootDir/cli/omnivec.exe"
+$CLI = "$RootDir/bin/omnivec.exe"
 
 Write-Host "`n`e[32m╔══════════════════════════════════════════════════════╗`e[0m"
 Write-Host "`e[32m║  OmniVec End-to-End Demo — Zero Manual Intervention  ║`e[0m"
