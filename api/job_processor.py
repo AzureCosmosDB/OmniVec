@@ -564,7 +564,7 @@ def _sync_write_vector(dest_config, doc_id, embedding, metadata):
     vector_field = dest_config.get("vector_field", "embedding")
 
     flat = embedding[0] if embedding and isinstance(embedding[0], list) else embedding
-    doc = {"id": doc_id, vector_field: flat, **metadata}
+    doc = {"id": doc_id, vector_field: flat, "embedding_dims": len(flat) if flat else 0, **metadata}
 
     # Retry on 429 with exponential backoff
     for attempt in range(1, MAX_RETRIES + 1):
@@ -773,6 +773,10 @@ async def process_jobs_batch(jobs: List[Job]) -> None:
                         "source_id": source.id,
                         "source_ref": job.source_ref,
                         "pipeline": pipeline.name,
+                        "pipeline_id": pipeline.id,
+                        "pipeline_name": pipeline.name,
+                        "embedded_at": datetime.utcnow().isoformat(),
+                        "content_hash": text_hashes[i] if i < len(text_hashes) else "",
                     }
 
                     # Check destination type to determine how to write vectors
