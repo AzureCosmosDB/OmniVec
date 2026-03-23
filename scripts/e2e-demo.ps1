@@ -18,12 +18,26 @@ $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 $CLI = "$RootDir/bin/omnivec.exe"
 
-# Auto-download CLI if not present
+# Auto-build CLI if not present
 if (-not (Test-Path $CLI)) {
-    Write-Host "`e[33mCLI not found — downloading from GitHub release...`e[0m"
+    Write-Host "`e[33mCLI not found — building from source...`e[0m"
     New-Item -ItemType Directory -Path "$RootDir/bin" -Force | Out-Null
-    Invoke-WebRequest -Uri "https://github.com/AzureCosmosDB/OmniVec/releases/download/v0.2.0/omnivec.exe" -OutFile $CLI
-    Write-Host "  `e[32mDownloaded: $CLI`e[0m"
+    $goExe = Get-Command go -ErrorAction SilentlyContinue
+    if (-not $goExe) {
+        # Try common Go install locations
+        $goExe = @("$env:ProgramFiles\Go\bin\go.exe", "$env:USERPROFILE\go\bin\go.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    } else {
+        $goExe = $goExe.Source
+    }
+    if ($goExe) {
+        Push-Location "$RootDir/cli"
+        & $goExe build -o $CLI .
+        Pop-Location
+        Write-Host "  `e[32mBuilt: $CLI`e[0m"
+    } else {
+        Write-Host "`e[31mGo not found. Install Go (https://go.dev/dl/) or place omnivec.exe in bin/`e[0m"
+        exit 1
+    }
 }
 
 Write-Host "`n`e[32m╔══════════════════════════════════════════════════════╗`e[0m"
