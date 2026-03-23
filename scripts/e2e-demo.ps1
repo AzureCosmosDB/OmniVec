@@ -25,6 +25,15 @@ $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 $CLI = "$RootDir/bin/omnivec.exe"
 
+# Auto-download CLI if not present
+if (-not (Test-Path $CLI)) {
+    Write-Host "`e[33mCLI not found at $CLI — downloading from GitHub release...`e[0m"
+    New-Item -ItemType Directory -Path "$RootDir/bin" -Force | Out-Null
+    $downloadUrl = "https://github.com/AzureCosmosDB/OmniVec/releases/download/v0.1.0/omnivec.exe"
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $CLI
+    Write-Host "  `e[32mDownloaded: $CLI`e[0m"
+}
+
 Write-Host "`n`e[32m╔══════════════════════════════════════════════════════╗`e[0m"
 Write-Host "`e[32m║  OmniVec End-to-End Demo — Zero Manual Intervention  ║`e[0m"
 Write-Host "`e[32m╚══════════════════════════════════════════════════════╝`e[0m`n"
