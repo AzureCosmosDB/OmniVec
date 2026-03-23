@@ -243,6 +243,16 @@ printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
 helm dependency build "${ROOT_DIR}/helm/omnivec"
 
 # Image tag used for all images built in Phase 1
+# Generate admin token if not already set
+ADMIN_TOKEN=$(get_azd_value "OMNIVEC_ADMIN_TOKEN")
+if [ -z "$ADMIN_TOKEN" ]; then
+  ADMIN_TOKEN=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+  azd env set OMNIVEC_ADMIN_TOKEN "$ADMIN_TOKEN"
+  printf "  ${GREEN}Generated new admin token.${NC}\n"
+else
+  printf "  ${GREEN}Using existing admin token.${NC}\n"
+fi
+
 IMAGE_TAG="latest"
 
 # Build helm command (POSIX-compatible — no bash arrays)
@@ -261,7 +271,8 @@ HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \
   --set docgrok.azure.cosmos.endpoint=${COSMOS_ENDPOINT} \
   --set docgrok.azure.cosmos.database=omnivec \
   --set docgrok.azure.cosmos.container=metadata \
-  --set docgrok.docgrok.image.tag=${IMAGE_TAG}"
+  --set docgrok.docgrok.image.tag=${IMAGE_TAG} \
+  --set api.adminToken=${ADMIN_TOKEN}"
 
 if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
   HELM_CMD="$HELM_CMD \
@@ -312,6 +323,8 @@ printf "  Environment:   ${CYAN}${AZURE_ENV_NAME}${NC}\n"
 printf "  AKS Cluster:   ${CYAN}${AKS_CLUSTER}${NC}\n"
 printf "  ACR Registry:  ${CYAN}${ACR_LOGIN_SERVER}${NC}\n"
 printf "  CosmosDB:      ${CYAN}${COSMOS_ENDPOINT}${NC}\n"
+
+printf "  Admin Token:   ${CYAN}${ADMIN_TOKEN}${NC}\n"
 
 if [ -n "${EXTERNAL_IP}" ]; then
   echo ""

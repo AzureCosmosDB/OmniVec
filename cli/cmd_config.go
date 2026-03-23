@@ -29,8 +29,10 @@ func newConfigSetCmd() *cobra.Command {
 			switch key {
 			case "server":
 				cfg.Server = value
+			case "token":
+				cfg.Token = value
 			default:
-				exitErr("Unknown config key: %s (valid keys: server)", key)
+				exitErr("Unknown config key: %s (valid keys: server, token)", key)
 			}
 			if err := saveConfig(cfg); err != nil {
 				exitErr("Save config: %v", err)

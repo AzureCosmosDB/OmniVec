@@ -35,6 +35,7 @@ func newPipelineCmd() *cobra.Command {
 		newPipelinePauseCmd(),
 		newPipelineResumeCmd(),
 		newPipelineRunCmd(),
+		newPipelineResetCmd(),
 	)
 	return cmd
 }
@@ -640,4 +641,33 @@ func newPipelineRunCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newPipelineResetCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "reset <pipeline-id>",
+		Short: "Reset a pipeline (clears all jobs and stats)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := ensurePrefix(args[0], "pip-")
+			if !yes && !confirmAction(fmt.Sprintf("Reset pipeline %s? This will clear all jobs and stats.", id)) {
+				return nil
+			}
+			c := getClient()
+			data, err := c.Post(fmt.Sprintf("/api/pipelines/%s/reset", id), nil)
+			if err != nil {
+				exitErr("%v", err)
+			}
+			resp := parseJSONObject(data)
+			if msg, ok := resp["message"].(string); ok {
+				exitOK("%s", msg)
+			} else {
+				exitOK("Pipeline %s reset", id)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation")
+	return cmd
 }

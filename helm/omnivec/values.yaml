@@ -67,6 +67,7 @@ api:
       port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
+  adminToken: ""  # Set via --set api.adminToken=<token> during deploy
   env:
     DOCGROK_URL: "http://docgrok:80"
 
@@ -133,6 +134,24 @@ changefeed:
     minReplicas: 15
     maxReplicas: 15
     targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# DOTNET WORKER (.NET Service Bus worker for queue-mode embedding)
+# =============================================================================
+dotnetWorker:
+  enabled: false
+  replicaCount: 2
+  image:
+    repository: omnivec-dotnet-worker
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
 
 # =============================================================================
 # BLOB ENUMERATOR (per-source blob enumeration with checkpointing)
