@@ -63,15 +63,10 @@ function Load-AzdValues {
     $script:TEST_COSMOS_ACCOUNT = "omnivec-test-$($script:INSTANCE_TOKEN)"
 }
 
-# ─── Helper: run Python on API pod via temp file ─────────────────────────────
+# ─── Helper: run Python on API pod via stdin ─────────────────────────────────
 function Invoke-PodPython {
     param([string]$Script)
-    $tmpFile = [System.IO.Path]::GetTempFileName() + ".py"
-    $Script | Set-Content -Path $tmpFile -Encoding UTF8
-    $podName = kubectl get pod -n omnivec -l app=omnivec-api -o jsonpath='{.items[0].metadata.name}' 2>$null
-    kubectl cp $tmpFile "${podName}:/tmp/_e2e_script.py" -n omnivec 2>$null
-    kubectl exec $podName -n omnivec -- python3 /tmp/_e2e_script.py
-    Remove-Item $tmpFile -ErrorAction SilentlyContinue
+    $Script | kubectl exec -i deployment/omnivec-api -n omnivec -- python3 -
 }
 
 # =============================================================================
@@ -241,6 +236,15 @@ if ($FromStep -le 6) {
 # =============================================================================
 if ($FromStep -le 7) {
     Write-Host "`n`e[33m[Step 7/9] Creating source and destination...`e[0m"
+
+    # Clean up any existing resources from previous runs
+    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
+    foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
+    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
+    foreach ($s in $existing.sources) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
+    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
+    foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
+
     $srcBody = @{ name = "demo-cosmosdb-source"; type = "cosmosdb"; config = @{
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "test-documents"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID
