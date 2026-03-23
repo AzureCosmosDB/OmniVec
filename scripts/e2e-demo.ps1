@@ -26,18 +26,29 @@ if (-not (Test-Path $CLI)) {
     # Try download first (fast)
     try {
         Write-Host "`e[33mCLI not found — downloading from GitHub release...`e[0m"
+        # Get GitHub token from gh CLI, env var, or git credential
+        $ghToken = $null
+        try { $ghToken = (gh auth token 2>$null) } catch {}
+        if (-not $ghToken) { $ghToken = $env:GITHUB_TOKEN }
+        if (-not $ghToken) { $ghToken = $env:GH_TOKEN }
+
+        $ghHeaders = @{ "Accept" = "application/vnd.github.v3+json" }
+        if ($ghToken) { $ghHeaders["Authorization"] = "token $ghToken" }
+
         $releaseUrl = "https://api.github.com/repos/AzureCosmosDB/OmniVec/releases/latest"
-        $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "Accept" = "application/vnd.github.v3+json" } -ErrorAction Stop
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers $ghHeaders -ErrorAction Stop
         $asset = $release.assets | Where-Object { $_.name -eq "omnivec.exe" } | Select-Object -First 1
         if ($asset) {
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $CLI -Headers @{ "Accept" = "application/octet-stream" } -ErrorAction Stop
+            $dlHeaders = @{ "Accept" = "application/octet-stream" }
+            if ($ghToken) { $dlHeaders["Authorization"] = "token $ghToken" }
+            Invoke-WebRequest -Uri $asset.url -OutFile $CLI -Headers $dlHeaders -ErrorAction Stop
             if ((Test-Path $CLI) -and (Get-Item $CLI).Length -gt 1MB) {
                 $downloaded = $true
-                Write-Host "  `e[32mDownloaded: $CLI`e[0m"
+                Write-Host "  `e[32mDownloaded: $CLI ($($release.tag_name))`e[0m"
             }
         }
     } catch {
-        Write-Host "  `e[33mDownload failed, falling back to build from source...`e[0m"
+        Write-Host "  `e[33mDownload failed ($($_.Exception.Message)), falling back to build...`e[0m"
     }
 
     # Fallback: build from source
