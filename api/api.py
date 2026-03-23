@@ -86,6 +86,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # All /api/* and /ui require auth
         if path.startswith("/api/") or path == "/ui":
+            # Skip auth for internal cluster calls (K8s service DNS)
+            host = request.headers.get("Host", "")
+            if host.startswith("omnivec-api") or host.startswith("omnivec-api.omnivec"):
+                return await call_next(request)
+
             auth_header = request.headers.get("Authorization", "")
             token = None
 
@@ -827,30 +832,27 @@ async def create_source(req: CreateSourceRequest):
 
     # Auto-validate source connectivity
     warnings = []
+    # Sources are always created enabled — connection test is advisory only
     enabled = True
     if req.type == SourceType.AZURE_BLOB:
         try:
             from connectors.blob_connector import test_blob_connection
             ok, result = await test_blob_connection(clean_config)
             if not ok:
-                enabled = False
                 warnings.append(f"Blob source validation failed: {result}. "
                     "Check account_url, container name, and that the OmniVec managed identity has "
                     "Storage Blob Data Reader role on the storage account.")
         except Exception as e:
-            enabled = False
             warnings.append(f"Could not connect to blob source: {str(e)}")
     elif req.type == SourceType.COSMOSDB:
         try:
             from connectors.cosmosdb_connector import test_cosmosdb_connection
             ok, result = await test_cosmosdb_connection(clean_config)
             if not ok:
-                enabled = False
                 warnings.append(f"CosmosDB source validation failed: {result}. "
                     "Check endpoint, database, container, and that the OmniVec managed identity has "
                     "Cosmos DB Built-in Data Reader role on the account.")
         except Exception as e:
-            enabled = False
             warnings.append(f"Could not connect to CosmosDB source: {str(e)}")
 
     source = Source(
@@ -1850,8 +1852,8 @@ async def create_pipeline(req: CreatePipelineRequest):
             raise HTTPException(status_code=400, detail="chunk_overlap must be less than chunk_size")
         chunk_config = ChunkConfig(**cc)
 
-    # Pipeline starts as ACTIVE if process_existing is true, otherwise PAUSED
-    initial_status = PipelineStatus.ACTIVE if req.process_existing else PipelineStatus.PAUSED
+    # Pipeline always starts PAUSED — user must explicitly resume/run to activate
+    initial_status = PipelineStatus.PAUSED
 
     pipeline_id = f"pip-{str(uuid.uuid4())[:8]}"
     pipeline = Pipeline(
