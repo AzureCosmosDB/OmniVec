@@ -22,7 +22,7 @@ $CLI = "$RootDir/bin/omnivec.exe"
 if (-not (Test-Path $CLI)) {
     Write-Host "`e[33mCLI not found — downloading from GitHub release...`e[0m"
     New-Item -ItemType Directory -Path "$RootDir/bin" -Force | Out-Null
-    Invoke-WebRequest -Uri "https://github.com/AzureCosmosDB/OmniVec/releases/download/v0.1.0/omnivec.exe" -OutFile $CLI
+    Invoke-WebRequest -Uri "https://github.com/AzureCosmosDB/OmniVec/releases/download/v0.2.0/omnivec.exe" -OutFile $CLI
     Write-Host "  `e[32mDownloaded: $CLI`e[0m"
 }
 
@@ -39,12 +39,18 @@ $AOAI_KEY        = $AoaiKey
 $AOAI_DEPLOYMENT = $AoaiDeployment
 $AOAI_DIMS       = $AoaiDims
 
-if (-not $AOAI_ENDPOINT -or -not $AOAI_KEY) {
-    Write-Host "`e[31mError: Azure OpenAI credentials required.`e[0m"
-    Write-Host "  Set env vars:  `$env:AOAI_ENDPOINT = 'https://...'; `$env:AOAI_KEY = '...'"
-    Write-Host "  Or pass flags: -AoaiEndpoint 'https://...' -AoaiKey '...'"
-    exit 1
+if (-not $AOAI_ENDPOINT) {
+    Write-Host "`e[33mAzure OpenAI endpoint not set.`e[0m"
+    Write-Host "  Example: https://<resource>.openai.azure.com"
+    $AOAI_ENDPOINT = Read-Host "  Enter Azure OpenAI endpoint"
+    if (-not $AOAI_ENDPOINT) { Write-Host "`e[31mEndpoint required.`e[0m"; exit 1 }
 }
+if (-not $AOAI_KEY) {
+    Write-Host "`e[33mAzure OpenAI API key not set.`e[0m"
+    $AOAI_KEY = Read-Host "  Enter Azure OpenAI API key"
+    if (-not $AOAI_KEY) { Write-Host "`e[31mAPI key required.`e[0m"; exit 1 }
+}
+Write-Host "  `e[32mEmbedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT`e[0m"
 
 # ─── Helper: load azd env values ─────────────────────────────────────────────
 function Load-AzdValues {
