@@ -1,6 +1,25 @@
 # OmniVec End-to-End Demo — Fully Automated
 # Creates environment, provisions infra, registers model, creates pipeline, verifies it works
-# Usage: pwsh scripts/e2e-demo.ps1
+#
+# Usage:
+#   pwsh scripts/e2e-demo.ps1               # Run all steps (1-9)
+#   pwsh scripts/e2e-demo.ps1 -FromStep 5   # Skip infra, start from test account creation
+#   pwsh scripts/e2e-demo.ps1 -FromStep 8   # Skip to pipeline + docs (assumes resources exist)
+#
+# Steps:
+#   1 - Create azd environment
+#   2 - Provision infrastructure (azd up)
+#   3 - Get connection details, wait for API
+#   4 - Configure CLI
+#   5 - Create test CosmosDB account + containers
+#   6 - Register embedding model
+#   7 - Create source + destination
+#   8 - Create pipeline + insert docs + resume
+#   9 - Verify results + test reset
+
+param(
+    [int]$FromStep = 1
+)
 
 $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
@@ -22,6 +41,7 @@ $AOAI_DEPLOYMENT = "text-embedding-3-small"
 $AOAI_DIMS      = 1536
 
 # ─── Step 1: Create fresh azd environment ────────────────────────────────────
+if ($FromStep -le 1) {
 Write-Host "`e[33m[Step 1/9] Creating azd environment: $ENV_NAME`e[0m"
 
 azd env new $ENV_NAME --location $LOCATION --subscription $SUBSCRIPTION 2>$null
@@ -37,7 +57,10 @@ azd env set OMNIVEC_BUILD_MODE "acr"
 
 Write-Host "  `e[32mEnvironment configured.`e[0m"
 
+} # end step 1
+
 # ─── Step 2: Provision infrastructure ────────────────────────────────────────
+if ($FromStep -le 2) {
 Write-Host "`n`e[33m[Step 2/9] Provisioning infrastructure (azd up)...`e[0m"
 Write-Host "  This takes ~15 minutes (AKS, CosmosDB, ACR, Storage, Service Bus)"
 
@@ -152,9 +175,19 @@ az cosmosdb sql role assignment create `
     --role-definition-id $dataContributorRole `
     --principal-id $PRINCIPAL_ID `
     --scope "/" -o none 2>$null
-Write-Host "  `e[32mData Contributor role assigned to managed identity.`e[0m"
-Write-Host "  Waiting 15s for RBAC propagation..."
-Start-Sleep -Seconds 15
+Write-Host "  `e[32mData Contributor role assigned.`e[0m"
+
+# Also grant ARM-level Cosmos DB Account Reader (needed for readMetadata / SDK init)
+$testAccountScope = "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
+az role assignment create `
+    --assignee-object-id $PRINCIPAL_ID `
+    --assignee-principal-type ServicePrincipal `
+    --role "Cosmos DB Account Reader Role" `
+    --scope $testAccountScope -o none 2>$null
+Write-Host "  `e[32mAccount Reader role assigned.`e[0m"
+
+Write-Host "  Waiting 30s for RBAC propagation..."
+Start-Sleep -Seconds 30
 
 # Create database and containers
 Write-Host "  Creating database and containers..."
