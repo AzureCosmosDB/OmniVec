@@ -96,16 +96,18 @@ Web UI: `http://<IP>/ui` (login with admin token)
 
 ### Step 4: Configure CLI
 
-Download from [GitHub Releases](https://github.com/AzureCosmosDB/OmniVec/releases) or build from source:
+Build from source (requires [Go 1.24+](https://go.dev/dl/)):
 
 ```powershell
-# Download
 mkdir bin
-Invoke-WebRequest -Uri "https://github.com/AzureCosmosDB/OmniVec/releases/download/v0.2.0/omnivec.exe" -OutFile bin/omnivec.exe
-
-# Or build from source (requires Go 1.24+)
-cd cli && go build -o ../bin/omnivec.exe . && cd ..
+cd cli
+go build -o ../bin/omnivec.exe .
+cd ..
 ```
+
+Or download from [GitHub Releases](https://github.com/AzureCosmosDB/OmniVec/releases) (v0.5.0+).
+
+The e2e demo script builds the CLI automatically if `bin/omnivec.exe` is not present and Go is installed.
 
 Configure:
 
