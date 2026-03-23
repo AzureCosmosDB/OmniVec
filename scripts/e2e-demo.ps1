@@ -7,7 +7,11 @@
 #   pwsh scripts/e2e-demo.ps1 -FromStep 8   # Skip to pipeline + docs (assumes resources exist)
 
 param(
-    [int]$FromStep = 1
+    [int]$FromStep = 1,
+    [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
+    [string]$AoaiKey = $env:AOAI_KEY,
+    [string]$AoaiDeployment = $(if ($env:AOAI_DEPLOYMENT) { $env:AOAI_DEPLOYMENT } else { "text-embedding-3-small" }),
+    [int]$AoaiDims = $(if ($env:AOAI_DIMS) { [int]$env:AOAI_DIMS } else { 1536 })
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,10 +34,17 @@ Write-Host "`e[32m╚═══════════════════�
 $ENV_NAME        = "omnivec-e2e-demo"
 $LOCATION        = "eastus2"
 $SUBSCRIPTION    = "<AZURE_SUBSCRIPTION_ID>"
-$AOAI_ENDPOINT   = "https://embedding-south-central.cognitiveservices.azure.com"
-$AOAI_KEY        = "F5RsCZ2ORnAva6f6eVTKV6PFPKGu8KluOa6kyywXW7I2tqiWCwvKJQQJ99BJACLArgHXJ3w3AAAAACOGLB6z"
-$AOAI_DEPLOYMENT = "text-embedding-3-small"
-$AOAI_DIMS       = 1536
+$AOAI_ENDPOINT   = $AoaiEndpoint
+$AOAI_KEY        = $AoaiKey
+$AOAI_DEPLOYMENT = $AoaiDeployment
+$AOAI_DIMS       = $AoaiDims
+
+if (-not $AOAI_ENDPOINT -or -not $AOAI_KEY) {
+    Write-Host "`e[31mError: Azure OpenAI credentials required.`e[0m"
+    Write-Host "  Set env vars:  `$env:AOAI_ENDPOINT = 'https://...'; `$env:AOAI_KEY = '...'"
+    Write-Host "  Or pass flags: -AoaiEndpoint 'https://...' -AoaiKey '...'"
+    exit 1
+}
 
 # ─── Helper: load azd env values ─────────────────────────────────────────────
 function Load-AzdValues {
