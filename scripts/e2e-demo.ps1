@@ -18,25 +18,46 @@ $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 $CLI = "$RootDir/bin/omnivec.exe"
 
-# Auto-build CLI if not present
+# Auto-download CLI if not present, build from source as fallback
 if (-not (Test-Path $CLI)) {
-    Write-Host "`e[33mCLI not found — building from source...`e[0m"
     New-Item -ItemType Directory -Path "$RootDir/bin" -Force | Out-Null
-    $goExe = Get-Command go -ErrorAction SilentlyContinue
-    if (-not $goExe) {
-        # Try common Go install locations
-        $goExe = @("$env:ProgramFiles\Go\bin\go.exe", "$env:USERPROFILE\go\bin\go.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-    } else {
-        $goExe = $goExe.Source
+    $downloaded = $false
+
+    # Try download first (fast)
+    try {
+        Write-Host "`e[33mCLI not found — downloading from GitHub release...`e[0m"
+        $releaseUrl = "https://api.github.com/repos/AzureCosmosDB/OmniVec/releases/latest"
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "Accept" = "application/vnd.github.v3+json" } -ErrorAction Stop
+        $asset = $release.assets | Where-Object { $_.name -eq "omnivec.exe" } | Select-Object -First 1
+        if ($asset) {
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $CLI -Headers @{ "Accept" = "application/octet-stream" } -ErrorAction Stop
+            if ((Test-Path $CLI) -and (Get-Item $CLI).Length -gt 1MB) {
+                $downloaded = $true
+                Write-Host "  `e[32mDownloaded: $CLI`e[0m"
+            }
+        }
+    } catch {
+        Write-Host "  `e[33mDownload failed, falling back to build from source...`e[0m"
     }
-    if ($goExe) {
-        Push-Location "$RootDir/cli"
-        & $goExe build -o $CLI .
-        Pop-Location
-        Write-Host "  `e[32mBuilt: $CLI`e[0m"
-    } else {
-        Write-Host "`e[31mGo not found. Install Go (https://go.dev/dl/) or place omnivec.exe in bin/`e[0m"
-        exit 1
+
+    # Fallback: build from source
+    if (-not $downloaded) {
+        Write-Host "`e[33mBuilding CLI from source...`e[0m"
+        $goExe = Get-Command go -ErrorAction SilentlyContinue
+        if (-not $goExe) {
+            $goExe = @("$env:ProgramFiles\Go\bin\go.exe", "$env:USERPROFILE\go\bin\go.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+        } else {
+            $goExe = $goExe.Source
+        }
+        if ($goExe) {
+            Push-Location "$RootDir/cli"
+            & $goExe build -o $CLI .
+            Pop-Location
+            Write-Host "  `e[32mBuilt: $CLI`e[0m"
+        } else {
+            Write-Host "`e[31mCannot obtain CLI. Install Go (https://go.dev/dl/) or place omnivec.exe in bin/`e[0m"
+            exit 1
+        }
     }
 }
 
