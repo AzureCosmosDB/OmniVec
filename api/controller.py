@@ -303,31 +303,64 @@ async def cosmosdb_change_feed_loop(source_id: str):
 
                     content_field = source.config.get("content_field", "content")
                     content_fields = content_field if isinstance(content_field, list) else [content_field]
+                    skipped_no_content = 0
+                    skipped_unchanged = 0
+                    jobs_created = 0
                     for item in items:
-                        # Skip items without any content field
-                        if not any(item.get(f) for f in content_fields):
+                        doc_id = item.get("id", "unknown")
+                        # Check for content — create job even for empty content so nothing is silently dropped
+                        has_content = any(item.get(f) for f in content_fields)
+                        if not has_content:
+                            skipped_no_content += 1
+                            # Still create a job marked as skipped so it's visible in the UI
+                            job = Job(
+                                id=f"job-{str(uuid.uuid4())[:12]}",
+                                pipeline_id=pipeline.id,
+                                source_id=source_id,
+                                source_ref=doc_id,
+                                status=JobStatus.COMPLETED,
+                                metadata={"trigger": "change_feed", "skipped": True, "reason": "no_content_field"},
+                                created_at=datetime.utcnow(),
+                                completed_at=datetime.utcnow(),
+                            )
+                            try:
+                                store.upsert(_to_doc(job, "job"))
+                            except Exception as je:
+                                logger.error("Failed to create skip-job for %s: %s", doc_id, je)
                             continue
+
                         # Skip if content_hash exists and content hasn't changed
-                        # (content_hash is set by the worker after embedding)
                         if item.get("content_hash"):
-                            # Concatenate all fields for hash comparison
                             parts = [item.get(f, "") for f in content_fields if item.get(f)]
                             raw = "\n\n".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
                             current = hashlib.sha256(
                                 raw.encode("utf-8") if isinstance(raw, str) else raw
                             ).hexdigest()
                             if current == item["content_hash"]:
+                                skipped_unchanged += 1
                                 continue
 
                         job = Job(
                             id=f"job-{str(uuid.uuid4())[:12]}",
                             pipeline_id=pipeline.id,
                             source_id=source_id,
-                            source_ref=item.get("id", ""),
-                            metadata={"trigger": "change_feed", "_etag": item.get("_etag")},
+                            source_ref=doc_id,
+                            metadata={
+                                "trigger": "change_feed",
+                                "_etag": item.get("_etag"),
+                                "_pk_value": item.get(source.config.get("partition_key_path", "/id").lstrip("/"), ""),
+                            },
                             created_at=datetime.utcnow(),
                         )
-                        store.upsert(_to_doc(job, "job"))
+                        try:
+                            store.upsert(_to_doc(job, "job"))
+                            jobs_created += 1
+                        except Exception as je:
+                            logger.error("CRITICAL: Failed to create job for doc %s — document will be MISSED: %s", doc_id, je)
+
+                    if skipped_no_content or skipped_unchanged:
+                        logger.info("CF source=%s: %d jobs created, %d skipped (no content), %d skipped (unchanged)",
+                            source_id, jobs_created, skipped_no_content, skipped_unchanged)
 
                 continuation_token = response.continuation_token
                 _persist_cf_token(source_id, continuation_token)

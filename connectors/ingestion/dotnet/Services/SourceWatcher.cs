@@ -177,8 +177,11 @@ public class SourceWatcher : ISourceWatcher
 
         if (pipelines.Count == 0)
         {
-            _logger.LogWarning("No active pipelines for source {SourceId}, skipping {Count} changes", _source.Id, changes.Count);
-            return;
+            // No active pipelines — DO NOT checkpoint. Return without processing so these
+            // changes are re-delivered when a pipeline becomes active. This ensures no
+            // documents are silently dropped while pipelines are paused.
+            _logger.LogWarning("No active pipelines for source {SourceId} — holding {Count} changes for re-delivery", _source.Id, changes.Count);
+            throw new InvalidOperationException($"No active pipelines for source {_source.Id} — refusing to checkpoint to prevent document loss");
         }
 
         // Separate pipelines by processing mode
@@ -262,7 +265,8 @@ public class SourceWatcher : ISourceWatcher
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error processing change feed document, skipping");
+                var failDocId = doc?["id"]?.Value<string>() ?? "unknown";
+                _logger.LogError(ex, "CRITICAL: Error processing CF document {DocId} — document may be MISSED. Will retry on next CF pass.", failDocId);
             }
         }
 
@@ -417,9 +421,10 @@ public class SourceWatcher : ISourceWatcher
                     {
                         embedReq = new { pipeline = pipeline.DocgrokPipeline, texts = chunkTexts };
                     }
-                    // Embed with infinite retry on transient errors
+                    // Embed with retry on transient errors (capped at 20 attempts)
+                    const int MaxEmbedRetries = 20;
                     HttpResponseMessage resp = null!;
-                    for (int embedAttempt = 1; ; embedAttempt++)
+                    for (int embedAttempt = 1; embedAttempt <= MaxEmbedRetries; embedAttempt++)
                     {
                         try
                         {
@@ -427,23 +432,29 @@ public class SourceWatcher : ISourceWatcher
                             if ((int)resp.StatusCode == 429)
                             {
                                 var retryAfter = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                _logger.LogWarning("Embed 429, attempt {Attempt}, retry after {Delay}s", embedAttempt, retryAfter.TotalSeconds);
+                                _logger.LogWarning("Embed 429, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", embedAttempt, MaxEmbedRetries, retryAfter.TotalSeconds);
                                 await Task.Delay(retryAfter, ct);
                                 continue;
                             }
                             if ((int)resp.StatusCode >= 500)
                             {
                                 var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                _logger.LogWarning("Embed {Status}, attempt {Attempt}, retry after {Delay}s", resp.StatusCode, embedAttempt, delay.TotalSeconds);
+                                _logger.LogWarning("Embed {Status}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", resp.StatusCode, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
                                 await Task.Delay(delay, ct);
                                 continue;
                             }
+                            // Non-retryable status (400, 401, 404) — fail immediately
                             break;
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
+                            if (embedAttempt >= MaxEmbedRetries)
+                            {
+                                _logger.LogError(ex, "CRITICAL: Embed failed after {MaxRetries} attempts — documents will NOT be embedded", MaxEmbedRetries);
+                                throw;
+                            }
                             var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                            _logger.LogWarning("Embed call failed: {Error}, attempt {Attempt}, retry after {Delay}s", ex.Message, embedAttempt, delay.TotalSeconds);
+                            _logger.LogWarning("Embed call failed: {Error}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", ex.Message, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
                             await Task.Delay(delay, ct);
                         }
                     }
@@ -595,6 +606,8 @@ public class SourceWatcher : ISourceWatcher
                 _patchThrottle.Release();
             }
         }
+        _logger.LogError("CRITICAL: Patch failed after {MaxRetries} attempts for pk={PK}, {Count} documents NOT embedded",
+            MaxPatchRetries, pkValue, docs.Count);
         return (0, docs.Count);
     }
 

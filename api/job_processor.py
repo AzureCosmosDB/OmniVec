@@ -466,10 +466,11 @@ async def _process_job_inner(job: Job) -> None:
 
     except SkipDocument as skip:
         job.status = JobStatus.COMPLETED
-        job.result = {"skipped": True, "reason": str(skip)}
+        job.result = {"skipped": True, "reason": str(skip), "embedded": False}
         job.completed_at = datetime.utcnow()
         store.upsert(_to_doc(job, "job"))
-        logger.info("Job %s skipped: %s", job.id, skip)
+        logger.warning("Job %s SKIPPED (not embedded): %s — document %s will NOT have an embedding",
+            job.id, skip, job.source_ref)
 
     except Exception as e:
         job.status = JobStatus.FAILED
