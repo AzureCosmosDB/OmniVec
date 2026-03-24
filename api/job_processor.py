@@ -192,12 +192,15 @@ async def process_job(job: Job) -> None:
         async with asyncio.timeout(JOB_TIMEOUT_SECONDS):
             await _process_job_inner(job)
     except asyncio.TimeoutError:
-        store = get_store()
-        job.status = JobStatus.FAILED
-        job.error = f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
-        job.completed_at = datetime.utcnow()
-        store.upsert(_to_doc(job, "job"))
-        logger.error("Job %s timed out after %ds", job.id, JOB_TIMEOUT_SECONDS)
+        try:
+            store = get_store()
+            job.status = JobStatus.FAILED
+            job.error = f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
+            job.completed_at = datetime.utcnow()
+            store.upsert(_to_doc(job, "job"))
+            logger.error("Job %s timed out after %ds", job.id, JOB_TIMEOUT_SECONDS)
+        except Exception as ue:
+            logger.critical("Job %s STUCK in PROCESSING — timeout status update failed: %s", job.id, ue)
         try:
             update_metrics(job.pipeline_id, JobStatus.FAILED, JOB_TIMEOUT_SECONDS * 1000)
         except Exception as me:
@@ -474,9 +477,13 @@ async def _process_job_inner(job: Job) -> None:
 
     except Exception as e:
         job.status = JobStatus.FAILED
-        job.error = str(e)
+        job.error = str(e)[:2000]
         job.completed_at = datetime.utcnow()
-        store.upsert(_to_doc(job, "job"))
+        try:
+            store.upsert(_to_doc(job, "job"))
+        except Exception as ue:
+            logger.critical("Job %s STUCK in PROCESSING — FAILED status update failed: %s (original error: %s)",
+                job.id, ue, str(e)[:200])
         logger.error("Job %s failed: %s", job.id, e)
 
         try:

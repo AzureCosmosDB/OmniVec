@@ -82,8 +82,8 @@ def _load_cf_token(source_id: str) -> str | None:
         if doc and doc.get("continuation_token"):
             _cf_tokens[source_id] = doc["continuation_token"]
             return doc["continuation_token"]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to load CF token for source %s (will replay from beginning): %s", source_id, e)
     return None
 
 def _clear_cf_token(source_id: str):

@@ -127,8 +127,9 @@ async def try_claim_and_process(doc: dict) -> bool:
             job.completed_at = datetime.utcnow()
             store.upsert(_to_doc(job, "job"))
             logger.error("Job %s crashed after claim: %s", job.id, e)
-        except Exception:
-            logger.critical("Job %s stuck in PROCESSING — failed to update status", job.id)
+        except Exception as ue:
+            logger.critical("Job %s STUCK in PROCESSING — failed to mark FAILED: %s (will be reclaimed in 5min)",
+                job.id, ue)
     return True
 
 
