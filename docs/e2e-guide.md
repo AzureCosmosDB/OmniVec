@@ -43,7 +43,7 @@ azd env new omnivec-e2e-demo --location eastus2 --subscription <subscription-id>
 # Pre-configure (skips interactive prompts)
 azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
 azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
-azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4s_v3"
+azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v5"
 azd env set OMNIVEC_SYSTEM_NODE_COUNT 2
 azd env set OMNIVEC_GPU_NODE_VM_SIZE "Standard_NC6s_v3"
 azd env set OMNIVEC_GPU_NODE_COUNT 0
@@ -105,7 +105,7 @@ go build -o ../bin/omnivec.exe .
 cd ..
 ```
 
-Or download from [GitHub Releases](https://github.com/AzureCosmosDB/OmniVec/releases) (v0.5.0+).
+Or download from [GitHub Releases](https://github.com/AzureCosmosDB/OmniVec/releases) (v1.0.0+).
 
 The e2e demo script builds the CLI automatically if `bin/omnivec.exe` is not present and Go is installed.
 
