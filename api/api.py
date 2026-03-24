@@ -222,8 +222,8 @@ http_client: Optional[httpx.AsyncClient] = None
 async def startup():
     global http_client, EVENT_QUEUE
     http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0, connect=5.0),
-        limits=httpx.Limits(max_connections=20, max_keepalive_connections=5, keepalive_expiry=30),
+        timeout=httpx.Timeout(120.0, connect=10.0),
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=10, keepalive_expiry=30),
     )
     EVENT_QUEUE = asyncio.Queue()
     # Initialize CosmosDB store
