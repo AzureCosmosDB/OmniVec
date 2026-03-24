@@ -248,23 +248,24 @@ async def poll_pending_jobs():
                     batch = docs[i:i + BATCH_SIZE]
                     await claim_and_batch_process(batch)
 
-            # Reclaim stuck PROCESSING jobs (older than 60s)
-            cutoff = (datetime.utcnow() - timedelta(seconds=60)).isoformat()
+            # Reclaim stuck PROCESSING jobs (older than 5 minutes)
+            cutoff = (datetime.utcnow() - timedelta(seconds=300)).isoformat()
             stuck_query = (
                 "SELECT TOP 200 * FROM c WHERE c.doc_type = 'job' "
                 "AND c.status = 'processing' AND c.started_at < @cutoff"
             )
             stuck_docs = store.query(stuck_query, [{"name": "@cutoff", "value": cutoff}], partition_key="job")
             if stuck_docs:
-                logger.warning("Reclaiming %d stuck PROCESSING jobs", len(stuck_docs))
-                # Reset them to PENDING so they get picked up again
+                logger.warning("Reclaiming %d stuck PROCESSING jobs (older than 5min)", len(stuck_docs))
                 for doc in stuck_docs:
                     doc["status"] = "pending"
                     doc["started_at"] = None
+                    doc["retry_count"] = doc.get("retry_count", 0) + 1
                     try:
                         store.upsert(doc)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error("CRITICAL: Failed to reclaim stuck job %s — job will remain stuck: %s",
+                            doc.get("id", "?"), e)
                 # Process reclaimed jobs immediately (force=True bypasses hash partitioning)
                 reclaimed = store.query(
                     "SELECT TOP 200 * FROM c WHERE c.doc_type = 'job' AND c.status = 'pending'",

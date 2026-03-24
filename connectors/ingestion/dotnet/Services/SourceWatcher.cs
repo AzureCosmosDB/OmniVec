@@ -704,6 +704,9 @@ public class SourceWatcher : ISourceWatcher
                 await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct);
             }
         }
+        // If we get here, all retries failed — last attempt exception propagated
+        _logger.LogError("CRITICAL: Job creation failed after {Max} attempts — {Count} documents will NOT be processed",
+            _options.MaxJobCreationRetries, entries.Count);
     }
 
     private Task HandleErrorAsync(string leaseToken, Exception exception)
