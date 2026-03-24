@@ -180,11 +180,32 @@ def update_metrics_batch(pipeline_id: str, completed: int, failed: int, total_pr
 
 # ── main processing function ────────────────────────────────────────────
 
+JOB_TIMEOUT_SECONDS = 600  # 10 minute wall-clock timeout per job
+
 async def process_job(job: Job) -> None:
     """Process a single job: download content → embed → write vector.
 
     Updates job status in the store as it progresses.
+    Enforces a wall-clock timeout to prevent stuck jobs.
     """
+    try:
+        async with asyncio.timeout(JOB_TIMEOUT_SECONDS):
+            await _process_job_inner(job)
+    except asyncio.TimeoutError:
+        store = get_store()
+        job.status = JobStatus.FAILED
+        job.error = f"Job timed out after {JOB_TIMEOUT_SECONDS}s"
+        job.completed_at = datetime.utcnow()
+        store.upsert(_to_doc(job, "job"))
+        logger.error("Job %s timed out after %ds", job.id, JOB_TIMEOUT_SECONDS)
+        try:
+            update_metrics(job.pipeline_id, JobStatus.FAILED, JOB_TIMEOUT_SECONDS * 1000)
+        except Exception:
+            pass
+
+
+async def _process_job_inner(job: Job) -> None:
+    """Inner job processing logic (wrapped by timeout in process_job)."""
     store = get_store()
     client = get_http_client()
 
@@ -254,12 +275,29 @@ async def process_job(job: Job) -> None:
         else:
             payload["text"] = content
 
-        resp = await client.post(
-            f"{DOCGROK_URL}/embed",
-            json=payload,
-        )
-        if resp.status_code != 200:
-            raise ValueError(f"DocGrok error: {resp.text}")
+        # Call DocGrok with retry on transient errors (429, 500, 502, 503)
+        EMBED_MAX_RETRIES = 5
+        EMBED_BASE_DELAY = 1.0
+        resp = None
+        for embed_attempt in range(1, EMBED_MAX_RETRIES + 1):
+            resp = await client.post(
+                f"{DOCGROK_URL}/embed",
+                json=payload,
+                timeout=120.0,
+            )
+            if resp.status_code == 200:
+                break
+            if resp.status_code in (429, 500, 502, 503) and embed_attempt < EMBED_MAX_RETRIES:
+                delay = EMBED_BASE_DELAY * (2 ** (embed_attempt - 1))
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("retry-after")
+                    if retry_after:
+                        delay = max(delay, float(retry_after))
+                logger.warning("DocGrok %d on attempt %d/%d, retry in %.1fs",
+                    resp.status_code, embed_attempt, EMBED_MAX_RETRIES, delay)
+                await asyncio.sleep(delay)
+            else:
+                raise ValueError(f"DocGrok error: {resp.text}")
 
         result = resp.json()
 
@@ -449,8 +487,28 @@ async def process_job(job: Job) -> None:
 
 # ── sync wrappers for parallel writes via asyncio.to_thread ──────────
 
-# Cache for partition key lookups: {(endpoint, database, container, doc_id): pk_value}
-_pk_cache: dict[str, str] = {}
+# Cache for partition key lookups — bounded LRU to prevent OOM
+from collections import OrderedDict
+
+_PK_CACHE_MAX = 10000
+
+class _LRUCache(OrderedDict):
+    def __init__(self, maxsize):
+        super().__init__()
+        self.maxsize = maxsize
+    def get(self, key, default=None):
+        if key in self:
+            self.move_to_end(key)
+            return self[key]
+        return default
+    def put(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        self[key] = value
+        if len(self) > self.maxsize:
+            self.popitem(last=False)
+
+_pk_cache = _LRUCache(_PK_CACHE_MAX)
 
 
 def _sync_patch_vector(dest_config, doc_id, embedding, pipeline_id, pipeline_name, content_hash, pk_hint=None, pipeline_generation=None):
@@ -507,7 +565,7 @@ def _sync_patch_vector(dest_config, doc_id, embedding, pipeline_id, pipeline_nam
             if not rows:
                 raise ValueError(f"Document '{doc_id}' not found for in-place patch")
             pk_value = rows[0].get(pk_field)
-            _pk_cache[cache_key] = pk_value
+            _pk_cache.put(cache_key, pk_value)
 
     ops = [
         {"op": "set", "path": f"/{vector_field}", "value": flat},

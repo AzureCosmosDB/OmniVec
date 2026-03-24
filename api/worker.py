@@ -106,11 +106,25 @@ async def try_claim_and_process(doc: dict) -> bool:
 
     Returns True if we claimed and processed (or failed) the job.
     Returns False if another worker claimed it first.
+    If processing crashes after claim, marks job as FAILED (not stuck in PROCESSING).
     """
     job = try_claim(doc)
     if job is None:
         return False
-    await process_job(job)
+    try:
+        await process_job(job)
+    except Exception as e:
+        # Ensure job doesn't get stuck in PROCESSING if process_job crashes
+        try:
+            from store import get_store
+            store = get_store()
+            job.status = JobStatus.FAILED
+            job.error = f"Worker crash: {str(e)[:500]}"
+            job.completed_at = datetime.utcnow()
+            store.upsert(_to_doc(job, "job"))
+            logger.error("Job %s crashed after claim: %s", job.id, e)
+        except Exception:
+            logger.critical("Job %s stuck in PROCESSING — failed to update status", job.id)
     return True
 
 
