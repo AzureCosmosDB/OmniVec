@@ -1983,7 +1983,7 @@ def run_pipeline(pipeline_id: str):
 
 @app.post("/api/pipelines/{pipeline_id}/reset")
 def reset_pipeline(pipeline_id: str):
-    """Reset a pipeline: delete all its jobs so it reprocesses from the beginning.
+    """Reset a pipeline: pause it first, delete all jobs, then allow resume.
 
     Sets reset_at which the .NET CFP service detects — it will automatically
     delete its lease container and restart the change feed from the beginning.
@@ -1994,6 +1994,13 @@ def reset_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+
+    # Force pause before reset to prevent race with active changefeed
+    if pipeline.status == PipelineStatus.ACTIVE:
+        pipeline.status = PipelineStatus.PAUSED
+        pipeline.updated_at = datetime.utcnow()
+        store.upsert(_to_doc(pipeline, "pipeline"))
+        logger.info("Pipeline %s paused before reset", pipeline_id)
 
     # Delete all jobs for this pipeline (skip for inline mode — no jobs created)
     deleted = 0
@@ -2255,6 +2262,14 @@ def retry_job(job_id: str):
             detail=f"Cannot retry job in '{job.status}' status"
         )
 
+    MAX_MANUAL_RETRIES = 10
+    if job.retry_count >= MAX_MANUAL_RETRIES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job has been retried {job.retry_count} times (max {MAX_MANUAL_RETRIES}). "
+                   f"Investigate the root cause: {job.error}"
+        )
+
     job.status = JobStatus.PENDING
     job.error = None
     job.started_at = None
@@ -2262,7 +2277,7 @@ def retry_job(job_id: str):
     job.retry_count += 1
     store.upsert(_to_doc(job, "job"))
 
-    return {"success": True, "message": "Job reset to PENDING — worker will pick it up"}
+    return {"success": True, "message": f"Job reset to PENDING (retry {job.retry_count}/{MAX_MANUAL_RETRIES})"}
 
 
 # =============================================================================

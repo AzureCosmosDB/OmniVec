@@ -53,8 +53,47 @@ _last_health_check: datetime | None = None
 # CosmosDB Change Feed tasks keyed by source_id
 _cf_tasks: dict[str, asyncio.Task] = {}
 
-# Continuation tokens persisted in memory (could store in CosmosDB for durability)
+# Continuation tokens — in-memory with CosmosDB persistence for durability across restarts
 _cf_tokens: dict[str, str] = {}
+
+def _persist_cf_token(source_id: str, token: str):
+    """Save CF continuation token to CosmosDB for durability."""
+    _cf_tokens[source_id] = token
+    try:
+        store = get_store()
+        doc = {
+            "id": f"cf-token-{source_id}",
+            "doc_type": "cf_token",
+            "source_id": source_id,
+            "continuation_token": token,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        store.upsert(doc)
+    except Exception as e:
+        logger.warning("Failed to persist CF token for %s: %s", source_id, e)
+
+def _load_cf_token(source_id: str) -> str | None:
+    """Load CF continuation token from memory or CosmosDB."""
+    if source_id in _cf_tokens:
+        return _cf_tokens[source_id]
+    try:
+        store = get_store()
+        doc = store.get(f"cf-token-{source_id}", "cf_token")
+        if doc and doc.get("continuation_token"):
+            _cf_tokens[source_id] = doc["continuation_token"]
+            return doc["continuation_token"]
+    except Exception:
+        pass
+    return None
+
+def _clear_cf_token(source_id: str):
+    """Clear CF continuation token from memory and CosmosDB."""
+    _cf_tokens.pop(source_id, None)
+    try:
+        store = get_store()
+        store.delete(f"cf-token-{source_id}", "cf_token")
+    except Exception:
+        pass
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -234,7 +273,7 @@ async def cosmosdb_change_feed_loop(source_id: str):
     database = client.get_database_client(source.config["database"])
     container = database.get_container_client(source.config["container"])
 
-    continuation_token = _cf_tokens.get(source_id)
+    continuation_token = _load_cf_token(source_id)
 
     while True:
         try:
@@ -291,7 +330,7 @@ async def cosmosdb_change_feed_loop(source_id: str):
                         store.upsert(_to_doc(job, "job"))
 
                 continuation_token = response.continuation_token
-                _cf_tokens[source_id] = continuation_token
+                _persist_cf_token(source_id, continuation_token)
 
             await asyncio.sleep(5)
 
@@ -303,8 +342,10 @@ async def cosmosdb_change_feed_loop(source_id: str):
             # Reset continuation token on mismatch errors
             if "Mismatch" in str(e) or "Invalid continuation" in str(e):
                 continuation_token = None
-                _cf_tokens.pop(source_id, None)
-                logger.info("Reset CF token for source %s", source_id)
+                _clear_cf_token(source_id)
+                logger.info("Reset CF token for source %s — retrying immediately", source_id)
+                await asyncio.sleep(2)  # Brief pause, then retry (was 30s — too long)
+                continue
             await asyncio.sleep(30)
 
 

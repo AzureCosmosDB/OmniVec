@@ -30,7 +30,7 @@ public class SourceWatcher : ISourceWatcher
     private string _partitionKeyPath = "/id"; // Discovered from container properties
     private volatile bool _running;
 
-    private const int MaxPatchRetries = int.MaxValue;
+    private const int MaxPatchRetries = 20; // Cap retries to prevent infinite loops on permanent errors
 
     // Global concurrency limiter — prevents overwhelming CosmosDB
     // when multiple partitions process simultaneously. 1000 concurrent patches
