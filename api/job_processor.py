@@ -200,8 +200,8 @@ async def process_job(job: Job) -> None:
         logger.error("Job %s timed out after %ds", job.id, JOB_TIMEOUT_SECONDS)
         try:
             update_metrics(job.pipeline_id, JobStatus.FAILED, JOB_TIMEOUT_SECONDS * 1000)
-        except Exception:
-            pass
+        except Exception as me:
+            logger.warning("Metrics update failed for timed-out job %s: %s", job.id, me)
 
 
 async def _process_job_inner(job: Job) -> None:
@@ -580,24 +580,30 @@ def _sync_patch_vector(dest_config, doc_id, embedding, pipeline_id, pipeline_nam
     if pipeline_generation:
         ops.append({"op": "set", "path": "/pipeline_generation", "value": pipeline_generation})
 
-    # Retry on 429 with exponential backoff
+    # Retry on 429/5xx with exponential backoff
+    last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             container.patch_item(item=doc_id, partition_key=pk_value, patch_operations=ops)
             return
         except CosmosHttpResponseError as e:
-            if e.status_code == 429:
+            last_error = e
+            if e.status_code in (429, 408, 503) or e.status_code >= 500:
                 retry_after = float(e.headers.get("x-ms-retry-after-ms", BASE_DELAY_S * 1000 * (2 ** attempt))) / 1000.0
-                retry_after = min(retry_after, 60.0)  # Cap at 60s
-                logger.warning(f"429 on patch attempt {attempt}/{MAX_RETRIES}, retry after {retry_after:.1f}s")
+                retry_after = min(retry_after, 60.0)
+                logger.warning("Patch %d on attempt %d/%d for doc %s, retry in %.1fs",
+                    e.status_code, attempt, MAX_RETRIES, doc_id, retry_after)
                 time.sleep(retry_after)
-                if attempt >= MAX_RETRIES:
-                    # Final attempt after long wait
-                    time.sleep(60)
-                    container.patch_item(item=doc_id, partition_key=pk_value, patch_operations=ops)
-                    return
             else:
                 raise
+        except Exception as e:
+            last_error = e
+            if attempt >= MAX_RETRIES:
+                raise
+            logger.warning("Patch error on attempt %d/%d for doc %s: %s", attempt, MAX_RETRIES, doc_id, e)
+            time.sleep(BASE_DELAY_S * (2 ** attempt))
+    # All retries exhausted
+    raise RuntimeError(f"Patch failed after {MAX_RETRIES} attempts for doc {doc_id}: {last_error}")
 
 
 def _sync_write_vector(dest_config, doc_id, embedding, metadata):
@@ -625,23 +631,29 @@ def _sync_write_vector(dest_config, doc_id, embedding, metadata):
     flat = embedding[0] if embedding and isinstance(embedding[0], list) else embedding
     doc = {"id": doc_id, vector_field: flat, "embedding_dims": len(flat) if flat else 0, **metadata}
 
-    # Retry on 429 with exponential backoff
+    # Retry on 429/5xx with exponential backoff
+    last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             container.upsert_item(doc)
             return
         except CosmosHttpResponseError as e:
-            if e.status_code == 429:
+            last_error = e
+            if e.status_code in (429, 408, 503) or e.status_code >= 500:
                 retry_after = float(e.headers.get("x-ms-retry-after-ms", BASE_DELAY_S * 1000 * (2 ** attempt))) / 1000.0
                 retry_after = min(retry_after, 60.0)
-                logger.warning(f"429 on upsert attempt {attempt}/{MAX_RETRIES}, retry after {retry_after:.1f}s")
+                logger.warning("Upsert %d on attempt %d/%d for doc %s, retry in %.1fs",
+                    e.status_code, attempt, MAX_RETRIES, doc_id, retry_after)
                 time.sleep(retry_after)
-                if attempt >= MAX_RETRIES:
-                    time.sleep(60)
-                    container.upsert_item(doc)
-                    return
             else:
                 raise
+        except Exception as e:
+            last_error = e
+            if attempt >= MAX_RETRIES:
+                raise
+            logger.warning("Upsert error on attempt %d/%d for doc %s: %s", attempt, MAX_RETRIES, doc_id, e)
+            time.sleep(BASE_DELAY_S * (2 ** attempt))
+    raise RuntimeError(f"Upsert failed after {MAX_RETRIES} attempts for doc {doc_id}: {last_error}")
 
 
 async def _async_write_pgvector(dest_config, doc_id, embedding, metadata):
@@ -780,8 +792,8 @@ async def process_jobs_batch(jobs: List[Job]) -> None:
             logger.error("Job %s failed during download: %s", job.id, e)
             try:
                 update_metrics(pipeline_id, JobStatus.FAILED, 0)
-            except Exception:
-                pass
+            except Exception as me:
+                logger.warning("Metrics update failed for batch job: %s", me)
 
     # Phase 2: Batch embed text jobs
     if text_jobs:
