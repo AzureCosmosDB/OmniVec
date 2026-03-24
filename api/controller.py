@@ -356,12 +356,15 @@ async def cosmosdb_change_feed_loop(source_id: str):
                             store.upsert(_to_doc(job, "job"))
                             jobs_created += 1
                         except Exception as je:
-                            logger.error("CRITICAL: Failed to create job for doc %s — document will be MISSED: %s", doc_id, je)
+                            logger.error("CRITICAL: Failed to create job for doc %s — will NOT checkpoint, batch will retry: %s", doc_id, je)
+                            # Don't checkpoint — raise to prevent token advancement so this batch retries
+                            raise RuntimeError(f"Job creation failed for doc {doc_id}, aborting batch to prevent data loss") from je
 
                     if skipped_no_content or skipped_unchanged:
                         logger.info("CF source=%s: %d jobs created, %d skipped (no content), %d skipped (unchanged)",
                             source_id, jobs_created, skipped_no_content, skipped_unchanged)
 
+                # Only checkpoint after ALL jobs in batch are successfully created
                 continuation_token = response.continuation_token
                 _persist_cf_token(source_id, continuation_token)
 

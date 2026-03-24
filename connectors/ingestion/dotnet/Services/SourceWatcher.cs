@@ -266,7 +266,9 @@ public class SourceWatcher : ISourceWatcher
             catch (Exception ex)
             {
                 var failDocId = doc?["id"]?.Value<string>() ?? "unknown";
-                _logger.LogError(ex, "CRITICAL: Error processing CF document {DocId} — document may be MISSED. Will retry on next CF pass.", failDocId);
+                _logger.LogError(ex, "CRITICAL: Error processing CF document {DocId} — aborting batch to prevent data loss. Batch will retry.", failDocId);
+                // Re-throw to prevent checkpoint — CFP will re-deliver this batch
+                throw new InvalidOperationException($"Failed to process document {failDocId}, aborting to prevent data loss", ex);
             }
         }
 
@@ -466,8 +468,10 @@ public class SourceWatcher : ISourceWatcher
 
                     if (outputs.GetArrayLength() != chunk.Count)
                     {
-                        _logger.LogError("Inline embed mismatch: sent {Sent}, got {Got}", chunk.Count, outputs.GetArrayLength());
-                        continue;
+                        _logger.LogError("CRITICAL: Inline embed mismatch: sent {Sent}, got {Got} — aborting batch to prevent data loss",
+                            chunk.Count, outputs.GetArrayLength());
+                        throw new InvalidOperationException(
+                            $"Embed returned {outputs.GetArrayLength()} results for {chunk.Count} inputs — batch will retry");
                     }
 
                     for (int i = 0; i < chunk.Count; i++)
@@ -484,6 +488,13 @@ public class SourceWatcher : ISourceWatcher
                 _logger.LogInformation(
                     "Inline complete: {Patched}/{Total} docs patched ({Failed} failed) for pipeline={Pipeline} on partition {Partition} in {Elapsed}ms",
                     patched, docs.Count, failed, pipeline.Name, partition, sw.ElapsedMilliseconds);
+
+                // If any documents failed to patch, throw to prevent checkpoint — batch will retry
+                if (failed > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Patch failed for {failed}/{docs.Count} documents in pipeline {pipeline.Name} — aborting to prevent data loss");
+                }
 
                 // Report metrics with dedup key: partition + first doc ID + count
                 // If lease rebalancing causes a replay, the API ignores the duplicate report
@@ -593,13 +604,20 @@ public class SourceWatcher : ISourceWatcher
                     ex.StatusCode, pkValue, attempt, delay.TotalMilliseconds);
                 await Task.Delay(delay, ct);
             }
+            catch (Exception ex) when (ex is System.IO.IOException || ex is System.Net.Http.HttpRequestException || ex is TaskCanceledException)
+            {
+                // Transient network errors — retry with backoff
+                var delay = TimeSpan.FromMilliseconds(Math.Min(1000 * Math.Pow(2, attempt), 30_000));
+                _logger.LogWarning("Batch transient error pk={PK}: {Error}, attempt {Attempt}/{Max}, retrying in {Delay}ms",
+                    pkValue, ex.Message, attempt, MaxPatchRetries, delay.TotalMilliseconds);
+                await Task.Delay(delay, ct);
+            }
             catch (Exception ex)
             {
-                // Non-retryable exception — log and retry anyway (could be transient network issue)
-                var delay = TimeSpan.FromMilliseconds(Math.Min(1000 * Math.Pow(2, attempt), 30_000));
-                _logger.LogWarning("Batch unexpected error pk={PK}: {Error}, attempt {Attempt}, retrying in {Delay}ms",
-                    pkValue, ex.Message, attempt, delay.TotalMilliseconds);
-                await Task.Delay(delay, ct);
+                // Non-transient error — fail immediately, don't waste retries
+                _logger.LogError(ex, "CRITICAL: Batch non-transient error pk={PK}, failing immediately", pkValue);
+                _patchThrottle.Release();
+                return (0, docs.Count);
             }
             finally
             {

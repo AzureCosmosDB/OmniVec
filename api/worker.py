@@ -165,6 +165,16 @@ async def claim_and_batch_process(docs: list[dict]) -> int:
                     await process_job(job)
                 except Exception as je:
                     logger.error("Individual fallback failed for job %s: %s", job.id, je)
+                    # Ensure job is marked FAILED, not stuck in PROCESSING
+                    try:
+                        store = get_store()
+                        if job.status == JobStatus.PROCESSING:
+                            job.status = JobStatus.FAILED
+                            job.error = f"Batch+individual fallback failed: {str(je)[:500]}"
+                            job.completed_at = datetime.utcnow()
+                            store.upsert(_to_doc(job, "job"))
+                    except Exception:
+                        logger.critical("Job %s STUCK in PROCESSING — could not mark as FAILED", job.id)
 
     await asyncio.gather(*[
         _process_group(pid, group) for pid, group in by_pipeline.items()
