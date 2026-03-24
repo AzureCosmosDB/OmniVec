@@ -94,6 +94,10 @@ def try_claim(doc: dict) -> Job | None:
     except CosmosAccessConditionFailedError:
         # Another worker got it
         return None
+    except Exception as e:
+        # Transient error (network, 500, timeout) — don't claim, let another worker try
+        logger.warning("Failed to claim job %s (transient error, will retry): %s", job.id, e)
+        return None
 
     job.status = JobStatus.PROCESSING
     job.started_at = datetime.utcnow()
