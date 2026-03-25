@@ -3528,31 +3528,47 @@ async def create_model(payload: dict):
         except Exception:
             pass
 
+        # Store API key in Key Vault (if configured), strip from CosmosDB doc
+        from keyvault_client import set_model_api_key
+        api_key_value = reg_payload.get("api_key", "")
+
         # For chat models, skip DocGrok registration (DocGrok only handles embeddings)
         if model_category == "chat":
             model_id = reg_payload.get("id") or f"mdl-ext-{str(uuid.uuid4())[:8]}"
+            # Store key in Key Vault, remove from CosmosDB doc
+            persist_doc = {k: v for k, v in reg_payload.items() if k != "api_key"}
+            if api_key_value and set_model_api_key(model_id, api_key_value):
+                persist_doc["api_key_source"] = "keyvault"
+            else:
+                persist_doc["api_key"] = api_key_value  # Fallback: store in CosmosDB
             store.upsert({
                 "id": model_id,
                 "doc_type": "docgrok_model",
-                **reg_payload,
+                **persist_doc,
                 "model_category": model_category,
                 "stored_at": datetime.utcnow().isoformat(),
             })
             result = {"id": model_id, "name": model_name, "kind": "external",
-                      "model_category": model_category, **reg_payload}
+                      "model_category": model_category, **persist_doc}
         else:
+            # Send full payload (including api_key) to DocGrok for in-memory use
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
             result = resp.json()
 
-            # Persist to CosmosDB for durability (sync back on DocGrok restart)
+            # Persist to CosmosDB (without api_key) for durability
             model_id = result.get("id", "")
             if model_id.startswith("mdl-ext-"):
+                persist_doc = {k: v for k, v in reg_payload.items() if k != "api_key"}
+                if api_key_value and set_model_api_key(model_id, api_key_value):
+                    persist_doc["api_key_source"] = "keyvault"
+                else:
+                    persist_doc["api_key"] = api_key_value  # Fallback
                 store.upsert({
                     "id": model_id,
                     "doc_type": "docgrok_model",
-                    **reg_payload,
+                    **persist_doc,
                     "model_category": model_category,
                     "stored_at": datetime.utcnow().isoformat(),
                 })
@@ -3587,10 +3603,15 @@ async def delete_model(model_id: str):
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
-        # Remove from CosmosDB persistence
+        # Remove from CosmosDB persistence and Key Vault
         if model_id.startswith("mdl-ext-"):
             try:
                 store.delete(model_id, "docgrok_model")
+            except Exception:
+                pass
+            try:
+                from keyvault_client import delete_model_api_key
+                delete_model_api_key(model_id)
             except Exception:
                 pass
 
@@ -3800,7 +3821,9 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
     # Step 3: Call the chat model
     model_type = model_doc.get("type", "azure-openai")
     endpoint = model_doc.get("endpoint", "")
-    api_key = model_doc.get("api_key", "")
+    # Retrieve API key from Key Vault first, fall back to CosmosDB doc
+    from keyvault_client import get_model_api_key
+    api_key = get_model_api_key(model_doc.get("id", "")) or model_doc.get("api_key", "")
     deployment = model_doc.get("deployment", "")
     api_version = model_doc.get("api_version", "2024-06-01")
 

@@ -47,6 +47,7 @@ STORAGE_ACCOUNT=$(get_azd_value "AZURE_STORAGE_ACCOUNT_NAME")
 STORAGE_BLOB_ENDPOINT=$(get_azd_value "AZURE_STORAGE_BLOB_ENDPOINT")
 STORAGE_QUEUE_ENDPOINT=$(get_azd_value "AZURE_STORAGE_QUEUE_ENDPOINT")
 SB_ENDPOINT=$(get_azd_value "AZURE_SERVICEBUS_ENDPOINT")
+KEYVAULT_URI=$(get_azd_value "AZURE_KEYVAULT_URI")
 
 # Validate required vars
 for var in INSTANCE_ID AKS_CLUSTER ACR_LOGIN_SERVER ACR_NAME COSMOS_ENDPOINT IDENTITY_CLIENT_ID RESOURCE_GROUP; do
@@ -273,6 +274,11 @@ HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \
   --set docgrok.azure.cosmos.container=metadata \
   --set docgrok.docgrok.image.tag=${IMAGE_TAG} \
   --set api.adminToken=${ADMIN_TOKEN}"
+
+if [ -n "$KEYVAULT_URI" ]; then
+  HELM_CMD="$HELM_CMD \
+  --set azure.keyVault.uri=${KEYVAULT_URI}"
+fi
 
 if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
   HELM_CMD="$HELM_CMD \

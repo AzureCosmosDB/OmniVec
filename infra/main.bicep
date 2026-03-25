@@ -86,7 +86,19 @@ module cosmosdb 'modules/cosmosdb.bicep' = {
   }
 }
 
-// 3. Storage Account (only when blob source is enabled)
+// 3. Key Vault (stores model API keys securely)
+module keyvault 'modules/keyvault.bicep' = {
+  name: 'keyvault'
+  scope: rg
+  params: {
+    vaultName: '${prefix}-kv-${resourceToken}'
+    location: location
+    tags: tags
+    identityPrincipalId: identity.outputs.principalId
+  }
+}
+
+// 4. Storage Account (only when blob source is enabled)
 module storage 'modules/storage.bicep' = if (enableBlobSource) {
   name: 'storage'
   scope: rg
@@ -196,4 +208,5 @@ output AZURE_STORAGE_QUEUE_ENDPOINT string = enableBlobSource ? storage!.outputs
 output AZURE_SERVICEBUS_NAMESPACE string = enableBlobSource ? servicebus!.outputs.namespaceName : ''
 output AZURE_SERVICEBUS_ENDPOINT string = enableBlobSource ? servicebus!.outputs.endpoint : ''
 output AZURE_IDENTITY_CLIENT_ID string = identity.outputs.clientId
+output AZURE_KEYVAULT_URI string = keyvault.outputs.vaultUri
 output AZURE_RESOURCE_GROUP string = rg.name
