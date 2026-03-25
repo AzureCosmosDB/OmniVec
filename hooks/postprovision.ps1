@@ -42,6 +42,7 @@ $STORAGE_ACCOUNT = Get-AzdValue "AZURE_STORAGE_ACCOUNT_NAME"
 $STORAGE_BLOB_ENDPOINT = Get-AzdValue "AZURE_STORAGE_BLOB_ENDPOINT"
 $STORAGE_QUEUE_ENDPOINT = Get-AzdValue "AZURE_STORAGE_QUEUE_ENDPOINT"
 $SB_ENDPOINT = Get-AzdValue "AZURE_SERVICEBUS_ENDPOINT"
+$KEYVAULT_URI = Get-AzdValue "AZURE_KEYVAULT_URI"
 
 # Validate required vars
 foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","COSMOS_ENDPOINT","IDENTITY_CLIENT_ID","RESOURCE_GROUP")) {
@@ -264,6 +265,12 @@ $helmArgs = @(
     "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
     "--set", "api.adminToken=$ADMIN_TOKEN"
 )
+
+if ($KEYVAULT_URI) {
+    $helmArgs += @(
+        "--set", "azure.keyVault.uri=$KEYVAULT_URI"
+    )
+}
 
 if ($ENABLE_BLOB_SOURCE -eq "true") {
     $helmArgs += @(
