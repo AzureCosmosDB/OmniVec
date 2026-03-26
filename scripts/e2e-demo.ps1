@@ -11,7 +11,8 @@ param(
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
     [string]$AoaiKey = $env:AOAI_KEY,
     [string]$AoaiDeployment = $(if ($env:AOAI_DEPLOYMENT) { $env:AOAI_DEPLOYMENT } else { "text-embedding-3-small" }),
-    [int]$AoaiDims = $(if ($env:AOAI_DIMS) { [int]$env:AOAI_DIMS } else { 1536 })
+    [int]$AoaiDims = $(if ($env:AOAI_DIMS) { [int]$env:AOAI_DIMS } else { 1536 }),
+    [string]$SharedRegistryToken = $env:OMNIVEC_SHARED_REGISTRY_TOKEN
 )
 
 $ErrorActionPreference = "Stop"
@@ -128,6 +129,15 @@ if ($FromStep -le 1) {
     azd env set OMNIVEC_GPU_NODE_VM_SIZE "Standard_NC6s_v3"
     azd env set OMNIVEC_GPU_NODE_COUNT 0
     azd env set OMNIVEC_BUILD_MODE "acr"
+    if ($SharedRegistryToken) {
+        azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $SharedRegistryToken
+    } elseif (-not $SharedRegistryToken) {
+        Write-Host "`e[33mShared registry token not set (needed for image import).`e[0m"
+        $SharedRegistryToken = Read-Host "  Enter shared registry token (omnivecregistry.azurecr.io)"
+        if ($SharedRegistryToken) {
+            azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $SharedRegistryToken
+        }
+    }
     Write-Host "  `e[32mEnvironment configured.`e[0m"
 }
 
