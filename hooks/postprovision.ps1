@@ -72,7 +72,7 @@ Write-Host "  Build mode:      $BUILD_MODE"
 # Shared registry with pre-built images (pull via token)
 $SHARED_REGISTRY = "omnivecregistry.azurecr.io"
 $SHARED_REGISTRY_USER = "omnivec-pull-token"
-$SHARED_REGISTRY_TOKEN = "CWTNilJX3hS5ZLpf3f1bGwYD1Go8QA4HlB13l53XCzqIpNIxw2mPJQQJ99CCACHYHv6Eqg7NAAABAZCR94z7"
+$SHARED_REGISTRY_TOKEN = if ($env:OMNIVEC_SHARED_REGISTRY_TOKEN) { $env:OMNIVEC_SHARED_REGISTRY_TOKEN } else { Get-AzdValue "OMNIVEC_SHARED_REGISTRY_TOKEN" }
 
 # Check if we should build or import
 $DO_BUILD = if (Get-AzdValue "OMNIVEC_BUILD") { (Get-AzdValue "OMNIVEC_BUILD") -eq "true" } else { $false }

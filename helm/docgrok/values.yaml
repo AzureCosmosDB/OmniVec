@@ -155,9 +155,9 @@ providers:
   azure-openai:
     enabled: true
     type: "azure-openai"
-    endpoint: "https://prsas-mbvxnk32-swedencentral.cognitiveservices.azure.com"
+    endpoint: ""  # Set via --set or env var
     apiVersion: "2024-06-01"
-    apiKey: "CwYwHdfoExDyQMZvgJTnrjktaJDYtUak3Fdm5efAguIdp97kHNWxJQQJ99BFACfhMk5XJ3w3AAAAACOGyeck"
+    apiKey: ""  # Set via --set (stored in Key Vault at runtime)
     models:
       text-embedding-3-large:
         deployment: "text-embedding-3-large"
