@@ -50,50 +50,9 @@ SKIP_BLOB_ENUMERATION = os.getenv("SKIP_BLOB_ENUMERATION", "true").lower() == "t
 # Track last health check time
 _last_health_check: datetime | None = None
 
-# CosmosDB Change Feed tasks keyed by source_id
-_cf_tasks: dict[str, asyncio.Task] = {}
-
-# Continuation tokens — in-memory with CosmosDB persistence for durability across restarts
-_cf_tokens: dict[str, str] = {}
-
-def _persist_cf_token(source_id: str, token: str):
-    """Save CF continuation token to CosmosDB for durability."""
-    _cf_tokens[source_id] = token
-    try:
-        store = get_store()
-        doc = {
-            "id": f"cf-token-{source_id}",
-            "doc_type": "cf_token",
-            "source_id": source_id,
-            "continuation_token": token,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        store.upsert(doc)
-    except Exception as e:
-        logger.warning("Failed to persist CF token for %s: %s", source_id, e)
-
-def _load_cf_token(source_id: str) -> str | None:
-    """Load CF continuation token from memory or CosmosDB."""
-    if source_id in _cf_tokens:
-        return _cf_tokens[source_id]
-    try:
-        store = get_store()
-        doc = store.get(f"cf-token-{source_id}", "cf_token")
-        if doc and doc.get("continuation_token"):
-            _cf_tokens[source_id] = doc["continuation_token"]
-            return doc["continuation_token"]
-    except Exception as e:
-        logger.warning("Failed to load CF token for source %s (will replay from beginning): %s", source_id, e)
-    return None
-
-def _clear_cf_token(source_id: str):
-    """Clear CF continuation token from memory and CosmosDB."""
-    _cf_tokens.pop(source_id, None)
-    try:
-        store = get_store()
-        store.delete(f"cf-token-{source_id}", "cf_token")
-    except Exception:
-        pass
+# NOTE: CosmosDB Change Feed processing is handled entirely by the .NET changefeed
+# service (connectors/ingestion/dotnet). The Python controller only handles health
+# checks, job monitoring, blob enumeration, and operational tasks.
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -258,147 +217,10 @@ async def enumerate_cosmosdb_source(source: Source, pipeline: Pipeline) -> int:
 
 # ── CosmosDB Change Feed per source ──────────────────────────────────────
 
-async def cosmosdb_change_feed_loop(source_id: str):
-    """Long-running loop that watches a CosmosDB source's Change Feed and creates jobs."""
-    logger.info("Starting Change Feed for source %s", source_id)
-    store = get_store()
-
-    source = _get_source(source_id)
-    if not source:
-        logger.error("Source %s not found, stopping CF loop", source_id)
-        return
-
-    credential = DefaultAzureCredential()
-    client = CosmosClient(source.config["endpoint"], credential=credential)
-    database = client.get_database_client(source.config["database"])
-    container = database.get_container_client(source.config["container"])
-
-    continuation_token = _load_cf_token(source_id)
-
-    while True:
-        try:
-            change_feed = container.query_items_change_feed(
-                is_start_from_beginning=continuation_token is None,
-                continuation=continuation_token,
-                max_item_count=100,
-            )
-
-            # Iterate through pages to get continuation token
-            items = []
-            response = change_feed.by_page()
-            for page in response:
-                items.extend(page)
-
-            if items:
-                logger.info("CF source=%s: %d changes", source_id, len(items))
-
-                # Find active pipelines referencing this source
-                active_pipelines = _get_active_pipelines()
-                for pipeline in active_pipelines:
-                    if not any(ps.source_id == source_id for ps in pipeline.sources):
-                        continue
-                    # Skip inline pipelines — handled by the .NET changefeed connector
-                    if getattr(pipeline, "processing_mode", "queue") == "inline":
-                        continue
-
-                    content_field = source.config.get("content_field", "content")
-                    content_fields = content_field if isinstance(content_field, list) else [content_field]
-                    skipped_no_content = 0
-                    skipped_unchanged = 0
-                    jobs_created = 0
-                    for item in items:
-                        doc_id = item.get("id", "unknown")
-                        # Check for content — create job even for empty content so nothing is silently dropped
-                        has_content = any(item.get(f) for f in content_fields)
-                        if not has_content:
-                            skipped_no_content += 1
-                            # Still create a job marked as skipped so it's visible in the UI
-                            job = Job(
-                                id=f"job-{str(uuid.uuid4())[:12]}",
-                                pipeline_id=pipeline.id,
-                                source_id=source_id,
-                                source_ref=doc_id,
-                                status=JobStatus.COMPLETED,
-                                metadata={"trigger": "change_feed", "skipped": True, "reason": "no_content_field"},
-                                created_at=datetime.utcnow(),
-                                completed_at=datetime.utcnow(),
-                            )
-                            try:
-                                store.upsert(_to_doc(job, "job"))
-                            except Exception as je:
-                                logger.error("Failed to create skip-job for %s: %s", doc_id, je)
-                            continue
-
-                        # Skip if content_hash exists and content hasn't changed
-                        if item.get("content_hash"):
-                            parts = [item.get(f, "") for f in content_fields if item.get(f)]
-                            raw = "\n\n".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
-                            current = hashlib.sha256(
-                                raw.encode("utf-8") if isinstance(raw, str) else raw
-                            ).hexdigest()
-                            if current == item["content_hash"]:
-                                skipped_unchanged += 1
-                                continue
-
-                        job = Job(
-                            id=f"job-{str(uuid.uuid4())[:12]}",
-                            pipeline_id=pipeline.id,
-                            source_id=source_id,
-                            source_ref=doc_id,
-                            metadata={
-                                "trigger": "change_feed",
-                                "_etag": item.get("_etag"),
-                                "_pk_value": item.get(source.config.get("partition_key_path", "/id").lstrip("/"), ""),
-                            },
-                            created_at=datetime.utcnow(),
-                        )
-                        try:
-                            store.upsert(_to_doc(job, "job"))
-                            jobs_created += 1
-                        except Exception as je:
-                            logger.error("CRITICAL: Failed to create job for doc %s — will NOT checkpoint, batch will retry: %s", doc_id, je)
-                            # Don't checkpoint — raise to prevent token advancement so this batch retries
-                            raise RuntimeError(f"Job creation failed for doc {doc_id}, aborting batch to prevent data loss") from je
-
-                    if skipped_no_content or skipped_unchanged:
-                        logger.info("CF source=%s: %d jobs created, %d skipped (no content), %d skipped (unchanged)",
-                            source_id, jobs_created, skipped_no_content, skipped_unchanged)
-
-                # Only checkpoint after ALL jobs in batch are successfully created
-                continuation_token = response.continuation_token
-                _persist_cf_token(source_id, continuation_token)
-
-            await asyncio.sleep(5)
-
-        except asyncio.CancelledError:
-            logger.info("CF loop cancelled for source %s", source_id)
-            raise
-        except Exception as e:
-            logger.error("CF error for source %s: %s", source_id, e)
-            # Reset continuation token on mismatch errors
-            if "Mismatch" in str(e) or "Invalid continuation" in str(e):
-                continuation_token = None
-                _clear_cf_token(source_id)
-                logger.info("Reset CF token for source %s — retrying immediately", source_id)
-                await asyncio.sleep(2)  # Brief pause, then retry (was 30s — too long)
-                continue
-            await asyncio.sleep(30)
-
-
-def _ensure_cf_task(source_id: str):
-    """Start a Change Feed task for the source if one isn't running."""
-    task = _cf_tasks.get(source_id)
-    if task is not None and not task.done():
-        return
-    _cf_tasks[source_id] = asyncio.create_task(cosmosdb_change_feed_loop(source_id))
-    logger.info("Launched CF task for source %s", source_id)
-
-
-def _cancel_cf_task(source_id: str):
-    task = _cf_tasks.pop(source_id, None)
-    if task and not task.done():
-        task.cancel()
-        logger.info("Cancelled CF task for source %s", source_id)
+    # NOTE: Change feed processing removed from Python controller.
+    # All source watching (CosmosDB CF, Blob, MSSQL CDC, PostgreSQL CDC)
+    # is handled by the .NET changefeed service (connectors/ingestion/dotnet).
+    # The controller only handles health checks, job monitoring, and blob enumeration.
 
 
 # ── job health monitor ───────────────────────────────────────────────────
@@ -435,47 +257,13 @@ def monitor_job_health():
 # ── main loop ─────────────────────────────────────────────────────────────
 
 async def process_active_pipelines():
-    """One iteration: enumerate sources for active pipelines, manage CF tasks."""
-    active_pipelines = _get_active_pipelines()
+    """One iteration: run health checks and job monitoring for active pipelines.
 
-    # Collect which source_ids should have CF tasks
-    needed_cf_sources: set[str] = set()
-
-    for pipeline in active_pipelines:
-        for ps in pipeline.sources:
-            source = _get_source(ps.source_id)
-            if not source or not source.enabled:
-                continue
-
-            if source.type == SourceType.AZURE_BLOB:
-                # Blob enumeration is now handled by per-source blob_enumerator.py
-                # Only enumerate if legacy mode is enabled
-                if not SKIP_BLOB_ENUMERATION:
-                    try:
-                        await enumerate_blob_source(source, pipeline)
-                    except Exception as e:
-                        logger.error(
-                            "Blob enumeration failed for source=%s pipeline=%s: %s",
-                            source.name, pipeline.name, e,
-                        )
-
-            elif source.type == SourceType.COSMOSDB:
-                needed_cf_sources.add(source.id)
-                _ensure_cf_task(source.id)
-                # Backfill existing docs for pipelines with process_existing
-                if pipeline.process_existing:
-                    try:
-                        await enumerate_cosmosdb_source(source, pipeline)
-                    except Exception as e:
-                        logger.error(
-                            "CosmosDB backfill failed for source=%s pipeline=%s: %s",
-                            source.name, pipeline.name, e,
-                        )
-
-    # Cancel CF tasks for sources no longer needed
-    current_cf_ids = set(_cf_tasks.keys())
-    for source_id in current_cf_ids - needed_cf_sources:
-        _cancel_cf_task(source_id)
+    NOTE: All source processing (change feed, blob enumeration, backfill) is
+    handled by the .NET changefeed service + .NET worker via Service Bus.
+    The Python controller only monitors health and stuck jobs.
+    """
+    pass  # Health checks and job monitoring handled in main loop
 
 
 async def sync_docgrok_from_store():
