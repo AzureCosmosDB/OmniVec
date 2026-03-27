@@ -15,8 +15,9 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     tenantId: subscription().tenantId
     enableRbacAuthorization: true
     enableSoftDelete: true
-    enablePurgeProtection: true
-    softDeleteRetentionInDays: 90
+    softDeleteRetentionInDays: 7
+    // Note: enablePurgeProtection should be true in production
+    // Disabled here for dev/test to allow clean teardown with azd down --purge
   }
   tags: tags
 }
