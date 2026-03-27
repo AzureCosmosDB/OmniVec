@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
 """OmniVec Controller
 
-Single-replica process that manages system health and CosmosDB sources:
-- CosmosDB sources: runs Change Feed processor per source
+Single-replica bookkeeper process:
 - Health monitor: detects stuck PROCESSING jobs, retries or fails them
-- DocGrok sync: restores pipelines and models from CosmosDB
+- DocGrok sync: restores pipelines and models from CosmosDB on startup
+- Operational settings: applies K8s scaling changes
 
-NOTE: Blob enumeration is now handled by per-source blob_enumerator.py deployments.
-Set SKIP_BLOB_ENUMERATION=false to re-enable legacy blob enumeration (deprecated).
+All source processing (change feed, blob enumeration, backfill) is handled
+by the .NET changefeed service + .NET worker via Service Bus.
 """
 
 import os
-import uuid
 import asyncio
-import hashlib
 import logging
 from datetime import datetime, timedelta
 
 import httpx
-from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
 
-from models import (
-    Source, Pipeline, Job, JobStatus, PipelineStatus, SourceType, PipelineSource,
-)
+from models import Job, JobStatus, PipelineStatus, Pipeline
 from store import init_store, get_store
 from health_checker import run_health_checks, HEALTH_CHECK_INTERVAL
 
@@ -33,7 +27,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Suppress noisy Azure SDK HTTP logging
 for _sdk_logger in ("azure.core.pipeline.policies.http_logging_policy",
                      "azure.identity", "azure.core", "urllib3"):
     logging.getLogger(_sdk_logger).setLevel(logging.WARNING)
@@ -44,15 +37,7 @@ JOB_TIMEOUT_MINUTES = int(os.getenv("JOB_TIMEOUT_MINUTES", "10"))
 MAX_RETRY_COUNT = int(os.getenv("MAX_RETRY_COUNT", "3"))
 DOCGROK_URL = os.getenv("DOCGROK_URL", "http://docgrok:80")
 
-# Set to "false" to re-enable legacy blob enumeration (deprecated - use blob_enumerator.py)
-SKIP_BLOB_ENUMERATION = os.getenv("SKIP_BLOB_ENUMERATION", "true").lower() == "true"
-
-# Track last health check time
 _last_health_check: datetime | None = None
-
-# NOTE: CosmosDB Change Feed processing is handled entirely by the .NET changefeed
-# service (connectors/ingestion/dotnet). The Python controller only handles health
-# checks, job monitoring, blob enumeration, and operational tasks.
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -61,10 +46,6 @@ def _strip_doc(doc: dict) -> dict:
     d = {k: v for k, v in doc.items() if not k.startswith("_")}
     d.pop("doc_type", None)
     return d
-
-
-def _source_from_doc(doc: dict) -> Source:
-    return Source(**_strip_doc(doc))
 
 
 def _pipeline_from_doc(doc: dict) -> Pipeline:
@@ -90,137 +71,6 @@ def _get_active_pipelines() -> list[Pipeline]:
     ]
 
 
-def _get_source(source_id: str) -> Source | None:
-    store = get_store()
-    doc = store.get(source_id, "source")
-    return _source_from_doc(doc) if doc else None
-
-
-def _existing_job_refs(pipeline_id: str, source_id: str) -> set[str]:
-    """Return set of source_refs that already have a job (any status)."""
-    store = get_store()
-    query = (
-        "SELECT c.source_ref FROM c "
-        "WHERE c.doc_type = 'job' AND c.pipeline_id = @pip AND c.source_id = @src"
-    )
-    params = [
-        {"name": "@pip", "value": pipeline_id},
-        {"name": "@src", "value": source_id},
-    ]
-    rows = store.query(query, params, partition_key="job")
-    return {r["source_ref"] for r in rows}
-
-
-# ── blob source enumeration ──────────────────────────────────────────────
-
-async def enumerate_blob_source(source: Source, pipeline: Pipeline) -> int:
-    """Enumerate blobs and create PENDING jobs for new ones. Returns count of new jobs."""
-    from connectors.blob_connector import list_blobs
-
-    documents = await list_blobs(source.config, full_sync=False)
-    existing = _existing_job_refs(pipeline.id, source.id)
-    store = get_store()
-    created = 0
-
-    for doc in documents:
-        ref = doc["ref"]
-        if ref in existing:
-            continue
-
-        job = Job(
-            id=f"job-{str(uuid.uuid4())[:12]}",
-            pipeline_id=pipeline.id,
-            source_id=source.id,
-            source_ref=ref,
-            metadata={"trigger": "controller", **doc.get("metadata", {})},
-            created_at=datetime.utcnow(),
-        )
-        store.upsert(_to_doc(job, "job"))
-        created += 1
-
-    if created:
-        logger.info(
-            "Created %d new jobs for pipeline=%s source=%s (blob)",
-            created, pipeline.name, source.name,
-        )
-    return created
-
-
-# ── CosmosDB source enumeration (backfill for process_existing) ───────────
-
-# Track which (pipeline_id, source_id) combos have been backfilled and when
-_backfilled: dict[tuple[str, str], datetime] = {}
-
-
-async def enumerate_cosmosdb_source(source: Source, pipeline: Pipeline) -> int:
-    """Full enumeration of CosmosDB source docs. Creates jobs for docs not yet
-    covered by this pipeline. Used for process_existing backfill."""
-    key = (pipeline.id, source.id)
-    backfilled_at = _backfilled.get(key)
-    # Skip if already backfilled, unless pipeline was reset after that
-    if backfilled_at is not None:
-        reset_at = pipeline.reset_at
-        if reset_at is None or reset_at <= backfilled_at:
-            return 0
-        logger.info("Pipeline %s was reset at %s, re-backfilling", pipeline.id, reset_at)
-    _backfilled[key] = datetime.utcnow()
-    logger.info("Backfill check: pipeline=%s source=%s", pipeline.id, source.id)
-
-    existing = _existing_job_refs(pipeline.id, source.id)
-    if existing:
-        logger.info("Backfill skip: pipeline=%s already has %d jobs", pipeline.id, len(existing))
-        return 0
-
-    credential = DefaultAzureCredential()
-    client = CosmosClient(source.config["endpoint"], credential=credential)
-    database = client.get_database_client(source.config["database"])
-    container = database.get_container_client(source.config["container"])
-
-    content_field = source.config.get("content_field", "content")
-    content_fields = content_field if isinstance(content_field, list) else [content_field]
-    store = get_store()
-    created = 0
-
-    # Query all documents with their id and content fields
-    field_selects = ", ".join(f"c.{f}" for f in content_fields)
-    items = list(container.query_items(
-        f"SELECT c.id, {field_selects}, c._etag FROM c",
-        enable_cross_partition_query=True,
-    ))
-    logger.info("Backfill: queried %d docs from source=%s (fields=%s)", len(items), source.id, content_fields)
-
-    for item in items:
-        doc_id = item.get("id", "")
-        if not doc_id or doc_id in existing:
-            continue
-        # Skip documents without any content field
-        if not any(item.get(f) for f in content_fields):
-            continue
-
-        job = Job(
-            id=f"job-{str(uuid.uuid4())[:12]}",
-            pipeline_id=pipeline.id,
-            source_id=source.id,
-            source_ref=doc_id,
-            metadata={"trigger": "backfill", "_etag": item.get("_etag")},
-            created_at=datetime.utcnow(),
-        )
-        store.upsert(_to_doc(job, "job"))
-        created += 1
-
-    logger.info(
-        "Backfill: created %d jobs for pipeline=%s source=%s (cosmosdb)",
-        created, pipeline.name, source.name,
-    )
-    return created
-
-
-# ── CosmosDB Change Feed per source ──────────────────────────────────────
-
-    # NOTE: Change feed processing removed from Python controller.
-    # All source watching (CosmosDB CF, Blob, MSSQL CDC, PostgreSQL CDC)
-    # is handled by the .NET changefeed service (connectors/ingestion/dotnet).
-    # The controller only handles health checks, job monitoring, and blob enumeration.
 
 
 # ── job health monitor ───────────────────────────────────────────────────
