@@ -243,6 +243,7 @@ azure:
   serviceBus:
     namespace: "" # Set from Terraform output
     jobsQueue: jobs
+    embeddingsTopic: embeddings
 
   # Key Vault
   keyVault:
