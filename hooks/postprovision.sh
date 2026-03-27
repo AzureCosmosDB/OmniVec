@@ -125,7 +125,8 @@ if [ "$OMNIVEC_BUILD" = "true" ]; then
 
   build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest"
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
-  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/cosmosdb/dotnet/Dockerfile" "${ROOT_DIR}/connectors/cosmosdb/dotnet/" "latest"
+  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
+  build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
 
   if [ -d "${ROOT_DIR}/docgrok/pipeline-worker" ]; then
     build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
@@ -247,7 +248,7 @@ helm dependency build "${ROOT_DIR}/helm/omnivec"
 # Generate admin token if not already set
 ADMIN_TOKEN=$(get_azd_value "OMNIVEC_ADMIN_TOKEN")
 if [ -z "$ADMIN_TOKEN" ]; then
-  ADMIN_TOKEN=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+  ADMIN_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 44)
   azd env set OMNIVEC_ADMIN_TOKEN "$ADMIN_TOKEN"
   printf "  ${GREEN}Generated new admin token.${NC}\n"
 else
@@ -273,18 +274,24 @@ HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \
   --set docgrok.azure.cosmos.database=omnivec \
   --set docgrok.azure.cosmos.container=metadata \
   --set docgrok.docgrok.image.tag=${IMAGE_TAG} \
-  --set api.adminToken=${ADMIN_TOKEN}"
+  --set api.adminToken=${ADMIN_TOKEN} \
+  --set worker.enabled=false \
+  --set dotnetWorker.enabled=true"
 
 if [ -n "$KEYVAULT_URI" ]; then
   HELM_CMD="$HELM_CMD \
   --set azure.keyVault.uri=${KEYVAULT_URI}"
 fi
 
+if [ -n "$SB_ENDPOINT" ]; then
+  HELM_CMD="$HELM_CMD \
+  --set azure.serviceBus.namespace=${SB_ENDPOINT}"
+fi
+
 if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
   HELM_CMD="$HELM_CMD \
   --set azure.storage.accountName=${STORAGE_ACCOUNT} \
-  --set azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT} \
-  --set azure.serviceBus.namespace=${SB_ENDPOINT}"
+  --set azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}"
 fi
 
 HELM_CMD="$HELM_CMD --wait --timeout 10m"
