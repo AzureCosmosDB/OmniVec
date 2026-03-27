@@ -237,7 +237,9 @@ helm dependency build "$RootDir/helm/omnivec"
 # Generate admin token if not already set
 $ADMIN_TOKEN = Get-AzdValue "OMNIVEC_ADMIN_TOKEN"
 if (-not $ADMIN_TOKEN) {
-    $ADMIN_TOKEN = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+    $bytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $ADMIN_TOKEN = [Convert]::ToBase64String($bytes) -replace '[+/=]','' | ForEach-Object { $_.Substring(0, [Math]::Min(44, $_.Length)) }
     azd env set OMNIVEC_ADMIN_TOKEN $ADMIN_TOKEN
     Write-Host "  `e[32mGenerated new admin token.`e[0m"
 } else {

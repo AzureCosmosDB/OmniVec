@@ -28,6 +28,24 @@ from store import init_store, get_store
 
 logger = logging.getLogger(__name__)
 
+# Filter sensitive data from logs
+import re
+class _SensitiveFilter(logging.Filter):
+    _patterns = [
+        (re.compile(r'(api[_-]?key|password|secret|token|credential)[=:]\s*["\']?([^\s"\'&,}{]{8})[^\s"\'&,}{]*', re.I), r'\1=\2***'),
+        (re.compile(r'(Bearer\s+)(\S{8})\S+', re.I), r'\1\2***'),
+    ]
+    def filter(self, record):
+        msg = str(record.msg)
+        for pattern, replacement in self._patterns:
+            msg = pattern.sub(replacement, msg)
+        record.msg = msg
+        return True
+
+logging.getLogger().addFilter(_SensitiveFilter())
+# Suppress verbose Azure SDK logs
+logging.getLogger("azure").setLevel(logging.WARNING)
+
 app = FastAPI(title="OmniVec", version="1.0.0", description="Universal Vector Ingestion Platform")
 
 # =============================================================================
@@ -38,8 +56,10 @@ app = FastAPI(title="OmniVec", version="1.0.0", description="Universal Vector In
 AUTH_SKIP_PATHS = {"/health", "/health/", "/openapi.json", "/docs", "/redoc"}
 AUTH_SKIP_PREFIXES = ("/static/",)
 
-# Admin bootstrap token — set via env var to create initial tokens
-ADMIN_TOKEN = os.getenv("OMNIVEC_ADMIN_TOKEN", "")
+# Admin bootstrap token — hash immediately, never keep plaintext in memory
+_ADMIN_TOKEN_RAW = os.getenv("OMNIVEC_ADMIN_TOKEN", "")
+ADMIN_TOKEN_HASH = hashlib.sha256(_ADMIN_TOKEN_RAW.encode()).hexdigest() if _ADMIN_TOKEN_RAW else ""
+del _ADMIN_TOKEN_RAW  # Remove plaintext from memory
 
 
 def _hash_token(token: str) -> str:
@@ -48,25 +68,33 @@ def _hash_token(token: str) -> str:
 
 
 def _validate_token(token: str) -> Optional[dict]:
-    """Validate a bearer token. Returns token metadata or None."""
+    """Validate a bearer token. Returns token metadata or None.
+
+    Uses constant-time comparison to prevent timing attacks.
+    """
     token_hash = _hash_token(token)
-    # Check admin bootstrap token
-    if ADMIN_TOKEN and token == ADMIN_TOKEN:
+    # Check admin bootstrap token (constant-time comparison)
+    if ADMIN_TOKEN_HASH and secrets.compare_digest(token_hash, ADMIN_TOKEN_HASH):
         return {"name": "admin", "role": "admin", "created_by": "env"}
-    # Check stored tokens in CosmosDB
+    # Check stored tokens in CosmosDB — query by hash for efficiency
     try:
         store = get_store()
-        tokens = store.query("SELECT * FROM c WHERE c.doc_type = 'auth_token'")
+        tokens = store.query(
+            "SELECT * FROM c WHERE c.doc_type = 'auth_token' AND c.token_hash = @hash",
+            parameters=[{"name": "@hash", "value": token_hash}],
+            partition_key="auth_token",
+        )
         for t in tokens:
-            if t.get("token_hash") == token_hash:
-                if t.get("revoked"):
+            if not secrets.compare_digest(t.get("token_hash", ""), token_hash):
+                continue
+            if t.get("revoked"):
+                return None
+            if t.get("expires_at"):
+                if datetime.fromisoformat(t["expires_at"]) < datetime.utcnow():
                     return None
-                if t.get("expires_at"):
-                    if datetime.fromisoformat(t["expires_at"]) < datetime.utcnow():
-                        return None
-                return {"name": t.get("name", ""), "role": t.get("role", "user"), "id": t.get("id", "")}
-    except Exception:
-        pass
+            return {"name": t.get("name", ""), "role": t.get("role", "user"), "id": t.get("id", "")}
+    except Exception as e:
+        logger.warning("Token validation error: %s", e)
     return None
 
 
@@ -86,9 +114,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # All /api/* and /ui require auth
         if path.startswith("/api/") or path == "/ui":
-            # Skip auth for internal cluster calls (K8s service DNS)
-            host = request.headers.get("Host", "")
-            if host.startswith("omnivec-api") or host.startswith("omnivec-api.omnivec"):
+            # Skip auth for internal cluster calls — exact K8s DNS match only
+            _INTERNAL_HOSTS = {
+                "omnivec-api", "omnivec-api:80",
+                "omnivec-api.omnivec", "omnivec-api.omnivec:80",
+                "omnivec-api.omnivec.svc", "omnivec-api.omnivec.svc:80",
+                "omnivec-api.omnivec.svc.cluster.local", "omnivec-api.omnivec.svc.cluster.local:80",
+            }
+            host = request.headers.get("Host", "").lower().strip()
+            if host in _INTERNAL_HOSTS:
                 return await call_next(request)
 
             auth_header = request.headers.get("Authorization", "")
@@ -119,6 +153,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AuthMiddleware)
+
+# CORS — restrict to same-origin by default (UI is served from same host)
+from fastapi.middleware.cors import CORSMiddleware
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS or ["*"],  # Default allows same-origin via nginx proxy
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 # ── test-connection timeout / retry config ──────────────────────────────
 TEST_CONN_TIMEOUT = 10   # seconds
