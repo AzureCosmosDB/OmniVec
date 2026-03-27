@@ -83,6 +83,7 @@ $IMAGES = @(
     "omnivec-api",
     "omnivec-web",
     "omnivec-changefeed",
+    "omnivec-dotnet-worker",
     "docgrok-pipeline-worker",
     "docgrok-router"
 )

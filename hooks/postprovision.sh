@@ -86,7 +86,7 @@ OMNIVEC_BUILD=${OMNIVEC_BUILD:-false}
 FORCE_IMPORT=${OMNIVEC_FORCE_IMPORT:-false}
 
 # Images to import/build
-IMAGES="omnivec-api omnivec-web omnivec-changefeed docgrok-pipeline-worker docgrok-router"
+IMAGES="omnivec-api omnivec-web omnivec-changefeed omnivec-dotnet-worker docgrok-pipeline-worker docgrok-router"
 
 image_exists() {
   name=$1
