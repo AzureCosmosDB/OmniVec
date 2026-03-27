@@ -258,7 +258,6 @@ $helmArgs = @(
     "--set", "azure.cosmos.endpoint=$COSMOS_ENDPOINT",
     "--set", "api.image.tag=$IMAGE_TAG",
     "--set", "controller.image.tag=$IMAGE_TAG",
-    "--set", "worker.image.tag=$IMAGE_TAG",
     "--set", "web.image.tag=$IMAGE_TAG",
     "--set", "changefeed.image.tag=$IMAGE_TAG",
     "--set", "docgrok.global.imageRegistry=$ACR_LOGIN_SERVER",
@@ -268,7 +267,6 @@ $helmArgs = @(
     "--set", "docgrok.azure.cosmos.container=metadata",
     "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
     "--set", "api.adminToken=$ADMIN_TOKEN",
-    "--set", "worker.enabled=false",
     "--set", "dotnetWorker.enabled=true"
 )
 

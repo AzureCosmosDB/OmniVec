@@ -89,28 +89,7 @@ controller:
       memory: "2Gi"
       cpu: "500m"
 
-# =============================================================================
-# OMNIVEC WORKERS (job processors — autoscaled)
-# =============================================================================
-worker:
-  enabled: false  # Replaced by .NET worker (dotnetWorker)
-  replicaCount: 1
-  image:
-    repository: omnivec-api   # Same image, different entrypoint
-    tag: latest
-    pullPolicy: Always
-  resources:
-    requests:
-      memory: "512Mi"
-      cpu: "500m"
-    limits:
-      memory: "2Gi"
-      cpu: "2"
-  autoscaling:
-    enabled: true
-    minReplicas: 1
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 70
+# NOTE: Python worker removed. Job execution handled by .NET worker (dotnetWorker).
 
 # =============================================================================
 # COSMOS CHANGE FEED PROCESSOR (.NET — push model for CosmosDB sources)
