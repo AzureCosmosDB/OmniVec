@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 DOCGROK_URL = os.getenv("DOCGROK_URL", "http://docgrok:80")
 
+# Validate DocGrok URL at startup — prevent SSRF via env var manipulation
+from urllib.parse import urlparse as _urlparse
+_parsed_dg = _urlparse(DOCGROK_URL)
+if _parsed_dg.hostname and _parsed_dg.hostname not in (
+    "docgrok", "docgrok.omnivec", "docgrok.omnivec.svc",
+    "docgrok.omnivec.svc.cluster.local", "localhost", "127.0.0.1",
+):
+    logger.warning("SECURITY: DocGrok URL '%s' points to non-cluster host — verify this is intentional", DOCGROK_URL)
+
 # Reuse a single async HTTP client (caller must set this or we create one)
 _http_client: httpx.AsyncClient | None = None
 
@@ -228,6 +237,10 @@ async def _process_job_inner(job: Job) -> None:
         if not source_doc:
             raise ValueError(f"Source '{job.source_id}' not found")
         source = _source_from_doc(source_doc)
+
+        # Validate source_ref to prevent path traversal
+        if ".." in job.source_ref or job.source_ref.startswith("/"):
+            raise ValueError(f"Invalid source_ref '{job.source_ref}': path traversal not allowed")
 
         dest_doc = store.get(pipeline.destination_id, "destination")
         if not dest_doc:
