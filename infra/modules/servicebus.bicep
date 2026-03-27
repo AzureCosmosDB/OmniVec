@@ -27,6 +27,26 @@ resource jobsQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' =
   }
 }
 
+// Embeddings topic — changefeed publishes, .NET worker subscribes
+resource embeddingsTopic 'Microsoft.ServiceBus/namespaces/topics@2022-10-01-preview' = {
+  parent: sbNamespace
+  name: 'embeddings'
+  properties: {
+    maxSizeInMegabytes: 5120
+    defaultMessageTimeToLive: 'P1D'
+  }
+}
+
+resource workerSubscription 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2022-10-01-preview' = {
+  parent: embeddingsTopic
+  name: 'worker'
+  properties: {
+    maxDeliveryCount: 10
+    lockDuration: 'PT5M'
+    deadLetteringOnMessageExpiration: true
+  }
+}
+
 // Azure Service Bus Data Owner role
 var serviceBusDataOwnerRoleId = '090c5cfd-751d-490a-894a-3ce6f1109419'
 
