@@ -123,7 +123,8 @@ if ($DO_BUILD) {
 
     Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest"
     Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
-    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/cosmosdb/dotnet/Dockerfile" -Context "$RootDir/connectors/cosmosdb/dotnet/" -Tag "latest"
+    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
+    Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
 
     if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
         Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
@@ -266,7 +267,9 @@ $helmArgs = @(
     "--set", "docgrok.azure.cosmos.database=omnivec",
     "--set", "docgrok.azure.cosmos.container=metadata",
     "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
-    "--set", "api.adminToken=$ADMIN_TOKEN"
+    "--set", "api.adminToken=$ADMIN_TOKEN",
+    "--set", "worker.enabled=false",
+    "--set", "dotnetWorker.enabled=true"
 )
 
 if ($KEYVAULT_URI) {
@@ -275,11 +278,16 @@ if ($KEYVAULT_URI) {
     )
 }
 
+if ($SB_ENDPOINT) {
+    $helmArgs += @(
+        "--set", "azure.serviceBus.namespace=$SB_ENDPOINT"
+    )
+}
+
 if ($ENABLE_BLOB_SOURCE -eq "true") {
     $helmArgs += @(
         "--set", "azure.storage.accountName=$STORAGE_ACCOUNT",
-        "--set", "azure.storage.blobEndpoint=$STORAGE_BLOB_ENDPOINT",
-        "--set", "azure.serviceBus.namespace=$SB_ENDPOINT"
+        "--set", "azure.storage.blobEndpoint=$STORAGE_BLOB_ENDPOINT"
     )
 }
 
