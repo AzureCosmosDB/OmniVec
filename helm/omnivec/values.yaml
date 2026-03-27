@@ -152,6 +152,11 @@ dotnetWorker:
     limits:
       memory: "1Gi"
       cpu: "1"
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
 
 # =============================================================================
 # BLOB ENUMERATOR (per-source blob enumeration with checkpointing)
