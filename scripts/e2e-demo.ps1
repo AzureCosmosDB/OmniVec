@@ -254,8 +254,8 @@ if ($FromStep -le 5) {
     az cosmosdb sql role assignment create --account-name $TEST_COSMOS_ACCOUNT --resource-group $RESOURCE_GROUP --role-definition-id "00000000-0000-0000-0000-000000000002" --principal-id $PRINCIPAL_ID --scope "/" -o none 2>$null
     $scope = "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
     az role assignment create --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal --role "Cosmos DB Account Reader Role" --scope $scope -o none 2>$null
-    LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 30s..."
-    Start-Sleep -Seconds 30
+    LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
+    Start-Sleep -Seconds 60
 
     # Create database + containers
     Log "  Creating containers..."
@@ -264,10 +264,12 @@ if ($FromStep -le 5) {
     LogOk "test-documents created."
 
     # Vectors container with vector policy (via API pod)
-    Invoke-PodPython @"
+    # Retry up to 3 times — RBAC propagation can take longer than expected
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $vectorsOutput = Invoke-PodPython @"
 import os
 from azure.cosmos import CosmosClient
-from azure.cosmos.exceptions import CosmosResourceExistsError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
 client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
@@ -276,10 +278,22 @@ vp = {"vectorEmbeddings": [{"path": "/embedding", "dataType": "float32", "distan
 ip = {"includedPaths": [{"path": "/*"}], "excludedPaths": [{"path": "/embedding/*"}], "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}]}
 try:
     db.create_container(id="vectors", partition_key={"paths": ["/id"], "kind": "Hash"}, vector_embedding_policy=vp, indexing_policy=ip)
-    print("  vectors created (${AOAI_DIMS}d, cosine, quantizedFlat)")
+    print("OK: vectors created (${AOAI_DIMS}d, cosine, quantizedFlat)")
 except CosmosResourceExistsError:
-    print("  vectors container already exists")
+    print("OK: vectors container already exists")
+except CosmosHttpResponseError as e:
+    if "Forbidden" in str(e) or "403" in str(e):
+        print("RBAC_WAIT")
+    else:
+        raise
 "@
+        Write-Host $vectorsOutput
+        if ($vectorsOutput -match "^OK:") { break }
+        if ($vectorsOutput -match "RBAC_WAIT") {
+            LogWarn "RBAC not yet propagated, waiting 30s (attempt $attempt/3)..."
+            Start-Sleep -Seconds 30
+        } else { break }
+    }
     LogOk "All containers ready."
 } else {
     # Load test endpoint for later steps
