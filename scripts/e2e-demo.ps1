@@ -137,7 +137,7 @@ if ($FromStep -le 1) {
     azd env new $ENV_NAME --location $LOCATION --subscription $SUBSCRIPTION 2>$null
     azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
     azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
-    azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v5"
+    azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v6"
     azd env set OMNIVEC_SYSTEM_NODE_COUNT 2
     azd env set OMNIVEC_GPU_NODE_VM_SIZE "Standard_NC6s_v3"
     azd env set OMNIVEC_GPU_NODE_COUNT 0
@@ -258,8 +258,8 @@ if ($FromStep -le 5) {
     $scope = "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
     $roleBody = @{ properties = @{ roleDefinitionId = "/subscriptions/$SUBSCRIPTION/providers/Microsoft.Authorization/roleDefinitions/fbdf93bf-df7d-467e-a4d2-9458aa1360c8"; principalId = $PRINCIPAL_ID; principalType = "ServicePrincipal" } } | ConvertTo-Json -Depth 5
     az rest --method PUT --url "${scope}/providers/Microsoft.Authorization/roleAssignments/${roleAssignId}?api-version=2022-04-01" --body $roleBody -o none 2>$null
-    LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
-    Start-Sleep -Seconds 60
+    LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 120s for propagation..."
+    Start-Sleep -Seconds 120
 
     # Create database + containers
     Log "  Creating containers..."
@@ -269,7 +269,7 @@ if ($FromStep -le 5) {
 
     # Vectors container with vector policy (via API pod)
     # Retry up to 3 times — RBAC propagation can take longer than expected
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
         $vectorsOutput = Invoke-PodPython @"
 import os
 from azure.cosmos import CosmosClient
@@ -294,7 +294,7 @@ except CosmosHttpResponseError as e:
         Write-Host $vectorsOutput
         if ($vectorsOutput -match "^OK:") { break }
         if ($vectorsOutput -match "RBAC_WAIT") {
-            LogWarn "RBAC not yet propagated, waiting 30s (attempt $attempt/3)..."
+            LogWarn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
             Start-Sleep -Seconds 30
         } else { break }
     }
@@ -397,8 +397,15 @@ for doc in docs:
     Log "  Resuming pipeline..."
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
-    LogOk "Pipeline activated (queue mode). Waiting 60s for processing..."
-    Start-Sleep -Seconds 60
+    LogOk "Pipeline activated (queue mode). Waiting for processing..."
+    # Poll until stats show completion or 120s timeout
+    for ($i = 0; $i -lt 12; $i++) {
+        try {
+            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
+            if ($poll.stats.embedded_count -gt 0) { break }
+        } catch {}
+        Start-Sleep -Seconds 10
+    }
 } else {
     $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
     $PIP_ID = $pips.pipelines[0].id
@@ -499,8 +506,22 @@ for doc in docs:
     c.upsert_item(doc)
     print(f"  Inserted: {doc['id']} - {doc['title']}")
 "@
-    LogOk "Docs inserted. Waiting 90s for inline processing..."
-    Start-Sleep -Seconds 90
+    LogOk "Docs inserted. Waiting for inline processing..."
+    # Poll source container until embeddings appear or 120s timeout
+    for ($i = 0; $i -lt 12; $i++) {
+        $pollResult = Invoke-PodPython @"
+import os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
+client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
+c = client.get_database_client("testdb").get_container_client("test-documents")
+count = sum(1 for d in c.query_items("SELECT c.id FROM c WHERE STARTSWITH(c.id, 'doc-inline-') AND IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
+print(count)
+"@
+        if ($pollResult -match "[1-9]") { break }
+        Start-Sleep -Seconds 10
+    }
 } else {
     # Load inline pipeline if skipping
     $allPips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers

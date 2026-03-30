@@ -171,7 +171,7 @@ if [ "$FROM_STEP" -le 1 ]; then
   azd env new "$ENV_NAME" --location "$LOCATION" --subscription "$SUBSCRIPTION" 2>/dev/null || true
   azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
   azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
-  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v5"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v6"
   azd env set OMNIVEC_SYSTEM_NODE_COUNT 2
   azd env set OMNIVEC_GPU_NODE_VM_SIZE "Standard_NC6s_v3"
   azd env set OMNIVEC_GPU_NODE_COUNT 0
@@ -292,7 +292,8 @@ ARMEOF
     PRINCIPAL_ID=$(az identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv 2>/dev/null || true)
   fi
 
-  az cosmosdb sql role assignment create --account-name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+  # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/" into "C:/Program Files/Git/"
+  MSYS_NO_PATHCONV=1 az cosmosdb sql role assignment create --account-name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
     --role-definition-id "00000000-0000-0000-0000-000000000002" --principal-id "$PRINCIPAL_ID" --scope "/" -o none 2>/dev/null || true
   # ARM role: Cosmos DB Account Reader (required for readMetadata)
   # Use az rest because az role assignment create has API version bugs in some az CLI versions
@@ -302,20 +303,21 @@ ARMEOF
     --url "${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGN_ID}?api-version=2022-04-01" \
     --body "{\"properties\":{\"roleDefinitionId\":\"/subscriptions/$SUBSCRIPTION/providers/Microsoft.Authorization/roleDefinitions/fbdf93bf-df7d-467e-a4d2-9458aa1360c8\",\"principalId\":\"$PRINCIPAL_ID\",\"principalType\":\"ServicePrincipal\"}}" \
     -o none 2>/dev/null || true
-  log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
-  sleep 60
+  log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 120s for propagation..."
+  sleep 120
 
   # Create database + containers
+  # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/id" into "C:/Program Files/Git/id"
   log "  Creating containers..."
   az cosmosdb sql database create --account-name "$TEST_COSMOS_ACCOUNT" --name testdb --resource-group "$RESOURCE_GROUP" -o none 2>/dev/null || true
-  az cosmosdb sql container create --account-name "$TEST_COSMOS_ACCOUNT" --database-name testdb --name test-documents \
+  MSYS_NO_PATHCONV=1 az cosmosdb sql container create --account-name "$TEST_COSMOS_ACCOUNT" --database-name testdb --name test-documents \
     --resource-group "$RESOURCE_GROUP" --partition-key-path "/id" -o none 2>/dev/null || true
   log_ok "test-documents created."
 
   # Vectors container with vector policy (via API pod)
   # Retry up to 3 times — RBAC propagation can take longer than expected
   vectors_ok=false
-  for attempt in 1 2 3; do
+  for attempt in 1 2 3 4 5; do
     vectors_output=$(pod_python "
 import os, time
 from azure.cosmos import CosmosClient
@@ -342,7 +344,7 @@ except CosmosHttpResponseError as e:
       vectors_ok=true
       break
     elif echo "$vectors_output" | grep -q "RBAC_WAIT"; then
-      log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/3)..."
+      log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
       sleep 30
     else
       break
@@ -452,8 +454,16 @@ for doc in docs:
   log "  Resuming pipeline..."
   api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
   api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
-  log_ok "Pipeline activated (queue mode). Waiting 60s for processing..."
-  sleep 60
+  log_ok "Pipeline activated (queue mode). Waiting for processing..."
+  # Poll until stats show completion or 120s timeout
+  i=0
+  while [ $i -lt 12 ]; do
+    POLL=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
+    POLL_EMB=$(echo "$POLL" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
+    if [ -n "$POLL_EMB" ] && [ "$POLL_EMB" -gt 0 ] 2>/dev/null; then break; fi
+    sleep 10
+    i=$((i + 1))
+  done
 else
   PIPS_RESULT=$(api_get "/api/pipelines")
   PIP_ID=$(echo "$PIPS_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
@@ -554,8 +564,24 @@ for doc in docs:
     c.upsert_item(doc)
     print(f'  Inserted: {doc[\"id\"]} - {doc[\"title\"]}')
 "
-  log_ok "Docs inserted. Waiting 90s for inline processing..."
-  sleep 90
+  log_ok "Docs inserted. Waiting for inline processing..."
+  # Poll source container until embeddings appear or 120s timeout
+  i=0
+  while [ $i -lt 12 ]; do
+    poll_check=$(pod_python "
+import os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+c = client.get_database_client('testdb').get_container_client('test-documents')
+count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE STARTSWITH(c.id, \"doc-inline-\") AND IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
+print(count)
+" 2>/dev/null || echo "0")
+    if echo "$poll_check" | grep -q "[1-9]"; then break; fi
+    sleep 10
+    i=$((i + 1))
+  done
 else
   # Load inline pipeline if skipping
   ALL_PIPS=$(api_get "/api/pipelines")
