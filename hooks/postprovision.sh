@@ -145,6 +145,10 @@ else
   import_count=0
   skip_count=0
 
+  # Import images in parallel for speed (each az acr import takes 30-120s)
+  IMPORT_TMP=$(mktemp -d)
+  import_pids=""
+
   for image in $IMAGES; do
     if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
       printf "  ${GREEN}${image}:latest exists, skipping.${NC}\n"
@@ -154,46 +158,56 @@ else
 
     printf "  ${CYAN}Importing ${image}:latest...${NC}\n"
 
-    # Import from shared registry to user's ACR using token credentials
-    # Retry up to 2 times on transient failures
-    import_success=false
-    for attempt in 1 2; do
-      import_error=$(az acr import \
-          --name "$ACR_NAME" \
-          --source "${SHARED_REGISTRY}/${image}:latest" \
-          --image "${image}:latest" \
-          --username "$SHARED_REGISTRY_USER" \
-          --password "$SHARED_REGISTRY_TOKEN" \
-          --force 2>&1) && import_success=true || import_success=false
+    # Run import in background
+    (
+      import_success=false
+      for attempt in 1 2; do
+        import_error=$(az acr import \
+            --name "$ACR_NAME" \
+            --source "${SHARED_REGISTRY}/${image}:latest" \
+            --image "${image}:latest" \
+            --username "$SHARED_REGISTRY_USER" \
+            --password "$SHARED_REGISTRY_TOKEN" \
+            --force 2>&1) && import_success=true || import_success=false
+
+        if [ "$import_success" = "true" ]; then break; fi
+        if echo "$import_error" | grep -qi "unauthorized\|authentication\|401\|not found\|does not exist"; then break; fi
+        if [ "$attempt" -lt 2 ]; then sleep 2; fi
+      done
 
       if [ "$import_success" = "true" ]; then
-        break
+        echo "OK" > "$IMPORT_TMP/$image"
+      else
+        echo "$import_error" > "$IMPORT_TMP/$image"
       fi
+    ) &
+    import_pids="$import_pids $!"
+  done
 
-      # Only retry on transient errors (not auth or not-found)
-      if echo "$import_error" | grep -qi "unauthorized\|authentication\|401\|not found\|does not exist"; then
-        break
-      fi
+  # Wait for all imports to finish
+  for pid in $import_pids; do
+    wait "$pid" 2>/dev/null || true
+  done
 
-      if [ "$attempt" -lt 2 ]; then
-        printf "  ${YELLOW}Retrying ${image}:latest...${NC}\n"
-        sleep 2
-      fi
-    done
-
-    if [ "$import_success" = "true" ]; then
+  # Report results
+  for image in $IMAGES; do
+    result_file="$IMPORT_TMP/$image"
+    if [ ! -f "$result_file" ]; then continue; fi  # was skipped
+    result=$(cat "$result_file")
+    if [ "$result" = "OK" ]; then
       printf "  ${GREEN}${image}:latest imported.${NC}\n"
       import_count=$((import_count + 1))
     else
       printf "  ${RED}${image}:latest import FAILED${NC}\n"
-      printf "  ${RED}Error: ${import_error}${NC}\n"
-      if echo "$import_error" | grep -qi "unauthorized\|authentication\|401"; then
+      printf "  ${RED}Error: ${result}${NC}\n"
+      if echo "$result" | grep -qi "unauthorized\|authentication\|401"; then
         printf "  ${RED}Hint: Token may be expired. Contact repo maintainer to regenerate.${NC}\n"
-      elif echo "$import_error" | grep -qi "not found\|does not exist"; then
-        printf "  ${RED}Hint: Image not found in shared registry. Run with OMNIVEC_BUILD=true to build from source.${NC}\n"
+      elif echo "$result" | grep -qi "not found\|does not exist"; then
+        printf "  ${RED}Hint: Image not found. Run: azd env set OMNIVEC_BUILD true${NC}\n"
       fi
     fi
   done
+  rm -rf "$IMPORT_TMP"
 
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
 fi

@@ -452,8 +452,16 @@ for doc in docs:
   log "  Resuming pipeline..."
   api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
   api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
-  log_ok "Pipeline activated (queue mode). Waiting 60s for processing..."
-  sleep 60
+  log_ok "Pipeline activated (queue mode). Waiting for processing..."
+  # Poll until stats show completion or 120s timeout
+  i=0
+  while [ $i -lt 12 ]; do
+    POLL=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
+    POLL_EMB=$(echo "$POLL" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
+    if [ -n "$POLL_EMB" ] && [ "$POLL_EMB" -gt 0 ] 2>/dev/null; then break; fi
+    sleep 10
+    i=$((i + 1))
+  done
 else
   PIPS_RESULT=$(api_get "/api/pipelines")
   PIP_ID=$(echo "$PIPS_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
@@ -554,8 +562,24 @@ for doc in docs:
     c.upsert_item(doc)
     print(f'  Inserted: {doc[\"id\"]} - {doc[\"title\"]}')
 "
-  log_ok "Docs inserted. Waiting 90s for inline processing..."
-  sleep 90
+  log_ok "Docs inserted. Waiting for inline processing..."
+  # Poll source container until embeddings appear or 120s timeout
+  i=0
+  while [ $i -lt 12 ]; do
+    poll_check=$(pod_python "
+import os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+c = client.get_database_client('testdb').get_container_client('test-documents')
+count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE STARTSWITH(c.id, \"doc-inline-\") AND IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
+print(count)
+" 2>/dev/null || echo "0")
+    if echo "$poll_check" | grep -q "[1-9]"; then break; fi
+    sleep 10
+    i=$((i + 1))
+  done
 else
   # Load inline pipeline if skipping
   ALL_PIPS=$(api_get "/api/pipelines")

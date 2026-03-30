@@ -397,8 +397,15 @@ for doc in docs:
     Log "  Resuming pipeline..."
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
-    LogOk "Pipeline activated (queue mode). Waiting 60s for processing..."
-    Start-Sleep -Seconds 60
+    LogOk "Pipeline activated (queue mode). Waiting for processing..."
+    # Poll until stats show completion or 120s timeout
+    for ($i = 0; $i -lt 12; $i++) {
+        try {
+            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
+            if ($poll.stats.embedded_count -gt 0) { break }
+        } catch {}
+        Start-Sleep -Seconds 10
+    }
 } else {
     $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
     $PIP_ID = $pips.pipelines[0].id
@@ -499,8 +506,22 @@ for doc in docs:
     c.upsert_item(doc)
     print(f"  Inserted: {doc['id']} - {doc['title']}")
 "@
-    LogOk "Docs inserted. Waiting 90s for inline processing..."
-    Start-Sleep -Seconds 90
+    LogOk "Docs inserted. Waiting for inline processing..."
+    # Poll source container until embeddings appear or 120s timeout
+    for ($i = 0; $i -lt 12; $i++) {
+        $pollResult = Invoke-PodPython @"
+import os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
+client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
+c = client.get_database_client("testdb").get_container_client("test-documents")
+count = sum(1 for d in c.query_items("SELECT c.id FROM c WHERE STARTSWITH(c.id, 'doc-inline-') AND IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
+print(count)
+"@
+        if ($pollResult -match "[1-9]") { break }
+        Start-Sleep -Seconds 10
+    }
 } else {
     # Load inline pipeline if skipping
     $allPips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
