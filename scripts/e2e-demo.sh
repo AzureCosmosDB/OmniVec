@@ -302,8 +302,8 @@ ARMEOF
     --url "${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGN_ID}?api-version=2022-04-01" \
     --body "{\"properties\":{\"roleDefinitionId\":\"/subscriptions/$SUBSCRIPTION/providers/Microsoft.Authorization/roleDefinitions/fbdf93bf-df7d-467e-a4d2-9458aa1360c8\",\"principalId\":\"$PRINCIPAL_ID\",\"principalType\":\"ServicePrincipal\"}}" \
     -o none 2>/dev/null || true
-  log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
-  sleep 60
+  log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 120s for propagation..."
+  sleep 120
 
   # Create database + containers
   log "  Creating containers..."
@@ -315,7 +315,7 @@ ARMEOF
   # Vectors container with vector policy (via API pod)
   # Retry up to 3 times — RBAC propagation can take longer than expected
   vectors_ok=false
-  for attempt in 1 2 3; do
+  for attempt in 1 2 3 4 5; do
     vectors_output=$(pod_python "
 import os, time
 from azure.cosmos import CosmosClient
@@ -342,7 +342,7 @@ except CosmosHttpResponseError as e:
       vectors_ok=true
       break
     elif echo "$vectors_output" | grep -q "RBAC_WAIT"; then
-      log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/3)..."
+      log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
       sleep 30
     else
       break

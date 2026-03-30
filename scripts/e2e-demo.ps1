@@ -258,8 +258,8 @@ if ($FromStep -le 5) {
     $scope = "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
     $roleBody = @{ properties = @{ roleDefinitionId = "/subscriptions/$SUBSCRIPTION/providers/Microsoft.Authorization/roleDefinitions/fbdf93bf-df7d-467e-a4d2-9458aa1360c8"; principalId = $PRINCIPAL_ID; principalType = "ServicePrincipal" } } | ConvertTo-Json -Depth 5
     az rest --method PUT --url "${scope}/providers/Microsoft.Authorization/roleAssignments/${roleAssignId}?api-version=2022-04-01" --body $roleBody -o none 2>$null
-    LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
-    Start-Sleep -Seconds 60
+    LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 120s for propagation..."
+    Start-Sleep -Seconds 120
 
     # Create database + containers
     Log "  Creating containers..."
@@ -269,7 +269,7 @@ if ($FromStep -le 5) {
 
     # Vectors container with vector policy (via API pod)
     # Retry up to 3 times — RBAC propagation can take longer than expected
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
         $vectorsOutput = Invoke-PodPython @"
 import os
 from azure.cosmos import CosmosClient
@@ -294,7 +294,7 @@ except CosmosHttpResponseError as e:
         Write-Host $vectorsOutput
         if ($vectorsOutput -match "^OK:") { break }
         if ($vectorsOutput -match "RBAC_WAIT") {
-            LogWarn "RBAC not yet propagated, waiting 30s (attempt $attempt/3)..."
+            LogWarn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
             Start-Sleep -Seconds 30
         } else { break }
     }
