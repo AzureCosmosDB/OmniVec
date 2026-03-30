@@ -292,7 +292,8 @@ ARMEOF
     PRINCIPAL_ID=$(az identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv 2>/dev/null || true)
   fi
 
-  az cosmosdb sql role assignment create --account-name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+  # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/" into "C:/Program Files/Git/"
+  MSYS_NO_PATHCONV=1 az cosmosdb sql role assignment create --account-name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
     --role-definition-id "00000000-0000-0000-0000-000000000002" --principal-id "$PRINCIPAL_ID" --scope "/" -o none 2>/dev/null || true
   # ARM role: Cosmos DB Account Reader (required for readMetadata)
   # Use az rest because az role assignment create has API version bugs in some az CLI versions
