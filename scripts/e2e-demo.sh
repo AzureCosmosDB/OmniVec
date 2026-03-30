@@ -307,9 +307,10 @@ ARMEOF
   sleep 120
 
   # Create database + containers
+  # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/id" into "C:/Program Files/Git/id"
   log "  Creating containers..."
   az cosmosdb sql database create --account-name "$TEST_COSMOS_ACCOUNT" --name testdb --resource-group "$RESOURCE_GROUP" -o none 2>/dev/null || true
-  az cosmosdb sql container create --account-name "$TEST_COSMOS_ACCOUNT" --database-name testdb --name test-documents \
+  MSYS_NO_PATHCONV=1 az cosmosdb sql container create --account-name "$TEST_COSMOS_ACCOUNT" --database-name testdb --name test-documents \
     --resource-group "$RESOURCE_GROUP" --partition-key-path "/id" -o none 2>/dev/null || true
   log_ok "test-documents created."
 
