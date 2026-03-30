@@ -171,7 +171,7 @@ if [ "$FROM_STEP" -le 1 ]; then
   azd env new "$ENV_NAME" --location "$LOCATION" --subscription "$SUBSCRIPTION" 2>/dev/null || true
   azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
   azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
-  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v5"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v6"
   azd env set OMNIVEC_SYSTEM_NODE_COUNT 2
   azd env set OMNIVEC_GPU_NODE_VM_SIZE "Standard_NC6s_v3"
   azd env set OMNIVEC_GPU_NODE_COUNT 0
