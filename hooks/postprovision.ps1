@@ -143,6 +143,10 @@ if ($DO_BUILD) {
     $importCount = 0
     $skipCount = 0
 
+    # Import images in parallel for speed (each az acr import takes 30-120s)
+    $importJobs = @()
+    $imagesToImport = @()
+
     foreach ($image in $IMAGES) {
         if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
             Write-Host "  `e[32m${image}:latest exists, skipping.`e[0m"
@@ -151,45 +155,39 @@ if ($DO_BUILD) {
         }
 
         Write-Host "  `e[36mImporting ${image}:latest...`e[0m"
+        $imagesToImport += $image
 
-        # Import from shared registry to user's ACR with retry
-        $importSuccess = $false
-        for ($attempt = 1; $attempt -le 2; $attempt++) {
-            $importError = az acr import `
-                --name $ACR_NAME `
-                --source "${SHARED_REGISTRY}/${image}:latest" `
-                --image "${image}:latest" `
-                --username $SHARED_REGISTRY_USER `
-                --password $SHARED_REGISTRY_TOKEN `
-                --force 2>&1
-
-            if ($LASTEXITCODE -eq 0) {
-                $importSuccess = $true
-                break
-            }
-
-            # Don't retry auth or not-found errors
-            if ($importError -match "unauthorized|authentication|401|not found|does not exist") {
-                break
-            }
-
-            if ($attempt -lt 2) {
-                Write-Host "  `e[33mRetrying ${image}:latest...`e[0m"
+        $job = Start-Job -ScriptBlock {
+            param($ACR, $SHARED, $IMG, $USER, $TOKEN)
+            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" --username $USER --password $TOKEN --force 2>&1
+            if ($LASTEXITCODE -eq 0) { return "OK" }
+            # Retry once on transient errors
+            if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist") {
                 Start-Sleep -Seconds 2
+                az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" --username $USER --password $TOKEN --force 2>&1
+                if ($LASTEXITCODE -eq 0) { return "OK" }
             }
-        }
+            return "FAIL: $importError"
+        } -ArgumentList $ACR_NAME, $SHARED_REGISTRY, $image, $SHARED_REGISTRY_USER, $SHARED_REGISTRY_TOKEN
 
-        if ($importSuccess) {
-            Write-Host "  `e[32m${image}:latest imported.`e[0m"
+        $importJobs += @{ Image = $image; Job = $job }
+    }
+
+    # Wait for all imports to finish
+    if ($importJobs.Count -gt 0) {
+        $importJobs | ForEach-Object { $_.Job } | Wait-Job | Out-Null
+    }
+
+    # Report results
+    foreach ($entry in $importJobs) {
+        $result = Receive-Job $entry.Job
+        Remove-Job $entry.Job
+        if ($result -eq "OK") {
+            Write-Host "  `e[32m$($entry.Image):latest imported.`e[0m"
             $importCount++
         } else {
-            Write-Host "  `e[31m${image}:latest import FAILED`e[0m"
-            Write-Host "  `e[31mError: $importError`e[0m"
-            if ($importError -match "unauthorized|authentication|401") {
-                Write-Host "  `e[31mHint: Token may be expired. Contact repo maintainer to regenerate.`e[0m"
-            } elseif ($importError -match "not found|does not exist") {
-                Write-Host "  `e[31mHint: Image not found. Run: azd env set OMNIVEC_BUILD true`e[0m"
-            }
+            Write-Host "  `e[31m$($entry.Image):latest import FAILED`e[0m"
+            Write-Host "  `e[31m$result`e[0m"
         }
     }
 
