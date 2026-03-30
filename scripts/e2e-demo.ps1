@@ -252,8 +252,12 @@ if ($FromStep -le 5) {
     if (-not $PRINCIPAL_ID) { $PRINCIPAL_ID = az identity list --resource-group $RESOURCE_GROUP --query "[0].principalId" -o tsv 2>$null }
 
     az cosmosdb sql role assignment create --account-name $TEST_COSMOS_ACCOUNT --resource-group $RESOURCE_GROUP --role-definition-id "00000000-0000-0000-0000-000000000002" --principal-id $PRINCIPAL_ID --scope "/" -o none 2>$null
+    # ARM role: Cosmos DB Account Reader (required for readMetadata)
+    # Use az rest because az role assignment create has API version bugs in some az CLI versions
+    $roleAssignId = [guid]::NewGuid().ToString()
     $scope = "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
-    az role assignment create --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal --role "Cosmos DB Account Reader Role" --scope $scope -o none 2>$null
+    $roleBody = @{ properties = @{ roleDefinitionId = "/subscriptions/$SUBSCRIPTION/providers/Microsoft.Authorization/roleDefinitions/fbdf93bf-df7d-467e-a4d2-9458aa1360c8"; principalId = $PRINCIPAL_ID; principalType = "ServicePrincipal" } } | ConvertTo-Json -Depth 5
+    az rest --method PUT --url "${scope}/providers/Microsoft.Authorization/roleAssignments/${roleAssignId}?api-version=2022-04-01" --body $roleBody -o none 2>$null
     LogOk "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
     Start-Sleep -Seconds 60
 

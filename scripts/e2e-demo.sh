@@ -294,9 +294,14 @@ ARMEOF
 
   az cosmosdb sql role assignment create --account-name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" \
     --role-definition-id "00000000-0000-0000-0000-000000000002" --principal-id "$PRINCIPAL_ID" --scope "/" -o none 2>/dev/null || true
+  # ARM role: Cosmos DB Account Reader (required for readMetadata)
+  # Use az rest because az role assignment create has API version bugs in some az CLI versions
+  ROLE_ASSIGN_ID=$(powershell -Command "[guid]::NewGuid().ToString()" 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
   SCOPE="/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
-  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
-    --role "Cosmos DB Account Reader Role" --scope "$SCOPE" -o none 2>/dev/null || true
+  az rest --method PUT \
+    --url "${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGN_ID}?api-version=2022-04-01" \
+    --body "{\"properties\":{\"roleDefinitionId\":\"/subscriptions/$SUBSCRIPTION/providers/Microsoft.Authorization/roleDefinitions/fbdf93bf-df7d-467e-a4d2-9458aa1360c8\",\"principalId\":\"$PRINCIPAL_ID\",\"principalType\":\"ServicePrincipal\"}}" \
+    -o none 2>/dev/null || true
   log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
   sleep 60
 
