@@ -297,8 +297,8 @@ ARMEOF
   SCOPE="/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.DocumentDB/databaseAccounts/$TEST_COSMOS_ACCOUNT"
   az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
     --role "Cosmos DB Account Reader Role" --scope "$SCOPE" -o none 2>/dev/null || true
-  log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 30s..."
-  sleep 30
+  log_ok "RBAC assigned (Data Contributor + Account Reader). Waiting 60s for propagation..."
+  sleep 60
 
   # Create database + containers
   log "  Creating containers..."
@@ -308,10 +308,13 @@ ARMEOF
   log_ok "test-documents created."
 
   # Vectors container with vector policy (via API pod)
-  pod_python "
-import os
+  # Retry up to 3 times — RBAC propagation can take longer than expected
+  vectors_ok=false
+  for attempt in 1 2 3; do
+    vectors_output=$(pod_python "
+import os, time
 from azure.cosmos import CosmosClient
-from azure.cosmos.exceptions import CosmosResourceExistsError
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
 client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
@@ -320,10 +323,30 @@ vp = {'vectorEmbeddings': [{'path': '/embedding', 'dataType': 'float32', 'distan
 ip = {'includedPaths': [{'path': '/*'}], 'excludedPaths': [{'path': '/embedding/*'}], 'vectorIndexes': [{'path': '/embedding', 'type': 'quantizedFlat'}]}
 try:
     db.create_container(id='vectors', partition_key={'paths': ['/id'], 'kind': 'Hash'}, vector_embedding_policy=vp, indexing_policy=ip)
-    print('  vectors created (${AOAI_DIMS}d, cosine, quantizedFlat)')
+    print('OK: vectors created (${AOAI_DIMS}d, cosine, quantizedFlat)')
 except CosmosResourceExistsError:
-    print('  vectors container already exists')
-"
+    print('OK: vectors container already exists')
+except CosmosHttpResponseError as e:
+    if 'Forbidden' in str(e) or '403' in str(e):
+        print('RBAC_WAIT')
+    else:
+        raise
+" 2>&1) && true
+    echo "$vectors_output"
+    if echo "$vectors_output" | grep -q "^OK:"; then
+      vectors_ok=true
+      break
+    elif echo "$vectors_output" | grep -q "RBAC_WAIT"; then
+      log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/3)..."
+      sleep 30
+    else
+      break
+    fi
+  done
+  if [ "$vectors_ok" != "true" ]; then
+    log_err "Failed to create vectors container after retries"
+    exit 1
+  fi
   log_ok "All containers ready."
 else
   # Load test endpoint for later steps
