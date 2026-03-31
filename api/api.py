@@ -46,7 +46,13 @@ logging.getLogger().addFilter(_SensitiveFilter())
 # Suppress verbose Azure SDK logs
 logging.getLogger("azure").setLevel(logging.WARNING)
 
-app = FastAPI(title="OmniVec", version="1.0.0", description="Universal Vector Ingestion Platform")
+_DEBUG = os.getenv("OMNIVEC_DEBUG", "").lower() in ("true", "1")
+app = FastAPI(
+    title="OmniVec", version="1.0.0", description="Universal Vector Ingestion Platform",
+    docs_url="/docs" if _DEBUG else None,
+    redoc_url="/redoc" if _DEBUG else None,
+    openapi_url="/openapi.json" if _DEBUG else None,
+)
 
 # =============================================================================
 # AUTHENTICATION — Bearer Token
@@ -110,6 +116,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # /api/auth/login is public (validates token and returns metadata)
         if path == "/api/auth/login":
+            client_ip = request.client.host if request.client else "unknown"
+            if not _check_rate_limit(client_ip):
+                return JSONResponse(status_code=429, content={"detail": "Too many authentication attempts. Try again later."})
             return await call_next(request)
 
         # All /api/* and /ui require auth
@@ -123,6 +132,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             }
             host = request.headers.get("Host", "").lower().strip()
             if host in _INTERNAL_HOSTS:
+                request.state.internal = True
                 return await call_next(request)
 
             auth_header = request.headers.get("Authorization", "")
@@ -142,6 +152,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             token_meta = _validate_token(token)
             if not token_meta:
+                # Count failed auth attempts for rate limiting
+                client_ip = request.client.host if request.client else "unknown"
+                if not _check_rate_limit(client_ip):
+                    return JSONResponse(status_code=429, content={"detail": "Too many authentication attempts. Try again later."})
                 if path == "/ui":
                     return await call_next(request)
                 return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
@@ -153,6 +167,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AuthMiddleware)
+
+# Rate limiter for auth endpoints — prevent brute force token guessing
+_auth_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
+_AUTH_RATE_LIMIT = 10  # max attempts per window
+_AUTH_RATE_WINDOW = 60  # seconds
+
+def _check_rate_limit(client_ip: str) -> bool:
+    """Return True if request is allowed, False if rate limited."""
+    import time
+    now = time.time()
+    attempts = _auth_attempts.get(client_ip, [])
+    attempts = [t for t in attempts if now - t < _AUTH_RATE_WINDOW]
+    if len(attempts) >= _AUTH_RATE_LIMIT:
+        _auth_attempts[client_ip] = attempts
+        return False
+    attempts.append(now)
+    _auth_attempts[client_ip] = attempts
+    return True
 
 # CORS — restrict to same-origin by default (UI is served from same host)
 from fastapi.middleware.cors import CORSMiddleware
@@ -223,15 +255,37 @@ async def _test_with_timeout(fn, retries: int = TEST_CONN_RETRIES, timeout: int 
 # COSMOS DB STORE HELPERS
 # =============================================================================
 
-def _source_from_doc(doc: dict) -> Source:
+# Sensitive fields that must never be returned in API responses
+_SENSITIVE_CONFIG_KEYS = {
+    "password", "api_key", "secret", "connection_string", "access_key",
+    "shared_key", "sas_token", "token", "client_secret",
+}
+
+def _mask_config(config: dict) -> dict:
+    """Mask sensitive fields in source/destination config for API responses."""
+    if not config:
+        return config
+    masked = {}
+    for k, v in config.items():
+        if any(s in k.lower() for s in _SENSITIVE_CONFIG_KEYS):
+            masked[k] = "***" if v else v
+        else:
+            masked[k] = v
+    return masked
+
+def _source_from_doc(doc: dict, mask: bool = True) -> Source:
     """Convert a CosmosDB document to a Source model."""
     d = {k: v for k, v in doc.items() if not k.startswith("_")}
     d.pop("doc_type", None)  # remove partition key discriminator
+    if mask and "config" in d and isinstance(d["config"], dict):
+        d["config"] = _mask_config(d["config"])
     return Source(**d)
 
-def _destination_from_doc(doc: dict) -> Destination:
+def _destination_from_doc(doc: dict, mask: bool = True) -> Destination:
     d = {k: v for k, v in doc.items() if not k.startswith("_")}
     d.pop("doc_type", None)
+    if mask and "config" in d and isinstance(d["config"], dict):
+        d["config"] = _mask_config(d["config"])
     return Destination(**d)
 
 def _pipeline_from_doc(doc: dict) -> Pipeline:
@@ -837,21 +891,23 @@ def backfill_metrics():
 # =============================================================================
 
 @app.get("/api/sources")
-def list_sources():
-    """List all configured sources."""
+def list_sources(request: Request):
+    """List all configured sources. Credentials masked for external callers."""
     store = get_store()
     docs = store.list("source")
-    return {"sources": [_source_from_doc(d) for d in docs]}
+    internal = getattr(request.state, "internal", False)
+    return {"sources": [_source_from_doc(d, mask=not internal) for d in docs]}
 
 
 @app.get("/api/sources/{source_id}")
-def get_source(source_id: str):
-    """Get a specific source."""
+def get_source(source_id: str, request: Request):
+    """Get a specific source. Credentials masked for external callers."""
     store = get_store()
     doc = store.get(source_id, "source")
     if not doc:
         raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
-    return _source_from_doc(doc)
+    internal = getattr(request.state, "internal", False)
+    return _source_from_doc(doc, mask=not internal)
 
 
 @app.post("/api/sources")
@@ -1476,21 +1532,23 @@ async def delete_source_deployments(source_id: str):
 # =============================================================================
 
 @app.get("/api/destinations")
-def list_destinations():
-    """List all configured destinations."""
+def list_destinations(request: Request):
+    """List all configured destinations. Credentials masked for external callers."""
     store = get_store()
     docs = store.list("destination")
-    return {"destinations": [_destination_from_doc(d) for d in docs]}
+    internal = getattr(request.state, "internal", False)
+    return {"destinations": [_destination_from_doc(d, mask=not internal) for d in docs]}
 
 
 @app.get("/api/destinations/{dest_id}")
-def get_destination(dest_id: str):
-    """Get a specific destination."""
+def get_destination(dest_id: str, request: Request):
+    """Get a specific destination. Credentials masked for external callers."""
     store = get_store()
     doc = store.get(dest_id, "destination")
     if not doc:
         raise HTTPException(status_code=404, detail=f"Destination '{dest_id}' not found")
-    return _destination_from_doc(doc)
+    internal = getattr(request.state, "internal", False)
+    return _destination_from_doc(doc, mask=not internal)
 
 
 @app.post("/api/destinations")
