@@ -265,7 +265,8 @@ $helmArgs = @(
     "--set", "docgrok.azure.cosmos.container=metadata",
     "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
     "--set", "api.adminToken=$ADMIN_TOKEN",
-    "--set", "dotnetWorker.enabled=true"
+    "--set", "dotnetWorker.enabled=true",
+    "--set", "web.service.dnsLabel=$INSTANCE_ID"
 )
 
 if ($KEYVAULT_URI) {
@@ -327,10 +328,15 @@ Write-Host "  CosmosDB:      `e[36m$COSMOS_ENDPOINT`e[0m"
 
 Write-Host "  Admin Token:   `e[36m$ADMIN_TOKEN`e[0m"
 
+$LOCATION = $env:AZURE_LOCATION
+if (-not $LOCATION) { $LOCATION = "eastus2" }
+$FQDN = "${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
+
 if ($externalIp) {
     Write-Host ""
-    Write-Host "  OmniVec UI:    `e[36mhttp://${externalIp}/ui`e[0m"
-    Write-Host "  Health Check:  `e[36mhttp://${externalIp}/health`e[0m"
+    Write-Host "  OmniVec FQDN:  `e[36mhttp://${FQDN}/ui`e[0m"
+    Write-Host "  OmniVec IP:    `e[36mhttp://${externalIp}/ui`e[0m"
+    Write-Host "  Health Check:  `e[36mhttp://${FQDN}/health`e[0m"
 } else {
     Write-Host ""
     Write-Host "  `e[33mExternal IP not yet assigned. Check with:`e[0m"
