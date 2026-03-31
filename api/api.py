@@ -55,14 +55,14 @@ app = FastAPI(
 )
 
 # =============================================================================
-# AUTHENTICATION — Bearer Token
+# AUTHENTICATION â€” Bearer Token
 # =============================================================================
 
 # Paths that don't require authentication
 AUTH_SKIP_PATHS = {"/health", "/health/", "/openapi.json", "/docs", "/redoc"}
 AUTH_SKIP_PREFIXES = ("/static/",)
 
-# Admin bootstrap token — hash immediately, never keep plaintext in memory
+# Admin bootstrap token â€” hash immediately, never keep plaintext in memory
 _ADMIN_TOKEN_RAW = os.getenv("OMNIVEC_ADMIN_TOKEN", "")
 ADMIN_TOKEN_HASH = hashlib.sha256(_ADMIN_TOKEN_RAW.encode()).hexdigest() if _ADMIN_TOKEN_RAW else ""
 del _ADMIN_TOKEN_RAW  # Remove plaintext from memory
@@ -82,7 +82,7 @@ def _validate_token(token: str) -> Optional[dict]:
     # Check admin bootstrap token (constant-time comparison)
     if ADMIN_TOKEN_HASH and secrets.compare_digest(token_hash, ADMIN_TOKEN_HASH):
         return {"name": "admin", "role": "admin", "created_by": "env"}
-    # Check stored tokens in CosmosDB — query by hash for efficiency
+    # Check stored tokens in CosmosDB â€” query by hash for efficiency
     try:
         store = get_store()
         tokens = store.query(
@@ -123,7 +123,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # All /api/* and /ui require auth
         if path.startswith("/api/") or path == "/ui":
-            # Skip auth for internal cluster calls — exact K8s DNS match only
+            # Skip auth for internal cluster calls â€” exact K8s DNS match only
             _INTERNAL_HOSTS = {
                 "omnivec-api", "omnivec-api:80",
                 "omnivec-api.omnivec", "omnivec-api.omnivec:80",
@@ -140,9 +140,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
-            else:
-                # Also check query param for UI initial load
-                token = request.query_params.get("token")
 
             if not token:
                 # For /ui, redirect-style: serve login page instead
@@ -168,7 +165,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(AuthMiddleware)
 
-# Rate limiter for auth endpoints — prevent brute force token guessing
+# Rate limiter for auth endpoints â€” prevent brute force token guessing
 _auth_attempts: dict[str, list[float]] = {}  # ip -> [timestamps]
 _AUTH_RATE_LIMIT = 10  # max attempts per window
 _AUTH_RATE_WINDOW = 60  # seconds
@@ -186,18 +183,32 @@ def _check_rate_limit(client_ip: str) -> bool:
     _auth_attempts[client_ip] = attempts
     return True
 
-# CORS — restrict to same-origin by default (UI is served from same host)
+# CORS â€” restrict origins. Set CORS_ORIGINS env var for cross-origin access.
+# Default: no cross-origin allowed (UI is same-origin via nginx proxy).
 from fastapi.middleware.cors import CORSMiddleware
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS or ["*"],  # Default allows same-origin via nginx proxy
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
-# ── test-connection timeout / retry config ──────────────────────────────
+# Security headers on all API responses
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+# â”€â”€ test-connection timeout / retry config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST_CONN_TIMEOUT = 10   # seconds
 TEST_CONN_RETRIES = 1
 
@@ -231,7 +242,7 @@ def _build_mssql_odbc_conn_str(cfg: dict) -> str:
 
 async def _test_with_timeout(fn, retries: int = TEST_CONN_RETRIES, timeout: int = TEST_CONN_TIMEOUT):
     """Run a test-connection function with timeout and retries.
-    fn can be sync or async — sync calls run in a thread pool so timeout works.
+    fn can be sync or async â€” sync calls run in a thread pool so timeout works.
     Returns (success: bool, result_or_error)."""
     last_err = None
     loop = asyncio.get_event_loop()
@@ -373,7 +384,7 @@ async def serve_ui():
 
 @app.get("/health")
 async def health():
-    """Lightweight health check for K8s probes — no external calls."""
+    """Lightweight health check for K8s probes â€” no external calls."""
     return {"status": "healthy", "service": "OmniVec", "version": "1.0.0"}
 
 
@@ -433,7 +444,7 @@ async def create_token(req: CreateTokenRequest, request: Request):
         "role": req.role,
         "token": token,  # Only shown once at creation time
         "expires_at": doc.get("expires_at"),
-        "message": "Save this token — it cannot be retrieved again."
+        "message": "Save this token â€” it cannot be retrieved again."
     }
 
 
@@ -712,7 +723,7 @@ def get_changefeed_metrics():
     }
 
 
-# ── timeseries metrics ────────────────────────────────────────────────
+# â”€â”€ timeseries metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _upsert_ts_bucket(pipeline_id: str, processed: int, failed: int, processing_time_ms: float):
     """Upsert a minute-level timeseries bucket for the given pipeline."""
@@ -933,7 +944,7 @@ async def create_source(req: CreateSourceRequest):
 
     # Auto-validate source connectivity
     warnings = []
-    # Sources are always created enabled — connection test is advisory only
+    # Sources are always created enabled â€” connection test is advisory only
     enabled = True
     if req.type == SourceType.AZURE_BLOB:
         try:
@@ -1056,7 +1067,7 @@ async def sync_source(source_id: str, req: SyncSourceRequest):
 
     return {
         "success": True,
-        "message": f"Activated {activated} pipeline(s) — controller will enumerate source"
+        "message": f"Activated {activated} pipeline(s) â€” controller will enumerate source"
     }
 
 
@@ -1222,309 +1233,39 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
 # SOURCE DEPLOYMENTS (per-source enumerator + worker)
 # =============================================================================
 
-class SourceDeploymentConfig(BaseModel):
-    """Configuration for per-source deployments."""
-    enumerator_enabled: bool = True
-    worker_enabled: bool = True
-    worker_replicas: int = 1
-    worker_min_replicas: int = 1
-    worker_max_replicas: int = 10
-    enumeration_interval: int = 60
-
-
 @app.get("/api/sources/{source_id}/deployments")
 async def get_source_deployments(source_id: str):
-    """Get deployment status for a source."""
-    store = get_store()
-    doc = store.get(source_id, "source")
-    if not doc:
-        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
-
-    try:
-        from kubernetes import client, config as k8s_config
-        k8s_config.load_incluster_config()
-        apps_v1 = client.AppsV1Api()
-        ns = "omnivec"
-
-        deployments = {}
-        for dep_type in ["enum", "worker"]:
-            name = f"omnivec-{dep_type}-{source_id}"
-            try:
-                dep = apps_v1.read_namespaced_deployment(name, ns)
-                deployments[dep_type] = {
-                    "name": name,
-                    "status": "running",
-                    "replicas": dep.spec.replicas,
-                    "ready_replicas": dep.status.ready_replicas or 0,
-                    "available_replicas": dep.status.available_replicas or 0,
-                }
-            except client.ApiException as e:
-                if e.status == 404:
-                    deployments[dep_type] = {"name": name, "status": "not_deployed"}
-                else:
-                    deployments[dep_type] = {"name": name, "status": "error", "error": str(e)}
-
-        return {"source_id": source_id, "deployments": deployments}
-
-    except Exception as e:
-        return {"source_id": source_id, "deployments": {}, "error": str(e)}
+    """Legacy endpoint â€” source deployments are no longer used. .NET CFP handles all sources."""
+    return {"deployments": [], "message": "Source deployments removed. Processing handled by .NET ChangeFeed Processor."}
 
 
 @app.post("/api/sources/{source_id}/deployments")
-async def create_source_deployments(source_id: str, config: SourceDeploymentConfig = None):
-    """Create dedicated enumerator + worker deployments for a source."""
-    if config is None:
-        config = SourceDeploymentConfig()
+async def create_source_deployments_legacy(source_id: str):
+    """Legacy endpoint â€” removed. .NET CFP handles all source processing."""
+    raise HTTPException(status_code=410, detail="Source deployments removed. Processing handled by .NET ChangeFeed Processor.")
 
-    store = get_store()
-    doc = store.get(source_id, "source")
-    if not doc:
-        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
 
-    source = _source_from_doc(doc)
-    if source.type != SourceType.AZURE_BLOB:
-        raise HTTPException(
-            status_code=400,
-            detail="Dedicated deployments are only supported for blob sources. "
-                   "CosmosDB sources use the shared change feed processor."
-        )
+@app.delete("/api/sources/{source_id}/deployments")
+async def delete_source_deployments_legacy(source_id: str):
+    """Legacy endpoint â€” removed. .NET CFP handles all source processing."""
+    raise HTTPException(status_code=410, detail="Source deployments removed. Processing handled by .NET ChangeFeed Processor.")
 
-    try:
-        from kubernetes import client, config as k8s_config
-        k8s_config.load_incluster_config()
-        apps_v1 = client.AppsV1Api()
-        autoscaling_v2 = client.AutoscalingV2Api()
-        ns = "omnivec"
 
-        created = []
-
-        # Get image info from existing API deployment
-        try:
-            api_dep = apps_v1.read_namespaced_deployment("omnivec-api", ns)
-            image = api_dep.spec.template.spec.containers[0].image
-            sa_name = api_dep.spec.template.spec.service_account_name
-        except Exception:
-            raise HTTPException(status_code=500, detail="Could not read API deployment for image info")
-
-        # Create enumerator deployment
-        if config.enumerator_enabled:
-            enum_name = f"omnivec-enum-{source_id}"
-            enum_dep = client.V1Deployment(
-                metadata=client.V1ObjectMeta(
-                    name=enum_name,
-                    namespace=ns,
-                    labels={"app": "omnivec-enumerator", "source-id": source_id}
-                ),
-                spec=client.V1DeploymentSpec(
-                    replicas=1,
-                    selector=client.V1LabelSelector(
-                        match_labels={"app": "omnivec-enumerator", "source-id": source_id}
-                    ),
-                    template=client.V1PodTemplateSpec(
-                        metadata=client.V1ObjectMeta(
-                            labels={
-                                "app": "omnivec-enumerator",
-                                "source-id": source_id,
-                                "azure.workload.identity/use": "true"
-                            }
-                        ),
-                        spec=client.V1PodSpec(
-                            service_account_name=sa_name,
-                            containers=[
-                                client.V1Container(
-                                    name="enumerator",
-                                    image=image,
-                                    command=["python", "blob_enumerator.py"],
-                                    env=[
-                                        client.V1EnvVar(name="SOURCE_ID", value=source_id),
-                                        client.V1EnvVar(name="ENUMERATION_INTERVAL", value=str(config.enumeration_interval)),
-                                        client.V1EnvVar(name="COSMOS_ENDPOINT", value_from=client.V1EnvVarSource(
-                                            field_ref=client.V1ObjectFieldSelector(field_path="metadata.namespace")
-                                        )),
-                                    ],
-                                    env_from=[
-                                        client.V1EnvFromSource(
-                                            config_map_ref=client.V1ConfigMapEnvSource(name="omnivec-config", optional=True)
-                                        )
-                                    ],
-                                    resources=client.V1ResourceRequirements(
-                                        requests={"memory": "256Mi", "cpu": "250m"},
-                                        limits={"memory": "1Gi", "cpu": "500m"}
-                                    )
-                                )
-                            ]
-                        )
-                    )
-                )
-            )
-            try:
-                apps_v1.create_namespaced_deployment(ns, enum_dep)
-                created.append(enum_name)
-            except client.ApiException as e:
-                if e.status != 409:  # Ignore already exists
-                    raise
-
-        # Create worker deployment
-        if config.worker_enabled:
-            worker_name = f"omnivec-worker-{source_id}"
-            worker_dep = client.V1Deployment(
-                metadata=client.V1ObjectMeta(
-                    name=worker_name,
-                    namespace=ns,
-                    labels={"app": "omnivec-source-worker", "source-id": source_id}
-                ),
-                spec=client.V1DeploymentSpec(
-                    replicas=config.worker_replicas,
-                    selector=client.V1LabelSelector(
-                        match_labels={"app": "omnivec-source-worker", "source-id": source_id}
-                    ),
-                    template=client.V1PodTemplateSpec(
-                        metadata=client.V1ObjectMeta(
-                            labels={
-                                "app": "omnivec-source-worker",
-                                "source-id": source_id,
-                                "azure.workload.identity/use": "true"
-                            }
-                        ),
-                        spec=client.V1PodSpec(
-                            service_account_name=sa_name,
-                            containers=[
-                                client.V1Container(
-                                    name="worker",
-                                    image=image,
-                                    command=["python", "source_worker.py"],
-                                    env=[
-                                        client.V1EnvVar(name="SOURCE_ID", value=source_id),
-                                    ],
-                                    env_from=[
-                                        client.V1EnvFromSource(
-                                            config_map_ref=client.V1ConfigMapEnvSource(name="omnivec-config", optional=True)
-                                        )
-                                    ],
-                                    resources=client.V1ResourceRequirements(
-                                        requests={"memory": "512Mi", "cpu": "500m"},
-                                        limits={"memory": "2Gi", "cpu": "2"}
-                                    )
-                                )
-                            ]
-                        )
-                    )
-                )
-            )
-            try:
-                apps_v1.create_namespaced_deployment(ns, worker_dep)
-                created.append(worker_name)
-            except client.ApiException as e:
-                if e.status != 409:
-                    raise
-
-            # Create HPA for worker
-            hpa_name = f"omnivec-worker-{source_id}"
-            hpa = client.V2HorizontalPodAutoscaler(
-                metadata=client.V1ObjectMeta(name=hpa_name, namespace=ns),
-                spec=client.V2HorizontalPodAutoscalerSpec(
-                    scale_target_ref=client.V2CrossVersionObjectReference(
-                        api_version="apps/v1",
-                        kind="Deployment",
-                        name=worker_name
-                    ),
-                    min_replicas=config.worker_min_replicas,
-                    max_replicas=config.worker_max_replicas,
-                    metrics=[
-                        client.V2MetricSpec(
-                            type="Resource",
-                            resource=client.V2ResourceMetricSource(
-                                name="cpu",
-                                target=client.V2MetricTarget(
-                                    type="Utilization",
-                                    average_utilization=70
-                                )
-                            )
-                        )
-                    ]
-                )
-            )
-            try:
-                autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(ns, hpa)
-                created.append(f"hpa/{hpa_name}")
-            except client.ApiException as e:
-                if e.status != 409:
-                    raise
-
-        return {
-            "success": True,
-            "source_id": source_id,
-            "created": created
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create deployments: {str(e)}")
+@app.post("/api/sources/{source_id}/deployments")
+async def create_source_deployments(source_id: str):
+    """Legacy â€” source deployments removed. .NET CFP handles all source processing."""
+    raise HTTPException(status_code=410, detail="Source deployments removed. Processing handled by .NET ChangeFeed Processor.")
 
 
 @app.delete("/api/sources/{source_id}/deployments")
 async def delete_source_deployments(source_id: str):
-    """Delete dedicated deployments for a source."""
-    store = get_store()
-    doc = store.get(source_id, "source")
-    if not doc:
-        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+    """Legacy â€” source deployments removed."""
+    raise HTTPException(status_code=410, detail="Source deployments removed. Processing handled by .NET ChangeFeed Processor.")
 
-    try:
-        from kubernetes import client, config as k8s_config
-        k8s_config.load_incluster_config()
-        apps_v1 = client.AppsV1Api()
-        autoscaling_v2 = client.AutoscalingV2Api()
-        ns = "omnivec"
 
-        deleted = []
-
-        # Delete HPA
-        hpa_name = f"omnivec-worker-{source_id}"
-        try:
-            autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler(hpa_name, ns)
-            deleted.append(f"hpa/{hpa_name}")
-        except client.ApiException as e:
-            if e.status != 404:
-                raise
-
-        # Delete worker deployment
-        worker_name = f"omnivec-worker-{source_id}"
-        try:
-            apps_v1.delete_namespaced_deployment(worker_name, ns)
-            deleted.append(worker_name)
-        except client.ApiException as e:
-            if e.status != 404:
-                raise
-
-        # Delete enumerator deployment
-        enum_name = f"omnivec-enum-{source_id}"
-        try:
-            apps_v1.delete_namespaced_deployment(enum_name, ns)
-            deleted.append(enum_name)
-        except client.ApiException as e:
-            if e.status != 404:
-                raise
-
-        # Clear checkpoint
-        checkpoint_id = f"blob-enum-{source_id}"
-        try:
-            store.delete(checkpoint_id, "checkpoint")
-            deleted.append(f"checkpoint/{checkpoint_id}")
-        except Exception:
-            pass
-
-        return {
-            "success": True,
-            "source_id": source_id,
-            "deleted": deleted
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete deployments: {str(e)}")
+# NOTE: ~250 lines of legacy K8s deployment code removed here.
+# All source processing is now handled by .NET ChangeFeed Processor + .NET Worker.
+# See git history for the removed create_source_deployments and delete_source_deployments code.
 
 
 # =============================================================================
@@ -1808,7 +1549,7 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             try:
                 import pyodbc
             except ImportError:
-                return {"success": False, "error": "pyodbc not installed — MSSQL destination tests handled by changefeed connector"}
+                return {"success": False, "error": "pyodbc not installed â€” MSSQL destination tests handled by changefeed connector"}
 
             conn_str = _build_mssql_odbc_conn_str(req.config)
 
@@ -1885,7 +1626,7 @@ async def _validate_docgrok_ref(docgrok_ref: str) -> str:
     """Validate a DocGrok model ID or transform pipeline name.
     Returns the reference as-is if valid. Only embedding models allowed for pipelines."""
     if docgrok_ref.startswith("mdl-ext-") or docgrok_ref.startswith("mdl-native-"):
-        # Check model_category in CosmosDB — chat models cannot be used in pipelines
+        # Check model_category in CosmosDB â€” chat models cannot be used in pipelines
         store = get_store()
         try:
             doc = store.get(docgrok_ref, "docgrok_model")
@@ -1955,7 +1696,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             raise HTTPException(status_code=400, detail="chunk_overlap must be less than chunk_size")
         chunk_config = ChunkConfig(**cc)
 
-    # Pipeline always starts PAUSED — user must explicitly resume/run to activate
+    # Pipeline always starts PAUSED â€” user must explicitly resume/run to activate
     initial_status = PipelineStatus.PAUSED
 
     pipeline_id = f"pip-{str(uuid.uuid4())[:8]}"
@@ -2081,14 +1822,14 @@ def run_pipeline(pipeline_id: str):
     pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
 
-    return {"success": True, "message": "Pipeline activated — controller will begin processing"}
+    return {"success": True, "message": "Pipeline activated â€” controller will begin processing"}
 
 
 @app.post("/api/pipelines/{pipeline_id}/reset")
 def reset_pipeline(pipeline_id: str):
     """Reset a pipeline: pause it first, delete all jobs, then allow resume.
 
-    Sets reset_at which the .NET CFP service detects — it will automatically
+    Sets reset_at which the .NET CFP service detects â€” it will automatically
     delete its lease container and restart the change feed from the beginning.
     """
     store = get_store()
@@ -2105,7 +1846,7 @@ def reset_pipeline(pipeline_id: str):
         store.upsert(_to_doc(pipeline, "pipeline"))
         logger.info("Pipeline %s paused before reset", pipeline_id)
 
-    # Delete all jobs for this pipeline (skip for inline mode — no jobs created)
+    # Delete all jobs for this pipeline (skip for inline mode â€” no jobs created)
     deleted = 0
     if pipeline.processing_mode != "inline":
         job_ids = store.query(
@@ -2147,7 +1888,7 @@ def reset_pipeline(pipeline_id: str):
         except Exception as e:
             logger.warning("Failed to clean up chunks for pipeline %s: %s", pipeline_id, e)
 
-    # Set reset_at — the .NET CFP service watches this and will delete its
+    # Set reset_at â€” the .NET CFP service watches this and will delete its
     # lease container + restart the change feed from the beginning
     # Generate new generation hash from context (source+dest+model+timestamp)
     import hashlib
@@ -2159,14 +1900,14 @@ def reset_pipeline(pipeline_id: str):
     pipeline.updated_at = reset_ts
     store.upsert(_to_doc(pipeline, "pipeline"))
 
-    return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset — {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
+    return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset â€” {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
 
 
 @app.post("/api/pipelines/{pipeline_id}/metrics/inline")
 def report_inline_metrics(pipeline_id: str, payload: dict):
     """Report inline processing metrics from CFP (continuous, cumulative).
     Payload: {processed: N, failed: M, processing_time_ms: T, batch_key: str}
-    batch_key is used for deduplication — duplicate reports from lease rebalancing are ignored."""
+    batch_key is used for deduplication â€” duplicate reports from lease rebalancing are ignored."""
     store = get_store()
     doc = store.get("global", "metrics")
     if not doc:
@@ -2638,7 +2379,7 @@ async def playground_search(req: SearchRequest):
         raise HTTPException(status_code=503, detail="Failed to generate embeddings for any model")
 
     if len(embeddings) > 1 and req.merge_strategy == "interleave":
-        warnings.append("Merging results across different embedding models — scores may not be directly comparable")
+        warnings.append("Merging results across different embedding models â€” scores may not be directly comparable")
 
     # Search all indexes in parallel
     search_start = time.time()
@@ -3176,7 +2917,7 @@ az eventgrid event-subscription create `
 
 
 # =============================================================================
-# OPERATIONS — K8s Deployment Management
+# OPERATIONS â€” K8s Deployment Management
 # =============================================================================
 
 OMNIVEC_DEPLOYMENTS = ["omnivec-web", "omnivec-api", "omnivec-controller", "omnivec-worker", "omnivec-source-connector", "omnivec-dotnet-worker"]
@@ -3448,7 +3189,7 @@ async def restart_deployment(name: str):
 # =============================================================================
 
 def _cfp_generation(reset_at) -> str:
-    """Compute CFP generation tag from reset_at — must match .NET GetGeneration()."""
+    """Compute CFP generation tag from reset_at â€” must match .NET GetGeneration()."""
     if not reset_at:
         return "0"
     import hashlib
@@ -3472,7 +3213,7 @@ def get_changefeed_leases():
         if d.get("type") == "cosmosdb"
     ]
 
-    # Build source_id → latest generation from active pipelines
+    # Build source_id â†’ latest generation from active pipelines
     pipelines = store.list("pipeline")
     source_generations = {}
     for p in pipelines:
@@ -3543,12 +3284,12 @@ def get_changefeed_leases():
 
 
 # =============================================================================
-# MODELS — proxied to DocGrok (DocGrok owns the model registry)
+# MODELS â€” proxied to DocGrok (DocGrok owns the model registry)
 # =============================================================================
 
 @app.get("/api/models")
 async def list_models():
-    """List all models — proxied from DocGrok model registry, enriched with model_category."""
+    """List all models â€” proxied from DocGrok model registry, enriched with model_category."""
     try:
         resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry")
         data = resp.json()
@@ -3590,9 +3331,13 @@ async def list_models():
             pass
 
         # Enrich all models with model_category (default to "embedding" for existing)
+        # Mask sensitive fields (api_key, secret) from responses
         for m in models:
             if "model_category" not in m:
                 m["model_category"] = stored.get(m.get("id"), "embedding")
+            for sensitive_key in ("api_key", "secret", "token"):
+                if sensitive_key in m and m[sensitive_key]:
+                    m[sensitive_key] = "***"
 
         data["models"] = models
         return data
@@ -3602,7 +3347,7 @@ async def list_models():
 
 @app.post("/api/models")
 async def create_model(payload: dict):
-    """Create an external model — proxied to DocGrok, persisted in CosmosDB."""
+    """Create an external model â€” proxied to DocGrok, persisted in CosmosDB."""
     try:
         # Map UI field names to DocGrok registry fields
         model_name = payload.get("name", payload.get("model", "")).strip()
@@ -3616,7 +3361,7 @@ async def create_model(payload: dict):
             "embedding_dim": int(payload.get("embedding_dim", payload.get("dimensions", 1536))),
             "api_version": payload.get("api_version", "2024-06-01"),
         }
-        # Preserve stored ID — look up by name in CosmosDB so DocGrok always
+        # Preserve stored ID â€” look up by name in CosmosDB so DocGrok always
         # gets the same ID even after restart (prevents ID drift).
         store = get_store()
         try:
@@ -3686,7 +3431,7 @@ async def create_model(payload: dict):
 
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: str):
-    """Delete an external model — proxied to DocGrok, removed from CosmosDB."""
+    """Delete an external model â€” proxied to DocGrok, removed from CosmosDB."""
     try:
         # Check if it's a chat-only model (only in CosmosDB, not in DocGrok)
         store = get_store()
@@ -3698,7 +3443,7 @@ async def delete_model(model_id: str):
                 pass
 
         if doc and doc.get("model_category") == "chat":
-            # Chat model — only delete from CosmosDB
+            # Chat model â€” only delete from CosmosDB
             store.delete(model_id, "docgrok_model")
             return {"status": "deleted", "id": model_id}
 
@@ -4506,7 +4251,7 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                         source_doc_count = total_result[0]
 
                     # Embedded count: query the container where embeddings are written
-                    # For inline mode → source container; for queue mode → destination container
+                    # For inline mode â†’ source container; for queue mode â†’ destination container
                     embed_container = src_container  # default: same as source (inline)
                     if pipeline.processing_mode != "inline" and pipeline.destination_id:
                         dest_doc = store.get(pipeline.destination_id, "destination")
