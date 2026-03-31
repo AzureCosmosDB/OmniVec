@@ -18,6 +18,7 @@ web:
     type: LoadBalancer
     port: 80
     targetPort: 8080
+    dnsLabel: ""  # Set to get <label>.<region>.cloudapp.azure.com FQDN
   resources:
     requests:
       memory: "64Mi"

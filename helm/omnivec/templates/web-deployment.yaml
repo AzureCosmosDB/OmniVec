@@ -46,6 +46,10 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   labels:
     app: omnivec-web
+  {{- if .Values.web.service.dnsLabel }}
+  annotations:
+    service.beta.kubernetes.io/azure-dns-label-name: {{ .Values.web.service.dnsLabel | quote }}
+  {{- end }}
 spec:
   type: {{ .Values.web.service.type }}
   ports:
