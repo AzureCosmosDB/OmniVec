@@ -288,7 +288,8 @@ HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \
   --set docgrok.azure.cosmos.container=metadata \
   --set docgrok.docgrok.image.tag=${IMAGE_TAG} \
   --set api.adminToken=${ADMIN_TOKEN} \
-  --set dotnetWorker.enabled=true"
+  --set dotnetWorker.enabled=true \
+  --set web.service.dnsLabel=${INSTANCE_ID}"
 
 if [ -n "$KEYVAULT_URI" ]; then
   HELM_CMD="$HELM_CMD \
@@ -351,10 +352,14 @@ printf "  CosmosDB:      ${CYAN}${COSMOS_ENDPOINT}${NC}\n"
 
 printf "  Admin Token:   ${CYAN}${ADMIN_TOKEN}${NC}\n"
 
+LOCATION="${AZURE_LOCATION:-eastus2}"
+FQDN="${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
+
 if [ -n "${EXTERNAL_IP}" ]; then
   echo ""
-  printf "  OmniVec UI:    ${CYAN}http://${EXTERNAL_IP}/ui${NC}\n"
-  printf "  Health Check:  ${CYAN}http://${EXTERNAL_IP}/health${NC}\n"
+  printf "  OmniVec FQDN:  ${CYAN}http://${FQDN}/ui${NC}\n"
+  printf "  OmniVec IP:    ${CYAN}http://${EXTERNAL_IP}/ui${NC}\n"
+  printf "  Health Check:  ${CYAN}http://${FQDN}/health${NC}\n"
 else
   echo ""
   printf "  ${YELLOW}External IP not yet assigned. Check with:${NC}\n"

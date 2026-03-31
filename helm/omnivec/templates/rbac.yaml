@@ -6,15 +6,16 @@ metadata:
   labels:
     {{- include "omnivec.labels" . | nindent 4 }}
 rules:
+  # Read + scale/restart for operational management (no create/delete)
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale"]
-    verbs: ["get", "list", "create", "patch", "update", "delete"]
+    verbs: ["get", "list", "patch", "update"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "delete"]
+    verbs: ["get", "list"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
-    verbs: ["get", "list", "create", "patch", "update", "delete"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
