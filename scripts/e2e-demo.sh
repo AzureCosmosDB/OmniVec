@@ -42,6 +42,13 @@ TOTAL_STEPS=11
 # Add common tool install paths to PATH
 export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$HOME/.azd/bin:$HOME/bin:$PATH"
 
+# WSL: ensure KUBECONFIG points to a Linux-accessible path
+if [ -z "${KUBECONFIG:-}" ] || [ ! -f "${KUBECONFIG:-}" ]; then
+  if [ -f "$HOME/.kube/config" ]; then
+    export KUBECONFIG="$HOME/.kube/config"
+  fi
+fi
+
 # Ensure all scripts are executable (git clone may strip +x)
 chmod +x "$ROOT_DIR"/hooks/*.sh "$ROOT_DIR"/scripts/*.sh 2>/dev/null || true
 
@@ -62,7 +69,7 @@ echo "Checking prerequisites..."
 check_install "az" "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash" "https://aka.ms/install-azure-cli"
 check_install "azd" "curl -fsSL https://aka.ms/install-azd.sh | bash" "https://aka.ms/install-azd"
 check_install "kubectl" \
-  "mkdir -p \$HOME/.azure-kubectl && az aks install-cli --install-location \$HOME/.azure-kubectl/kubectl --kubelogin-install-location \$HOME/.azure-kubectl/kubelogin 2>/dev/null" \
+  "mkdir -p \$HOME/.azure-kubectl && az aks install-cli --install-location \$HOME/.azure-kubectl/kubectl --kubelogin-install-location \$HOME/.azure-kubectl/kubelogin 2>/dev/null && chmod +x \$HOME/.azure-kubectl/kubectl \$HOME/.azure-kubectl/kubelogin 2>/dev/null" \
   "https://aka.ms/install-kubectl"
 check_install "helm" \
   "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR=\$HOME/.local/bin USE_SUDO=false bash 2>/dev/null" \
@@ -198,12 +205,12 @@ log_ok "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
 
 # ─── Helper: load azd env values ────────────────────────────────────────────
 load_azd_values() {
-  ADMIN_TOKEN=$(azd env get-value OMNIVEC_ADMIN_TOKEN 2>/dev/null || true)
-  AKS_CLUSTER=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
-  RESOURCE_GROUP=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
-  IDENTITY_CLIENT_ID=$(azd env get-value AZURE_IDENTITY_CLIENT_ID 2>/dev/null || true)
-  COSMOS_ENDPOINT=$(azd env get-value AZURE_COSMOS_ENDPOINT 2>/dev/null || true)
-  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | sed 's/omnivec-aks-//')
+  ADMIN_TOKEN=$(azd env get-value OMNIVEC_ADMIN_TOKEN 2>/dev/null | tr -d '\r' || true)
+  AKS_CLUSTER=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null | tr -d '\r' || true)
+  RESOURCE_GROUP=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null | tr -d '\r' || true)
+  IDENTITY_CLIENT_ID=$(azd env get-value AZURE_IDENTITY_CLIENT_ID 2>/dev/null | tr -d '\r' || true)
+  COSMOS_ENDPOINT=$(azd env get-value AZURE_COSMOS_ENDPOINT 2>/dev/null | tr -d '\r' || true)
+  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
   TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
 }
 
@@ -251,6 +258,18 @@ fi
 load_azd_values
 az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --overwrite-existing 2>/dev/null
 
+# WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
+if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
+  mkdir -p "$HOME/.kube"
+  ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
+elif [ ! -f "$HOME/.kube/config" ]; then
+  WIN_HOME=$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | sed 's|\\|/|g; s|^\([A-Z]\):|/mnt/\L\1|') || true
+  if [ -n "$WIN_HOME" ] && [ -f "$WIN_HOME/.kube/config" ]; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "$WIN_HOME/.kube/config" "$HOME/.kube/config"
+  fi
+fi
+
 log "  Admin Token: $ADMIN_TOKEN"
 log "  AKS:         $AKS_CLUSTER"
 
@@ -259,7 +278,7 @@ log "  Waiting for external IP..."
 SERVER=""
 i=0
 while [ $i -lt 60 ]; do
-  SERVER=$(kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  SERVER=$(kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
   if [ -n "$SERVER" ]; then break; fi
   sleep 5
   i=$((i + 1))
@@ -294,7 +313,7 @@ fi
 # =============================================================================
 if [ "$FROM_STEP" -le 5 ]; then
   log_step 5 "Creating test CosmosDB account..."
-  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || true)
+  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null | tr -d '\r' || true)
 
   if [ -z "$TEST_COSMOS_ENDPOINT" ]; then
     log "  Creating account: $TEST_COSMOS_ACCOUNT"
@@ -320,20 +339,20 @@ ARMEOF
     log "  Waiting for provisioning..."
     i=0
     while [ $i -lt 40 ]; do
-      st=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query provisioningState -o tsv 2>/dev/null || true)
+      st=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query provisioningState -o tsv 2>/dev/null | tr -d '\r' || true)
       if [ "$st" = "Succeeded" ]; then break; fi
       sleep 10
       i=$((i + 1))
     done
-    TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || true)
+    TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null | tr -d '\r' || true)
   fi
   log_ok "Endpoint: $TEST_COSMOS_ENDPOINT"
 
   # Grant RBAC
   log "  Granting RBAC..."
-  PRINCIPAL_ID=$(az identity show --name "omnivec-identity-$INSTANCE_TOKEN" --resource-group "$RESOURCE_GROUP" --query principalId -o tsv 2>/dev/null || true)
+  PRINCIPAL_ID=$(az identity show --name "omnivec-identity-$INSTANCE_TOKEN" --resource-group "$RESOURCE_GROUP" --query principalId -o tsv 2>/dev/null | tr -d '\r' || true)
   if [ -z "$PRINCIPAL_ID" ]; then
-    PRINCIPAL_ID=$(az identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv 2>/dev/null || true)
+    PRINCIPAL_ID=$(az identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv 2>/dev/null | tr -d '\r' || true)
   fi
 
   # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/" into "C:/Program Files/Git/"
@@ -401,7 +420,7 @@ except CosmosHttpResponseError as e:
   log_ok "All containers ready."
 else
   # Load test endpoint for later steps
-  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || true)
+  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null | tr -d '\r' || true)
 fi
 
 # =============================================================================
