@@ -406,7 +406,7 @@ from azure.cosmos import CosmosClient
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 db = client.get_database_client('testdb')
 vp = {'vectorEmbeddings': [{'path': '/embedding', 'dataType': 'float32', 'distanceFunction': 'cosine', 'dimensions': $AOAI_DIMS}]}
 ip = {'includedPaths': [{'path': '/*'}], 'excludedPaths': [{'path': '/embedding/*'}], 'vectorIndexes': [{'path': '/embedding', 'type': 'quantizedFlat'}]}
@@ -520,7 +520,7 @@ import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 docs = [
     {'id': 'doc-001', 'title': 'Azure Cosmos DB', 'content': 'Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling.', 'category': 'database'},
@@ -604,7 +604,7 @@ import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
 print(count)
@@ -631,7 +631,7 @@ import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 embedded = 0
 checked = 0
