@@ -75,6 +75,12 @@ if ! az account show >/dev/null 2>&1; then
   exit 1
 fi
 
+# Init submodules if needed (docgrok images require submodule content)
+if [ ! -f "$ROOT_DIR/docgrok/Dockerfile" ]; then
+  printf "\033[1;33m  Initializing git submodules...\033[0m\n"
+  (cd "$ROOT_DIR" && git submodule update --init --recursive 2>/dev/null) || true
+fi
+
 # Detect CLI binary name (omnivec on Linux/macOS, omnivec.exe on Windows/WSL)
 if [ -f "$ROOT_DIR/bin/omnivec" ]; then
   CLI="$ROOT_DIR/bin/omnivec"
