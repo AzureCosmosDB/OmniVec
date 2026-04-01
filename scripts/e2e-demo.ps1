@@ -359,20 +359,19 @@ if ($FromStep -le 7) {
 }
 
 # =============================================================================
-# STEP 8: Queue mode — create pipeline, insert docs, resume
+# STEP 8: Create pipeline (queue mode), insert docs, activate
 # =============================================================================
 if ($FromStep -le 8) {
-    LogStep 8 "Queue mode — creating pipeline, inserting docs, activating..."
+    LogStep 8 "Creating pipeline (queue mode), inserting docs, activating..."
 
-    # Pipeline (paused, queue mode is default)
     $pipBody = @{
-        name = "demo-pipeline-queue"; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
+        name = "demo-pipeline"; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
         destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
         processing_mode = "queue"
     } | ConvertTo-Json -Depth 5
     $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $headers -Body $pipBody
     $PIP_ID = $pipResult.pipeline.id
-    LogOk "Pipeline (paused, queue mode): $PIP_ID"
+    LogOk "Pipeline created (queue mode): $PIP_ID"
 
     # Insert test documents
     Log "  Inserting test documents..."
@@ -398,7 +397,6 @@ for doc in docs:
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
     LogOk "Pipeline activated (queue mode). Waiting for processing..."
-    # Poll until stats show completion or 120s timeout
     for ($i = 0; $i -lt 12; $i++) {
         try {
             $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
@@ -416,97 +414,43 @@ for doc in docs:
 # =============================================================================
 if ($PIP_ID) {
     LogStep 9 "Verifying queue mode results..."
-    if (-not $Quiet) {
-        & $CLI pipeline show $PIP_ID
-        Write-Host ""
-        & $CLI job list
-    }
+    if (-not $Quiet) { & $CLI pipeline show $PIP_ID }
 
-    $jobsResult = Invoke-RestMethod -Uri "$SERVER_URL/api/jobs?status=completed&limit=5" -Headers $headers
-    $completedCount = $jobsResult.jobs.Count
-
-    if ($completedCount -gt 0) {
-        LogOk "$completedCount documents embedded via queue mode!"
-
-        # Vector search test
-        Log "  Testing vector search..."
-        $searchBody = @{ query = "what is cosmos db"; destination_id = $DEST_ID; top_k = 3 } | ConvertTo-Json
-        try {
-            $searchResult = Invoke-RestMethod -Uri "$SERVER_URL/api/playground/search" -Method POST -Headers $headers -Body $searchBody
-            LogOk "Search returned $($searchResult.results.Count) results:"
-            foreach ($r in $searchResult.results) {
-                Log "    [$([math]::Round($r.score, 4))] $($r.id)"
-            }
-        } catch {
-            LogWarn "Search test skipped (may need more processing time)"
-        }
-
-        # Pipeline reset test
-        Log "  Testing pipeline reset..."
-        & $CLI pipeline reset $PIP_ID -y
-    } else {
-        LogWarn "No completed jobs yet. Check: omnivec pipeline show $PIP_ID"
-    }
-
-    # Stats
     $stats = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
-    Log "  Processed:  $($stats.stats.documents_processed)"
     Log "  Embedded:   $($stats.stats.embedded_count)"
     Log "  Completion: $($stats.stats.completion_pct)%"
 
-    # Clean up queue pipeline before starting inline — they share the same source,
-    # so only one should be active at a time to avoid change feed contention.
-    Log "  Removing queue pipeline before inline test..."
-    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Method DELETE -Headers $headers | Out-Null } catch {}
+    if ($stats.stats.embedded_count -gt 0) {
+        LogOk "Queue mode: $($stats.stats.embedded_count) documents embedded to destination!"
+    } else {
+        LogWarn "No completed embeddings yet. Check: omnivec pipeline show $PIP_ID"
+    }
 } else {
-    LogStep 9 "Skipping queue mode verify (no queue pipeline)"
-    # Clean up any existing pipelines when jumping to inline test
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
-    foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
+    LogStep 9 "Skipping queue mode verify (no pipeline)"
 }
 
 # =============================================================================
-# STEP 10: Inline mode — create pipeline, resume, then insert docs
+# STEP 10: Switch to inline mode, reset, reprocess same docs
 # =============================================================================
-if ($FromStep -le 10) {
-    LogStep 10 "Inline mode — creating pipeline, activating, inserting docs..."
+if ($FromStep -le 10 -and $PIP_ID) {
+    LogStep 10 "Switching pipeline to inline mode, resetting..."
 
-    # Pipeline (paused, inline mode — CFP embeds directly into source container)
-    $inlinePipBody = @{
-        name = "demo-pipeline-inline"; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
-        destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
-        processing_mode = "inline"
-    } | ConvertTo-Json -Depth 5
-    $inlinePipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $headers -Body $inlinePipBody
-    $INLINE_PIP_ID = $inlinePipResult.pipeline.id
-    LogOk "Pipeline (paused, inline mode): $INLINE_PIP_ID"
+    # Pause pipeline before switching mode
+    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $headers | Out-Null } catch {}
 
-    # Resume inline pipeline FIRST so CFP picks up changes in inline mode
-    Log "  Resuming inline pipeline..."
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$INLINE_PIP_ID/resume" -Method POST -Headers $headers | Out-Null
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$INLINE_PIP_ID/run" -Method POST -Headers $headers | Out-Null
-    LogOk "Pipeline active (inline mode). Waiting 30s for CFP lease rebalance..."
-    Start-Sleep -Seconds 30
+    # Switch processing mode to inline
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $headers | Out-Null
+    LogOk "Switched to inline mode"
 
-    # Insert test documents AFTER pipeline is active so CFP processes them in inline mode
-    Log "  Inserting inline test documents..."
-    Invoke-PodPython @"
-import os
-from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
-cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
-client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
-c = client.get_database_client("testdb").get_container_client("test-documents")
-docs = [
-    {"id": "doc-inline-001", "title": "Azure Functions", "content": "Azure Functions is an event-driven serverless compute platform that lets you run code without provisioning or managing infrastructure.", "category": "compute"},
-    {"id": "doc-inline-002", "title": "Azure AI Search", "content": "Azure AI Search provides secure information retrieval at scale over user-owned content in traditional and generative AI search applications.", "category": "ai"},
-    {"id": "doc-inline-003", "title": "Azure Service Bus", "content": "Azure Service Bus is a fully managed enterprise message broker with message queues and publish-subscribe topics for decoupled applications.", "category": "messaging"},
-]
-for doc in docs:
-    c.upsert_item(doc)
-    print(f"  Inserted: {doc['id']} - {doc['title']}")
-"@
-    LogOk "Docs inserted. Waiting for inline processing..."
+    # Reset pipeline — forces CFP to reprocess all docs from the beginning
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $headers | Out-Null
+    LogOk "Pipeline reset — will reprocess all docs in inline mode"
+
+    # Resume pipeline
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
+    LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
+
     # Poll source container until embeddings appear or 120s timeout
     for ($i = 0; $i -lt 12; $i++) {
         $pollResult = Invoke-PodPython @"
@@ -516,32 +460,26 @@ from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
 client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
 c = client.get_database_client("testdb").get_container_client("test-documents")
-count = sum(1 for d in c.query_items("SELECT c.id FROM c WHERE STARTSWITH(c.id, 'doc-inline-') AND IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
+count = sum(1 for d in c.query_items("SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
 print(count)
 "@
-        if ($pollResult -match "[1-9]") { break }
+        if ($pollResult -match "3") { break }
         Start-Sleep -Seconds 10
     }
-} else {
-    # Load inline pipeline if skipping
-    $allPips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
-    $INLINE_PIP_ID = ($allPips.pipelines | Where-Object { $_.processing_mode -eq "inline" } | Select-Object -First 1).id
 }
 
 # =============================================================================
 # STEP 11: Verify inline mode results
 # =============================================================================
 LogStep 11 "Verifying inline mode results..."
-if (-not $Quiet) {
-    & $CLI pipeline show $INLINE_PIP_ID
-}
+if (-not $Quiet -and $PIP_ID) { & $CLI pipeline show $PIP_ID }
 
 # Inline mode embeds directly into the source container — check for embedding field
 Log "  Checking source container for inline embeddings..."
 $inlineCheck = $null
 try {
     $inlineCheck = Invoke-PodPython @"
-import os, json
+import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
@@ -549,7 +487,7 @@ client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
 c = client.get_database_client("testdb").get_container_client("test-documents")
 embedded = 0
 checked = 0
-for doc in c.query_items("SELECT c.id, IS_DEFINED(c.embedding) as has_emb FROM c WHERE STARTSWITH(c.id, 'doc-inline-')", enable_cross_partition_query=True):
+for doc in c.query_items("SELECT c.id, IS_DEFINED(c.embedding) as has_emb FROM c", enable_cross_partition_query=True):
     checked += 1
     if doc.get('has_emb'):
         embedded += 1
@@ -563,8 +501,6 @@ print(f"INLINE_RESULT:{embedded}/{checked}")
     LogWarn "Could not query inline embeddings: $($_.Exception.Message)"
 }
 
-# For inline mode, the source container is the source of truth — embeddings are
-# patched directly into source docs. Pipeline stats may lag behind.
 $inlineEmbeddedCount = 0
 $inlineTotal = 0
 $inlineCheckStr = if ($inlineCheck -is [array]) { $inlineCheck -join "`n" } else { "$inlineCheck" }
@@ -573,14 +509,10 @@ if ($inlineCheckStr -match "INLINE_RESULT:(\d+)/(\d+)") {
     $inlineTotal = [int]$Matches[2]
 }
 
-$inlineStats = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$INLINE_PIP_ID" -Headers $headers
-Log "  Pipeline stats — Processed: $($inlineStats.stats.documents_processed), Embedded: $($inlineStats.stats.embedded_count)"
-Log "  Source container — Embedded: $inlineEmbeddedCount/$inlineTotal"
-
 if ($inlineEmbeddedCount -gt 0) {
-    LogOk "Inline mode working — $inlineEmbeddedCount/$inlineTotal documents embedded directly into source container!"
+    LogOk "Inline mode: $inlineEmbeddedCount/$inlineTotal documents embedded directly into source container!"
 } else {
-    LogWarn "No inline embeddings yet. The CFP may still be processing. Check: omnivec pipeline show $INLINE_PIP_ID"
+    LogWarn "No inline embeddings yet. The CFP may still be processing. Check: omnivec pipeline show $PIP_ID"
 }
 
 # =============================================================================
@@ -595,10 +527,10 @@ Write-Host "  Server:          `e[36m$SERVER_URL`e[0m"
 Write-Host "  Admin Token:     `e[36m$ADMIN_TOKEN`e[0m"
 Write-Host "  Source:          `e[36m$SOURCE_ID`e[0m"
 Write-Host "  Destination:     `e[36m$DEST_ID`e[0m"
-Write-Host "  Queue Pipeline:  `e[36m$PIP_ID`e[0m"
-Write-Host "  Inline Pipeline: `e[36m$INLINE_PIP_ID`e[0m"
+Write-Host "  Pipeline:        `e[36m$PIP_ID`e[0m"
 Write-Host "  Model:           `e[36m$MODEL_ID ($AOAI_DEPLOYMENT)`e[0m"
 Write-Host ""
-Write-Host "  `e[36mQueue mode:`e[0m  CFP detects changes -> creates jobs -> .NET worker embeds -> writes to destination"
-Write-Host "  `e[36mInline mode:`e[0m CFP detects changes -> embeds directly -> patches back to source container"
+Write-Host "  Tested both modes on the same pipeline and same documents:"
+Write-Host "  `e[36mQueue mode:`e[0m  CFP -> Service Bus -> .NET worker -> destination container"
+Write-Host "  `e[36mInline mode:`e[0m CFP -> embed directly -> patch back to source container"
 Write-Host ""

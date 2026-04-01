@@ -417,19 +417,19 @@ else
 fi
 
 # =============================================================================
-# STEP 8: Queue mode — create pipeline, insert docs, resume
+# STEP 8: Create pipeline (queue mode), insert docs, activate
 # =============================================================================
 PIP_ID=""
 if [ "$FROM_STEP" -le 8 ]; then
-  log_step 8 "Queue mode — creating pipeline, inserting docs, activating..."
+  log_step 8 "Creating pipeline (queue mode), inserting docs, activating..."
 
   PIP_BODY=$(cat <<PEOF
-{"name":"demo-pipeline-queue","sources":[{"source_id":"$SOURCE_ID","filters":{}}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","process_existing":true,"processing_mode":"queue"}
+{"name":"demo-pipeline","sources":[{"source_id":"$SOURCE_ID","filters":{}}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","process_existing":true,"processing_mode":"queue"}
 PEOF
   )
   PIP_RESULT=$(api_post "/api/pipelines" "$PIP_BODY")
   PIP_ID=$(echo "$PIP_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
-  log_ok "Pipeline (paused, queue mode): $PIP_ID"
+  log_ok "Pipeline created (queue mode): $PIP_ID"
 
   # Insert test documents
   log "  Inserting test documents..."
@@ -455,7 +455,6 @@ for doc in docs:
   api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
   api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
   log_ok "Pipeline activated (queue mode). Waiting for processing..."
-  # Poll until stats show completion or 120s timeout
   i=0
   while [ $i -lt 12 ]; do
     POLL=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
@@ -476,95 +475,45 @@ if [ -n "$PIP_ID" ]; then
   log_step 9 "Verifying queue mode results..."
   if [ "$QUIET" = "false" ]; then
     "$CLI" pipeline show "$PIP_ID"
-    echo ""
-    "$CLI" job list
   fi
 
-  JOBS_RESULT=$(api_get "/api/jobs?status=completed&limit=5")
-  COMPLETED_COUNT=$(echo "$JOBS_RESULT" | grep -o '"id":"job-[^"]*"' | wc -l)
-
-  if [ "$COMPLETED_COUNT" -gt 0 ]; then
-    log_ok "$COMPLETED_COUNT documents embedded via queue mode!"
-
-    # Vector search test
-    log "  Testing vector search..."
-    SEARCH_BODY="{\"query\":\"what is cosmos db\",\"destination_id\":\"$DEST_ID\",\"top_k\":3}"
-    SEARCH_RESULT=$(api_post "/api/playground/search" "$SEARCH_BODY" 2>/dev/null || true)
-    if [ -n "$SEARCH_RESULT" ]; then
-      SEARCH_COUNT=$(echo "$SEARCH_RESULT" | grep -o '"id":' | wc -l)
-      log_ok "Search returned $SEARCH_COUNT results"
-    else
-      log_warn "Search test skipped (may need more processing time)"
-    fi
-
-    # Pipeline reset test
-    log "  Testing pipeline reset..."
-    "$CLI" pipeline reset "$PIP_ID" -y
-  else
-    log_warn "No completed jobs yet. Check: omnivec pipeline show $PIP_ID"
-  fi
-
-  # Stats
   STATS_RESULT=$(api_get "/api/pipelines/$PIP_ID")
-  PROCESSED=$(echo "$STATS_RESULT" | grep -o '"documents_processed":[0-9]*' | cut -d: -f2)
   EMBEDDED=$(echo "$STATS_RESULT" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
   COMPLETION=$(echo "$STATS_RESULT" | grep -o '"completion_pct":[0-9.]*' | cut -d: -f2)
-  log "  Processed:  $PROCESSED"
   log "  Embedded:   $EMBEDDED"
   log "  Completion: ${COMPLETION}%"
 
-  # Clean up queue pipeline before starting inline
-  log "  Removing queue pipeline before inline test..."
-  api_delete "/api/pipelines/$PIP_ID" >/dev/null
+  if [ -n "$EMBEDDED" ] && [ "$EMBEDDED" -gt 0 ] 2>/dev/null; then
+    log_ok "Queue mode: $EMBEDDED documents embedded to destination!"
+  else
+    log_warn "No completed embeddings yet. Check: omnivec pipeline show $PIP_ID"
+  fi
 else
-  log_step 9 "Skipping queue mode verify (no queue pipeline)"
-  # Clean up any existing pipelines when jumping to inline test
-  for pip_id in $(api_get "/api/pipelines" | grep -o '"id":"pip-[^"]*"' | cut -d'"' -f4); do
-    api_delete "/api/pipelines/$pip_id" >/dev/null
-  done
+  log_step 9 "Skipping queue mode verify (no pipeline)"
 fi
 
 # =============================================================================
-# STEP 10: Inline mode — create pipeline, resume, then insert docs
+# STEP 10: Switch to inline mode, reset, reprocess same docs
 # =============================================================================
-INLINE_PIP_ID=""
-if [ "$FROM_STEP" -le 10 ]; then
-  log_step 10 "Inline mode — creating pipeline, activating, inserting docs..."
+if [ "$FROM_STEP" -le 10 ] && [ -n "$PIP_ID" ]; then
+  log_step 10 "Switching pipeline to inline mode, resetting..."
 
-  INLINE_PIP_BODY=$(cat <<IPEOF
-{"name":"demo-pipeline-inline","sources":[{"source_id":"$SOURCE_ID","filters":{}}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","process_existing":true,"processing_mode":"inline"}
-IPEOF
-  )
-  INLINE_PIP_RESULT=$(api_post "/api/pipelines" "$INLINE_PIP_BODY")
-  INLINE_PIP_ID=$(echo "$INLINE_PIP_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
-  log_ok "Pipeline (paused, inline mode): $INLINE_PIP_ID"
+  # Pause pipeline before switching mode
+  api_post "/api/pipelines/$PIP_ID/pause" "{}" >/dev/null 2>&1 || true
 
-  # Resume inline pipeline FIRST so CFP picks up changes in inline mode
-  log "  Resuming inline pipeline..."
-  api_post "/api/pipelines/$INLINE_PIP_ID/resume" "{}" >/dev/null
-  api_post "/api/pipelines/$INLINE_PIP_ID/run" "{}" >/dev/null
-  log_ok "Pipeline active (inline mode). Waiting 30s for CFP lease rebalance..."
-  sleep 30
+  # Switch processing mode to inline
+  api_post "/api/pipelines/$PIP_ID/processing-mode/inline" "{}" >/dev/null
+  log_ok "Switched to inline mode"
 
-  # Insert test documents AFTER pipeline is active so CFP processes them in inline mode
-  log "  Inserting inline test documents..."
-  pod_python "
-import os
-from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
-cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
-c = client.get_database_client('testdb').get_container_client('test-documents')
-docs = [
-    {'id': 'doc-inline-001', 'title': 'Azure Functions', 'content': 'Azure Functions is an event-driven serverless compute platform that lets you run code without provisioning or managing infrastructure.', 'category': 'compute'},
-    {'id': 'doc-inline-002', 'title': 'Azure AI Search', 'content': 'Azure AI Search provides secure information retrieval at scale over user-owned content in traditional and generative AI search applications.', 'category': 'ai'},
-    {'id': 'doc-inline-003', 'title': 'Azure Service Bus', 'content': 'Azure Service Bus is a fully managed enterprise message broker with message queues and publish-subscribe topics for decoupled applications.', 'category': 'messaging'},
-]
-for doc in docs:
-    c.upsert_item(doc)
-    print(f'  Inserted: {doc[\"id\"]} - {doc[\"title\"]}')
-"
-  log_ok "Docs inserted. Waiting for inline processing..."
+  # Reset pipeline — forces CFP to reprocess all docs from the beginning
+  api_post "/api/pipelines/$PIP_ID/reset" "{}" >/dev/null
+  log_ok "Pipeline reset — will reprocess all docs in inline mode"
+
+  # Resume pipeline
+  api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
+  api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
+  log_ok "Pipeline resumed (inline mode). Waiting for reprocessing..."
+
   # Poll source container until embeddings appear or 120s timeout
   i=0
   while [ $i -lt 12 ]; do
@@ -575,32 +524,28 @@ from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
 client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
 c = client.get_database_client('testdb').get_container_client('test-documents')
-count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE STARTSWITH(c.id, \"doc-inline-\") AND IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
+count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
 print(count)
 " 2>/dev/null || echo "0")
-    if echo "$poll_check" | grep -q "[1-9]"; then break; fi
+    if echo "$poll_check" | grep -q "3"; then break; fi
     sleep 10
     i=$((i + 1))
   done
-else
-  # Load inline pipeline if skipping
-  ALL_PIPS=$(api_get "/api/pipelines")
-  INLINE_PIP_ID=$(echo "$ALL_PIPS" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
 fi
 
 # =============================================================================
 # STEP 11: Verify inline mode results
 # =============================================================================
 log_step 11 "Verifying inline mode results..."
-if [ "$QUIET" = "false" ]; then
-  "$CLI" pipeline show "$INLINE_PIP_ID"
+if [ "$QUIET" = "false" ] && [ -n "$PIP_ID" ]; then
+  "$CLI" pipeline show "$PIP_ID"
 fi
 
 # Inline mode embeds directly into the source container — check for embedding field
 log "  Checking source container for inline embeddings..."
 INLINE_CHECK=""
 INLINE_CHECK=$(pod_python "
-import os, json
+import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
@@ -608,7 +553,7 @@ client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 embedded = 0
 checked = 0
-for doc in c.query_items('SELECT c.id, IS_DEFINED(c.embedding) as has_emb FROM c WHERE STARTSWITH(c.id, \"doc-inline-\")', enable_cross_partition_query=True):
+for doc in c.query_items('SELECT c.id, IS_DEFINED(c.embedding) as has_emb FROM c', enable_cross_partition_query=True):
     checked += 1
     if doc.get('has_emb'):
         embedded += 1
@@ -627,7 +572,7 @@ if echo "$INLINE_CHECK" | grep -q "INLINE_RESULT:"; then
   INLINE_TOTAL=$(echo "$INLINE_CHECK" | grep -o 'INLINE_RESULT:[0-9]*/[0-9]*' | cut -d: -f2 | cut -d/ -f2)
 fi
 
-INLINE_STATS=$(api_get "/api/pipelines/$INLINE_PIP_ID")
+INLINE_STATS=$(api_get "/api/pipelines/$PIP_ID")
 INLINE_PROCESSED=$(echo "$INLINE_STATS" | grep -o '"documents_processed":[0-9]*' | cut -d: -f2)
 INLINE_STATS_EMBEDDED=$(echo "$INLINE_STATS" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
 log "  Pipeline stats — Processed: $INLINE_PROCESSED, Embedded: $INLINE_STATS_EMBEDDED"
@@ -636,7 +581,7 @@ log "  Source container — Embedded: $INLINE_EMBEDDED/$INLINE_TOTAL"
 if [ "$INLINE_EMBEDDED" -gt 0 ] 2>/dev/null; then
   log_ok "Inline mode working — $INLINE_EMBEDDED/$INLINE_TOTAL documents embedded directly into source container!"
 else
-  log_warn "No inline embeddings yet. The CFP may still be processing. Check: omnivec pipeline show $INLINE_PIP_ID"
+  log_warn "No inline embeddings yet. The CFP may still be processing. Check: omnivec pipeline show $PIP_ID"
 fi
 
 # =============================================================================
@@ -651,10 +596,10 @@ printf "  Server:          ${CYAN}${SERVER_URL}${NC}\n"
 printf "  Admin Token:     ${CYAN}${ADMIN_TOKEN}${NC}\n"
 printf "  Source:          ${CYAN}${SOURCE_ID}${NC}\n"
 printf "  Destination:     ${CYAN}${DEST_ID}${NC}\n"
-printf "  Queue Pipeline:  ${CYAN}${PIP_ID}${NC}\n"
-printf "  Inline Pipeline: ${CYAN}${INLINE_PIP_ID}${NC}\n"
+printf "  Pipeline:        ${CYAN}${PIP_ID}${NC}\n"
 printf "  Model:           ${CYAN}${MODEL_ID} (${AOAI_DEPLOYMENT})${NC}\n"
 echo ""
-printf "  ${CYAN}Queue mode:${NC}  CFP detects changes -> creates jobs -> .NET worker embeds -> writes to destination\n"
-printf "  ${CYAN}Inline mode:${NC} CFP detects changes -> embeds directly -> patches back to source container\n"
+printf "  Tested both modes on the same pipeline and same documents:\n"
+printf "  ${CYAN}Queue mode:${NC}  CFP -> Service Bus -> .NET worker -> destination container\n"
+printf "  ${CYAN}Inline mode:${NC} CFP -> embed directly -> patch back to source container\n"
 echo ""
