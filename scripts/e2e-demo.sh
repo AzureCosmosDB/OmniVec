@@ -37,11 +37,43 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOTAL_STEPS=11
 
-# Ensure hook scripts are executable (git may strip +x on clone)
+# ─── Bootstrap: ensure everything is runnable from any directory ──────────────
+
+# Add common tool install paths to PATH
+export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$HOME/.azd/bin:$HOME/bin:$PATH"
+
+# Ensure all scripts are executable (git clone may strip +x)
 chmod +x "$ROOT_DIR"/hooks/*.sh "$ROOT_DIR"/scripts/*.sh 2>/dev/null || true
 
-# Ensure tools installed by preprovision are on PATH (kubectl, helm)
-export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$PATH"
+# Check and install required tools
+check_install() {
+  tool=$1; install_cmd=$2; url=$3
+  if command -v "$tool" >/dev/null 2>&1; then return 0; fi
+  printf "\033[1;33m  %s not found — installing...\033[0m\n" "$tool"
+  eval "$install_cmd" 2>/dev/null
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf "\033[0;31m  Failed to install %s. Install manually: %s\033[0m\n" "$tool" "$url"
+    exit 1
+  fi
+  printf "\033[0;32m  %s installed.\033[0m\n" "$tool"
+}
+
+echo "Checking prerequisites..."
+check_install "az" "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash" "https://aka.ms/install-azure-cli"
+check_install "azd" "curl -fsSL https://aka.ms/install-azd.sh | bash" "https://aka.ms/install-azd"
+check_install "kubectl" \
+  "mkdir -p \$HOME/.azure-kubectl && az aks install-cli --install-location \$HOME/.azure-kubectl/kubectl --kubelogin-install-location \$HOME/.azure-kubectl/kubelogin 2>/dev/null" \
+  "https://aka.ms/install-kubectl"
+check_install "helm" \
+  "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR=\$HOME/.local/bin USE_SUDO=false bash 2>/dev/null" \
+  "https://helm.sh/docs/intro/install/"
+check_install "curl" "echo 'curl is required'" "https://curl.se"
+
+# Verify Azure login
+if ! az account show >/dev/null 2>&1; then
+  printf "\033[0;31m  Not logged into Azure. Run 'az login' first.\033[0m\n"
+  exit 1
+fi
 
 # Detect CLI binary name (omnivec on Linux/macOS, omnivec.exe on Windows/WSL)
 if [ -f "$ROOT_DIR/bin/omnivec" ]; then
