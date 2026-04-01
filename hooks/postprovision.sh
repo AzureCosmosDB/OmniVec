@@ -25,10 +25,11 @@ printf "${GREEN}╚════════════════════�
 get_azd_value() {
   key=$1
   # First check env var (set during azd up flow)
-  val=$(eval echo "\${$key:-}" | tr -d '\r')
+  val=$(eval echo "\${$key:-}")
+  val=$(printf '%s' "$val" | tr -d '\r')
   if [ -n "$val" ]; then echo "$val"; return 0; fi
-  # Fallback: read from azd env store
-  val=$(azd env get-value "$key" 2>/dev/null | tr -d '\r' || true)
+  # Fallback: read from azd env store (use && to suppress stdout errors)
+  val=$(azd env get-value "$key" 2>/dev/null) && val=$(printf '%s' "$val" | tr -d '\r') || val=""
   if [ -n "$val" ]; then echo "$val"; return 0; fi
   echo ""
 }
