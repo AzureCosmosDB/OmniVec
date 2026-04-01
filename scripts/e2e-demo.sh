@@ -110,6 +110,17 @@ log_ok()   { printf "  ${GREEN}%s${NC}\n" "$1"; }
 log_warn() { printf "  ${YELLOW}%s${NC}\n" "$1"; }
 log_err()  { printf "  ${RED}%s${NC}\n" "$1"; }
 
+# ─── Helper: safely capture azd/az output (strips \r, suppresses errors) ────
+# On WSL the Windows az/azd CLIs output \r\n and may send errors to stdout.
+# Pattern: run command, only emit stdout through tr on success, else empty.
+azd_get() {
+  val=$(azd env get-value "$1" 2>/dev/null) && printf '%s' "$val" | tr -d '\r' || true
+}
+
+az_query() {
+  val=$(az "$@" 2>/dev/null) && printf '%s' "$val" | tr -d '\r' || true
+}
+
 # ─── Helper: run Python on API pod via stdin ─────────────────────────────────
 pod_python() {
   echo "$1" | kubectl exec -i deployment/omnivec-api -n omnivec -- python3 -
@@ -205,13 +216,32 @@ log_ok "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
 
 # ─── Helper: load azd env values ────────────────────────────────────────────
 load_azd_values() {
-  ADMIN_TOKEN=$(azd env get-value OMNIVEC_ADMIN_TOKEN 2>/dev/null | tr -d '\r' || true)
-  AKS_CLUSTER=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null | tr -d '\r' || true)
-  RESOURCE_GROUP=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null | tr -d '\r' || true)
-  IDENTITY_CLIENT_ID=$(azd env get-value AZURE_IDENTITY_CLIENT_ID 2>/dev/null | tr -d '\r' || true)
-  COSMOS_ENDPOINT=$(azd env get-value AZURE_COSMOS_ENDPOINT 2>/dev/null | tr -d '\r' || true)
+  ADMIN_TOKEN=$(azd_get OMNIVEC_ADMIN_TOKEN)
+  AKS_CLUSTER=$(azd_get AZURE_AKS_CLUSTER_NAME)
+  RESOURCE_GROUP=$(azd_get AZURE_RESOURCE_GROUP)
+  IDENTITY_CLIENT_ID=$(azd_get AZURE_IDENTITY_CLIENT_ID)
+  COSMOS_ENDPOINT=$(azd_get AZURE_COSMOS_ENDPOINT)
   INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
   TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
+}
+
+# ─── Helper: symlink kubeconfig from Windows home on WSL ─────────────────────
+ensure_kubeconfig() {
+  if [ -f "$HOME/.kube/config" ]; then return 0; fi
+  # Try common Windows home path
+  WIN_USER=$(cmd.exe /C "echo %USERNAME%" 2>/dev/null | tr -d '\r') || true
+  if [ -n "$WIN_USER" ] && [ -f "/mnt/c/Users/$WIN_USER/.kube/config" ]; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "/mnt/c/Users/$WIN_USER/.kube/config" "$HOME/.kube/config"
+    export KUBECONFIG="$HOME/.kube/config"
+    return 0
+  fi
+  # Fallback: try whoami
+  if [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
+    export KUBECONFIG="$HOME/.kube/config"
+  fi
 }
 
 # =============================================================================
@@ -257,18 +287,7 @@ fi
 # Always load azd values (needed by all subsequent steps)
 load_azd_values
 az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --overwrite-existing 2>/dev/null
-
-# WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
-if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
-  mkdir -p "$HOME/.kube"
-  ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
-elif [ ! -f "$HOME/.kube/config" ]; then
-  WIN_HOME=$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | sed 's|\\|/|g; s|^\([A-Z]\):|/mnt/\L\1|') || true
-  if [ -n "$WIN_HOME" ] && [ -f "$WIN_HOME/.kube/config" ]; then
-    mkdir -p "$HOME/.kube"
-    ln -sf "$WIN_HOME/.kube/config" "$HOME/.kube/config"
-  fi
-fi
+ensure_kubeconfig
 
 log "  Admin Token: $ADMIN_TOKEN"
 log "  AKS:         $AKS_CLUSTER"
@@ -313,7 +332,7 @@ fi
 # =============================================================================
 if [ "$FROM_STEP" -le 5 ]; then
   log_step 5 "Creating test CosmosDB account..."
-  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null | tr -d '\r' || true)
+  TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
 
   if [ -z "$TEST_COSMOS_ENDPOINT" ]; then
     log "  Creating account: $TEST_COSMOS_ACCOUNT"
@@ -339,20 +358,20 @@ ARMEOF
     log "  Waiting for provisioning..."
     i=0
     while [ $i -lt 40 ]; do
-      st=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query provisioningState -o tsv 2>/dev/null | tr -d '\r' || true)
+      st=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query provisioningState -o tsv)
       if [ "$st" = "Succeeded" ]; then break; fi
       sleep 10
       i=$((i + 1))
     done
-    TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null | tr -d '\r' || true)
+    TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
   fi
   log_ok "Endpoint: $TEST_COSMOS_ENDPOINT"
 
   # Grant RBAC
   log "  Granting RBAC..."
-  PRINCIPAL_ID=$(az identity show --name "omnivec-identity-$INSTANCE_TOKEN" --resource-group "$RESOURCE_GROUP" --query principalId -o tsv 2>/dev/null | tr -d '\r' || true)
+  PRINCIPAL_ID=$(az_query identity show --name "omnivec-identity-$INSTANCE_TOKEN" --resource-group "$RESOURCE_GROUP" --query principalId -o tsv)
   if [ -z "$PRINCIPAL_ID" ]; then
-    PRINCIPAL_ID=$(az identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv 2>/dev/null | tr -d '\r' || true)
+    PRINCIPAL_ID=$(az_query identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv)
   fi
 
   # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/" into "C:/Program Files/Git/"
@@ -420,7 +439,7 @@ except CosmosHttpResponseError as e:
   log_ok "All containers ready."
 else
   # Load test endpoint for later steps
-  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null | tr -d '\r' || true)
+  TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
 fi
 
 # =============================================================================
