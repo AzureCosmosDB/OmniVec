@@ -56,6 +56,7 @@ if ! command -v kubectl >/dev/null 2>&1; then
   printf "  ${YELLOW}kubectl not found — installing to ${KUBECTL_DIR}...${NC}\n"
   mkdir -p "$KUBECTL_DIR"
   az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
+  chmod +x "$KUBECTL_DIR/kubectl" "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
   export PATH="$KUBECTL_DIR:$PATH"
   if ! command -v kubectl >/dev/null 2>&1; then
     printf "  ${RED}Failed to install kubectl. Install manually: https://aka.ms/install-kubectl${NC}\n"
