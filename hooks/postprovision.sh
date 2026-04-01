@@ -4,6 +4,9 @@
 
 set -eu
 
+# Ensure tools installed by preprovision are on PATH (kubectl, helm, kubelogin)
+export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$PATH"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

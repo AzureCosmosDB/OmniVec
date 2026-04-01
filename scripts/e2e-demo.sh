@@ -37,6 +37,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOTAL_STEPS=11
 
+# Ensure hook scripts are executable (git may strip +x on clone)
+chmod +x "$ROOT_DIR"/hooks/*.sh "$ROOT_DIR"/scripts/*.sh 2>/dev/null || true
+
+# Ensure tools installed by preprovision are on PATH (kubectl, helm)
+export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$PATH"
+
 # Detect CLI binary name (omnivec on Linux/macOS, omnivec.exe on Windows/WSL)
 if [ -f "$ROOT_DIR/bin/omnivec" ]; then
   CLI="$ROOT_DIR/bin/omnivec"
