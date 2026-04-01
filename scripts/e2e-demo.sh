@@ -572,7 +572,7 @@ if echo "$INLINE_CHECK" | grep -q "INLINE_RESULT:"; then
   INLINE_TOTAL=$(echo "$INLINE_CHECK" | grep -o 'INLINE_RESULT:[0-9]*/[0-9]*' | cut -d: -f2 | cut -d/ -f2)
 fi
 
-INLINE_STATS=$(api_get "/api/pipelines/$INLINE_PIP_ID")
+INLINE_STATS=$(api_get "/api/pipelines/$PIP_ID")
 INLINE_PROCESSED=$(echo "$INLINE_STATS" | grep -o '"documents_processed":[0-9]*' | cut -d: -f2)
 INLINE_STATS_EMBEDDED=$(echo "$INLINE_STATS" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
 log "  Pipeline stats — Processed: $INLINE_PROCESSED, Embedded: $INLINE_STATS_EMBEDDED"
