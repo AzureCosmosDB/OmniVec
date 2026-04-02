@@ -37,6 +37,57 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOTAL_STEPS=11
 
+# ─── Bootstrap: ensure everything is runnable from any directory ──────────────
+
+# Add common tool install paths to PATH
+export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$HOME/.azd/bin:$HOME/bin:$PATH"
+
+# WSL: ensure KUBECONFIG points to a Linux-accessible path
+if [ -z "${KUBECONFIG:-}" ] || [ ! -f "${KUBECONFIG:-}" ]; then
+  if [ -f "$HOME/.kube/config" ]; then
+    export KUBECONFIG="$HOME/.kube/config"
+  fi
+fi
+
+# Ensure all scripts are executable (git clone may strip +x)
+chmod +x "$ROOT_DIR"/hooks/*.sh "$ROOT_DIR"/scripts/*.sh 2>/dev/null || true
+
+# Check and install required tools
+check_install() {
+  tool=$1; install_cmd=$2; url=$3
+  if command -v "$tool" >/dev/null 2>&1; then return 0; fi
+  printf "\033[1;33m  %s not found — installing...\033[0m\n" "$tool"
+  eval "$install_cmd" 2>/dev/null
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf "\033[0;31m  Failed to install %s. Install manually: %s\033[0m\n" "$tool" "$url"
+    exit 1
+  fi
+  printf "\033[0;32m  %s installed.\033[0m\n" "$tool"
+}
+
+echo "Checking prerequisites..."
+check_install "az" "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash" "https://aka.ms/install-azure-cli"
+check_install "azd" "curl -fsSL https://aka.ms/install-azd.sh | bash" "https://aka.ms/install-azd"
+check_install "kubectl" \
+  "mkdir -p \$HOME/.azure-kubectl && az aks install-cli --install-location \$HOME/.azure-kubectl/kubectl --kubelogin-install-location \$HOME/.azure-kubectl/kubelogin 2>/dev/null && chmod +x \$HOME/.azure-kubectl/kubectl \$HOME/.azure-kubectl/kubelogin 2>/dev/null" \
+  "https://aka.ms/install-kubectl"
+check_install "helm" \
+  "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR=\$HOME/.local/bin USE_SUDO=false bash 2>/dev/null" \
+  "https://helm.sh/docs/intro/install/"
+check_install "curl" "echo 'curl is required'" "https://curl.se"
+
+# Verify Azure login
+if ! az account show >/dev/null 2>&1; then
+  printf "\033[0;31m  Not logged into Azure. Run 'az login' first.\033[0m\n"
+  exit 1
+fi
+
+# Init submodules if needed (docgrok images require submodule content)
+if [ ! -f "$ROOT_DIR/docgrok/Dockerfile" ]; then
+  printf "\033[1;33m  Initializing git submodules...\033[0m\n"
+  (cd "$ROOT_DIR" && git submodule update --init --recursive 2>/dev/null) || true
+fi
+
 # Detect CLI binary name (omnivec on Linux/macOS, omnivec.exe on Windows/WSL)
 if [ -f "$ROOT_DIR/bin/omnivec" ]; then
   CLI="$ROOT_DIR/bin/omnivec"
@@ -58,6 +109,17 @@ log_step() { printf "${YELLOW}[Step %s/%s] %s${NC}\n" "$1" "$TOTAL_STEPS" "$2"; 
 log_ok()   { printf "  ${GREEN}%s${NC}\n" "$1"; }
 log_warn() { printf "  ${YELLOW}%s${NC}\n" "$1"; }
 log_err()  { printf "  ${RED}%s${NC}\n" "$1"; }
+
+# ─── Helper: safely capture azd/az output (strips \r, suppresses errors) ────
+# On WSL the Windows az/azd CLIs output \r\n and may send errors to stdout.
+# Pattern: run command, only emit stdout through tr on success, else empty.
+azd_get() {
+  val=$(azd env get-value "$1" 2>/dev/null) && printf '%s' "$val" | tr -d '\r' || true
+}
+
+az_query() {
+  val=$(az "$@" 2>/dev/null) && printf '%s' "$val" | tr -d '\r' || true
+}
 
 # ─── Helper: run Python on API pod via stdin ─────────────────────────────────
 pod_python() {
@@ -154,13 +216,32 @@ log_ok "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
 
 # ─── Helper: load azd env values ────────────────────────────────────────────
 load_azd_values() {
-  ADMIN_TOKEN=$(azd env get-value OMNIVEC_ADMIN_TOKEN 2>/dev/null || true)
-  AKS_CLUSTER=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
-  RESOURCE_GROUP=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
-  IDENTITY_CLIENT_ID=$(azd env get-value AZURE_IDENTITY_CLIENT_ID 2>/dev/null || true)
-  COSMOS_ENDPOINT=$(azd env get-value AZURE_COSMOS_ENDPOINT 2>/dev/null || true)
-  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | sed 's/omnivec-aks-//')
+  ADMIN_TOKEN=$(azd_get OMNIVEC_ADMIN_TOKEN)
+  AKS_CLUSTER=$(azd_get AZURE_AKS_CLUSTER_NAME)
+  RESOURCE_GROUP=$(azd_get AZURE_RESOURCE_GROUP)
+  IDENTITY_CLIENT_ID=$(azd_get AZURE_IDENTITY_CLIENT_ID)
+  COSMOS_ENDPOINT=$(azd_get AZURE_COSMOS_ENDPOINT)
+  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
   TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
+}
+
+# ─── Helper: symlink kubeconfig from Windows home on WSL ─────────────────────
+ensure_kubeconfig() {
+  if [ -f "$HOME/.kube/config" ]; then return 0; fi
+  # Try common Windows home path
+  WIN_USER=$(cmd.exe /C "echo %USERNAME%" 2>/dev/null | tr -d '\r') || true
+  if [ -n "$WIN_USER" ] && [ -f "/mnt/c/Users/$WIN_USER/.kube/config" ]; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "/mnt/c/Users/$WIN_USER/.kube/config" "$HOME/.kube/config"
+    export KUBECONFIG="$HOME/.kube/config"
+    return 0
+  fi
+  # Fallback: try whoami
+  if [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
+    export KUBECONFIG="$HOME/.kube/config"
+  fi
 }
 
 # =============================================================================
@@ -206,6 +287,7 @@ fi
 # Always load azd values (needed by all subsequent steps)
 load_azd_values
 az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --overwrite-existing 2>/dev/null
+ensure_kubeconfig
 
 log "  Admin Token: $ADMIN_TOKEN"
 log "  AKS:         $AKS_CLUSTER"
@@ -215,7 +297,7 @@ log "  Waiting for external IP..."
 SERVER=""
 i=0
 while [ $i -lt 60 ]; do
-  SERVER=$(kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  SERVER=$(kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
   if [ -n "$SERVER" ]; then break; fi
   sleep 5
   i=$((i + 1))
@@ -250,7 +332,7 @@ fi
 # =============================================================================
 if [ "$FROM_STEP" -le 5 ]; then
   log_step 5 "Creating test CosmosDB account..."
-  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || true)
+  TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
 
   if [ -z "$TEST_COSMOS_ENDPOINT" ]; then
     log "  Creating account: $TEST_COSMOS_ACCOUNT"
@@ -276,20 +358,20 @@ ARMEOF
     log "  Waiting for provisioning..."
     i=0
     while [ $i -lt 40 ]; do
-      st=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query provisioningState -o tsv 2>/dev/null || true)
+      st=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query provisioningState -o tsv)
       if [ "$st" = "Succeeded" ]; then break; fi
       sleep 10
       i=$((i + 1))
     done
-    TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || true)
+    TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
   fi
   log_ok "Endpoint: $TEST_COSMOS_ENDPOINT"
 
   # Grant RBAC
   log "  Granting RBAC..."
-  PRINCIPAL_ID=$(az identity show --name "omnivec-identity-$INSTANCE_TOKEN" --resource-group "$RESOURCE_GROUP" --query principalId -o tsv 2>/dev/null || true)
+  PRINCIPAL_ID=$(az_query identity show --name "omnivec-identity-$INSTANCE_TOKEN" --resource-group "$RESOURCE_GROUP" --query principalId -o tsv)
   if [ -z "$PRINCIPAL_ID" ]; then
-    PRINCIPAL_ID=$(az identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv 2>/dev/null || true)
+    PRINCIPAL_ID=$(az_query identity list --resource-group "$RESOURCE_GROUP" --query "[0].principalId" -o tsv)
   fi
 
   # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling "/" into "C:/Program Files/Git/"
@@ -315,7 +397,7 @@ ARMEOF
   log_ok "test-documents created."
 
   # Vectors container with vector policy (via API pod)
-  # Retry up to 3 times — RBAC propagation can take longer than expected
+  # Retry up to 5 times — RBAC propagation or transient connectivity can delay
   vectors_ok=false
   for attempt in 1 2 3 4 5; do
     vectors_output=$(pod_python "
@@ -324,7 +406,7 @@ from azure.cosmos import CosmosClient
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 db = client.get_database_client('testdb')
 vp = {'vectorEmbeddings': [{'path': '/embedding', 'dataType': 'float32', 'distanceFunction': 'cosine', 'dimensions': $AOAI_DIMS}]}
 ip = {'includedPaths': [{'path': '/*'}], 'excludedPaths': [{'path': '/embedding/*'}], 'vectorIndexes': [{'path': '/embedding', 'type': 'quantizedFlat'}]}
@@ -338,6 +420,11 @@ except CosmosHttpResponseError as e:
         print('RBAC_WAIT')
     else:
         raise
+except Exception as e:
+    if 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
+        print('RETRY_TIMEOUT')
+    else:
+        raise
 " 2>&1) && true
     echo "$vectors_output"
     if echo "$vectors_output" | grep -q "^OK:"; then
@@ -345,6 +432,9 @@ except CosmosHttpResponseError as e:
       break
     elif echo "$vectors_output" | grep -q "RBAC_WAIT"; then
       log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
+      sleep 30
+    elif echo "$vectors_output" | grep -q "RETRY_TIMEOUT\|timed out\|Timeout"; then
+      log_warn "Connection timed out, retrying in 30s (attempt $attempt/5)..."
       sleep 30
     else
       break
@@ -357,7 +447,7 @@ except CosmosHttpResponseError as e:
   log_ok "All containers ready."
 else
   # Load test endpoint for later steps
-  TEST_COSMOS_ENDPOINT=$(az cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv 2>/dev/null || true)
+  TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
 fi
 
 # =============================================================================
@@ -431,14 +521,16 @@ PEOF
   PIP_ID=$(echo "$PIP_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
   log_ok "Pipeline created (queue mode): $PIP_ID"
 
-  # Insert test documents
+  # Insert test documents (retry up to 3 times for transient connectivity)
   log "  Inserting test documents..."
-  pod_python "
+  docs_ok=false
+  for doc_attempt in 1 2 3; do
+    docs_output=$(pod_python "
 import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 docs = [
     {'id': 'doc-001', 'title': 'Azure Cosmos DB', 'content': 'Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling.', 'category': 'database'},
@@ -448,7 +540,20 @@ docs = [
 for doc in docs:
     c.upsert_item(doc)
     print(f'  Inserted: {doc[\"id\"]} - {doc[\"title\"]}')
-"
+print('DOCS_OK')
+" 2>&1) && true
+    echo "$docs_output"
+    if echo "$docs_output" | grep -q "DOCS_OK"; then
+      docs_ok=true
+      break
+    fi
+    log_warn "Doc insert failed, retrying in 30s (attempt $doc_attempt/3)..."
+    sleep 30
+  done
+  if [ "$docs_ok" != "true" ]; then
+    log_err "Failed to insert test documents after retries"
+    exit 1
+  fi
 
   # Resume pipeline
   log "  Resuming pipeline..."
@@ -474,7 +579,7 @@ fi
 if [ -n "$PIP_ID" ]; then
   log_step 9 "Verifying queue mode results..."
   if [ "$QUIET" = "false" ]; then
-    "$CLI" pipeline show "$PIP_ID"
+    "$CLI" pipeline show "$PIP_ID" || true
   fi
 
   STATS_RESULT=$(api_get "/api/pipelines/$PIP_ID")
@@ -522,7 +627,7 @@ import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
 print(count)
@@ -538,7 +643,7 @@ fi
 # =============================================================================
 log_step 11 "Verifying inline mode results..."
 if [ "$QUIET" = "false" ] && [ -n "$PIP_ID" ]; then
-  "$CLI" pipeline show "$PIP_ID"
+  "$CLI" pipeline show "$PIP_ID" || true
 fi
 
 # Inline mode embeds directly into the source container — check for embedding field
@@ -549,7 +654,7 @@ import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get('AZURE_CLIENT_ID'))
-client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred)
+client = CosmosClient('$TEST_COSMOS_ENDPOINT', credential=cred, connection_timeout=30)
 c = client.get_database_client('testdb').get_container_client('test-documents')
 embedded = 0
 checked = 0
