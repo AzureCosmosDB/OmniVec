@@ -579,7 +579,7 @@ fi
 if [ -n "$PIP_ID" ]; then
   log_step 9 "Verifying queue mode results..."
   if [ "$QUIET" = "false" ]; then
-    "$CLI" pipeline show "$PIP_ID"
+    "$CLI" pipeline show "$PIP_ID" || true
   fi
 
   STATS_RESULT=$(api_get "/api/pipelines/$PIP_ID")
@@ -643,7 +643,7 @@ fi
 # =============================================================================
 log_step 11 "Verifying inline mode results..."
 if [ "$QUIET" = "false" ] && [ -n "$PIP_ID" ]; then
-  "$CLI" pipeline show "$PIP_ID"
+  "$CLI" pipeline show "$PIP_ID" || true
 fi
 
 # Inline mode embeds directly into the source container — check for embedding field
