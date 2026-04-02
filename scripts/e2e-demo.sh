@@ -397,7 +397,7 @@ ARMEOF
   log_ok "test-documents created."
 
   # Vectors container with vector policy (via API pod)
-  # Retry up to 3 times — RBAC propagation can take longer than expected
+  # Retry up to 5 times — RBAC propagation or transient connectivity can delay
   vectors_ok=false
   for attempt in 1 2 3 4 5; do
     vectors_output=$(pod_python "
@@ -420,6 +420,11 @@ except CosmosHttpResponseError as e:
         print('RBAC_WAIT')
     else:
         raise
+except Exception as e:
+    if 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
+        print('RETRY_TIMEOUT')
+    else:
+        raise
 " 2>&1) && true
     echo "$vectors_output"
     if echo "$vectors_output" | grep -q "^OK:"; then
@@ -427,6 +432,9 @@ except CosmosHttpResponseError as e:
       break
     elif echo "$vectors_output" | grep -q "RBAC_WAIT"; then
       log_warn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
+      sleep 30
+    elif echo "$vectors_output" | grep -q "RETRY_TIMEOUT\|timed out\|Timeout"; then
+      log_warn "Connection timed out, retrying in 30s (attempt $attempt/5)..."
       sleep 30
     else
       break
@@ -513,9 +521,11 @@ PEOF
   PIP_ID=$(echo "$PIP_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
   log_ok "Pipeline created (queue mode): $PIP_ID"
 
-  # Insert test documents
+  # Insert test documents (retry up to 3 times for transient connectivity)
   log "  Inserting test documents..."
-  pod_python "
+  docs_ok=false
+  for doc_attempt in 1 2 3; do
+    docs_output=$(pod_python "
 import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
@@ -530,7 +540,20 @@ docs = [
 for doc in docs:
     c.upsert_item(doc)
     print(f'  Inserted: {doc[\"id\"]} - {doc[\"title\"]}')
-"
+print('DOCS_OK')
+" 2>&1) && true
+    echo "$docs_output"
+    if echo "$docs_output" | grep -q "DOCS_OK"; then
+      docs_ok=true
+      break
+    fi
+    log_warn "Doc insert failed, retrying in 30s (attempt $doc_attempt/3)..."
+    sleep 30
+  done
+  if [ "$docs_ok" != "true" ]; then
+    log_err "Failed to insert test documents after retries"
+    exit 1
+  fi
 
   # Resume pipeline
   log "  Resuming pipeline..."
