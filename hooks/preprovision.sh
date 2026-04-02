@@ -56,6 +56,7 @@ if ! command -v kubectl >/dev/null 2>&1; then
   printf "  ${YELLOW}kubectl not found — installing to ${KUBECTL_DIR}...${NC}\n"
   mkdir -p "$KUBECTL_DIR"
   az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
+  chmod +x "$KUBECTL_DIR/kubectl" "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
   export PATH="$KUBECTL_DIR:$PATH"
   if ! command -v kubectl >/dev/null 2>&1; then
     printf "  ${RED}Failed to install kubectl. Install manually: https://aka.ms/install-kubectl${NC}\n"
@@ -82,6 +83,14 @@ else
 fi
 
 printf "${GREEN}All prerequisites met.${NC}\n"
+
+# Init submodules if needed
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ ! -f "$REPO_ROOT/docgrok/Dockerfile" ]; then
+  printf "  ${YELLOW}Initializing git submodules...${NC}\n"
+  (cd "$REPO_ROOT" && git submodule update --init --recursive 2>/dev/null) || true
+fi
 
 # ── Validate Azure login ────────────────────────────────────────────────────
 

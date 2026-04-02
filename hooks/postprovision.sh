@@ -4,6 +4,9 @@
 
 set -eu
 
+# Ensure tools installed by preprovision are on PATH (kubectl, helm, kubelogin)
+export PATH="$HOME/.azure-kubectl:$HOME/.local/bin:$PATH"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -23,9 +26,10 @@ get_azd_value() {
   key=$1
   # First check env var (set during azd up flow)
   val=$(eval echo "\${$key:-}")
+  val=$(printf '%s' "$val" | tr -d '\r')
   if [ -n "$val" ]; then echo "$val"; return 0; fi
-  # Fallback: read from azd env store
-  val=$(azd env get-value "$key" 2>/dev/null || true)
+  # Fallback: read from azd env store (use && to suppress stdout errors)
+  val=$(azd env get-value "$key" 2>/dev/null) && val=$(printf '%s' "$val" | tr -d '\r') || val=""
   if [ -n "$val" ]; then echo "$val"; return 0; fi
   echo ""
 }
@@ -221,6 +225,19 @@ az aks get-credentials \
   --resource-group "$RESOURCE_GROUP" \
   --name "$AKS_CLUSTER" \
   --overwrite-existing
+
+# WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
+if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
+  mkdir -p "$HOME/.kube"
+  ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
+elif [ ! -f "$HOME/.kube/config" ]; then
+  # Try to find Windows kubeconfig via USERPROFILE
+  WIN_HOME=$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | sed 's|\\|/|g; s|^\([A-Z]\):|/mnt/\L\1|') || true
+  if [ -n "$WIN_HOME" ] && [ -f "$WIN_HOME/.kube/config" ]; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "$WIN_HOME/.kube/config" "$HOME/.kube/config"
+  fi
+fi
 
 printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER}${NC}\n"
 
