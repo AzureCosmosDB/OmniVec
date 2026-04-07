@@ -16,7 +16,7 @@ namespace OmniVec.Worker.Services;
 public class EmbeddingWorkerService : BackgroundService
 {
     private readonly WorkerOptions _options;
-    private readonly ServiceBusClient _sbClient;
+    private readonly ServiceBusClient? _sbClient;
     private readonly DocGrokClient _docGrok;
     private readonly MetricsReporter _metrics;
     private readonly Dictionary<string, IDestinationWriter> _writers;
@@ -24,7 +24,7 @@ public class EmbeddingWorkerService : BackgroundService
 
     public EmbeddingWorkerService(
         IOptions<WorkerOptions> options,
-        ServiceBusClient sbClient,
+        ServiceBusClient? sbClient,
         DocGrokClient docGrok,
         MetricsReporter metrics,
         IEnumerable<IDestinationWriter> writers,
@@ -40,6 +40,14 @@ public class EmbeddingWorkerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
+        if (_sbClient is null)
+        {
+            _logger.LogWarning("Service Bus not configured — worker idle. Set Worker__ServiceBusNamespace to enable queue processing.");
+            // Stay alive but idle — don't crash the pod
+            await Task.Delay(Timeout.Infinite, ct);
+            return;
+        }
+
         _logger.LogInformation(
             "Embedding worker starting: topic={Topic}, sub={Sub}, batchSize={BatchSize}",
             _options.TopicName, _options.SubscriptionName, _options.EmbedBatchSize);

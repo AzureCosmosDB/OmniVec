@@ -69,7 +69,7 @@ func newModelListCmd() *cobra.Command {
 }
 
 func newModelAddCmd() *cobra.Command {
-	var provider, providerType, endpoint, apiKey, apiVersion, modelName string
+	var provider, providerType, endpoint, apiKey, apiVersion, modelName, authType, clientID string
 	var dimensions int
 	cmd := &cobra.Command{
 		Use:   "add",
@@ -87,11 +87,18 @@ func newModelAddCmd() *cobra.Command {
 			if modelName == "" {
 				exitErr("--model is required")
 			}
+			if authType == "managed-identity" && apiKey != "" {
+				exitErr("--api-key and --auth-type managed-identity are mutually exclusive")
+			}
+			if authType == "key" && apiKey == "" {
+				exitErr("--api-key is required when --auth-type is key")
+			}
 			body := map[string]any{
-				"name":     provider,
-				"type":     providerType,
-				"endpoint": endpoint,
-				"model":    modelName,
+				"name":      provider,
+				"type":      providerType,
+				"endpoint":  endpoint,
+				"model":     modelName,
+				"auth_type": authType,
 			}
 			if apiKey != "" {
 				body["api_key"] = apiKey
@@ -102,19 +109,24 @@ func newModelAddCmd() *cobra.Command {
 			if dimensions > 0 {
 				body["dimensions"] = dimensions
 			}
+			if clientID != "" {
+				body["client_id"] = clientID
+			}
 			c := getClient()
 			_, err := c.Post("/api/models", body)
 			if err != nil {
 				exitErr("%v", err)
 			}
-			exitOK("External model added: %s (%s)", provider, modelName)
+			exitOK("External model added: %s (%s, auth: %s)", provider, modelName, authType)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&provider, "provider", "", "Provider name (e.g., my-azure-openai)")
 	cmd.Flags().StringVarP(&providerType, "type", "t", "", "Provider type (azure-openai, openai, cohere, custom)")
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "Endpoint URL")
-	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key (for key auth)")
+	cmd.Flags().StringVar(&authType, "auth-type", "key", "Auth method: key or managed-identity")
+	cmd.Flags().StringVar(&clientID, "client-id", "", "Managed identity client ID (optional, defaults to workload identity)")
 	cmd.Flags().StringVar(&apiVersion, "api-version", "", "API version (Azure only)")
 	cmd.Flags().StringVar(&modelName, "model", "", "Model/deployment name")
 	cmd.Flags().IntVar(&dimensions, "dimensions", 0, "Embedding dimensions")

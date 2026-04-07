@@ -56,7 +56,8 @@ echo -e "${GREEN}Infrastructure deployed!${NC}"
 
 # Step 2: Get AKS credentials
 echo -e "\n${YELLOW}Step 2: Connecting to AKS...${NC}"
-az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing
+KUBE_CONTEXT="${AKS_CLUSTER_NAME}"
+az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --context "$KUBE_CONTEXT" --overwrite-existing 2>/dev/null || true
 
 # Step 3: Login to ACR
 echo -e "\n${YELLOW}Step 3: Logging into ACR...${NC}"
@@ -84,6 +85,7 @@ echo -e "\n${YELLOW}Step 5: Deploying with Helm...${NC}"
 cd "$SCRIPT_DIR/helm"
 
 helm upgrade --install omnivec ./omnivec \
+  --kube-context "$KUBE_CONTEXT" \
   --namespace omnivec \
   --create-namespace \
   --set global.imageRegistry="$ACR_LOGIN_SERVER" \
@@ -99,7 +101,7 @@ echo -e "${GREEN}Deployment complete!${NC}"
 # Step 6: Get service URL
 echo -e "\n${YELLOW}Getting service URL...${NC}"
 sleep 10
-EXTERNAL_IP=$(kubectl get svc omnivec-api -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+EXTERNAL_IP=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-api -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
 echo -e "\n${GREEN}╔══════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║         Deployment Successful!           ║${NC}"
