@@ -3352,15 +3352,21 @@ async def create_model(payload: dict):
         # Map UI field names to DocGrok registry fields
         model_name = payload.get("name", payload.get("model", "")).strip()
         model_category = payload.get("model_category", "embedding")  # "embedding" or "chat"
+        auth_type = payload.get("auth_type", "key")  # "key" or "managed-identity"
         reg_payload = {
             "name": model_name,
             "type": payload.get("provider_type", payload.get("type", "azure-openai")),
             "endpoint": payload.get("endpoint", "").strip(),
+            "auth_type": auth_type,
             "api_key": payload.get("api_key", "").strip(),
             "deployment": payload.get("deployment", payload.get("name", "")).strip(),
             "embedding_dim": int(payload.get("embedding_dim", payload.get("dimensions", 1536))),
             "api_version": payload.get("api_version", "2024-06-01"),
         }
+        if auth_type == "managed-identity":
+            client_id = payload.get("client_id", "").strip()
+            if client_id:
+                reg_payload["client_id"] = client_id
         # Preserve stored ID â€” look up by name in CosmosDB so DocGrok always
         # gets the same ID even after restart (prevents ID drift).
         store = get_store()
