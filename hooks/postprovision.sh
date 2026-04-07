@@ -221,10 +221,12 @@ fi
 # =============================================================================
 
 printf "\n${YELLOW}Phase 2: Getting AKS credentials...${NC}\n"
+KUBE_CONTEXT="${AKS_CLUSTER}"
 az aks get-credentials \
   --resource-group "$RESOURCE_GROUP" \
   --name "$AKS_CLUSTER" \
-  --overwrite-existing
+  --context "$KUBE_CONTEXT" \
+  --overwrite-existing 2>/dev/null || true
 
 # WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
 if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
@@ -239,7 +241,8 @@ elif [ ! -f "$HOME/.kube/config" ]; then
   fi
 fi
 
-printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER}${NC}\n"
+export KUBE_CONTEXT
+printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEXT})${NC}\n"
 
 # =============================================================================
 # PHASE 3: Create namespaces and K8s secrets
@@ -248,18 +251,18 @@ printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER}${NC}\n"
 printf "\n${YELLOW}Phase 3: Creating namespaces and secrets...${NC}\n"
 
 # Create namespaces and label for Helm ownership
-kubectl create namespace omnivec --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace docgrok --dry-run=client -o yaml | kubectl apply -f -
-kubectl label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite
-kubectl annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite
+kubectl --context "$KUBE_CONTEXT" create namespace omnivec 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" create namespace docgrok 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite
+kubectl --context "$KUBE_CONTEXT" annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite
 
 # Storage connection string secret (only when blob source is enabled)
 if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
-  kubectl create secret generic omnivec-storage \
+  kubectl --context "$KUBE_CONTEXT" create secret generic omnivec-storage \
     --namespace omnivec \
     --from-literal=account-name="$STORAGE_ACCOUNT" \
     --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f -
   printf "  ${GREEN}omnivec-storage secret created.${NC}\n"
 fi
 
@@ -290,6 +293,7 @@ IMAGE_TAG="latest"
 
 # Build helm command (POSIX-compatible — no bash arrays)
 HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \
+  --kube-context ${KUBE_CONTEXT} \
   --namespace omnivec \
   --set global.imageRegistry=${ACR_LOGIN_SERVER} \
   --set azure.workloadIdentity.clientId=${IDENTITY_CLIENT_ID} \
@@ -338,17 +342,17 @@ printf "${GREEN}Helm deployment complete.${NC}\n"
 printf "\n${YELLOW}Phase 5: Verifying deployment...${NC}\n"
 
 printf "\n${CYAN}OmniVec pods:${NC}\n"
-kubectl get pods -n omnivec --no-headers 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers 2>/dev/null || true
 
 printf "\n${CYAN}DocGrok pods:${NC}\n"
-kubectl get pods -n docgrok --no-headers 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n docgrok --no-headers 2>/dev/null || true
 
 # Wait for external IP
 printf "\n${YELLOW}Waiting for external IP...${NC}\n"
 EXTERNAL_IP=""
 i=0
 while [ $i -lt 30 ]; do
-  EXTERNAL_IP=$(kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  EXTERNAL_IP=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
   if [ -n "$EXTERNAL_IP" ]; then
     break
   fi

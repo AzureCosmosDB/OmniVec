@@ -123,7 +123,7 @@ az_query() {
 
 # ─── Helper: run Python on API pod via stdin ─────────────────────────────────
 pod_python() {
-  echo "$1" | kubectl exec -i deployment/omnivec-api -n omnivec -- python3 -
+  echo "$1" | kubectl --context "$KUBE_CONTEXT" exec -i deployment/omnivec-api -n omnivec -- python3 -
 }
 
 # ─── Helper: HTTP calls via curl ─────────────────────────────────────────────
@@ -286,7 +286,8 @@ if [ "$FROM_STEP" -le 3 ]; then
 fi
 # Always load azd values (needed by all subsequent steps)
 load_azd_values
-az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --overwrite-existing 2>/dev/null
+KUBE_CONTEXT="${AKS_CLUSTER}"
+az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --context "$KUBE_CONTEXT" --overwrite-existing 2>/dev/null || true
 ensure_kubeconfig
 
 log "  Admin Token: $ADMIN_TOKEN"
@@ -297,7 +298,7 @@ log "  Waiting for external IP..."
 SERVER=""
 i=0
 while [ $i -lt 60 ]; do
-  SERVER=$(kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
+  SERVER=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
   if [ -n "$SERVER" ]; then break; fi
   sleep 5
   i=$((i + 1))
