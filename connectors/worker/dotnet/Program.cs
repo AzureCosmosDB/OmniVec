@@ -12,10 +12,16 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.Configure<WorkerOptions>(
     builder.Configuration.GetSection("Worker"));
 
-// Service Bus client
+// Service Bus client — only register when namespace is configured
 builder.Services.AddSingleton(sp =>
 {
     var opts = sp.GetRequiredService<IOptions<WorkerOptions>>().Value;
+    if (string.IsNullOrWhiteSpace(opts.ServiceBusNamespace))
+    {
+        var log = sp.GetRequiredService<ILogger<Program>>();
+        log.LogWarning("Service Bus namespace not configured — worker will start but cannot process queue messages");
+        return (ServiceBusClient?)null;
+    }
     return new ServiceBusClient(opts.ServiceBusNamespace, new DefaultAzureCredential());
 });
 
