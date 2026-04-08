@@ -14,12 +14,83 @@ printf "${GREEN}╔════════════════════�
 printf "${GREEN}║     OmniVec — Pre-provision Checks       ║${NC}\n"
 printf "${GREEN}╚══════════════════════════════════════════╝${NC}\n"
 
+# ── Deployment lock: prevent concurrent azd up/down for the same env ────────
+LOCK_DIR="${HOME}/.omnivec/locks"
+mkdir -p "$LOCK_DIR"
+LOCK_FILE="${LOCK_DIR}/${AZURE_ENV_NAME}.lock"
+
+acquire_lock() {
+  if [ -f "$LOCK_FILE" ]; then
+    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null | head -1)
+    LOCK_HOST=$(cat "$LOCK_FILE" 2>/dev/null | tail -1)
+
+    # Check if the locking process is still alive
+    if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+      printf "\n${RED}ERROR: Another deployment for '${AZURE_ENV_NAME}' is already running (PID ${LOCK_PID}).${NC}\n"
+      printf "  If that process is stuck, you can force-take the lock.\n"
+      printf "  ${YELLOW}Take over lock and continue? [y/N]: ${NC}"
+      read -r force_lock || true
+      case "$force_lock" in
+        [yY]*)
+          printf "  ${YELLOW}Killing PID ${LOCK_PID} and taking lock...${NC}\n"
+          kill "$LOCK_PID" 2>/dev/null || true
+          sleep 2
+          ;;
+        *)
+          printf "  ${RED}Aborting. Wait for the other deployment to finish or take over the lock.${NC}\n"
+          exit 1
+          ;;
+      esac
+    else
+      printf "  ${YELLOW}Stale lock found (PID ${LOCK_PID} is dead). Cleaning up.${NC}\n"
+    fi
+  fi
+
+  # Write lock: PID on line 1, hostname on line 2
+  printf "%s\n%s\n" "$$" "$(hostname 2>/dev/null || echo unknown)" > "$LOCK_FILE"
+}
+
+release_lock() {
+  rm -f "$LOCK_FILE"
+}
+
+# Release lock on exit (success or failure)
+trap 'release_lock' EXIT INT TERM
+
+acquire_lock
+
+# ── Check for existing healthy deployment ───────────────────────────────────
+# If pods are already running and healthy, warn before re-deploying
+EXISTING_AKS=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
+EXISTING_RG=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
+
+if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
+  # Try to get credentials and check pod health (silently)
+  KUBE_CTX="$EXISTING_AKS"
+  az aks get-credentials --resource-group "$EXISTING_RG" --name "$EXISTING_AKS" --context "$KUBE_CTX" --overwrite-existing 2>/dev/null || true
+
+  HEALTHY_PODS=$(kubectl --context "$KUBE_CTX" get pods -n omnivec --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+
+  if [ "$HEALTHY_PODS" -gt 0 ]; then
+    printf "\n${YELLOW}WARNING: Existing deployment detected and running (${HEALTHY_PODS} healthy pods in omnivec namespace).${NC}\n"
+    printf "  AKS:  ${CYAN}${EXISTING_AKS}${NC}\n"
+    printf "  RG:   ${CYAN}${EXISTING_RG}${NC}\n"
+    printf "  Re-running azd up will update the deployment in place.\n"
+    printf "  ${YELLOW}Continue with re-deployment? [y/N]: ${NC}"
+    read -r confirm_redeploy || true
+    case "$confirm_redeploy" in
+      [yY]*) printf "  ${GREEN}Proceeding with update...${NC}\n" ;;
+      *)     printf "  ${RED}Aborting. Use 'azd down' to tear down first, or re-run and confirm.${NC}\n"; exit 0 ;;
+    esac
+  fi
+fi
+
 # ── Resume detection ────────────────────────────────────────────────────────
 # If config is already set (from a previous run), skip interactive prompts
 
 EXISTING_CONFIG=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
 if [ -n "$EXISTING_CONFIG" ]; then
-  printf "\n${CYAN}Resuming previous configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
+  printf "\n${CYAN}Found previous configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
   echo "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null)"
   echo "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null)"
   echo "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null)"
@@ -27,7 +98,7 @@ if [ -n "$EXISTING_CONFIG" ]; then
   echo "  Blob source:     $(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>/dev/null)"
   echo "  Metadata store:  $(azd env get-value OMNIVEC_METADATA_STORE 2>/dev/null)"
   echo ""
-  printf "  ${YELLOW}Use existing config? [Y/n]: ${NC}"
+  printf "  ${YELLOW}Keep these settings? [Y/n] (n = reconfigure from scratch): ${NC}"
   read -r reuse || true
   reuse=${reuse:-Y}
   case "$reuse" in
@@ -35,7 +106,7 @@ if [ -n "$EXISTING_CONFIG" ]; then
       printf "  ${GREEN}Reconfiguring...${NC}\n"
       ;;
     *)
-      printf "  ${GREEN}Resuming with existing config.${NC}\n"
+      printf "  ${GREEN}Using existing settings, skipping configuration prompts.${NC}\n"
       exit 0
       ;;
   esac
@@ -328,6 +399,24 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 else
   printf "${YELLOW}No Docker daemon — will use 'az acr build' for remote builds.${NC}\n"
   azd env set OMNIVEC_BUILD_MODE "acr"
+fi
+
+# ── Check for soft-deleted Key Vault with the expected name ────────────────
+# The vault name uses the same prefix-resourceToken pattern as other resources.
+# We check if a soft-deleted vault with that name exists so Bicep can recover
+# it instead of failing with a "vault already exists in deleted state" error.
+
+printf "\n${YELLOW}Checking for soft-deleted Key Vaults...${NC}\n"
+# Build expected vault name: we can't know the exact resourceToken yet (Bicep computes it),
+# so we check all soft-deleted vaults with our prefix and let Bicep handle recovery.
+SOFT_DELETED_VAULTS=$(az keyvault list-deleted --query "[?contains(name,'omnivec-kv')].name" -o tsv 2>/dev/null || true)
+if [ -n "$SOFT_DELETED_VAULTS" ]; then
+  printf "  ${YELLOW}Found soft-deleted vault(s): ${SOFT_DELETED_VAULTS}${NC}\n"
+  printf "  ${CYAN}Bicep will recover the vault automatically (no purge needed).${NC}\n"
+  azd env set OMNIVEC_RECOVER_KEYVAULT "true"
+else
+  printf "  ${GREEN}No soft-deleted Key Vaults found.${NC}\n"
+  azd env set OMNIVEC_RECOVER_KEYVAULT "false"
 fi
 
 printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"

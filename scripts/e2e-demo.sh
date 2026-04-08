@@ -37,6 +37,26 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOTAL_STEPS=11
 
+# ─── Checkpoint: auto-resume from last successful step ──────────────────────
+CHECKPOINT_FILE="${ROOT_DIR}/.e2e-checkpoint"
+
+# Auto-detect FROM_STEP from checkpoint if user didn't explicitly set --from-step
+if [ "$FROM_STEP" -eq 1 ] && [ -f "$CHECKPOINT_FILE" ]; then
+  LAST_OK=$(cat "$CHECKPOINT_FILE" 2>/dev/null | tr -d '\r')
+  if [ -n "$LAST_OK" ] && [ "$LAST_OK" -gt 0 ] 2>/dev/null; then
+    RESUME_STEP=$((LAST_OK + 1))
+    if [ "$RESUME_STEP" -le "$TOTAL_STEPS" ]; then
+      printf "\033[1;33m  Previous run completed step %s/%s. Resuming from step %s.\033[0m\n" "$LAST_OK" "$TOTAL_STEPS" "$RESUME_STEP"
+      printf "  (To start fresh, delete %s or pass --from-step 1)\n" "$CHECKPOINT_FILE"
+      FROM_STEP=$RESUME_STEP
+    fi
+  fi
+fi
+
+save_checkpoint() {
+  echo "$1" > "$CHECKPOINT_FILE"
+}
+
 # ─── Bootstrap: ensure everything is runnable from any directory ──────────────
 
 # Add common tool install paths to PATH
@@ -268,6 +288,7 @@ if [ "$FROM_STEP" -le 1 ]; then
     fi
   fi
   log_ok "Environment configured."
+  save_checkpoint 1
 fi
 
 # =============================================================================
@@ -276,6 +297,7 @@ fi
 if [ "$FROM_STEP" -le 2 ]; then
   log_step 2 "Provisioning infrastructure (azd up ~15 min)..."
   azd up --no-prompt || log_warn "azd up returned non-zero, continuing..."
+  save_checkpoint 2
 fi
 
 # =============================================================================
@@ -317,6 +339,7 @@ while [ $i -lt 30 ]; do
   i=$((i + 1))
 done
 log_ok "API healthy."
+save_checkpoint 3
 
 # =============================================================================
 # STEP 4: Configure CLI
@@ -326,6 +349,7 @@ if [ "$FROM_STEP" -le 4 ]; then
   "$CLI" config set server "$SERVER_URL"
   "$CLI" config set token "$ADMIN_TOKEN"
   "$CLI" status
+  save_checkpoint 4
 fi
 
 # =============================================================================
@@ -446,6 +470,7 @@ except Exception as e:
     exit 1
   fi
   log_ok "All containers ready."
+  save_checkpoint 5
 else
   # Load test endpoint for later steps
   TEST_COSMOS_ENDPOINT=$(az_query cosmosdb show --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --query documentEndpoint -o tsv)
@@ -463,6 +488,7 @@ MEOF
   MODEL_RESULT=$(api_post "/api/models" "$MODEL_BODY")
   MODEL_ID=$(echo "$MODEL_RESULT" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   log_ok "Model: $MODEL_ID ($AOAI_DEPLOYMENT, ${AOAI_DIMS}d)"
+  save_checkpoint 6
 else
   MODELS_RESULT=$(api_get "/api/models")
   MODEL_ID=$(echo "$MODELS_RESULT" | grep -o '"id":"mdl-[^"]*"' | head -1 | cut -d'"' -f4)
@@ -500,6 +526,7 @@ DEOF
   DST_RESULT=$(api_post "/api/destinations" "$DST_BODY")
   DEST_ID=$(echo "$DST_RESULT" | grep -o '"id":"dst-[^"]*"' | head -1 | cut -d'"' -f4)
   log_ok "Destination: $DEST_ID"
+  save_checkpoint 7
 else
   SRCS_RESULT=$(api_get "/api/sources")
   SOURCE_ID=$(echo "$SRCS_RESULT" | grep -o '"id":"src-[^"]*"' | head -1 | cut -d'"' -f4)
@@ -569,6 +596,7 @@ print('DOCS_OK')
     sleep 10
     i=$((i + 1))
   done
+  save_checkpoint 8
 else
   PIPS_RESULT=$(api_get "/api/pipelines")
   PIP_ID=$(echo "$PIPS_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
@@ -594,8 +622,10 @@ if [ -n "$PIP_ID" ]; then
   else
     log_warn "No completed embeddings yet. Check: omnivec pipeline show $PIP_ID"
   fi
+  save_checkpoint 9
 else
   log_step 9 "Skipping queue mode verify (no pipeline)"
+  save_checkpoint 9
 fi
 
 # =============================================================================
@@ -637,6 +667,7 @@ print(count)
     sleep 10
     i=$((i + 1))
   done
+  save_checkpoint 10
 fi
 
 # =============================================================================
@@ -709,3 +740,7 @@ printf "  Tested both modes on the same pipeline and same documents:\n"
 printf "  ${CYAN}Queue mode:${NC}  CFP -> Service Bus -> .NET worker -> destination container\n"
 printf "  ${CYAN}Inline mode:${NC} CFP -> embed directly -> patch back to source container\n"
 echo ""
+
+# Clean up checkpoint on successful completion
+rm -f "$CHECKPOINT_FILE"
+save_checkpoint 11
