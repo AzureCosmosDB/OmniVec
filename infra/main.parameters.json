@@ -25,6 +25,9 @@
     },
     "enableBlobSource": {
       "value": "${OMNIVEC_ENABLE_BLOB_SOURCE}"
+    },
+    "recoverKeyvault": {
+      "value": "${OMNIVEC_RECOVER_KEYVAULT}"
     }
   }
 }
