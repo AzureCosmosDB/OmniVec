@@ -1,8 +1,13 @@
 // Key Vault — stores model API keys securely with RBAC authorization
+// Uses createMode 'recover' when a soft-deleted vault with the same name exists,
+// avoiding the "vault already exists in deleted state" conflict on re-deployment.
 param vaultName string
 param location string
 param tags object = {}
 param identityPrincipalId string
+
+@description('Set to true when a soft-deleted vault with this name exists and should be recovered instead of created fresh.')
+param recoverSoftDeleted bool = false
 
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: vaultName
@@ -16,6 +21,8 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableRbacAuthorization: true
     enableSoftDelete: true
     softDeleteRetentionInDays: 7
+    // Recover from soft-delete if a previous vault exists, otherwise create fresh
+    createMode: recoverSoftDeleted ? 'recover' : 'default'
     // Note: enablePurgeProtection should be true in production
     // Disabled here for dev/test to allow clean teardown with azd down --purge
   }

@@ -7,13 +7,95 @@ Write-Host "`n`e[32m+==========================================+`e[0m"
 Write-Host "`e[32m|     OmniVec - Pre-provision Checks       |`e[0m"
 Write-Host "`e[32m+==========================================+`e[0m"
 
+# -- Deployment lock: prevent concurrent azd up/down for the same env --
+$lockDir = Join-Path $HOME ".omnivec" "locks"
+if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
+$lockFile = Join-Path $lockDir "$env:AZURE_ENV_NAME.lock"
+
+function Acquire-Lock {
+    if (Test-Path $lockFile) {
+        $lockContent = Get-Content $lockFile -ErrorAction SilentlyContinue
+        $lockPid = $lockContent | Select-Object -First 1
+        $lockHost = $lockContent | Select-Object -Last 1
+
+        # Check if the locking process is still alive
+        $alive = $false
+        if ($lockPid) {
+            try {
+                $proc = Get-Process -Id ([int]$lockPid) -ErrorAction Stop
+                $alive = $true
+            } catch {
+                $alive = $false
+            }
+        }
+
+        if ($alive) {
+            Write-Host "`n`e[31mERROR: Another deployment for '$env:AZURE_ENV_NAME' is already running (PID $lockPid).`e[0m"
+            Write-Host "  If that process is stuck, you can force-take the lock."
+            $forceLock = Read-Host "  Take over lock and continue? [y/N]"
+            if ($forceLock -match "^[yY]") {
+                Write-Host "  `e[33mKilling PID $lockPid and taking lock...`e[0m"
+                try { Stop-Process -Id ([int]$lockPid) -Force -ErrorAction SilentlyContinue } catch {}
+                Start-Sleep -Seconds 2
+            } else {
+                Write-Host "  `e[31mAborting. Wait for the other deployment to finish or take over the lock.`e[0m"
+                exit 1
+            }
+        } else {
+            Write-Host "  `e[33mStale lock found (PID $lockPid is dead). Cleaning up.`e[0m"
+        }
+    }
+
+    # Write lock: PID on line 1, hostname on line 2
+    @($PID, (hostname)) | Set-Content $lockFile
+}
+
+function Release-Lock {
+    if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
+}
+
+Acquire-Lock
+
+# Release lock on exit (success or failure) via try/finally wrapper
+try {
+
+# -- Check for existing healthy deployment --
+$ErrorActionPreference = "SilentlyContinue"
+$existingAks = azd env get-value AZURE_AKS_CLUSTER_NAME 2>$null
+$existingRg = azd env get-value AZURE_RESOURCE_GROUP 2>$null
+$ErrorActionPreference = "Stop"
+
+if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $existingRg -notmatch "^ERROR") {
+    $kubeCtx = $existingAks.Trim()
+    az aks get-credentials --resource-group $existingRg.Trim() --name $kubeCtx --context $kubeCtx --overwrite-existing 2>$null | Out-Null
+
+    $healthyPods = 0
+    try {
+        $podLines = kubectl --context $kubeCtx get pods -n omnivec --field-selector=status.phase=Running --no-headers 2>$null
+        if ($podLines) { $healthyPods = @($podLines | Where-Object { $_ }).Count }
+    } catch {}
+
+    if ($healthyPods -gt 0) {
+        Write-Host "`n`e[33mWARNING: Existing deployment detected and running ($healthyPods healthy pods in omnivec namespace).`e[0m"
+        Write-Host "  AKS:  `e[36m$kubeCtx`e[0m"
+        Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
+        Write-Host "  Re-running azd up will update the deployment in place."
+        $confirmRedeploy = Read-Host "  Continue with re-deployment? [y/N]"
+        if ($confirmRedeploy -notmatch "^[yY]") {
+            Write-Host "  `e[31mAborting. Use 'azd down' to tear down first, or re-run and confirm.`e[0m"
+            exit 0
+        }
+        Write-Host "  `e[32mProceeding with update...`e[0m"
+    }
+}
+
 # -- Resume detection --
 $existingConfig = $null
 $ErrorActionPreference = "SilentlyContinue"
 $existingConfig = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
 $ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ERROR") {
-    Write-Host "`n`e[36mResuming previous configuration for environment '$env:AZURE_ENV_NAME':`e[0m"
+    Write-Host "`n`e[36mFound previous configuration for environment '$env:AZURE_ENV_NAME':`e[0m"
     Write-Host "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null)"
     Write-Host "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null)"
     Write-Host "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null)"
@@ -21,12 +103,12 @@ if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ER
     Write-Host "  Blob source:     $(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)"
     Write-Host "  Metadata store:  $(azd env get-value OMNIVEC_METADATA_STORE 2>$null)"
     Write-Host ""
-    $reuse = Read-Host "  Use existing config? [Y/n]"
+    $reuse = Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)"
     if (-not $reuse) { $reuse = "Y" }
     if ($reuse -match "^[nN]") {
         Write-Host "  `e[32mReconfiguring...`e[0m"
     } else {
-        Write-Host "  `e[32mResuming with existing config.`e[0m"
+        Write-Host "  `e[32mUsing existing settings, skipping configuration prompts.`e[0m"
         exit 0
     }
 }
@@ -296,6 +378,25 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
     azd env set OMNIVEC_BUILD_MODE "acr"
 }
 
+# -- Check for soft-deleted Key Vault with the expected name --
+Write-Host "`n`e[33mChecking for soft-deleted Key Vaults...`e[0m"
+$softDeletedVaults = $null
+$ErrorActionPreference = "SilentlyContinue"
+$softDeletedVaults = az keyvault list-deleted --query "[?contains(name,'omnivec-kv')].name" -o tsv 2>$null
+$ErrorActionPreference = "Stop"
+if ($softDeletedVaults) {
+    Write-Host "  `e[33mFound soft-deleted vault(s): $softDeletedVaults`e[0m"
+    Write-Host "  `e[36mBicep will recover the vault automatically (no purge needed).`e[0m"
+    azd env set OMNIVEC_RECOVER_KEYVAULT "true"
+} else {
+    Write-Host "  `e[32mNo soft-deleted Key Vaults found.`e[0m"
+    azd env set OMNIVEC_RECOVER_KEYVAULT "false"
+}
+
 Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
 Write-Host "`e[36mEnvironment: $env:AZURE_ENV_NAME`e[0m"
 Write-Host "`e[36mEach installation gets a unique resource token derived from (subscription + resource group + env name).`e[0m"
+
+} finally {
+    Release-Lock
+}

@@ -99,57 +99,62 @@ image_exists() {
   [ -n "$existing" ]
 }
 
-if [ "$OMNIVEC_BUILD" = "true" ]; then
-  # BUILD MODE: Build images from source
-  printf "\n${YELLOW}Phase 1: Building images from source...${NC}\n"
+# ── Helper: build a single image via docker or ACR ──────────────────────
+build_image() {
+  name=$1
+  dockerfile=$2
+  context=$3
+  tag=${4:-latest}
 
-  build_image() {
-    name=$1
-    dockerfile=$2
-    context=$3
-    tag=${4:-latest}
+  if [ "$FORCE_IMPORT" != "true" ] && image_exists "$name" "$tag"; then
+    printf "  ${GREEN}${name}:${tag} exists, skipping.${NC}\n"
+    return 0
+  fi
 
-    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$name" "$tag"; then
-      printf "  ${GREEN}${name}:${tag} exists, skipping.${NC}\n"
-      return 0
-    fi
+  printf "  ${CYAN}Building ${name}:${tag}...${NC}\n"
+  if [ "$BUILD_MODE" = "docker" ]; then
+    docker build -t "${ACR_LOGIN_SERVER}/${name}:${tag}" -f "$dockerfile" "$context"
+    docker push "${ACR_LOGIN_SERVER}/${name}:${tag}"
+  else
+    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs 2>/dev/null || \
+    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context"
+  fi
+  printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
+}
 
-    printf "  ${CYAN}Building ${name}:${tag}...${NC}\n"
-
-    if [ "$BUILD_MODE" = "docker" ]; then
-      docker build -t "${ACR_LOGIN_SERVER}/${name}:${tag}" -f "$dockerfile" "$context"
-      docker push "${ACR_LOGIN_SERVER}/${name}:${tag}"
-    else
-      az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs 2>/dev/null || \
-      az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context"
-    fi
-
-    printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
-  }
-
+build_all_images() {
   build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest"
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
   build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
   build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
-
   if [ -d "${ROOT_DIR}/docgrok/pipeline-worker" ]; then
     build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
   fi
   if [ -d "${ROOT_DIR}/docgrok/router" ]; then
     build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
   fi
+}
 
-  printf "${GREEN}All images built and pushed.${NC}\n"
-else
-  # IMPORT MODE: Import pre-built images from shared registry (fast!)
+# ── If not explicitly set to build, try import ──────────────────────────
+if [ "$OMNIVEC_BUILD" != "true" ]; then
   printf "\n${YELLOW}Phase 1: Importing pre-built images from shared registry...${NC}\n"
   printf "  ${CYAN}Source: $SHARED_REGISTRY${NC}\n"
-  printf "  ${CYAN}To build from source instead: azd env set OMNIVEC_BUILD true${NC}\n"
+  if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
+    printf "  ${CYAN}Using provided registry token for import.${NC}\n"
+  else
+    printf "  ${CYAN}No token provided — assuming public registry (anonymous pull).${NC}\n"
+  fi
+fi
 
+if [ "$OMNIVEC_BUILD" = "true" ]; then
+  # BUILD MODE: Build images from source
+  printf "\n${YELLOW}Phase 1: Building images from source...${NC}\n"
+  build_all_images
+  printf "${GREEN}All images built and pushed.${NC}\n"
+else
+  # IMPORT MODE: Token validated, proceed with parallel imports
   import_count=0
   skip_count=0
-
-  # Import images in parallel for speed (each az acr import takes 30-120s)
   IMPORT_TMP=$(mktemp -d)
   import_pids=""
 
@@ -162,16 +167,19 @@ else
 
     printf "  ${CYAN}Importing ${image}:latest...${NC}\n"
 
-    # Run import in background
+    # Run import in background (parallel)
     (
       import_success=false
       for attempt in 1 2; do
+        AUTH_ARGS=""
+        if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
+          AUTH_ARGS="--username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN"
+        fi
         import_error=$(az acr import \
             --name "$ACR_NAME" \
             --source "${SHARED_REGISTRY}/${image}:latest" \
             --image "${image}:latest" \
-            --username "$SHARED_REGISTRY_USER" \
-            --password "$SHARED_REGISTRY_TOKEN" \
+            $AUTH_ARGS \
             --force 2>&1) && import_success=true || import_success=false
 
         if [ "$import_success" = "true" ]; then break; fi
@@ -188,7 +196,7 @@ else
     import_pids="$import_pids $!"
   done
 
-  # Wait for all imports to finish
+  # Wait for all imports
   for pid in $import_pids; do
     wait "$pid" 2>/dev/null || true
   done
@@ -196,24 +204,56 @@ else
   # Report results
   for image in $IMAGES; do
     result_file="$IMPORT_TMP/$image"
-    if [ ! -f "$result_file" ]; then continue; fi  # was skipped
+    if [ ! -f "$result_file" ]; then continue; fi
     result=$(cat "$result_file")
     if [ "$result" = "OK" ]; then
       printf "  ${GREEN}${image}:latest imported.${NC}\n"
       import_count=$((import_count + 1))
     else
       printf "  ${RED}${image}:latest import FAILED${NC}\n"
-      printf "  ${RED}Error: ${result}${NC}\n"
-      if echo "$result" | grep -qi "unauthorized\|authentication\|401"; then
-        printf "  ${RED}Hint: Token may be expired. Contact repo maintainer to regenerate.${NC}\n"
-      elif echo "$result" | grep -qi "not found\|does not exist"; then
-        printf "  ${RED}Hint: Image not found. Run: azd env set OMNIVEC_BUILD true${NC}\n"
-      fi
+      printf "  ${RED}${result}${NC}\n"
     fi
   done
   rm -rf "$IMPORT_TMP"
 
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
+
+  # If no images available, abort before Helm deploy
+  total_available=$((import_count + skip_count))
+  if [ "$total_available" -eq 0 ]; then
+    printf "\n${RED}ERROR: No images available in ACR. Cannot proceed with Helm deploy.${NC}\n"
+    printf "  Fix the issue above, then re-run: azd hooks run postprovision\n"
+    exit 1
+  fi
+fi
+
+# ── Final image check: verify all required images exist, build any missing ──
+printf "\n${YELLOW}Verifying all required images exist in ACR...${NC}\n"
+MISSING_IMAGES=""
+for image in $IMAGES; do
+  if ! image_exists "$image" "latest"; then
+    printf "  ${RED}MISSING: ${image}:latest${NC}\n"
+    MISSING_IMAGES="$MISSING_IMAGES $image"
+  else
+    printf "  ${GREEN}OK: ${image}:latest${NC}\n"
+  fi
+done
+
+if [ -n "$MISSING_IMAGES" ]; then
+  printf "\n${YELLOW}Building missing images from source...${NC}\n"
+  for image in $MISSING_IMAGES; do
+    case "$image" in
+      omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest" ;;
+      omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
+      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
+      omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
+      docgrok-pipeline-worker)  [ -d "${ROOT_DIR}/docgrok/pipeline-worker" ] && build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest" ;;
+      docgrok-router)           [ -d "${ROOT_DIR}/docgrok/router" ] && build_image "$image" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest" ;;
+    esac
+  done
+  printf "${GREEN}Missing images built.${NC}\n"
+else
+  printf "${GREEN}All required images present in ACR.${NC}\n"
 fi
 
 # =============================================================================
