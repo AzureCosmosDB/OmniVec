@@ -269,7 +269,14 @@ ensure_kubeconfig() {
 # =============================================================================
 if [ "$FROM_STEP" -le 1 ]; then
   log_step 1 "Creating azd environment: $ENV_NAME"
-  azd env new "$ENV_NAME" --location "$LOCATION" --subscription "$SUBSCRIPTION" 2>/dev/null || true
+  if ! azd env new "$ENV_NAME" --location "$LOCATION" --subscription "$SUBSCRIPTION" 2>/dev/null; then
+    if azd env select "$ENV_NAME" >/dev/null 2>&1; then
+      log_warn "Environment already exists. Reusing: $ENV_NAME"
+    else
+      log_err "Failed to create/select environment: $ENV_NAME"
+      exit 1
+    fi
+  fi
   azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
   azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
   azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v6"
@@ -296,7 +303,10 @@ fi
 # =============================================================================
 if [ "$FROM_STEP" -le 2 ]; then
   log_step 2 "Provisioning infrastructure (azd up ~15 min)..."
-  azd up --no-prompt || log_warn "azd up returned non-zero, continuing..."
+  if ! azd up --no-prompt; then
+    log_err "azd up failed. Resolve the deployment error and re-run."
+    exit 1
+  fi
   save_checkpoint 2
 fi
 
@@ -308,8 +318,12 @@ if [ "$FROM_STEP" -le 3 ]; then
 fi
 # Always load azd values (needed by all subsequent steps)
 load_azd_values
+if [ -z "${AKS_CLUSTER:-}" ] || [ -z "${RESOURCE_GROUP:-}" ] || [ -z "${ADMIN_TOKEN:-}" ]; then
+  log_err "Missing required azd outputs (AKS cluster/resource group/admin token)."
+  exit 1
+fi
 KUBE_CONTEXT="${AKS_CLUSTER}"
-az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --context "$KUBE_CONTEXT" --overwrite-existing 2>/dev/null || true
+az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --context "$KUBE_CONTEXT" --overwrite-existing >/dev/null
 ensure_kubeconfig
 
 log "  Admin Token: $ADMIN_TOKEN"
@@ -332,12 +346,20 @@ log_ok "Server: $SERVER_URL"
 # Wait for API
 log "  Waiting for API health..."
 i=0
+api_healthy=false
 while [ $i -lt 30 ]; do
   health=$(curl -sf --max-time 5 "$SERVER_URL/health" 2>/dev/null || true)
-  if echo "$health" | grep -q '"healthy"'; then break; fi
+  if echo "$health" | grep -q '"healthy"'; then
+    api_healthy=true
+    break
+  fi
   sleep 5
   i=$((i + 1))
 done
+if [ "$api_healthy" != "true" ]; then
+  log_err "API did not become healthy in time."
+  exit 1
+fi
 log_ok "API healthy."
 save_checkpoint 3
 
@@ -588,14 +610,22 @@ print('DOCS_OK')
   api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
   api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
   log_ok "Pipeline activated (queue mode). Waiting for processing..."
+  queue_embedded=false
   i=0
   while [ $i -lt 12 ]; do
     POLL=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
     POLL_EMB=$(echo "$POLL" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
-    if [ -n "$POLL_EMB" ] && [ "$POLL_EMB" -gt 0 ] 2>/dev/null; then break; fi
+    if [ -n "$POLL_EMB" ] && [ "$POLL_EMB" -gt 0 ] 2>/dev/null; then
+      queue_embedded=true
+      break
+    fi
     sleep 10
     i=$((i + 1))
   done
+  if [ "$queue_embedded" != "true" ]; then
+    log_err "Queue mode did not produce embeddings within timeout."
+    exit 1
+  fi
   save_checkpoint 8
 else
   PIPS_RESULT=$(api_get "/api/pipelines")
@@ -620,12 +650,13 @@ if [ -n "$PIP_ID" ]; then
   if [ -n "$EMBEDDED" ] && [ "$EMBEDDED" -gt 0 ] 2>/dev/null; then
     log_ok "Queue mode: $EMBEDDED documents embedded to destination!"
   else
-    log_warn "No completed embeddings yet. Check: omnivec pipeline show $PIP_ID"
+    log_err "Queue mode verification failed: embedded_count is 0."
+    exit 1
   fi
   save_checkpoint 9
 else
-  log_step 9 "Skipping queue mode verify (no pipeline)"
-  save_checkpoint 9
+  log_err "No pipeline found for queue-mode verification."
+  exit 1
 fi
 
 # =============================================================================
@@ -651,6 +682,7 @@ if [ "$FROM_STEP" -le 10 ] && [ -n "$PIP_ID" ]; then
   log_ok "Pipeline resumed (inline mode). Waiting for reprocessing..."
 
   # Poll source container until embeddings appear or 120s timeout
+  inline_ready=false
   i=0
   while [ $i -lt 12 ]; do
     poll_check=$(pod_python "
@@ -663,17 +695,31 @@ c = client.get_database_client('testdb').get_container_client('test-documents')
 count = sum(1 for d in c.query_items('SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)', enable_cross_partition_query=True))
 print(count)
 " 2>/dev/null || echo "0")
-    if echo "$poll_check" | grep -q "3"; then break; fi
+    if echo "$poll_check" | grep -q "3"; then
+      inline_ready=true
+      break
+    fi
     sleep 10
     i=$((i + 1))
   done
+  if [ "$inline_ready" != "true" ]; then
+    log_err "Inline mode did not reprocess all documents within timeout."
+    exit 1
+  fi
   save_checkpoint 10
+elif [ "$FROM_STEP" -le 10 ]; then
+  log_err "No pipeline found for inline-mode reset."
+  exit 1
 fi
 
 # =============================================================================
 # STEP 11: Verify inline mode results
 # =============================================================================
 log_step 11 "Verifying inline mode results..."
+if [ -z "$PIP_ID" ]; then
+  log_err "No pipeline found for inline-mode verification."
+  exit 1
+fi
 if [ "$QUIET" = "false" ] && [ -n "$PIP_ID" ]; then
   "$CLI" pipeline show "$PIP_ID" || true
 fi
@@ -718,7 +764,8 @@ log "  Source container — Embedded: $INLINE_EMBEDDED/$INLINE_TOTAL"
 if [ "$INLINE_EMBEDDED" -gt 0 ] 2>/dev/null; then
   log_ok "Inline mode working — $INLINE_EMBEDDED/$INLINE_TOTAL documents embedded directly into source container!"
 else
-  log_warn "No inline embeddings yet. The CFP may still be processing. Check: omnivec pipeline show $PIP_ID"
+  log_err "Inline mode verification failed: no embeddings detected in source container."
+  exit 1
 fi
 
 # =============================================================================

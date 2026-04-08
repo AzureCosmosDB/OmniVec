@@ -30,6 +30,7 @@ Thumbs.db
 
 # Logs
 *.log
+.e2e-checkpoint
 
 # Secrets
 *.env
