@@ -112,23 +112,31 @@ if (-not $Quiet) {
 $ENV_NAME        = "omnivec-e2e-demo"
 $LOCATION        = "eastus2"
 $SUBSCRIPTION    = "074d02eb-4d74-486a-b299-b262264d1536"
+$MODEL_NAME      = "azure-openai-embed"
+$SOURCE_NAME     = "demo-cosmosdb-source"
+$DEST_NAME       = "demo-vector-store"
+$PIPELINE_NAME   = "demo-pipeline"
 $AOAI_ENDPOINT   = $AoaiEndpoint
 $AOAI_KEY        = $AoaiKey
 $AOAI_DEPLOYMENT = $AoaiDeployment
 $AOAI_DIMS       = $AoaiDims
 
-if (-not $AOAI_ENDPOINT) {
-    LogWarn "Azure OpenAI endpoint not set."
-    Log "  Example: https://<resource>.openai.azure.com"
-    $AOAI_ENDPOINT = Read-Host "  Enter Azure OpenAI endpoint"
-    if (-not $AOAI_ENDPOINT) { LogErr "Endpoint required."; exit 1 }
+if ($FromStep -le 6) {
+    if (-not $AOAI_ENDPOINT) {
+        LogWarn "Azure OpenAI endpoint not set."
+        Log "  Example: https://<resource>.openai.azure.com"
+        $AOAI_ENDPOINT = Read-Host "  Enter Azure OpenAI endpoint"
+        if (-not $AOAI_ENDPOINT) { LogErr "Endpoint required."; exit 1 }
+    }
+    if (-not $AOAI_KEY) {
+        LogWarn "Azure OpenAI API key not set."
+        $AOAI_KEY = Read-Host "  Enter Azure OpenAI API key"
+        if (-not $AOAI_KEY) { LogErr "API key required."; exit 1 }
+    }
+    LogOk "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
+} else {
+    Log "  Skipping Azure OpenAI prompts (resuming from step $FromStep)."
 }
-if (-not $AOAI_KEY) {
-    LogWarn "Azure OpenAI API key not set."
-    $AOAI_KEY = Read-Host "  Enter Azure OpenAI API key"
-    if (-not $AOAI_KEY) { LogErr "API key required."; exit 1 }
-}
-LogOk "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
 
 # ─── Helper: load azd env values ─────────────────────────────────────────────
 function Load-AzdValues {
@@ -147,12 +155,29 @@ function Invoke-PodPython {
     $Script | kubectl exec -i deployment/omnivec-api -n omnivec -- python3 -
 }
 
+function Normalize-CommandOutput {
+    param($Output)
+    if ($Output -is [System.Array]) {
+        return ($Output -join "`n")
+    }
+    return "$Output"
+}
+
 # =============================================================================
 # STEP 1: Create azd environment
 # =============================================================================
 if ($FromStep -le 1) {
     LogStep 1 "Creating azd environment: $ENV_NAME"
     azd env new $ENV_NAME --location $LOCATION --subscription $SUBSCRIPTION 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        azd env select $ENV_NAME 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            LogWarn "Environment already exists. Reusing: $ENV_NAME"
+        } else {
+            LogErr "Failed to create/select environment: $ENV_NAME"
+            exit 1
+        }
+    }
     azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
     azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
     azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4ds_v6"
@@ -180,7 +205,8 @@ if ($FromStep -le 2) {
     LogStep 2 "Provisioning infrastructure (azd up ~15 min)..."
     azd up --no-prompt
     if ($LASTEXITCODE -ne 0) {
-        LogWarn "azd up returned non-zero, continuing..."
+        LogErr "azd up failed. Resolve the deployment error and re-run."
+        exit 1
     }
     Save-Checkpoint 2
 }
@@ -193,6 +219,10 @@ if ($FromStep -le 3) {
 }
 # Always load azd values (needed by all subsequent steps)
 Load-AzdValues
+if (-not $AKS_CLUSTER -or -not $RESOURCE_GROUP -or -not $ADMIN_TOKEN) {
+    LogErr "Missing required azd outputs (AKS cluster/resource group/admin token)."
+    exit 1
+}
 az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing 2>$null
 
 Log "  Admin Token: $ADMIN_TOKEN"
@@ -212,9 +242,20 @@ LogOk "Server: $SERVER_URL"
 
 # Wait for API
 Log "  Waiting for API health..."
+$apiHealthy = $false
 for ($i = 0; $i -lt 30; $i++) {
-    try { $h = Invoke-RestMethod -Uri "$SERVER_URL/health" -TimeoutSec 5 2>$null; if ($h.status -eq "healthy") { break } } catch {}
+    try {
+        $h = Invoke-RestMethod -Uri "$SERVER_URL/health" -TimeoutSec 5 2>$null
+        if ($h.status -eq "healthy") {
+            $apiHealthy = $true
+            break
+        }
+    } catch {}
     Start-Sleep -Seconds 5
+}
+if (-not $apiHealthy) {
+    LogErr "API did not become healthy in time."
+    exit 1
 }
 LogOk "API healthy."
 Save-Checkpoint 3
@@ -290,15 +331,16 @@ if ($FromStep -le 5) {
     LogOk "test-documents created."
 
     # Vectors container with vector policy (via API pod)
-    # Retry up to 3 times — RBAC propagation can take longer than expected
-    for ($attempt = 1; $attempt -le 5; $attempt++) {
-        $vectorsOutput = Invoke-PodPython @"
+    # Retry on RBAC propagation and transient Cosmos connectivity timeouts
+    $vectorsOk = $false
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        $vectorsOutput = (Invoke-PodPython @"
 import os
 from azure.cosmos import CosmosClient
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
-client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
+client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred, connection_timeout=30)
 db = client.get_database_client("testdb")
 vp = {"vectorEmbeddings": [{"path": "/embedding", "dataType": "float32", "distanceFunction": "cosine", "dimensions": $AOAI_DIMS}]}
 ip = {"includedPaths": [{"path": "/*"}], "excludedPaths": [{"path": "/embedding/*"}], "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}]}
@@ -310,15 +352,36 @@ except CosmosResourceExistsError:
 except CosmosHttpResponseError as e:
     if "Forbidden" in str(e) or "403" in str(e):
         print("RBAC_WAIT")
+    elif "timed out" in str(e).lower() or "timeout" in str(e).lower():
+        print("RETRY_TIMEOUT")
+    else:
+        raise
+except Exception as e:
+    if "timed out" in str(e).lower() or "timeout" in str(e).lower():
+        print("RETRY_TIMEOUT")
     else:
         raise
 "@
-        Write-Host $vectorsOutput
-        if ($vectorsOutput -match "^OK:") { break }
-        if ($vectorsOutput -match "RBAC_WAIT") {
-            LogWarn "RBAC not yet propagated, waiting 30s (attempt $attempt/5)..."
-            Start-Sleep -Seconds 30
-        } else { break }
+        ) 2>&1
+        $vectorsText = Normalize-CommandOutput $vectorsOutput
+        if ($vectorsText) { Write-Host $vectorsText }
+
+        if ($vectorsText -match "^OK:") {
+            $vectorsOk = $true
+            break
+        }
+        if ($vectorsText -match "RBAC_WAIT|RETRY_TIMEOUT|ServiceRequestTimeoutError|timed out|timeout") {
+            if ($attempt -lt 8) {
+                LogWarn "Vectors container not ready yet, retrying in 30s (attempt $attempt/8)..."
+                Start-Sleep -Seconds 30
+                continue
+            }
+        }
+        break
+    }
+    if (-not $vectorsOk) {
+        LogErr "Failed to create vectors container after retries"
+        exit 1
     }
     LogOk "All containers ready."
     Save-Checkpoint 5
@@ -333,7 +396,7 @@ except CosmosHttpResponseError as e:
 if ($FromStep -le 6) {
     LogStep 6 "Registering Azure OpenAI embedding model..."
     $modelBody = @{
-        name = "azure-openai-embed"; type = "azure-openai"; endpoint = $AOAI_ENDPOINT
+        name = $MODEL_NAME; type = "azure-openai"; endpoint = $AOAI_ENDPOINT
         api_key = $AOAI_KEY; model = $AOAI_DEPLOYMENT; deployment = $AOAI_DEPLOYMENT
         dimensions = $AOAI_DIMS; api_version = "2024-06-01"
     } | ConvertTo-Json
@@ -343,7 +406,12 @@ if ($FromStep -le 6) {
     Save-Checkpoint 6
 } else {
     $models = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Headers $headers
-    $MODEL_ID = $models.models[0].id
+    $model = $models.models | Where-Object { $_.name -eq $MODEL_NAME } | Select-Object -First 1
+    if (-not $model) {
+        LogErr "Required model '$MODEL_NAME' not found. Re-run from step 6."
+        exit 1
+    }
+    $MODEL_ID = $model.id
 }
 
 # =============================================================================
@@ -360,7 +428,7 @@ if ($FromStep -le 7) {
     $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
     foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
 
-    $srcBody = @{ name = "demo-cosmosdb-source"; type = "cosmosdb"; config = @{
+    $srcBody = @{ name = $SOURCE_NAME; type = "cosmosdb"; config = @{
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "test-documents"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID
     }} | ConvertTo-Json -Depth 5
@@ -368,7 +436,7 @@ if ($FromStep -le 7) {
     $SOURCE_ID = $srcResult.source.id
     LogOk "Source: $SOURCE_ID"
 
-    $dstBody = @{ name = "demo-vector-store"; type = "cosmosdb-vector"; config = @{
+    $dstBody = @{ name = $DEST_NAME; type = "cosmosdb-vector"; config = @{
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "vectors"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID; vector_dimensions = $AOAI_DIMS
     }} | ConvertTo-Json -Depth 5
@@ -378,9 +446,19 @@ if ($FromStep -le 7) {
     Save-Checkpoint 7
 } else {
     $srcs = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
-    $SOURCE_ID = $srcs.sources[0].id
+    $src = $srcs.sources | Where-Object { $_.name -eq $SOURCE_NAME } | Select-Object -First 1
+    if (-not $src) {
+        LogErr "Required source '$SOURCE_NAME' not found. Re-run from step 7."
+        exit 1
+    }
+    $SOURCE_ID = $src.id
     $dsts = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
-    $DEST_ID = $dsts.destinations[0].id
+    $dst = $dsts.destinations | Where-Object { $_.name -eq $DEST_NAME } | Select-Object -First 1
+    if (-not $dst) {
+        LogErr "Required destination '$DEST_NAME' not found. Re-run from step 7."
+        exit 1
+    }
+    $DEST_ID = $dst.id
 }
 
 # =============================================================================
@@ -389,8 +467,18 @@ if ($FromStep -le 7) {
 if ($FromStep -le 8) {
     LogStep 8 "Creating pipeline (queue mode), inserting docs, activating..."
 
+    # Clean up an existing demo pipeline to make step-8 resume idempotent
+    try {
+        $existingPipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
+        foreach ($p in $existingPipelines.pipelines) {
+            if ($p.name -eq $PIPELINE_NAME) {
+                try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null | Out-Null } catch {}
+            }
+        }
+    } catch {}
+
     $pipBody = @{
-        name = "demo-pipeline"; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
+        name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
         destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
         processing_mode = "queue"
     } | ConvertTo-Json -Depth 5
@@ -398,14 +486,16 @@ if ($FromStep -le 8) {
     $PIP_ID = $pipResult.pipeline.id
     LogOk "Pipeline created (queue mode): $PIP_ID"
 
-    # Insert test documents
+    # Insert test documents with retries for transient Cosmos timeout errors
     Log "  Inserting test documents..."
-    Invoke-PodPython @"
+    $docsInserted = $false
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        $docInsertOutput = (Invoke-PodPython @"
 import os
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
-client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
+client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred, connection_timeout=30)
 c = client.get_database_client("testdb").get_container_client("test-documents")
 docs = [
     {"id": "doc-001", "title": "Azure Cosmos DB", "content": "Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling.", "category": "database"},
@@ -415,24 +505,73 @@ docs = [
 for doc in docs:
     c.upsert_item(doc)
     print(f"  Inserted: {doc['id']} - {doc['title']}")
+print("DOCS_OK")
 "@
+        ) 2>&1
+        $docInsertText = Normalize-CommandOutput $docInsertOutput
+        if ($docInsertText) { Write-Host $docInsertText }
+        if ($docInsertText -match "DOCS_OK") {
+            $docsInserted = $true
+            break
+        }
+        if ($docInsertText -match "ServiceRequestTimeoutError|timed out|timeout|Connection to .* timed out") {
+            if ($attempt -lt 8) {
+                LogWarn "Document insert timed out, retrying in 30s (attempt $attempt/8)..."
+                Start-Sleep -Seconds 30
+                continue
+            }
+        }
+        break
+    }
+    if (-not $docsInserted) {
+        LogErr "Failed to insert test documents after retries."
+        exit 1
+    }
+
+    Log "  Waiting for worker pods to be ready..."
+    kubectl wait --for=condition=ready pod -l app=omnivec-dotnet-worker -n omnivec --timeout=300s 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "dotnet-worker pods did not become ready."
+        exit 1
+    }
+    kubectl wait --for=condition=ready pod -l app=omnivec-cosmos-changefeed -n omnivec --timeout=300s 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "cosmos-changefeed pods did not become ready."
+        exit 1
+    }
 
     # Resume pipeline
     Log "  Resuming pipeline..."
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
     LogOk "Pipeline activated (queue mode). Waiting for processing..."
-    for ($i = 0; $i -lt 12; $i++) {
+    $queueEmbedded = $false
+    for ($i = 0; $i -lt 24; $i++) {
         try {
             $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
-            if ($poll.stats.embedded_count -gt 0) { break }
+            if ($poll.stats.embedded_count -gt 0) {
+                $queueEmbedded = $true
+                break
+            }
         } catch {}
         Start-Sleep -Seconds 10
+    }
+    if (-not $queueEmbedded) {
+        LogErr "Queue mode did not produce embeddings within timeout."
+        try { kubectl get pods -n omnivec } catch {}
+        try { kubectl logs deployment/omnivec-dotnet-worker -n omnivec --tail=120 2>$null } catch {}
+        try { kubectl logs deployment/omnivec-cosmos-changefeed -n omnivec --tail=120 2>$null } catch {}
+        exit 1
     }
     Save-Checkpoint 8
 } else {
     $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
-    $PIP_ID = $pips.pipelines[0].id
+    $pipeline = $pips.pipelines | Where-Object { $_.name -eq $PIPELINE_NAME } | Select-Object -First 1
+    if (-not $pipeline) {
+        LogErr "Required pipeline '$PIPELINE_NAME' not found. Re-run from step 8."
+        exit 1
+    }
+    $PIP_ID = $pipeline.id
 }
 
 # =============================================================================
@@ -449,12 +588,13 @@ if ($PIP_ID) {
     if ($stats.stats.embedded_count -gt 0) {
         LogOk "Queue mode: $($stats.stats.embedded_count) documents embedded to destination!"
     } else {
-        LogWarn "No completed embeddings yet. Check: omnivec pipeline show $PIP_ID"
+        LogErr "Queue mode verification failed: embedded_count is 0."
+        exit 1
     }
     Save-Checkpoint 9
 } else {
-    LogStep 9 "Skipping queue mode verify (no pipeline)"
-    Save-Checkpoint 9
+    LogErr "No pipeline found for queue-mode verification."
+    exit 1
 }
 
 # =============================================================================
@@ -480,6 +620,7 @@ if ($FromStep -le 10 -and $PIP_ID) {
     LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
 
     # Poll source container until embeddings appear or 120s timeout
+    $inlineReady = $false
     for ($i = 0; $i -lt 12; $i++) {
         $pollResult = Invoke-PodPython @"
 import os
@@ -491,16 +632,30 @@ c = client.get_database_client("testdb").get_container_client("test-documents")
 count = sum(1 for d in c.query_items("SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
 print(count)
 "@
-        if ($pollResult -match "3") { break }
+        if ($pollResult -match "3") {
+            $inlineReady = $true
+            break
+        }
         Start-Sleep -Seconds 10
     }
+    if (-not $inlineReady) {
+        LogErr "Inline mode did not reprocess all documents within timeout."
+        exit 1
+    }
     Save-Checkpoint 10
+} elseif ($FromStep -le 10) {
+    LogErr "No pipeline found for inline-mode reset."
+    exit 1
 }
 
 # =============================================================================
 # STEP 11: Verify inline mode results
 # =============================================================================
 LogStep 11 "Verifying inline mode results..."
+if (-not $PIP_ID) {
+    LogErr "No pipeline found for inline-mode verification."
+    exit 1
+}
 if (-not $Quiet -and $PIP_ID) { & $CLI pipeline show $PIP_ID }
 
 # Inline mode embeds directly into the source container — check for embedding field
@@ -541,7 +696,8 @@ if ($inlineCheckStr -match "INLINE_RESULT:(\d+)/(\d+)") {
 if ($inlineEmbeddedCount -gt 0) {
     LogOk "Inline mode: $inlineEmbeddedCount/$inlineTotal documents embedded directly into source container!"
 } else {
-    LogWarn "No inline embeddings yet. The CFP may still be processing. Check: omnivec pipeline show $PIP_ID"
+    LogErr "Inline mode verification failed: no embeddings detected in source container."
+    exit 1
 }
 
 # =============================================================================
