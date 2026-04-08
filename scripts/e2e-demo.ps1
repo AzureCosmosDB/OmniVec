@@ -23,6 +23,24 @@ $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 $CLI = "$RootDir/bin/omnivec.exe"
 $TOTAL_STEPS = 11
 
+# ─── Checkpoint: auto-resume from last successful step ──────────────────────
+$CheckpointFile = Join-Path $RootDir ".e2e-checkpoint"
+
+# Auto-detect FromStep from checkpoint if user didn't explicitly set -FromStep
+if ($FromStep -eq 1 -and (Test-Path $CheckpointFile)) {
+    $lastOk = [int](Get-Content $CheckpointFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($lastOk -gt 0) {
+        $resumeStep = $lastOk + 1
+        if ($resumeStep -le $TOTAL_STEPS) {
+            Write-Host "`e[33m  Previous run completed step $lastOk/$TOTAL_STEPS. Resuming from step $resumeStep.`e[0m"
+            Write-Host "  (To start fresh, delete $CheckpointFile or pass -FromStep 1)"
+            $FromStep = $resumeStep
+        }
+    }
+}
+
+function Save-Checkpoint { param([int]$Step) Set-Content -Path $CheckpointFile -Value $Step }
+
 # ─── Logging helpers ────────────────────────────────────────────────────────
 function Log       { param([string]$Msg) if (-not $Quiet) { Write-Host $Msg } }
 function LogStep   { param([int]$N, [string]$Msg) Write-Host "`e[33m[Step $N/$TOTAL_STEPS] $Msg`e[0m" }
@@ -152,6 +170,7 @@ if ($FromStep -le 1) {
         }
     }
     LogOk "Environment configured."
+    Save-Checkpoint 1
 }
 
 # =============================================================================
@@ -163,6 +182,7 @@ if ($FromStep -le 2) {
     if ($LASTEXITCODE -ne 0) {
         LogWarn "azd up returned non-zero, continuing..."
     }
+    Save-Checkpoint 2
 }
 
 # =============================================================================
@@ -197,6 +217,7 @@ for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 5
 }
 LogOk "API healthy."
+Save-Checkpoint 3
 
 # Auth headers for all API calls
 $headers = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
@@ -209,6 +230,7 @@ if ($FromStep -le 4) {
     & $CLI config set server $SERVER_URL
     & $CLI config set token $ADMIN_TOKEN
     & $CLI status
+    Save-Checkpoint 4
 }
 
 # =============================================================================
@@ -299,6 +321,7 @@ except CosmosHttpResponseError as e:
         } else { break }
     }
     LogOk "All containers ready."
+    Save-Checkpoint 5
 } else {
     # Load test endpoint for later steps
     $TEST_COSMOS_ENDPOINT = az cosmosdb show --name $TEST_COSMOS_ACCOUNT --resource-group $RESOURCE_GROUP --query documentEndpoint -o tsv 2>$null
@@ -317,6 +340,7 @@ if ($FromStep -le 6) {
     $modelResult = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Method POST -Headers $headers -Body $modelBody
     $MODEL_ID = $modelResult.id
     LogOk "Model: $MODEL_ID ($AOAI_DEPLOYMENT, ${AOAI_DIMS}d)"
+    Save-Checkpoint 6
 } else {
     $models = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Headers $headers
     $MODEL_ID = $models.models[0].id
@@ -351,6 +375,7 @@ if ($FromStep -le 7) {
     $dstResult = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Method POST -Headers $headers -Body $dstBody
     $DEST_ID = $dstResult.destination.id
     LogOk "Destination: $DEST_ID"
+    Save-Checkpoint 7
 } else {
     $srcs = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
     $SOURCE_ID = $srcs.sources[0].id
@@ -404,6 +429,7 @@ for doc in docs:
         } catch {}
         Start-Sleep -Seconds 10
     }
+    Save-Checkpoint 8
 } else {
     $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
     $PIP_ID = $pips.pipelines[0].id
@@ -425,8 +451,10 @@ if ($PIP_ID) {
     } else {
         LogWarn "No completed embeddings yet. Check: omnivec pipeline show $PIP_ID"
     }
+    Save-Checkpoint 9
 } else {
     LogStep 9 "Skipping queue mode verify (no pipeline)"
+    Save-Checkpoint 9
 }
 
 # =============================================================================
@@ -466,6 +494,7 @@ print(count)
         if ($pollResult -match "3") { break }
         Start-Sleep -Seconds 10
     }
+    Save-Checkpoint 10
 }
 
 # =============================================================================
@@ -534,3 +563,7 @@ Write-Host "  Tested both modes on the same pipeline and same documents:"
 Write-Host "  `e[36mQueue mode:`e[0m  CFP -> Service Bus -> .NET worker -> destination container"
 Write-Host "  `e[36mInline mode:`e[0m CFP -> embed directly -> patch back to source container"
 Write-Host ""
+
+# Clean up checkpoint on successful completion
+Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
+Save-Checkpoint 11

@@ -90,37 +90,39 @@ $IMAGES = @(
 
 function Test-ImageExists {
     param($Name, $Tag)
-    $ErrorActionPreference = "SilentlyContinue"
-    $existing = az acr repository show-tags --name $ACR_NAME --repository $Name --query "[?@ == '$Tag']" -o tsv 2>$null
-    $ErrorActionPreference = "Stop"
-    return ($existing -and $existing.Trim())
+    try {
+        $existing = az acr repository show-tags --name $ACR_NAME --repository $Name --query "[?@ == '$Tag']" -o tsv 2>&1
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $result = "$existing".Trim()
+        return ($result -eq $Tag)
+    } catch {
+        return $false
+    }
 }
 
-if ($DO_BUILD) {
-    # BUILD MODE: Build images from source
-    Write-Host "`n`e[33mPhase 1: Building images from source...`e[0m"
+# -- Helper: build a single image via docker or ACR --
+function Build-Image {
+    param($Name, $Dockerfile, $Context, $Tag = "latest")
 
-    function Build-Image {
-        param($Name, $Dockerfile, $Context, $Tag = "latest")
-
-        if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $Name -Tag $Tag)) {
-            Write-Host "  `e[32m${Name}:${Tag} exists, skipping.`e[0m"
-            return
-        }
-
-        Write-Host "  `e[36mBuilding ${Name}:${Tag}...`e[0m"
-        if ($BUILD_MODE -eq "docker") {
-            docker build -t "${ACR_LOGIN_SERVER}/${Name}:${Tag}" -f $Dockerfile $Context
-            docker push "${ACR_LOGIN_SERVER}/${Name}:${Tag}"
-        } else {
-            az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --no-logs 2>$null
-            if ($LASTEXITCODE -ne 0) {
-                az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context
-            }
-        }
-        Write-Host "  `e[32m${Name}:${Tag} pushed.`e[0m"
+    if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $Name -Tag $Tag)) {
+        Write-Host "  `e[32m${Name}:${Tag} exists, skipping.`e[0m"
+        return
     }
 
+    Write-Host "  `e[36mBuilding ${Name}:${Tag}...`e[0m"
+    if ($BUILD_MODE -eq "docker") {
+        docker build -t "${ACR_LOGIN_SERVER}/${Name}:${Tag}" -f $Dockerfile $Context
+        docker push "${ACR_LOGIN_SERVER}/${Name}:${Tag}"
+    } else {
+        az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --no-logs 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context
+        }
+    }
+    Write-Host "  `e[32m${Name}:${Tag} pushed.`e[0m"
+}
+
+function Build-AllImages {
     Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest"
     Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
     Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
@@ -132,12 +134,28 @@ if ($DO_BUILD) {
     if (Test-Path "$RootDir/docgrok/router/Dockerfile") {
         Build-Image -Name "docgrok-router" -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest"
     }
+}
+
+# -- If not explicitly set to build, try import --
+if (-not $DO_BUILD) {
+    Write-Host "`n`e[33mPhase 1: Importing pre-built images from shared registry...`e[0m"
+    Write-Host "  `e[36mSource: $SHARED_REGISTRY`e[0m"
+    if ($SHARED_REGISTRY_TOKEN) {
+        Write-Host "  `e[36mUsing provided registry token for import.`e[0m"
+    } else {
+        Write-Host "  `e[36mNo token provided - assuming public registry (anonymous pull).`e[0m"
+    }
+}
+
+if ($DO_BUILD) {
+    # BUILD MODE: Build images from source
+    Write-Host "`n`e[33mPhase 1: Building images from source...`e[0m"
+
+    Build-AllImages
 
     Write-Host "`e[32mAll images built and pushed.`e[0m"
 } else {
-    # IMPORT MODE: Import pre-built images from shared registry (fast!)
-    Write-Host "`n`e[33mPhase 1: Importing pre-built images from shared registry...`e[0m"
-    Write-Host "  `e[36mSource: $SHARED_REGISTRY`e[0m"
+    # IMPORT MODE: Token validated, proceed with parallel imports
     Write-Host "  `e[36mTo build from source instead: azd env set OMNIVEC_BUILD true`e[0m"
 
     $importCount = 0
@@ -159,12 +177,14 @@ if ($DO_BUILD) {
 
         $job = Start-Job -ScriptBlock {
             param($ACR, $SHARED, $IMG, $USER, $TOKEN)
-            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" --username $USER --password $TOKEN --force 2>&1
+            $authArgs = @()
+            if ($TOKEN) { $authArgs = @("--username", $USER, "--password", $TOKEN) }
+            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" @authArgs --force 2>&1
             if ($LASTEXITCODE -eq 0) { return "OK" }
             # Retry once on transient errors
             if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist") {
                 Start-Sleep -Seconds 2
-                az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" --username $USER --password $TOKEN --force 2>&1
+                az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" @authArgs --force 2>&1
                 if ($LASTEXITCODE -eq 0) { return "OK" }
             }
             return "FAIL: $importError"
@@ -192,6 +212,43 @@ if ($DO_BUILD) {
     }
 
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
+
+    # If no images available, abort before Helm deploy
+    $totalAvailable = $importCount + $skipCount
+    if ($totalAvailable -eq 0) {
+        Write-Host "`n`e[31mERROR: No images available in ACR. Cannot proceed with Helm deploy.`e[0m"
+        Write-Host "  Fix the issue above, then re-run: azd hooks run postprovision"
+        exit 1
+    }
+}
+
+# -- Final image check: verify all required images exist, build any missing --
+Write-Host "`n`e[33mVerifying all required images exist in ACR...`e[0m"
+$missingImages = @()
+foreach ($image in $IMAGES) {
+    if (-not (Test-ImageExists -Name $image -Tag "latest")) {
+        Write-Host "  `e[31mMISSING: ${image}:latest`e[0m"
+        $missingImages += $image
+    } else {
+        Write-Host "  `e[32mOK: ${image}:latest`e[0m"
+    }
+}
+
+if ($missingImages.Count -gt 0) {
+    Write-Host "`n`e[33mBuilding missing images from source...`e[0m"
+    foreach ($image in $missingImages) {
+        switch ($image) {
+            "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
+            "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
+            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
+            "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
+            "docgrok-pipeline-worker" { if (Test-Path "$RootDir/docgrok/pipeline-worker") { Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest" } }
+            "docgrok-router"          { if (Test-Path "$RootDir/docgrok/router") { Build-Image -Name $image -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest" } }
+        }
+    }
+    Write-Host "`e[32mMissing images built.`e[0m"
+} else {
+    Write-Host "`e[32mAll required images present in ACR.`e[0m"
 }
 
 # =============================================================================
@@ -199,7 +256,8 @@ if ($DO_BUILD) {
 # =============================================================================
 
 Write-Host "`n`e[33mPhase 2: Getting AKS credentials...`e[0m"
-az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing
+$KUBE_CONTEXT = $AKS_CLUSTER
+az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --context $KUBE_CONTEXT --overwrite-existing
 Write-Host "`e[32mConnected to AKS cluster: $AKS_CLUSTER`e[0m"
 
 # =============================================================================
@@ -208,17 +266,17 @@ Write-Host "`e[32mConnected to AKS cluster: $AKS_CLUSTER`e[0m"
 
 Write-Host "`n`e[33mPhase 3: Creating namespaces and secrets...`e[0m"
 
-kubectl create namespace omnivec --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace docgrok --dry-run=client -o yaml | kubectl apply -f -
-kubectl label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite
-kubectl annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite
+kubectl --context $KUBE_CONTEXT create namespace omnivec --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+kubectl --context $KUBE_CONTEXT create namespace docgrok --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+kubectl --context $KUBE_CONTEXT label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite
+kubectl --context $KUBE_CONTEXT annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite
 
 if ($ENABLE_BLOB_SOURCE -eq "true" -and $STORAGE_ACCOUNT) {
-    kubectl create secret generic omnivec-storage `
+    kubectl --context $KUBE_CONTEXT create secret generic omnivec-storage `
         --namespace omnivec `
         --from-literal=account-name="$STORAGE_ACCOUNT" `
         --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" `
-        --dry-run=client -o yaml | kubectl apply -f -
+        --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
     Write-Host "  `e[32momnivec-storage secret created.`e[0m"
 }
 
@@ -288,7 +346,7 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
     )
 }
 
-$helmArgs += @("--wait", "--timeout", "10m")
+$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
 
 helm @helmArgs
 
@@ -301,16 +359,16 @@ Write-Host "`e[32mHelm deployment complete.`e[0m"
 Write-Host "`n`e[33mPhase 5: Verifying deployment...`e[0m"
 
 Write-Host "`n`e[36mOmniVec pods:`e[0m"
-kubectl get pods -n omnivec --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null
 
 Write-Host "`n`e[36mDocGrok pods:`e[0m"
-kubectl get pods -n docgrok --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT get pods -n docgrok --no-headers 2>$null
 
 # Wait for external IP
 Write-Host "`n`e[33mWaiting for external IP...`e[0m"
 $externalIp = $null
 for ($i = 0; $i -lt 30; $i++) {
-    $externalIp = kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+    $externalIp = kubectl --context $KUBE_CONTEXT get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
     if ($externalIp) { break }
     Start-Sleep -Seconds 5
 }
