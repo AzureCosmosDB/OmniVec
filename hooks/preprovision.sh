@@ -72,16 +72,10 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
   HEALTHY_PODS=$(kubectl --context "$KUBE_CTX" get pods -n omnivec --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
   if [ "$HEALTHY_PODS" -gt 0 ]; then
-    printf "\n${YELLOW}WARNING: Existing deployment detected and running (${HEALTHY_PODS} healthy pods in omnivec namespace).${NC}\n"
+    printf "\n${YELLOW}Existing healthy deployment detected (${HEALTHY_PODS} running pods in omnivec).${NC}\n"
     printf "  AKS:  ${CYAN}${EXISTING_AKS}${NC}\n"
     printf "  RG:   ${CYAN}${EXISTING_RG}${NC}\n"
-    printf "  Re-running azd up will update the deployment in place.\n"
-    printf "  ${YELLOW}Continue with re-deployment? [y/N]: ${NC}"
-    read -r confirm_redeploy || true
-    case "$confirm_redeploy" in
-      [yY]*) printf "  ${GREEN}Proceeding with update...${NC}\n" ;;
-      *)     printf "  ${RED}Aborting. Use 'azd down' to tear down first, or re-run and confirm.${NC}\n"; exit 0 ;;
-    esac
+    printf "  ${GREEN}Reusing existing resources and proceeding with in-place update.${NC}\n"
   fi
 fi
 

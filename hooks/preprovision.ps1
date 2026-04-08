@@ -76,16 +76,10 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
     } catch {}
 
     if ($healthyPods -gt 0) {
-        Write-Host "`n`e[33mWARNING: Existing deployment detected and running ($healthyPods healthy pods in omnivec namespace).`e[0m"
+        Write-Host "`n`e[33mExisting healthy deployment detected ($healthyPods running pods in omnivec).`e[0m"
         Write-Host "  AKS:  `e[36m$kubeCtx`e[0m"
         Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
-        Write-Host "  Re-running azd up will update the deployment in place."
-        $confirmRedeploy = Read-Host "  Continue with re-deployment? [y/N]"
-        if ($confirmRedeploy -notmatch "^[yY]") {
-            Write-Host "  `e[31mAborting. Use 'azd down' to tear down first, or re-run and confirm.`e[0m"
-            exit 0
-        }
-        Write-Host "  `e[32mProceeding with update...`e[0m"
+        Write-Host "  `e[32mReusing existing resources and proceeding with in-place update.`e[0m"
     }
 }
 

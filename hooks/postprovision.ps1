@@ -52,6 +52,11 @@ foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","CO
     }
 }
 
+if ($ENABLE_BLOB_SOURCE -eq "true" -and -not $SB_ENDPOINT) {
+    Write-Host "`e[31mMissing Service Bus endpoint while blob source is enabled.`e[0m"
+    exit 1
+}
+
 Write-Host "`n`e[36mConfiguration:`e[0m"
 Write-Host "  Instance ID:     $INSTANCE_ID"
 Write-Host "  AKS cluster:     $AKS_CLUSTER"
@@ -136,6 +141,33 @@ function Build-AllImages {
     }
 }
 
+function Build-MissingImages {
+    param([string[]]$Images)
+
+    foreach ($image in $Images) {
+        switch ($image) {
+            "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
+            "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
+            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
+            "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
+            "docgrok-pipeline-worker" {
+                if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
+                    Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
+                } else {
+                    Write-Host "  `e[33mSkipping ${image}: source not present in repo.`e[0m"
+                }
+            }
+            "docgrok-router" {
+                if (Test-Path "$RootDir/docgrok/router/Dockerfile") {
+                    Build-Image -Name $image -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest"
+                } else {
+                    Write-Host "  `e[33mSkipping ${image}: source not present in repo.`e[0m"
+                }
+            }
+        }
+    }
+}
+
 # -- If not explicitly set to build, try import --
 if (-not $DO_BUILD) {
     Write-Host "`n`e[33mPhase 1: Importing pre-built images from shared registry...`e[0m"
@@ -213,12 +245,11 @@ if ($DO_BUILD) {
 
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
 
-    # If no images available, abort before Helm deploy
+    # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
     if ($totalAvailable -eq 0) {
-        Write-Host "`n`e[31mERROR: No images available in ACR. Cannot proceed with Helm deploy.`e[0m"
-        Write-Host "  Fix the issue above, then re-run: azd hooks run postprovision"
-        exit 1
+        Write-Host "`n`e[33mImport provided no usable images. Falling back to source build mode...`e[0m"
+        Build-AllImages
     }
 }
 
@@ -236,17 +267,20 @@ foreach ($image in $IMAGES) {
 
 if ($missingImages.Count -gt 0) {
     Write-Host "`n`e[33mBuilding missing images from source...`e[0m"
+    Build-MissingImages -Images $missingImages
+
+    $stillMissing = @()
     foreach ($image in $missingImages) {
-        switch ($image) {
-            "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
-            "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
-            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
-            "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
-            "docgrok-pipeline-worker" { if (Test-Path "$RootDir/docgrok/pipeline-worker") { Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest" } }
-            "docgrok-router"          { if (Test-Path "$RootDir/docgrok/router") { Build-Image -Name $image -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest" } }
+        if (-not (Test-ImageExists -Name $image -Tag "latest")) {
+            $stillMissing += $image
         }
     }
-    Write-Host "`e[32mMissing images built.`e[0m"
+    if ($stillMissing.Count -gt 0) {
+        Write-Host "`n`e[31mERROR: Required images are still missing after build attempt: $($stillMissing -join ', ')`e[0m"
+        Write-Host "  Ensure docgrok source/submodule exists, then re-run: azd hooks run postprovision"
+        exit 1
+    }
+    Write-Host "`e[32mMissing images built and verified.`e[0m"
 } else {
     Write-Host "`e[32mAll required images present in ACR.`e[0m"
 }
@@ -348,7 +382,25 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
 
 $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
 
-helm @helmArgs
+& helm @helmArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
+    kubectl --context $KUBE_CONTEXT get pods -n omnivec -o wide
+
+    $problemPods = kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null | `
+        Where-Object { $_ -match "ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending" }
+
+    foreach ($line in $problemPods) {
+        $parts = ($line -replace '\s+', ' ').Trim().Split(' ')
+        if ($parts.Count -lt 3) { continue }
+        $podName = $parts[0]
+        $status = $parts[2]
+        Write-Host "`n`e[33m=== $podName ($status) ===`e[0m"
+        kubectl --context $KUBE_CONTEXT describe pod $podName -n omnivec | Select-String -Pattern "Events:" -Context 0,60
+        kubectl --context $KUBE_CONTEXT logs $podName -n omnivec --tail=80 2>$null
+    }
+    exit 1
+}
 
 Write-Host "`e[32mHelm deployment complete.`e[0m"
 
@@ -362,7 +414,8 @@ Write-Host "`n`e[36mOmniVec pods:`e[0m"
 kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null
 
 Write-Host "`n`e[36mDocGrok pods:`e[0m"
-kubectl --context $KUBE_CONTEXT get pods -n docgrok --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT get pods -n omnivec -l app=docgrok --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT get pods -n omnivec -l app=docgrok-controller --no-headers 2>$null
 
 # Wait for external IP
 Write-Host "`n`e[33mWaiting for external IP...`e[0m"
@@ -371,6 +424,12 @@ for ($i = 0; $i -lt 30; $i++) {
     $externalIp = kubectl --context $KUBE_CONTEXT get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
     if ($externalIp) { break }
     Start-Sleep -Seconds 5
+}
+
+kubectl --context $KUBE_CONTEXT rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`e[31mAPI deployment did not become ready.`e[0m"
+    exit 1
 }
 
 Write-Host ""

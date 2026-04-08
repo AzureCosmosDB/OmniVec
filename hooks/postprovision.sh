@@ -62,6 +62,11 @@ for var in INSTANCE_ID AKS_CLUSTER ACR_LOGIN_SERVER ACR_NAME COSMOS_ENDPOINT IDE
   fi
 done
 
+if [ "$ENABLE_BLOB_SOURCE" = "true" ] && [ -z "$SB_ENDPOINT" ]; then
+  printf "${RED}Missing Service Bus endpoint while blob source is enabled.${NC}\n"
+  exit 1
+fi
+
 printf "\n${CYAN}Configuration:${NC}\n"
 echo "  Instance ID:     $INSTANCE_ID"
 echo "  AKS cluster:    $AKS_CLUSTER"
@@ -127,12 +132,37 @@ build_all_images() {
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
   build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
   build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
-  if [ -d "${ROOT_DIR}/docgrok/pipeline-worker" ]; then
+  if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
     build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
   fi
-  if [ -d "${ROOT_DIR}/docgrok/router" ]; then
+  if [ -f "${ROOT_DIR}/docgrok/router/Dockerfile" ]; then
     build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
   fi
+}
+
+build_missing_images() {
+  for image in "$@"; do
+    case "$image" in
+      omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest" ;;
+      omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
+      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
+      omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
+      docgrok-pipeline-worker)
+        if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
+          build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
+        else
+          printf "  ${YELLOW}Skipping ${image}: source not present in repo.${NC}\n"
+        fi
+        ;;
+      docgrok-router)
+        if [ -f "${ROOT_DIR}/docgrok/router/Dockerfile" ]; then
+          build_image "$image" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
+        else
+          printf "  ${YELLOW}Skipping ${image}: source not present in repo.${NC}\n"
+        fi
+        ;;
+    esac
+  done
 }
 
 # ── If not explicitly set to build, try import ──────────────────────────
@@ -198,7 +228,7 @@ else
 
   # Wait for all imports
   for pid in $import_pids; do
-    wait "$pid" 2>/dev/null || true
+    wait "$pid"
   done
 
   # Report results
@@ -218,12 +248,12 @@ else
 
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
 
-  # If no images available, abort before Helm deploy
+  # If no images available from import, auto-fallback to build mode
   total_available=$((import_count + skip_count))
   if [ "$total_available" -eq 0 ]; then
-    printf "\n${RED}ERROR: No images available in ACR. Cannot proceed with Helm deploy.${NC}\n"
-    printf "  Fix the issue above, then re-run: azd hooks run postprovision\n"
-    exit 1
+    printf "\n${YELLOW}Import provided no usable images. Falling back to source build mode...${NC}\n"
+    BUILD_MODE=${BUILD_MODE:-acr}
+    build_all_images
   fi
 fi
 
@@ -241,17 +271,21 @@ done
 
 if [ -n "$MISSING_IMAGES" ]; then
   printf "\n${YELLOW}Building missing images from source...${NC}\n"
+  # shellcheck disable=SC2086
+  build_missing_images $MISSING_IMAGES
+
+  STILL_MISSING=""
   for image in $MISSING_IMAGES; do
-    case "$image" in
-      omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest" ;;
-      omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
-      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
-      omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
-      docgrok-pipeline-worker)  [ -d "${ROOT_DIR}/docgrok/pipeline-worker" ] && build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest" ;;
-      docgrok-router)           [ -d "${ROOT_DIR}/docgrok/router" ] && build_image "$image" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest" ;;
-    esac
+    if ! image_exists "$image" "latest"; then
+      STILL_MISSING="$STILL_MISSING $image"
+    fi
   done
-  printf "${GREEN}Missing images built.${NC}\n"
+  if [ -n "$STILL_MISSING" ]; then
+    printf "\n${RED}ERROR: Required images are still missing after build attempt:${NC} $STILL_MISSING\n"
+    printf "  Ensure docgrok submodule/source exists, then re-run: azd hooks run postprovision\n"
+    exit 1
+  fi
+  printf "${GREEN}Missing images built and verified.${NC}\n"
 else
   printf "${GREEN}All required images present in ACR.${NC}\n"
 fi
@@ -266,7 +300,7 @@ az aks get-credentials \
   --resource-group "$RESOURCE_GROUP" \
   --name "$AKS_CLUSTER" \
   --context "$KUBE_CONTEXT" \
-  --overwrite-existing 2>/dev/null || true
+  --overwrite-existing >/dev/null
 
 # WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
 if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
@@ -282,6 +316,7 @@ elif [ ! -f "$HOME/.kube/config" ]; then
 fi
 
 export KUBE_CONTEXT
+kubectl --context "$KUBE_CONTEXT" get nodes >/dev/null
 printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEXT})${NC}\n"
 
 # =============================================================================
@@ -371,7 +406,27 @@ fi
 HELM_CMD="$HELM_CMD --wait --timeout 10m"
 
 # Execute
+set +e
 eval $HELM_CMD
+helm_rc=$?
+set -e
+
+if [ "$helm_rc" -ne 0 ]; then
+  printf "${RED}Helm deploy failed. Collecting pod diagnostics...${NC}\n"
+  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -o wide || true
+  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers 2>/dev/null | while read -r line; do
+    pod=$(echo "$line" | awk '{print $1}')
+    status=$(echo "$line" | awk '{print $3}')
+    case "$status" in
+      ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending)
+        printf "\n${YELLOW}=== %s (%s) ===${NC}\n" "$pod" "$status"
+        kubectl --context "$KUBE_CONTEXT" describe pod "$pod" -n omnivec | sed -n '/Events:/,$p' || true
+        kubectl --context "$KUBE_CONTEXT" logs "$pod" -n omnivec --tail=80 || true
+        ;;
+    esac
+  done
+  exit "$helm_rc"
+fi
 
 printf "${GREEN}Helm deployment complete.${NC}\n"
 
@@ -385,7 +440,8 @@ printf "\n${CYAN}OmniVec pods:${NC}\n"
 kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers 2>/dev/null || true
 
 printf "\n${CYAN}DocGrok pods:${NC}\n"
-kubectl --context "$KUBE_CONTEXT" get pods -n docgrok --no-headers 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok --no-headers 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok-controller --no-headers 2>/dev/null || true
 
 # Wait for external IP
 printf "\n${YELLOW}Waiting for external IP...${NC}\n"
@@ -399,6 +455,11 @@ while [ $i -lt 30 ]; do
   sleep 5
   i=$((i + 1))
 done
+
+if ! kubectl --context "$KUBE_CONTEXT" rollout status deployment/omnivec-api -n omnivec --timeout=5m >/dev/null; then
+  printf "${RED}API deployment did not become ready.${NC}\n"
+  exit 1
+fi
 
 echo ""
 printf "${GREEN}╔══════════════════════════════════════════╗${NC}\n"
