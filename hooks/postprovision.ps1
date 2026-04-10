@@ -214,7 +214,7 @@ if ($DO_BUILD) {
             $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" @authArgs --force 2>&1
             if ($LASTEXITCODE -eq 0) { return "OK" }
             # Retry once on transient errors
-            if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist") {
+            if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist|InvalidHostName|could not be resolved") {
                 Start-Sleep -Seconds 2
                 az acr import --name $ACR --source "${SHARED}/${IMG}:latest" --image "${IMG}:latest" @authArgs --force 2>&1
                 if ($LASTEXITCODE -eq 0) { return "OK" }
