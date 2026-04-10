@@ -372,18 +372,20 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
     azd env set OMNIVEC_BUILD_MODE "acr"
 }
 
-# -- Check for soft-deleted Key Vault with the expected name --
+# -- Check for soft-deleted Key Vault matching THIS environment's resource group --
 Write-Host "`n`e[33mChecking for soft-deleted Key Vaults...`e[0m"
-$softDeletedVaults = $null
+$rgName = "rg-omnivec-$($env:AZURE_ENV_NAME)"
+$softDeletedVault = $null
 $ErrorActionPreference = "SilentlyContinue"
-$softDeletedVaults = az keyvault list-deleted --query "[?contains(name,'omnivec-kv')].name" -o tsv 2>$null
+$softDeletedVault = az keyvault list-deleted --query "[?contains(properties.vaultId,'$rgName')].name" -o tsv 2>$null
 $ErrorActionPreference = "Stop"
-if ($softDeletedVaults) {
-    Write-Host "  `e[33mFound soft-deleted vault(s): $softDeletedVaults`e[0m"
+if ($softDeletedVault) {
+    $softDeletedVault = "$softDeletedVault".Trim()
+    Write-Host "  `e[33mFound soft-deleted vault for this env: $softDeletedVault`e[0m"
     Write-Host "  `e[36mBicep will recover the vault automatically (no purge needed).`e[0m"
     azd env set OMNIVEC_RECOVER_KEYVAULT "true"
 } else {
-    Write-Host "  `e[32mNo soft-deleted Key Vaults found.`e[0m"
+    Write-Host "  `e[32mNo soft-deleted Key Vault for env '$($env:AZURE_ENV_NAME)'.`e[0m"
     azd env set OMNIVEC_RECOVER_KEYVAULT "false"
 }
 
