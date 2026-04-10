@@ -213,7 +213,7 @@ else
             --force 2>&1) && import_success=true || import_success=false
 
         if [ "$import_success" = "true" ]; then break; fi
-        if echo "$import_error" | grep -qi "unauthorized\|authentication\|401\|not found\|does not exist"; then break; fi
+        if echo "$import_error" | grep -qi "unauthorized\|authentication\|401\|not found\|does not exist\|InvalidHostName\|could not be resolved"; then break; fi
         if [ "$attempt" -lt 2 ]; then sleep 2; fi
       done
 
