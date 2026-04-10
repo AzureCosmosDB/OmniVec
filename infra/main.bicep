@@ -31,9 +31,6 @@ param gpuNodeCount int = 4
 @description('Enable blob storage as a document source (creates Storage Account, Service Bus, Event Grid)')
 param enableBlobSource bool = true
 
-@description('Recover Key Vault from soft-deleted state instead of creating fresh (set by preprovision hook)')
-param recoverKeyvault bool = false
-
 // =============================================================================
 // NAMING (must be computed before resource group to avoid circular dependency)
 // =============================================================================
@@ -98,7 +95,6 @@ module keyvault 'modules/keyvault.bicep' = {
     location: location
     tags: tags
     identityPrincipalId: identity.outputs.principalId
-    recoverSoftDeleted: recoverKeyvault
   }
 }
 
