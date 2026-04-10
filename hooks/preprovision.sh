@@ -401,15 +401,17 @@ fi
 # it instead of failing with a "vault already exists in deleted state" error.
 
 printf "\n${YELLOW}Checking for soft-deleted Key Vaults...${NC}\n"
-# Build expected vault name: we can't know the exact resourceToken yet (Bicep computes it),
-# so we check all soft-deleted vaults with our prefix and let Bicep handle recovery.
-SOFT_DELETED_VAULTS=$(az keyvault list-deleted --query "[?contains(name,'omnivec-kv')].name" -o tsv 2>/dev/null || true)
-if [ -n "$SOFT_DELETED_VAULTS" ]; then
-  printf "  ${YELLOW}Found soft-deleted vault(s): ${SOFT_DELETED_VAULTS}${NC}\n"
+# Match only vaults that belonged to THIS environment's resource group,
+# not vaults from other environments that happen to share the omnivec-kv prefix.
+RG_NAME="rg-omnivec-${AZURE_ENV_NAME}"
+SOFT_DELETED_VAULT=$(az keyvault list-deleted --query "[?contains(properties.vaultId,'${RG_NAME}')].name" -o tsv 2>/dev/null || true)
+SOFT_DELETED_VAULT=$(printf '%s' "$SOFT_DELETED_VAULT" | tr -d '\r' | head -1)
+if [ -n "$SOFT_DELETED_VAULT" ]; then
+  printf "  ${YELLOW}Found soft-deleted vault for this env: ${SOFT_DELETED_VAULT}${NC}\n"
   printf "  ${CYAN}Bicep will recover the vault automatically (no purge needed).${NC}\n"
   azd env set OMNIVEC_RECOVER_KEYVAULT "true"
 else
-  printf "  ${GREEN}No soft-deleted Key Vaults found.${NC}\n"
+  printf "  ${GREEN}No soft-deleted Key Vault for env '${AZURE_ENV_NAME}'.${NC}\n"
   azd env set OMNIVEC_RECOVER_KEYVAULT "false"
 fi
 
