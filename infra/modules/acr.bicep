@@ -1,4 +1,4 @@
-// Azure Container Registry — Basic tier
+// Azure Container Registry — Premium tier (faster imports, geo-replication, throughput)
 param registryName string
 param location string
 param tags object = {}
@@ -7,7 +7,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: registryName
   location: location
   sku: {
-    name: 'Basic'
+    name: 'Premium'
   }
   properties: {
     adminUserEnabled: false
