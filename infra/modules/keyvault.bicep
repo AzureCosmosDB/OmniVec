@@ -6,9 +6,6 @@ param location string
 param tags object = {}
 param identityPrincipalId string
 
-@description('Set to true when a soft-deleted vault with this name exists and should be recovered instead of created fresh.')
-param recoverSoftDeleted bool = false
-
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: vaultName
   location: location
@@ -21,8 +18,9 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableRbacAuthorization: true
     enableSoftDelete: true
     softDeleteRetentionInDays: 7
-    // Recover from soft-delete if a previous vault exists, otherwise create fresh
-    createMode: recoverSoftDeleted ? 'recover' : 'default'
+    // Let Azure handle createMode automatically:
+    // - If a soft-deleted vault with this name exists, Azure recovers it
+    // - Otherwise, creates fresh
     // Note: enablePurgeProtection should be true in production
     // Disabled here for dev/test to allow clean teardown with azd down --purge
   }
