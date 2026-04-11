@@ -32,7 +32,7 @@ function Acquire-Lock {
         if ($alive) {
             Write-Host "`n`e[31mERROR: Another deployment for '$env:AZURE_ENV_NAME' is already running (PID $lockPid).`e[0m"
             Write-Host "  If that process is stuck, you can force-take the lock."
-            $forceLock = Read-Host "  Take over lock and continue? [y/N]"
+            $forceLock = (Read-Host "  Take over lock and continue? [y/N]").Trim()
             if ($forceLock -match "^[yY]") {
                 Write-Host "  `e[33mKilling PID $lockPid and taking lock...`e[0m"
                 try { Stop-Process -Id ([int]$lockPid) -Force -ErrorAction SilentlyContinue } catch {}
@@ -62,13 +62,15 @@ try {
 # -- Check for existing healthy deployment --
 $ErrorActionPreference = "SilentlyContinue"
 $existingAks = azd env get-value AZURE_AKS_CLUSTER_NAME 2>$null
+$aksExitCode = $LASTEXITCODE
 $existingRg = azd env get-value AZURE_RESOURCE_GROUP 2>$null
+$rgExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 
 $deploymentDetected = $false
 $inPlaceUpdate = $false
 
-if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $existingRg -notmatch "^ERROR") {
+if ($aksExitCode -eq 0 -and $rgExitCode -eq 0 -and $existingAks -and $existingRg -and "$existingAks" -notmatch "ERROR" -and "$existingRg" -notmatch "ERROR") {
     $kubeCtx = $existingAks.Trim()
     az aks get-credentials --resource-group $existingRg.Trim() --name $kubeCtx --context $kubeCtx --overwrite-existing 2>$null | Out-Null
 
@@ -85,10 +87,9 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
         Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
         Write-Host ""
         Write-Host "  `e[36m1) Update in-place (default)`e[0m"
-        Write-Host "  `e[36m2) Teardown and redeploy fresh`e[0m"
-        Write-Host "  `e[36m3) Abort`e[0m"
+        Write-Host "  `e[36m2) Abort (use 'azd down' to teardown)`e[0m"
         Write-Host ""
-        $choice = Read-Host "  Choice [1]"
+        $choice = (Read-Host "  Choice [1]").Trim()
         if (-not $choice) { $choice = "1" }
         switch ($choice) {
             "1" {
@@ -96,14 +97,8 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
                 $inPlaceUpdate = $true
             }
             "2" {
-                Write-Host "  `e[33mTearing down existing deployment first...`e[0m"
-                azd down --force --purge
-                Write-Host "  `e[32mTeardown complete. Proceeding with fresh deployment.`e[0m"
-                $deploymentDetected = $false
-            }
-            "3" {
                 Write-Host "  `e[31mAborted by user.`e[0m"
-                Write-Host "  `e[33m(The ERROR message below is expected — it is how azd stops.)`e[0m"
+                Write-Host "  `e[33mTo teardown, run: azd down --force --purge`e[0m"
                 exit 1
             }
             default {
@@ -119,16 +114,18 @@ if ($inPlaceUpdate) {
     Write-Host "`n`e[36mIn-place update — only node count changes allowed.`e[0m"
     $ErrorActionPreference = "SilentlyContinue"
     $curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+    $sysExitCode2 = $LASTEXITCODE
     $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
+    $gpuExitCode2 = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
-    $defSysCount = if ($curSysCount -and $curSysCount -notmatch "^ERROR" -and $curSysCount.Trim()) { $curSysCount.Trim() } else { "2" }
-    $defGpuCount = if ($curGpuCount -and $curGpuCount -notmatch "^ERROR" -and $curGpuCount.Trim()) { $curGpuCount.Trim() } else { "0" }
+    $defSysCount = if ($sysExitCode2 -eq 0 -and $curSysCount -and "$curSysCount".Trim()) { "$curSysCount".Trim() } else { "2" }
+    $defGpuCount = if ($gpuExitCode2 -eq 0 -and $curGpuCount -and "$curGpuCount".Trim()) { "$curGpuCount".Trim() } else { "0" }
 
-    $sysCount = Read-Host "  System node count [$defSysCount]"
+    $sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
     if (-not $sysCount) { $sysCount = $defSysCount }
     azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
 
-    $gpuCount = Read-Host "  GPU node count [$defGpuCount]"
+    $gpuCount = (Read-Host "  GPU node count [$defGpuCount]").Trim()
     if (-not $gpuCount) { $gpuCount = $defGpuCount }
     azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
 
@@ -141,8 +138,9 @@ if ($inPlaceUpdate) {
 $existingConfig = $null
 $ErrorActionPreference = "SilentlyContinue"
 $existingConfig = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
+$configExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ERROR") {
+if ($configExitCode -eq 0 -and $existingConfig -and "$existingConfig" -notmatch "ERROR") {
     Write-Host "`n`e[36mConfiguration for environment '$env:AZURE_ENV_NAME':`e[0m"
     Write-Host "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null)"
     Write-Host "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null)"
@@ -151,12 +149,44 @@ if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ER
     Write-Host "  Blob source:     $(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)"
     Write-Host "  Metadata store:  $(azd env get-value OMNIVEC_METADATA_STORE 2>$null)"
     Write-Host ""
-    $reuse = Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)"
+    $reuse = (Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)").Trim()
     if (-not $reuse) { $reuse = "Y" }
     if ($reuse -match "^[nN]") {
         Write-Host "  `e[32mReconfiguring — current values shown as defaults, press Enter to keep.`e[0m"
     } else {
-        Write-Host "  `e[32mUsing existing settings, skipping configuration prompts.`e[0m"
+        Write-Host "  `e[32mUsing existing settings, running recovery checks before proceeding...`e[0m"
+
+        # -- Recovery: check for soft-deleted Key Vaults that block provisioning --
+        Write-Host "`n`e[33mChecking for soft-deleted Key Vaults that may block provisioning...`e[0m"
+        $ErrorActionPreference = "SilentlyContinue"
+        $deletedVaults = az keyvault list-deleted --query "[?contains(name, 'omnivec-kv')].{name:name, location:properties.location}" -o json 2>$null | ConvertFrom-Json
+        $ErrorActionPreference = "Stop"
+        if ($deletedVaults -and $deletedVaults.Count -gt 0) {
+            Write-Host "  `e[33mFound $($deletedVaults.Count) soft-deleted OmniVec Key Vault(s):`e[0m"
+            foreach ($dv in $deletedVaults) {
+                Write-Host "    - $($dv.name) (location: $($dv.location))"
+            }
+            Write-Host ""
+            $purgeChoice = (Read-Host "  Purge these to unblock provisioning? [Y/n]").Trim()
+            if (-not $purgeChoice) { $purgeChoice = "Y" }
+            if ($purgeChoice -match "^[yY]") {
+                foreach ($dv in $deletedVaults) {
+                    Write-Host "  `e[36mPurging $($dv.name)...`e[0m" -NoNewline
+                    az keyvault purge --name $dv.name 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host " `e[32m✓`e[0m"
+                    } else {
+                        Write-Host " `e[31m✗ (may need elevated permissions)`e[0m"
+                    }
+                }
+            } else {
+                Write-Host "  `e[33mSkipping purge — provisioning may fail if vault name collides.`e[0m"
+            }
+        } else {
+            Write-Host "  `e[32mNo soft-deleted Key Vaults found.`e[0m"
+        }
+
+        Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
         exit 0
     }
 }
@@ -236,7 +266,7 @@ if (-not $deploymentDetected) {
     Write-Host "  1) Launch a NEW OmniVec installation (unique resources alongside existing)"
     Write-Host "  2) Cancel deployment"
     Write-Host ""
-    $choice = Read-Host "Choice [1/2]"
+    $choice = (Read-Host "Choice [1/2]").Trim()
     if ($choice -eq "2") {
         Write-Host "`e[31mDeployment cancelled.`e[0m"
         exit 1
@@ -250,8 +280,9 @@ if (-not $deploymentDetected) {
 # -- Metadata storage selection --
 $ErrorActionPreference = "SilentlyContinue"
 $curMeta = azd env get-value OMNIVEC_METADATA_STORE 2>$null
+$metaExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-$defMeta = if ($curMeta -and $curMeta -notmatch "^ERROR") { $curMeta.Trim() } else { "cosmosdb-serverless" }
+$defMeta = if ($metaExitCode -eq 0 -and $curMeta -and "$curMeta" -notmatch "ERROR") { "$curMeta".Trim() } else { "cosmosdb-serverless" }
 $defMetaNum = if ($defMeta -eq "cosmosdb-provisioned") { "2" } else { "1" }
 $mark1 = if ($defMetaNum -eq "1") { " (current)" } else { "" }
 $mark2 = if ($defMetaNum -eq "2") { " (current)" } else { "" }
@@ -260,7 +291,7 @@ Write-Host "`e[33mSelect metadata storage backend:`e[0m"
 Write-Host "  1) Azure CosmosDB (Serverless NoSQL)$mark1"
 Write-Host "  2) Azure CosmosDB (Provisioned throughput)$mark2"
 Write-Host ""
-$metaChoice = Read-Host "Choice [$defMetaNum]"
+$metaChoice = (Read-Host "Choice [$defMetaNum]").Trim()
 if (-not $metaChoice) { $metaChoice = $defMetaNum }
 
 switch ($metaChoice) {
@@ -277,8 +308,9 @@ switch ($metaChoice) {
 # -- Blob storage source --
 $ErrorActionPreference = "SilentlyContinue"
 $curBlob = azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null
+$blobExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-$defBlob = if ($curBlob -and $curBlob -notmatch "^ERROR") { $curBlob.Trim() } else { "true" }
+$defBlob = if ($blobExitCode -eq 0 -and $curBlob -and "$curBlob" -notmatch "ERROR") { "$curBlob".Trim() } else { "true" }
 $defBlobNum = if ($defBlob -eq "false") { "2" } else { "1" }
 $bmark1 = if ($defBlobNum -eq "1") { " (current)" } else { "" }
 $bmark2 = if ($defBlobNum -eq "2") { " (current)" } else { "" }
@@ -290,7 +322,7 @@ Write-Host ""
 Write-Host "  1) Yes - enable blob source ingestion$bmark1"
 Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)$bmark2"
 Write-Host ""
-$blobChoice = Read-Host "Choice [$defBlobNum]"
+$blobChoice = (Read-Host "Choice [$defBlobNum]").Trim()
 if (-not $blobChoice) { $blobChoice = $defBlobNum }
 
 if ($blobChoice -eq "1") {
@@ -321,8 +353,9 @@ Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
 $ErrorActionPreference = "SilentlyContinue"
 $curSysSku = $null
 try { $curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null } catch {}
+$sysSkuExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-if ($curSysSku -and $LASTEXITCODE -eq 0 -and $curSysSku -notmatch "^ERROR") {
+if ($curSysSku -and $sysSkuExitCode -eq 0 -and "$curSysSku" -notmatch "ERROR") {
     $curSysSku = $curSysSku.Trim()
 } else {
     $curSysSku = ""
@@ -357,12 +390,12 @@ while (-not $SYS_SKU) {
     Write-Host ""
     if (-not $nextDefault) { $nextDefault = $($defIdx+1) }
 
-    $sysPick = Read-Host "  System VM SKU [$nextDefault]"
+    $sysPick = (Read-Host "  System VM SKU [$nextDefault]").Trim()
     if (-not $sysPick) { $sysPick = "$nextDefault" }
 
     if ([int]$sysPick -eq ($sysCandidates.Count + 1)) {
         $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
-        $candidate = Read-Host "  Enter SKU name [$defManual]"
+        $candidate = (Read-Host "  Enter SKU name [$defManual]").Trim()
         if (-not $candidate) { $candidate = $defManual }
     } else {
         $idx = [int]$sysPick - 1
@@ -391,9 +424,10 @@ Write-Host "  `e[32mSystem VM SKU: $SYS_SKU`e[0m"
 
 $ErrorActionPreference = "SilentlyContinue"
 $curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+$sysExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-$defSysCount = if ($curSysCount -and $curSysCount -notmatch "^ERROR" -and $curSysCount.Trim()) { $curSysCount.Trim() } else { "2" }
-$sysCount = Read-Host "  System node count [$defSysCount]"
+$defSysCount = if ($sysExitCode -eq 0 -and $curSysCount -and "$curSysCount".Trim()) { "$curSysCount".Trim() } else { "2" }
+$sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
 if (-not $sysCount) { $sysCount = $defSysCount }
 Write-Host "  `e[32mSystem nodes: $sysCount`e[0m"
 
@@ -405,8 +439,9 @@ Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
 $ErrorActionPreference = "SilentlyContinue"
 $curGpuSku = $null
 try { $curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null } catch {}
+$gpuSkuExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-if ($curGpuSku -and $LASTEXITCODE -eq 0 -and $curGpuSku -notmatch "^ERROR") {
+if ($curGpuSku -and $gpuSkuExitCode -eq 0 -and "$curGpuSku" -notmatch "ERROR") {
     $curGpuSku = $curGpuSku.Trim()
 } else {
     $curGpuSku = ""
@@ -414,10 +449,11 @@ if ($curGpuSku -and $LASTEXITCODE -eq 0 -and $curGpuSku -notmatch "^ERROR") {
 
 $ErrorActionPreference = "SilentlyContinue"
 $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
+$gpuCountExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-$defGpuCount = if ($curGpuCount -and $curGpuCount -notmatch "^ERROR" -and $curGpuCount.Trim()) { $curGpuCount.Trim() } else { "0" }
+$defGpuCount = if ($gpuCountExitCode -eq 0 -and $curGpuCount -and "$curGpuCount".Trim()) { "$curGpuCount".Trim() } else { "0" }
 
-$gpuCount = Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]"
+$gpuCount = (Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]").Trim()
 if (-not $gpuCount) { $gpuCount = $defGpuCount }
 
 if ($gpuCount -ne "0") {
@@ -449,12 +485,12 @@ if ($gpuCount -ne "0") {
         Write-Host ""
         if (-not $nextGpuDefault) { $nextGpuDefault = $($defGpuIdx+1) }
 
-        $gpuPick = Read-Host "  GPU VM SKU [$nextGpuDefault]"
+        $gpuPick = (Read-Host "  GPU VM SKU [$nextGpuDefault]").Trim()
         if (-not $gpuPick) { $gpuPick = "$nextGpuDefault" }
 
         if ([int]$gpuPick -eq ($gpuCandidates.Count + 1)) {
             $defGpuManual = if ($curGpuSku) { $curGpuSku } else { "Standard_NC4as_T4_v3" }
-            $candidate = Read-Host "  Enter SKU name [$defGpuManual]"
+            $candidate = (Read-Host "  Enter SKU name [$defGpuManual]").Trim()
             if (-not $candidate) { $candidate = $defGpuManual }
         } else {
             $idx = [int]$gpuPick - 1

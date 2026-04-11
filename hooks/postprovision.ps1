@@ -21,9 +21,10 @@ function Get-AzdValue {
     # Fallback: read from azd env store
     $ErrorActionPreference = "SilentlyContinue"
     $val = azd env get-value $Key 2>$null
+    $exitCode = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
-    if ($LASTEXITCODE -eq 0 -and $val -and $val -notmatch "^ERROR") {
-        return $val.Trim()
+    if ($exitCode -eq 0 -and $val -and "$val" -notmatch "ERROR") {
+        return "$val".Trim()
     }
     return $null
 }
@@ -413,7 +414,7 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
     )
 }
 
-$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
+$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m", "--atomic")
 
 & helm @helmArgs
 if ($LASTEXITCODE -ne 0) {
