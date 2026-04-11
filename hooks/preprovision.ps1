@@ -396,6 +396,22 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
     azd env set OMNIVEC_BUILD_MODE "acr"
 }
 
+# -- Sanitize env values: strip BOM, tabs, carriage returns --
+Write-Host "`n`e[36mSanitizing environment values...`e[0m"
+$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_ENABLE_BLOB_SOURCE", "OMNIVEC_METADATA_STORE", "OMNIVEC_BUILD_MODE")
+foreach ($key in $envKeys) {
+    $ErrorActionPreference = "SilentlyContinue"
+    $raw = azd env get-value $key 2>$null
+    $ErrorActionPreference = "Stop"
+    if ($raw) {
+        $clean = $raw -replace '[\t\r]','' -replace '^\xEF\xBB\xBF','' -replace '^\s+|\s+$',''
+        if ($clean -ne $raw) {
+            azd env set $key $clean
+            Write-Host "  `e[33mCleaned ${key}: removed hidden characters`e[0m"
+        }
+    }
+}
+
 Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
 Write-Host "`e[36mEnvironment: $env:AZURE_ENV_NAME`e[0m"
 Write-Host "`e[36mEach installation gets a unique resource token derived from (subscription + resource group + env name).`e[0m"

@@ -423,6 +423,19 @@ fi
 # We check if a soft-deleted vault with that name exists so Bicep can recover
 # it instead of failing with a "vault already exists in deleted state" error.
 
+# ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
+printf "\n${CYAN}Sanitizing environment values...${NC}\n"
+for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE OMNIVEC_BUILD_MODE; do
+  raw=$(azd env get-value "$key" 2>/dev/null || true)
+  if [ -n "$raw" ]; then
+    clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ "$raw" != "$clean" ]; then
+      azd env set "$key" "$clean"
+      printf "  ${YELLOW}Cleaned ${key}: removed hidden characters${NC}\n"
+    fi
+  fi
+done
+
 printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
 printf "${CYAN}Environment: ${AZURE_ENV_NAME}${NC}\n"
 printf "${CYAN}Each installation gets a unique resource token derived from (subscription + resource group + env name).${NC}\n"
