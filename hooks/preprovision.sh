@@ -122,13 +122,7 @@ if [ -n "$EXISTING_CONFIG" ]; then
   reuse=${reuse:-Y}
   case "$reuse" in
     [nN]*)
-      printf "  ${GREEN}Reconfiguring — clearing saved settings...${NC}\n"
-      azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "" 2>/dev/null || true
-      azd env set OMNIVEC_SYSTEM_NODE_COUNT "" 2>/dev/null || true
-      azd env set OMNIVEC_GPU_NODE_VM_SIZE "" 2>/dev/null || true
-      azd env set OMNIVEC_GPU_NODE_COUNT "" 2>/dev/null || true
-      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "" 2>/dev/null || true
-      azd env set OMNIVEC_METADATA_STORE "" 2>/dev/null || true
+      printf "  ${GREEN}Reconfiguring — current values shown as defaults, press Enter to keep.${NC}\n"
       ;;
     *)
       printf "  ${GREEN}Using existing settings, skipping configuration prompts.${NC}\n"
@@ -246,14 +240,23 @@ fi
 
 # ── Metadata storage selection ──────────────────────────────────────────────
 
+cur_meta=$(azd env get-value OMNIVEC_METADATA_STORE 2>/dev/null || true)
+cur_meta=$(printf '%s' "$cur_meta" | tr -d '\r')
+def_meta_num=1
+meta_mark1=" (current)"
+meta_mark2=""
+if [ "$cur_meta" = "cosmosdb-provisioned" ]; then
+  def_meta_num=2; meta_mark1=""; meta_mark2=" (current)"
+fi
+
 echo ""
 printf "${YELLOW}Select metadata storage backend:${NC}\n"
-echo "  1) Azure CosmosDB (Serverless NoSQL) — recommended"
-echo "  2) Azure CosmosDB (Provisioned throughput)"
+echo "  1) Azure CosmosDB (Serverless NoSQL)${meta_mark1}"
+echo "  2) Azure CosmosDB (Provisioned throughput)${meta_mark2}"
 echo ""
-printf "Choice [1]: "
+printf "Choice [${def_meta_num}]: "
 read -r meta_choice || true
-meta_choice=${meta_choice:-1}
+meta_choice=${meta_choice:-$def_meta_num}
 
 case "$meta_choice" in
   1)
@@ -272,17 +275,26 @@ esac
 
 # ── Blob storage source ─────────────────────────────────────────────────────
 
+cur_blob=$(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>/dev/null || true)
+cur_blob=$(printf '%s' "$cur_blob" | tr -d '\r')
+def_blob_num=1
+blob_mark1=" (current)"
+blob_mark2=""
+if [ "$cur_blob" = "false" ]; then
+  def_blob_num=2; blob_mark1=""; blob_mark2=" (current)"
+fi
+
 echo ""
 printf "${YELLOW}Will you use Azure Blob Storage as a document source?${NC}\n"
 echo "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
 echo "  will be created alongside the Storage Account."
 echo ""
-echo "  1) Yes — enable blob source ingestion (recommended)"
-echo "  2) No  — CosmosDB sources only (skip Service Bus + Event Grid)"
+echo "  1) Yes — enable blob source ingestion${blob_mark1}"
+echo "  2) No  — CosmosDB sources only (skip Service Bus + Event Grid)${blob_mark2}"
 echo ""
-printf "Choice [1]: "
+printf "Choice [${def_blob_num}]: "
 read -r blob_choice || true
-blob_choice=${blob_choice:-1}
+blob_choice=${blob_choice:-$def_blob_num}
 
 case "$blob_choice" in
   1)
@@ -360,9 +372,12 @@ else
 fi
 printf "  ${GREEN}System VM SKU: ${SYS_SKU}${NC}\n"
 
-printf "  System node count [2]: "
+cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
+cur_sys_count=$(printf '%s' "$cur_sys_count" | tr -d '\r')
+def_sys_count=${cur_sys_count:-2}
+printf "  System node count [${def_sys_count}]: "
 read -r sys_count || true
-sys_count=${sys_count:-2}
+sys_count=${sys_count:-$def_sys_count}
 printf "  ${GREEN}System nodes: ${sys_count}${NC}\n"
 
 echo ""
@@ -394,9 +409,12 @@ else
     GPU_SKU=$(printf "$GPU_OPTIONS" | head -1 | cut -d: -f2)
   fi
 
-  printf "  GPU node count (0 = no GPU pool) [4]: "
+  cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
+  cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+  def_gpu_count=${cur_gpu_count:-4}
+  printf "  GPU node count (0 = no GPU pool) [${def_gpu_count}]: "
   read -r gpu_count || true
-  gpu_count=${gpu_count:-4}
+  gpu_count=${gpu_count:-$def_gpu_count}
 fi
 
 if [ "$gpu_count" = "0" ]; then
