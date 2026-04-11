@@ -279,73 +279,67 @@ Write-Host ""
 Write-Host "`e[33mConfigure AKS node pools:`e[0m"
 Write-Host ""
 
-# Query available VM SKUs in the selected location (parallel queries)
 $location = $env:AZURE_LOCATION
 if (-not $location) { $location = "centralus" }
-Write-Host "`e[33mChecking VM SKU availability in $location...`e[0m"
 
-# Run both SKU queries in parallel
-$sysJob = Start-Job -ScriptBlock {
-    az vm list-skus --location $args[0] --size Standard_D --resource-type virtualMachines --query "[?(restrictions==null || restrictions[0]==null)].name" -o json 2>$null
-} -ArgumentList $location
-$gpuJob = Start-Job -ScriptBlock {
-    az vm list-skus --location $args[0] --size Standard_NC --resource-type virtualMachines --query "[?(restrictions==null || restrictions[0]==null)].name" -o json 2>$null
-} -ArgumentList $location
-
-# Wait for both to finish
-$null = Wait-Job $sysJob, $gpuJob
-$sysJson = Receive-Job $sysJob
-$gpuJson = Receive-Job $gpuJob
-Remove-Job $sysJob, $gpuJob
-
-$availableRaw = @()
-if ($sysJson) { $availableRaw += ($sysJson | ConvertFrom-Json) }
-if ($gpuJson) { $availableRaw += ($gpuJson | ConvertFrom-Json) }
-if (-not $availableRaw) { $availableRaw = @() }
-
-# System node candidates
-$sysCandidates = @(
-    @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB RAM" },
-    @{ name = "Standard_D4ds_v5"; desc = "4 vCPU, 16 GB RAM (v5)" },
-    @{ name = "Standard_D8s_v3";  desc = "8 vCPU, 32 GB RAM" },
-    @{ name = "Standard_D8ds_v5"; desc = "8 vCPU, 32 GB RAM (v5)" },
-    @{ name = "Standard_D2s_v3";  desc = "2 vCPU, 8 GB RAM (dev)" },
-    @{ name = "Standard_D2ds_v5"; desc = "2 vCPU, 8 GB RAM (dev, v5)" }
-)
-$availableSys = @()
-foreach ($c in $sysCandidates) {
-    if ($availableRaw -contains $c.name) {
-        $availableSys += $c
-    }
+# Helper: validate a single SKU in the location
+function Test-SkuAvailable {
+    param($Sku, $Location)
+    $result = az vm list-skus --location $Location --size $Sku --resource-type virtualMachines --query "[?name=='$Sku' && (restrictions==null || restrictions[0]==null)].name" -o tsv 2>$null
+    return ($result -and $result.Trim() -eq $Sku)
 }
 
+# -- System node pool --
 Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
 $ErrorActionPreference = "SilentlyContinue"
 $curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
 $ErrorActionPreference = "Stop"
 $curSysSku = if ($curSysSku -and $curSysSku -notmatch "^ERROR") { $curSysSku.Trim() } else { "" }
-if ($availableSys.Count -eq 0) {
-    Write-Host "  `e[31mNo suitable system VM SKUs found in $location!`e[0m"
-    $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
-    $SYS_SKU = Read-Host "  Enter a VM SKU manually [$defManual]"
-    if (-not $SYS_SKU) { $SYS_SKU = $defManual }
-} else {
-    # Find default index — match current SKU or fall back to first
-    $defIdx = 0
-    for ($i = 0; $i -lt $availableSys.Count; $i++) {
-        if ($curSysSku -and $availableSys[$i].name -eq $curSysSku) { $defIdx = $i }
+
+$sysCandidates = @(
+    @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB" },
+    @{ name = "Standard_D4ds_v5"; desc = "4 vCPU, 16 GB (v5)" },
+    @{ name = "Standard_D8s_v3";  desc = "8 vCPU, 32 GB" },
+    @{ name = "Standard_B4ms";    desc = "4 vCPU, 16 GB (burstable)" },
+    @{ name = "Standard_D2s_v3";  desc = "2 vCPU, 8 GB (dev)" }
+)
+$defIdx = 0
+for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
+    if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { $defIdx = $i }
+}
+Write-Host "  Common options:"
+for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
+    $mark = if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { " (current)" } else { "" }
+    Write-Host "    $($i+1)) $($sysCandidates[$i].name) - $($sysCandidates[$i].desc)$mark"
+}
+Write-Host "    $($sysCandidates.Count+1)) Enter custom SKU"
+Write-Host ""
+
+$SYS_SKU = $null
+while (-not $SYS_SKU) {
+    $sysPick = Read-Host "  System VM SKU [$($defIdx+1)]"
+    if (-not $sysPick) { $sysPick = "$($defIdx+1)" }
+
+    if ([int]$sysPick -eq ($sysCandidates.Count + 1)) {
+        $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
+        $SYS_SKU = Read-Host "  Enter SKU name [$defManual]"
+        if (-not $SYS_SKU) { $SYS_SKU = $defManual }
+    } else {
+        $idx = [int]$sysPick - 1
+        if ($idx -ge 0 -and $idx -lt $sysCandidates.Count) {
+            $SYS_SKU = $sysCandidates[$idx].name
+        } else {
+            $SYS_SKU = $sysCandidates[$defIdx].name
+        }
     }
-    Write-Host "  Available VM SKUs:"
-    for ($i = 0; $i -lt $availableSys.Count; $i++) {
-        $mark = if ($curSysSku -and $availableSys[$i].name -eq $curSysSku) { " (current)" } else { "" }
-        Write-Host "    $($i+1)) $($availableSys[$i].name) - $($availableSys[$i].desc)$mark"
+
+    Write-Host "  `e[36mValidating $SYS_SKU in $location...`e[0m" -NoNewline
+    if (Test-SkuAvailable -Sku $SYS_SKU -Location $location) {
+        Write-Host " `e[32m✓ available`e[0m"
+    } else {
+        Write-Host " `e[31m✗ not available in $location. Try again.`e[0m"
+        $SYS_SKU = $null
     }
-    Write-Host ""
-    $sysSku = Read-Host "  System VM SKU [$($defIdx+1)]"
-    if (-not $sysSku) { $sysSku = "$($defIdx+1)" }
-    $idx = [int]$sysSku - 1
-    if ($idx -lt 0 -or $idx -ge $availableSys.Count) { $idx = $defIdx }
-    $SYS_SKU = $availableSys[$idx].name
 }
 Write-Host "  `e[32mSystem VM SKU: $SYS_SKU`e[0m"
 
@@ -359,59 +353,72 @@ Write-Host "  `e[32mSystem nodes: $sysCount`e[0m"
 
 Write-Host ""
 
-# GPU node candidates
-$gpuCandidates = @(
-    @{ name = "Standard_NC6s_v3";     desc = "6 vCPU, 112 GB, 1x V100 16GB" },
-    @{ name = "Standard_NC12s_v3";    desc = "12 vCPU, 224 GB, 2x V100" },
-    @{ name = "Standard_NC4as_T4_v3"; desc = "4 vCPU, 28 GB, 1x T4 16GB" },
-    @{ name = "Standard_NC8as_T4_v3"; desc = "8 vCPU, 56 GB, 1x T4 16GB" },
-    @{ name = "Standard_NC24ads_A100_v4"; desc = "24 vCPU, 220 GB, 1x A100 80GB" }
-)
-$availableGpu = @()
-foreach ($c in $gpuCandidates) {
-    if ($availableRaw -contains $c.name) {
-        $availableGpu += $c
-    }
-}
-
+# -- GPU node pool --
 Write-Host "`e[36mGPU node pool (ML models - dse-qwen2, clip, bge, bge-small):`e[0m"
 Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
 $ErrorActionPreference = "SilentlyContinue"
 $curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null
 $ErrorActionPreference = "Stop"
 $curGpuSku = if ($curGpuSku -and $curGpuSku -notmatch "^ERROR") { $curGpuSku.Trim() } else { "" }
-if ($availableGpu.Count -eq 0) {
-    Write-Host "  `e[33mNo GPU VM SKUs available in $location. GPU pool will be skipped.`e[0m"
-    $GPU_SKU = if ($curGpuSku) { $curGpuSku } else { "Standard_NC6s_v3" }
-    $gpuCount = "0"
-} else {
-    $defGpuIdx = 0
-    for ($i = 0; $i -lt $availableGpu.Count; $i++) {
-        if ($curGpuSku -and $availableGpu[$i].name -eq $curGpuSku) { $defGpuIdx = $i }
-    }
-    Write-Host "  Available GPU SKUs:"
-    for ($i = 0; $i -lt $availableGpu.Count; $i++) {
-        $mark = if ($curGpuSku -and $availableGpu[$i].name -eq $curGpuSku) { " (current)" } else { "" }
-        Write-Host "    $($i+1)) $($availableGpu[$i].name) - $($availableGpu[$i].desc)$mark"
-    }
-    Write-Host ""
-    $gpuSku = Read-Host "  GPU VM SKU [$($defGpuIdx+1)]"
-    if (-not $gpuSku) { $gpuSku = "$($defGpuIdx+1)" }
-    $idx = [int]$gpuSku - 1
-    if ($idx -lt 0 -or $idx -ge $availableGpu.Count) { $idx = $defGpuIdx }
-    $GPU_SKU = $availableGpu[$idx].name
 
-    $ErrorActionPreference = "SilentlyContinue"
-    $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
-    $ErrorActionPreference = "Stop"
-    $defGpuCount = if ($curGpuCount -and $curGpuCount -notmatch "^ERROR" -and $curGpuCount.Trim()) { $curGpuCount.Trim() } else { "4" }
-    $gpuCount = Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]"
-    if (-not $gpuCount) { $gpuCount = $defGpuCount }
-}
-if ($gpuCount -eq "0") {
-    Write-Host "  `e[33mGPU pool disabled - using external embedding models only.`e[0m"
-} else {
+$ErrorActionPreference = "SilentlyContinue"
+$curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
+$ErrorActionPreference = "Stop"
+$defGpuCount = if ($curGpuCount -and $curGpuCount -notmatch "^ERROR" -and $curGpuCount.Trim()) { $curGpuCount.Trim() } else { "0" }
+
+$gpuCount = Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]"
+if (-not $gpuCount) { $gpuCount = $defGpuCount }
+
+if ($gpuCount -ne "0") {
+    $gpuCandidates = @(
+        @{ name = "Standard_NC4as_T4_v3";     desc = "4 vCPU, 28 GB, 1x T4 16GB" },
+        @{ name = "Standard_NC6s_v3";          desc = "6 vCPU, 112 GB, 1x V100 16GB" },
+        @{ name = "Standard_NC8as_T4_v3";      desc = "8 vCPU, 56 GB, 1x T4 16GB" },
+        @{ name = "Standard_NC12s_v3";         desc = "12 vCPU, 224 GB, 2x V100" },
+        @{ name = "Standard_NC24ads_A100_v4";  desc = "24 vCPU, 220 GB, 1x A100 80GB" }
+    )
+    $defGpuIdx = 0
+    for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
+        if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { $defGpuIdx = $i }
+    }
+    Write-Host "  Common GPU options:"
+    for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
+        $mark = if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { " (current)" } else { "" }
+        Write-Host "    $($i+1)) $($gpuCandidates[$i].name) - $($gpuCandidates[$i].desc)$mark"
+    }
+    Write-Host "    $($gpuCandidates.Count+1)) Enter custom SKU"
+    Write-Host ""
+
+    $GPU_SKU = $null
+    while (-not $GPU_SKU) {
+        $gpuPick = Read-Host "  GPU VM SKU [$($defGpuIdx+1)]"
+        if (-not $gpuPick) { $gpuPick = "$($defGpuIdx+1)" }
+
+        if ([int]$gpuPick -eq ($gpuCandidates.Count + 1)) {
+            $defGpuManual = if ($curGpuSku) { $curGpuSku } else { "Standard_NC4as_T4_v3" }
+            $GPU_SKU = Read-Host "  Enter SKU name [$defGpuManual]"
+            if (-not $GPU_SKU) { $GPU_SKU = $defGpuManual }
+        } else {
+            $idx = [int]$gpuPick - 1
+            if ($idx -ge 0 -and $idx -lt $gpuCandidates.Count) {
+                $GPU_SKU = $gpuCandidates[$idx].name
+            } else {
+                $GPU_SKU = $gpuCandidates[$defGpuIdx].name
+            }
+        }
+
+        Write-Host "  `e[36mValidating $GPU_SKU in $location...`e[0m" -NoNewline
+        if (Test-SkuAvailable -Sku $GPU_SKU -Location $location) {
+            Write-Host " `e[32m✓ available`e[0m"
+        } else {
+            Write-Host " `e[31m✗ not available in $location. Try again.`e[0m"
+            $GPU_SKU = $null
+        }
+    }
     Write-Host "  `e[32mGPU VM: $GPU_SKU, nodes: $gpuCount`e[0m"
+} else {
+    Write-Host "  `e[33mGPU pool disabled - using external embedding models only.`e[0m"
+    $GPU_SKU = if ($curGpuSku) { $curGpuSku } else { "" }
 }
 
 # Validate before storing

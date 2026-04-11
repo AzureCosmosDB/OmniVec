@@ -313,73 +313,77 @@ echo ""
 printf "${YELLOW}Configure AKS node pools:${NC}\n"
 echo ""
 
-# Check VM SKU availability (parallel queries)
 LOCATION="${AZURE_LOCATION:-centralus}"
-printf "${YELLOW}Checking VM SKU availability in ${LOCATION}...${NC}\n"
 
-# Run both queries in parallel
-SYS_TMP=$(mktemp)
-GPU_TMP=$(mktemp)
-
-az vm list-skus --location "$LOCATION" --size Standard_D --resource-type virtualMachines \
-  --query "[?(name=='Standard_D4s_v3' || name=='Standard_D4ds_v5' || name=='Standard_D8s_v3' || name=='Standard_D8ds_v5' || name=='Standard_D2s_v3' || name=='Standard_D2ds_v5') && (restrictions==null || restrictions[0]==null)].name" \
-  -o tsv >"$SYS_TMP" 2>/dev/null &
-
-az vm list-skus --location "$LOCATION" --size Standard_NC --resource-type virtualMachines \
-  --query "[?(name=='Standard_NC6s_v3' || name=='Standard_NC12s_v3' || name=='Standard_NC4as_T4_v3' || name=='Standard_NC8as_T4_v3' || name=='Standard_NC24ads_A100_v4') && (restrictions==null || restrictions[0]==null)].name" \
-  -o tsv >"$GPU_TMP" 2>/dev/null &
-
-wait
-
-SYS_SKUS=$(cat "$SYS_TMP" || true)
-GPU_SKUS=$(cat "$GPU_TMP" || true)
-rm -f "$SYS_TMP" "$GPU_TMP"
-
-AVAILABLE_SKUS="${SYS_SKUS}
-${GPU_SKUS}"
-
-# Helper: check if a SKU is available
-sku_available() {
-  echo "$AVAILABLE_SKUS" | grep -qx "$1" 2>/dev/null
+# Helper: validate a single SKU in the location
+validate_sku() {
+  _sku=$1
+  _result=$(az vm list-skus --location "$LOCATION" --size "$_sku" --resource-type virtualMachines \
+    --query "[?name=='$_sku' && (restrictions==null || restrictions[0]==null)].name" -o tsv 2>/dev/null || true)
+  [ -n "$_result" ] && [ "$_result" = "$_sku" ]
 }
 
-# System nodes — find available SKUs
+# -- System node pool --
 printf "${CYAN}System node pool (API, controller, worker, changefeed):${NC}\n"
 cur_sys_sku=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
 cur_sys_sku=$(printf '%s' "$cur_sys_sku" | tr -d '\r')
-printf "  Available VM SKUs:\n"
-SYS_OPTIONS=""
-SYS_COUNT=0
+
+SYS_CANDIDATES="Standard_D4s_v3:4 vCPU, 16 GB
+Standard_D4ds_v5:4 vCPU, 16 GB (v5)
+Standard_D8s_v3:8 vCPU, 32 GB
+Standard_B4ms:4 vCPU, 16 GB (burstable)
+Standard_D2s_v3:2 vCPU, 8 GB (dev)"
+SYS_TOTAL=$(echo "$SYS_CANDIDATES" | wc -l | tr -d ' ')
+
+printf "  Common options:\n"
 DEF_SYS_IDX=1
-for sku in Standard_D4s_v3 Standard_D4ds_v5 Standard_D8s_v3 Standard_D8ds_v5 Standard_D2s_v3 Standard_D2ds_v5; do
-  if sku_available "$sku"; then
-    SYS_COUNT=$((SYS_COUNT + 1))
-    SYS_OPTIONS="${SYS_OPTIONS}${SYS_COUNT}:${sku}\n"
-    mark=""
-    if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then
-      mark=" (current)"
-      DEF_SYS_IDX=$SYS_COUNT
+i=0
+echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+  i=$((i + 1))
+  mark=""
+  if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then mark=" (current)"; fi
+  printf "    ${i}) ${sku} - ${desc}${mark}\n"
+done
+# Recompute default index outside subshell
+i=0
+echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+  i=$((i + 1))
+  if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then echo "$i"; fi
+done > /tmp/_omnivec_def_sys_idx
+_def=$(cat /tmp/_omnivec_def_sys_idx 2>/dev/null | head -1)
+DEF_SYS_IDX=${_def:-1}
+rm -f /tmp/_omnivec_def_sys_idx
+
+CUSTOM_IDX=$((SYS_TOTAL + 1))
+printf "    ${CUSTOM_IDX}) Enter custom SKU\n"
+echo ""
+
+SYS_SKU=""
+while [ -z "$SYS_SKU" ]; do
+  printf "  System VM SKU [${DEF_SYS_IDX}]: "
+  read -r sys_pick || true
+  sys_pick=${sys_pick:-$DEF_SYS_IDX}
+
+  if [ "$sys_pick" = "$CUSTOM_IDX" ]; then
+    def_manual=${cur_sys_sku:-Standard_D4s_v3}
+    printf "  Enter SKU name [${def_manual}]: "
+    read -r SYS_SKU || true
+    SYS_SKU=${SYS_SKU:-$def_manual}
+  else
+    SYS_SKU=$(echo "$SYS_CANDIDATES" | sed -n "${sys_pick}p" | cut -d: -f1)
+    if [ -z "$SYS_SKU" ]; then
+      SYS_SKU=$(echo "$SYS_CANDIDATES" | sed -n "${DEF_SYS_IDX}p" | cut -d: -f1)
     fi
-    printf "    ${SYS_COUNT}) ${sku}${mark}\n"
+  fi
+
+  printf "  ${CYAN}Validating ${SYS_SKU} in ${LOCATION}...${NC}"
+  if validate_sku "$SYS_SKU"; then
+    printf " ${GREEN}✓ available${NC}\n"
+  else
+    printf " ${RED}✗ not available in ${LOCATION}. Try again.${NC}\n"
+    SYS_SKU=""
   fi
 done
-
-if [ "$SYS_COUNT" = "0" ]; then
-  printf "  ${RED}No suitable system VM SKUs found in ${LOCATION}!${NC}\n"
-  def_manual=${cur_sys_sku:-Standard_D4s_v3}
-  printf "  Enter a VM SKU manually [${def_manual}]: "
-  read -r SYS_SKU || true
-  SYS_SKU=${SYS_SKU:-$def_manual}
-else
-  echo ""
-  printf "  System VM SKU [${DEF_SYS_IDX}]: "
-  read -r sys_sku_choice || true
-  sys_sku_choice=${sys_sku_choice:-$DEF_SYS_IDX}
-  SYS_SKU=$(printf "$SYS_OPTIONS" | grep "^${sys_sku_choice}:" | cut -d: -f2)
-  if [ -z "$SYS_SKU" ]; then
-    SYS_SKU=$(printf "$SYS_OPTIONS" | sed -n "${DEF_SYS_IDX}p" | cut -d: -f2)
-  fi
-fi
 printf "  ${GREEN}System VM SKU: ${SYS_SKU}${NC}\n"
 
 cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
@@ -392,53 +396,79 @@ printf "  ${GREEN}System nodes: ${sys_count}${NC}\n"
 
 echo ""
 
-# GPU nodes — find available SKUs
+# -- GPU node pool --
 printf "${CYAN}GPU node pool (ML models — dse-qwen2, clip, bge, bge-small):${NC}\n"
 echo "  Enter 0 nodes to skip GPU pool (use external models only)."
 cur_gpu_sku=$(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null || true)
 cur_gpu_sku=$(printf '%s' "$cur_gpu_sku" | tr -d '\r')
-GPU_OPTIONS=""
-GPU_COUNT=0
-DEF_GPU_IDX=1
-for sku in Standard_NC6s_v3 Standard_NC12s_v3 Standard_NC4as_T4_v3 Standard_NC8as_T4_v3 Standard_NC24ads_A100_v4; do
-  if sku_available "$sku"; then
-    GPU_COUNT=$((GPU_COUNT + 1))
-    GPU_OPTIONS="${GPU_OPTIONS}${GPU_COUNT}:${sku}\n"
+
+cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
+cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+def_gpu_count=${cur_gpu_count:-0}
+
+printf "  GPU node count (0 = no GPU pool) [${def_gpu_count}]: "
+read -r gpu_count || true
+gpu_count=${gpu_count:-$def_gpu_count}
+
+if [ "$gpu_count" != "0" ]; then
+  GPU_CANDIDATES="Standard_NC4as_T4_v3:4 vCPU, 28 GB, 1x T4 16GB
+Standard_NC6s_v3:6 vCPU, 112 GB, 1x V100 16GB
+Standard_NC8as_T4_v3:8 vCPU, 56 GB, 1x T4 16GB
+Standard_NC12s_v3:12 vCPU, 224 GB, 2x V100
+Standard_NC24ads_A100_v4:24 vCPU, 220 GB, 1x A100 80GB"
+  GPU_TOTAL=$(echo "$GPU_CANDIDATES" | wc -l | tr -d ' ')
+
+  printf "  Common GPU options:\n"
+  i=0
+  echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
     mark=""
-    if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then
-      mark=" (current)"
-      DEF_GPU_IDX=$GPU_COUNT
-    fi
-    printf "    ${GPU_COUNT}) ${sku}${mark}\n"
-  fi
-done
+    if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then mark=" (current)"; fi
+    printf "    ${i}) ${sku} - ${desc}${mark}\n"
+  done
+  i=0
+  echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
+    if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then echo "$i"; fi
+  done > /tmp/_omnivec_def_gpu_idx
+  _gdef=$(cat /tmp/_omnivec_def_gpu_idx 2>/dev/null | head -1)
+  DEF_GPU_IDX=${_gdef:-1}
+  rm -f /tmp/_omnivec_def_gpu_idx
 
-if [ "$GPU_COUNT" = "0" ]; then
-  printf "  ${YELLOW}No GPU VM SKUs available in ${LOCATION}. GPU pool will be skipped.${NC}\n"
-  GPU_SKU=${cur_gpu_sku:-Standard_NC6s_v3}
-  gpu_count="0"
-else
+  GPU_CUSTOM_IDX=$((GPU_TOTAL + 1))
+  printf "    ${GPU_CUSTOM_IDX}) Enter custom SKU\n"
   echo ""
-  printf "  GPU VM SKU [${DEF_GPU_IDX}]: "
-  read -r gpu_sku_choice || true
-  gpu_sku_choice=${gpu_sku_choice:-$DEF_GPU_IDX}
-  GPU_SKU=$(printf "$GPU_OPTIONS" | grep "^${gpu_sku_choice}:" | cut -d: -f2)
-  if [ -z "$GPU_SKU" ]; then
-    GPU_SKU=$(printf "$GPU_OPTIONS" | sed -n "${DEF_GPU_IDX}p" | cut -d: -f2)
-  fi
 
-  cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
-  cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
-  def_gpu_count=${cur_gpu_count:-4}
-  printf "  GPU node count (0 = no GPU pool) [${def_gpu_count}]: "
-  read -r gpu_count || true
-  gpu_count=${gpu_count:-$def_gpu_count}
-fi
+  GPU_SKU=""
+  while [ -z "$GPU_SKU" ]; do
+    printf "  GPU VM SKU [${DEF_GPU_IDX}]: "
+    read -r gpu_pick || true
+    gpu_pick=${gpu_pick:-$DEF_GPU_IDX}
 
-if [ "$gpu_count" = "0" ]; then
-  printf "  ${YELLOW}GPU pool disabled — using external embedding models only.${NC}\n"
-else
+    if [ "$gpu_pick" = "$GPU_CUSTOM_IDX" ]; then
+      def_gpu_manual=${cur_gpu_sku:-Standard_NC4as_T4_v3}
+      printf "  Enter SKU name [${def_gpu_manual}]: "
+      read -r GPU_SKU || true
+      GPU_SKU=${GPU_SKU:-$def_gpu_manual}
+    else
+      GPU_SKU=$(echo "$GPU_CANDIDATES" | sed -n "${gpu_pick}p" | cut -d: -f1)
+      if [ -z "$GPU_SKU" ]; then
+        GPU_SKU=$(echo "$GPU_CANDIDATES" | sed -n "${DEF_GPU_IDX}p" | cut -d: -f1)
+      fi
+    fi
+
+    printf "  ${CYAN}Validating ${GPU_SKU} in ${LOCATION}...${NC}"
+    if validate_sku "$GPU_SKU"; then
+      printf " ${GREEN}✓ available${NC}\n"
+    else
+      printf " ${RED}✗ not available in ${LOCATION}. Try again.${NC}\n"
+      GPU_SKU=""
+    fi
+  done
   printf "  ${GREEN}GPU VM: ${GPU_SKU}, nodes: ${gpu_count}${NC}\n"
+else
+  printf "  ${YELLOW}GPU pool disabled — using external embedding models only.${NC}\n"
+  GPU_SKU=${cur_gpu_sku:-}
 fi
 
 # Validate before storing
