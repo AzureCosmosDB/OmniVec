@@ -59,138 +59,6 @@ Acquire-Lock
 # Release lock on exit (success or failure) via try/finally wrapper
 try {
 
-# -- Check for existing healthy deployment --
-$ErrorActionPreference = "SilentlyContinue"
-$existingAks = azd env get-value AZURE_AKS_CLUSTER_NAME 2>$null
-$aksExitCode = $LASTEXITCODE
-$existingRg = azd env get-value AZURE_RESOURCE_GROUP 2>$null
-$rgExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-
-$deploymentDetected = $false
-$inPlaceUpdate = $false
-
-if ($aksExitCode -eq 0 -and $rgExitCode -eq 0 -and $existingAks -and $existingRg -and "$existingAks" -notmatch "ERROR" -and "$existingRg" -notmatch "ERROR") {
-    $kubeCtx = $existingAks.Trim()
-    az aks get-credentials --resource-group $existingRg.Trim() --name $kubeCtx --context $kubeCtx --overwrite-existing 2>$null | Out-Null
-
-    $healthyPods = 0
-    try {
-        $podLines = kubectl --context $kubeCtx get pods -n omnivec --field-selector=status.phase=Running --no-headers 2>$null
-        if ($podLines) { $healthyPods = @($podLines | Where-Object { $_ }).Count }
-    } catch {}
-
-    if ($healthyPods -gt 0) {
-        $deploymentDetected = $true
-        Write-Host "`n`e[33mExisting healthy deployment detected ($healthyPods running pods in omnivec).`e[0m"
-        Write-Host "  AKS:  `e[36m$kubeCtx`e[0m"
-        Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
-        Write-Host ""
-        Write-Host "  `e[36m1) Update in-place (default)`e[0m"
-        Write-Host "  `e[36m2) Abort (use 'azd down' to teardown)`e[0m"
-        Write-Host ""
-        $choice = (Read-Host "  Choice [1]").Trim()
-        if (-not $choice) { $choice = "1" }
-        switch ($choice) {
-            "1" {
-                Write-Host "  `e[32mProceeding with in-place update.`e[0m"
-                $inPlaceUpdate = $true
-            }
-            "2" {
-                Write-Host "  `e[31mAborted by user.`e[0m"
-                Write-Host "  `e[33mTo teardown, run: azd down --force --purge`e[0m"
-                exit 1
-            }
-            default {
-                Write-Host "  `e[32mProceeding with in-place update (default).`e[0m"
-                $inPlaceUpdate = $true
-            }
-        }
-    }
-}
-
-# -- In-place update: only allow node count changes, then proceed --
-if ($inPlaceUpdate) {
-    Write-Host "`n`e[36mIn-place update — only node count changes allowed.`e[0m"
-    $ErrorActionPreference = "SilentlyContinue"
-    $curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
-    $sysExitCode2 = $LASTEXITCODE
-    $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
-    $gpuExitCode2 = $LASTEXITCODE
-    $ErrorActionPreference = "Stop"
-    $defSysCount = if ($sysExitCode2 -eq 0 -and $curSysCount -and "$curSysCount".Trim()) { "$curSysCount".Trim() } else { "2" }
-    $defGpuCount = if ($gpuExitCode2 -eq 0 -and $curGpuCount -and "$curGpuCount".Trim()) { "$curGpuCount".Trim() } else { "0" }
-
-    $sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
-    if (-not $sysCount) { $sysCount = $defSysCount }
-    azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
-
-    $gpuCount = (Read-Host "  GPU node count [$defGpuCount]").Trim()
-    if (-not $gpuCount) { $gpuCount = $defGpuCount }
-    azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
-
-    Write-Host "  `e[32mSystem nodes: $sysCount, GPU nodes: $gpuCount`e[0m"
-    Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
-    exit 0
-}
-
-# -- Resume detection --
-$existingConfig = $null
-$ErrorActionPreference = "SilentlyContinue"
-$existingConfig = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
-$configExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-if ($configExitCode -eq 0 -and $existingConfig -and "$existingConfig" -notmatch "ERROR") {
-    Write-Host "`n`e[36mConfiguration for environment '$env:AZURE_ENV_NAME':`e[0m"
-    Write-Host "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null)"
-    Write-Host "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null)"
-    Write-Host "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null)"
-    Write-Host "  GPU nodes:       $(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null)"
-    Write-Host "  Blob source:     $(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)"
-    Write-Host "  Metadata store:  $(azd env get-value OMNIVEC_METADATA_STORE 2>$null)"
-    Write-Host ""
-    $reuse = (Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)").Trim()
-    if (-not $reuse) { $reuse = "Y" }
-    if ($reuse -match "^[nN]") {
-        Write-Host "  `e[32mReconfiguring — current values shown as defaults, press Enter to keep.`e[0m"
-    } else {
-        Write-Host "  `e[32mUsing existing settings, running recovery checks before proceeding...`e[0m"
-
-        # -- Recovery: check for soft-deleted Key Vaults that block provisioning --
-        Write-Host "`n`e[33mChecking for soft-deleted Key Vaults that may block provisioning...`e[0m"
-        $ErrorActionPreference = "SilentlyContinue"
-        $deletedVaults = az keyvault list-deleted --query "[?contains(name, 'omnivec-kv')].{name:name, location:properties.location}" -o json 2>$null | ConvertFrom-Json
-        $ErrorActionPreference = "Stop"
-        if ($deletedVaults -and $deletedVaults.Count -gt 0) {
-            Write-Host "  `e[33mFound $($deletedVaults.Count) soft-deleted OmniVec Key Vault(s):`e[0m"
-            foreach ($dv in $deletedVaults) {
-                Write-Host "    - $($dv.name) (location: $($dv.location))"
-            }
-            Write-Host ""
-            $purgeChoice = (Read-Host "  Purge these to unblock provisioning? [Y/n]").Trim()
-            if (-not $purgeChoice) { $purgeChoice = "Y" }
-            if ($purgeChoice -match "^[yY]") {
-                foreach ($dv in $deletedVaults) {
-                    Write-Host "  `e[36mPurging $($dv.name)...`e[0m" -NoNewline
-                    az keyvault purge --name $dv.name 2>$null
-                    if ($LASTEXITCODE -eq 0) {
-                        Write-Host " `e[32m✓`e[0m"
-                    } else {
-                        Write-Host " `e[31m✗ (may need elevated permissions)`e[0m"
-                    }
-                }
-            } else {
-                Write-Host "  `e[33mSkipping purge — provisioning may fail if vault name collides.`e[0m"
-            }
-        } else {
-            Write-Host "  `e[32mNo soft-deleted Key Vaults found.`e[0m"
-        }
-
-        Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
-        exit 0
-    }
-}
-
 # -- Validate required tools --
 Write-Host "`n`e[33mChecking prerequisites...`e[0m"
 
@@ -247,34 +115,32 @@ if (-not $acct) {
 }
 Write-Host "`e[32mLogged in to subscription: $($acct.name) ($($acct.id))`e[0m"
 
-# -- Check for existing OmniVec installations (skip if already detected above) --
-if (-not $deploymentDetected) {
-    Write-Host "`n`e[33mChecking for existing OmniVec installations in subscription...`e[0m"
-
-    $existing = az resource list --query "[?tags.""omnivec-instance"" != null].{name:name, type:type, rg:resourceGroup, instance:tags.""omnivec-instance""}" -o json 2>$null | ConvertFrom-Json
-    if ($existing -and $existing.Count -gt 0) {
-    $instances = $existing | Group-Object -Property instance
-    Write-Host "`e[36mFound $($instances.Count) existing OmniVec installation(s):`e[0m"
-    Write-Host ""
-    foreach ($inst in $instances) {
-        $rg = $inst.Group[0].rg
-        $types = ($inst.Group | ForEach-Object { $_.type.Split('/')[-1] } | Sort-Object -Unique) -join ", "
-        Write-Host "  `e[36m$($inst.Name)`e[0m  (rg: $rg, $($inst.Count) resources ($types))"
+# -- Check for existing deployment (RG exists = update in-place) --
+$rgName = "rg-omnivec-$env:AZURE_ENV_NAME"
+$rgExists = az group exists --name $rgName 2>$null
+if ("$rgExists".Trim() -eq "true") {
+    Write-Host "`n`e[32mExisting deployment detected (RG: $rgName). Importing config...`e[0m"
+    $tags = az group show --name $rgName --query "tags" -o json 2>$null | ConvertFrom-Json
+    if ($tags) {
+        $tagMap = @{
+            "omnivec-sys-sku"    = "OMNIVEC_SYSTEM_NODE_VM_SIZE"
+            "omnivec-sys-count"  = "OMNIVEC_SYSTEM_NODE_COUNT"
+            "omnivec-gpu-sku"    = "OMNIVEC_GPU_NODE_VM_SIZE"
+            "omnivec-gpu-count"  = "OMNIVEC_GPU_NODE_COUNT"
+            "omnivec-metadata"   = "OMNIVEC_METADATA_STORE"
+            "omnivec-blob"       = "OMNIVEC_ENABLE_BLOB_SOURCE"
+            "omnivec-build"      = "OMNIVEC_BUILD_MODE"
+        }
+        foreach ($tag in $tagMap.GetEnumerator()) {
+            $val = $tags.PSObject.Properties[$tag.Key].Value
+            if ($val) {
+                azd env set $tag.Value "$val" 2>$null
+                Write-Host "  $($tag.Value) = $val"
+            }
+        }
     }
-    Write-Host ""
-    Write-Host "`e[33mWhat would you like to do?`e[0m"
-    Write-Host "  1) Launch a NEW OmniVec installation (unique resources alongside existing)"
-    Write-Host "  2) Cancel deployment"
-    Write-Host ""
-    $choice = (Read-Host "Choice [1/2]").Trim()
-    if ($choice -eq "2") {
-        Write-Host "`e[31mDeployment cancelled.`e[0m"
-        exit 1
-    }
-    Write-Host "`e[32mCreating new installation with environment '$env:AZURE_ENV_NAME'.`e[0m"
-} else {
-    Write-Host "`e[32mNo existing OmniVec installations found. This will be a fresh deployment.`e[0m"
-}
+    Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
+    exit 0
 }
 
 # -- Metadata storage selection --
