@@ -62,3 +62,4 @@ id_mappings.json
 
 # Windows
 nul
+.lock-hash

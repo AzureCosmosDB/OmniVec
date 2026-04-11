@@ -79,7 +79,30 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
         Write-Host "`n`e[33mExisting healthy deployment detected ($healthyPods running pods in omnivec).`e[0m"
         Write-Host "  AKS:  `e[36m$kubeCtx`e[0m"
         Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
-        Write-Host "  `e[32mReusing existing resources and proceeding with in-place update.`e[0m"
+        Write-Host ""
+        Write-Host "  `e[36m1) Update in-place (default)`e[0m"
+        Write-Host "  `e[36m2) Teardown and redeploy fresh`e[0m"
+        Write-Host "  `e[36m3) Abort`e[0m"
+        Write-Host ""
+        $choice = Read-Host "  Choice [1]"
+        if (-not $choice) { $choice = "1" }
+        switch ($choice) {
+            "1" {
+                Write-Host "  `e[32mProceeding with in-place update.`e[0m"
+            }
+            "2" {
+                Write-Host "  `e[33mTearing down existing deployment first...`e[0m"
+                azd down --force --purge
+                Write-Host "  `e[32mTeardown complete. Proceeding with fresh deployment.`e[0m"
+            }
+            "3" {
+                Write-Host "  `e[31mAborted by user.`e[0m"
+                exit 0
+            }
+            default {
+                Write-Host "  `e[32mProceeding with in-place update (default).`e[0m"
+            }
+        }
     }
 }
 
