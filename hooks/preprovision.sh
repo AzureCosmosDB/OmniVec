@@ -92,7 +92,7 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
         ;;
       3)
         printf "  ${RED}Aborted by user.${NC}\n"
-        exit 0
+        exit 1
         ;;
       *)
         printf "  ${GREEN}Proceeding with in-place update (default).${NC}\n"

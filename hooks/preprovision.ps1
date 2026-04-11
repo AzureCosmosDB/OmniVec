@@ -97,7 +97,7 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
             }
             "3" {
                 Write-Host "  `e[31mAborted by user.`e[0m"
-                exit 0
+                exit 1
             }
             default {
                 Write-Host "  `e[32mProceeding with in-place update (default).`e[0m"
