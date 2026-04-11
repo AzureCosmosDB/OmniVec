@@ -59,10 +59,15 @@ trap 'release_lock' EXIT INT TERM
 
 acquire_lock
 
+# Helper: safely read an azd env value, returns empty string on failure
+azd_get() {
+  _val=$(azd env get-value "$1" 2>/dev/null) && printf '%s' "$_val" | tr -d '\r' || printf ''
+}
+
 # ── Check for existing healthy deployment ───────────────────────────────────
 # If pods are already running and healthy, warn before re-deploying
-EXISTING_AKS=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
-EXISTING_RG=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
+EXISTING_AKS=$(azd_get AZURE_AKS_CLUSTER_NAME)
+EXISTING_RG=$(azd_get AZURE_RESOURCE_GROUP)
 DEPLOYMENT_DETECTED=false
 IN_PLACE_UPDATE=false
 
@@ -79,8 +84,7 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
     printf "  AKS:  ${CYAN}${EXISTING_AKS}${NC}\n"
     printf "  RG:   ${CYAN}${EXISTING_RG}${NC}\n"
     printf "\n  ${CYAN}1) Update in-place (default)${NC}\n"
-    printf "  ${CYAN}2) Teardown and redeploy fresh${NC}\n"
-    printf "  ${CYAN}3) Abort${NC}\n"
+    printf "  ${CYAN}2) Abort (use 'azd down' to teardown)${NC}\n"
     printf "\n  Choice [1]: "
     read -r DEPLOY_CHOICE </dev/tty 2>/dev/null || DEPLOY_CHOICE="1"
     DEPLOY_CHOICE=${DEPLOY_CHOICE:-1}
@@ -90,14 +94,8 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
         IN_PLACE_UPDATE=true
         ;;
       2)
-        printf "  ${YELLOW}Tearing down existing deployment first...${NC}\n"
-        azd down --force --purge
-        printf "  ${GREEN}Teardown complete. Proceeding with fresh deployment.${NC}\n"
-        DEPLOYMENT_DETECTED=false
-        ;;
-      3)
         printf "  ${RED}Aborted by user.${NC}\n"
-        printf "  ${YELLOW}(The ERROR message below is expected — it is how azd stops.)${NC}\n"
+        printf "  ${YELLOW}To teardown, run: azd down --force --purge${NC}\n"
         exit 1
         ;;
       *)
@@ -111,16 +109,14 @@ fi
 # ── In-place update: only allow node count changes, then proceed ─────────
 if [ "$IN_PLACE_UPDATE" = "true" ]; then
   printf "\n${CYAN}In-place update — only node count changes allowed.${NC}\n"
-  cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
-  cur_sys_count=$(printf '%s' "$cur_sys_count" | tr -d '\r')
+  cur_sys_count=$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)
   def_sys_count=${cur_sys_count:-2}
   printf "  System node count [${def_sys_count}]: "
   read -r sys_count </dev/tty 2>/dev/null || sys_count=""
   sys_count=${sys_count:-$def_sys_count}
   azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count"
 
-  cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
-  cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+  cur_gpu_count=$(azd_get OMNIVEC_GPU_NODE_COUNT)
   def_gpu_count=${cur_gpu_count:-0}
   printf "  GPU node count [${def_gpu_count}]: "
   read -r gpu_count </dev/tty 2>/dev/null || gpu_count=""
@@ -135,15 +131,15 @@ fi
 # ── Resume detection ────────────────────────────────────────────────────────
 # If config is already set (from a previous run), skip interactive prompts
 
-EXISTING_CONFIG=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
+EXISTING_CONFIG=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
 if [ -n "$EXISTING_CONFIG" ]; then
   printf "\n${CYAN}Configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
-  echo "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null)"
-  echo "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null)"
-  echo "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null)"
-  echo "  GPU nodes:       $(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null)"
-  echo "  Blob source:     $(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>/dev/null)"
-  echo "  Metadata store:  $(azd env get-value OMNIVEC_METADATA_STORE 2>/dev/null)"
+  echo "  System SKU:      $(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)"
+  echo "  System nodes:    $(azd_get OMNIVEC_SYSTEM_NODE_COUNT)"
+  echo "  GPU SKU:         $(azd_get OMNIVEC_GPU_NODE_VM_SIZE)"
+  echo "  GPU nodes:       $(azd_get OMNIVEC_GPU_NODE_COUNT)"
+  echo "  Blob source:     $(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)"
+  echo "  Metadata store:  $(azd_get OMNIVEC_METADATA_STORE)"
   echo ""
   printf "  ${YELLOW}Keep these settings? [Y/n] (n = reconfigure from scratch): ${NC}"
   read -r reuse || true
@@ -153,7 +149,41 @@ if [ -n "$EXISTING_CONFIG" ]; then
       printf "  ${GREEN}Reconfiguring — current values shown as defaults, press Enter to keep.${NC}\n"
       ;;
     *)
-      printf "  ${GREEN}Using existing settings, skipping configuration prompts.${NC}\n"
+      printf "  ${GREEN}Using existing settings, running recovery checks before proceeding...${NC}\n"
+
+      # -- Recovery: check for soft-deleted Key Vaults that block provisioning --
+      printf "\n${YELLOW}Checking for soft-deleted Key Vaults that may block provisioning...${NC}\n"
+      deleted_vaults=$(az keyvault list-deleted --query "[?contains(name, 'omnivec-kv')].name" -o tsv 2>/dev/null || true)
+      if [ -n "$deleted_vaults" ]; then
+        vault_count=$(echo "$deleted_vaults" | wc -l | tr -d ' ')
+        printf "  ${YELLOW}Found ${vault_count} soft-deleted OmniVec Key Vault(s):${NC}\n"
+        echo "$deleted_vaults" | while IFS= read -r vname; do
+          echo "    - $vname"
+        done
+        echo ""
+        printf "  ${YELLOW}Purge these to unblock provisioning? [Y/n]: ${NC}"
+        read -r purge_choice || true
+        purge_choice=${purge_choice:-Y}
+        case "$purge_choice" in
+          [yY]*)
+            echo "$deleted_vaults" | while IFS= read -r vname; do
+              printf "  ${CYAN}Purging ${vname}...${NC}"
+              if az keyvault purge --name "$vname" 2>/dev/null; then
+                printf " ${GREEN}✓${NC}\n"
+              else
+                printf " ${RED}✗ (may need elevated permissions)${NC}\n"
+              fi
+            done
+            ;;
+          *)
+            printf "  ${YELLOW}Skipping purge — provisioning may fail if vault name collides.${NC}\n"
+            ;;
+        esac
+      else
+        printf "  ${GREEN}No soft-deleted Key Vaults found.${NC}\n"
+      fi
+
+      printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
       exit 0
       ;;
   esac
@@ -268,8 +298,7 @@ fi
 
 # ── Metadata storage selection ──────────────────────────────────────────────
 
-cur_meta=$(azd env get-value OMNIVEC_METADATA_STORE 2>/dev/null || true)
-cur_meta=$(printf '%s' "$cur_meta" | tr -d '\r')
+cur_meta=$(azd_get OMNIVEC_METADATA_STORE)
 def_meta_num=1
 meta_mark1=" (current)"
 meta_mark2=""
@@ -303,8 +332,7 @@ esac
 
 # ── Blob storage source ─────────────────────────────────────────────────────
 
-cur_blob=$(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>/dev/null || true)
-cur_blob=$(printf '%s' "$cur_blob" | tr -d '\r')
+cur_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
 def_blob_num=1
 blob_mark1=" (current)"
 blob_mark2=""
@@ -353,8 +381,7 @@ validate_sku() {
 
 # -- System node pool --
 printf "${CYAN}System node pool (API, controller, worker, changefeed):${NC}\n"
-cur_sys_sku=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
-cur_sys_sku=$(printf '%s' "$cur_sys_sku" | tr -d '\r')
+cur_sys_sku=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
 
 SYS_CANDIDATES="Standard_D4s_v3:4 vCPU, 16 GB
 Standard_D4ds_v5:4 vCPU, 16 GB (v5)
@@ -445,8 +472,7 @@ while [ -z "$SYS_SKU" ]; do
 done
 printf "  ${GREEN}System VM SKU: ${SYS_SKU}${NC}\n"
 
-cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
-cur_sys_count=$(printf '%s' "$cur_sys_count" | tr -d '\r')
+cur_sys_count=$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)
 def_sys_count=${cur_sys_count:-2}
 printf "  System node count [${def_sys_count}]: "
 read -r sys_count || true
@@ -458,11 +484,9 @@ echo ""
 # -- GPU node pool --
 printf "${CYAN}GPU node pool (ML models — dse-qwen2, clip, bge, bge-small):${NC}\n"
 echo "  Enter 0 nodes to skip GPU pool (use external models only)."
-cur_gpu_sku=$(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null || true)
-cur_gpu_sku=$(printf '%s' "$cur_gpu_sku" | tr -d '\r')
+cur_gpu_sku=$(azd_get OMNIVEC_GPU_NODE_VM_SIZE)
 
-cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
-cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+cur_gpu_count=$(azd_get OMNIVEC_GPU_NODE_COUNT)
 def_gpu_count=${cur_gpu_count:-0}
 
 printf "  GPU node count (0 = no GPU pool) [${def_gpu_count}]: "
@@ -579,7 +603,7 @@ fi
 # ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
 printf "\n${CYAN}Sanitizing environment values...${NC}\n"
 for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE OMNIVEC_BUILD_MODE; do
-  raw=$(azd env get-value "$key" 2>/dev/null || true)
+  raw=$(azd_get "$key")
   if [ -n "$raw" ]; then
     clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [ "$raw" != "$clean" ]; then
