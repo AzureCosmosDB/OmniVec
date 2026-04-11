@@ -339,13 +339,6 @@ $defIdx = 0
 for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
     if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { $defIdx = $i }
 }
-Write-Host "  Common options:"
-for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
-    $mark = if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { " (current)" } else { "" }
-    Write-Host "    $($i+1)) $($sysCandidates[$i].name) - $($sysCandidates[$i].desc)$mark"
-}
-Write-Host "    $($sysCandidates.Count+1)) Enter custom SKU"
-Write-Host ""
 
 $SYS_SKU = $null
 $failedSkus = @{}
@@ -439,13 +432,6 @@ if ($gpuCount -ne "0") {
     for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
         if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { $defGpuIdx = $i }
     }
-    Write-Host "  Common GPU options:"
-    for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
-        $mark = if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { " (current)" } else { "" }
-        Write-Host "    $($i+1)) $($gpuCandidates[$i].name) - $($gpuCandidates[$i].desc)$mark"
-    }
-    Write-Host "    $($gpuCandidates.Count+1)) Enter custom SKU"
-    Write-Host ""
 
     $GPU_SKU = $null
     $failedGpuSkus = @{}
