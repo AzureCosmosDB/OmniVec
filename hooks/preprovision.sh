@@ -75,7 +75,29 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
     printf "\n${YELLOW}Existing healthy deployment detected (${HEALTHY_PODS} running pods in omnivec).${NC}\n"
     printf "  AKS:  ${CYAN}${EXISTING_AKS}${NC}\n"
     printf "  RG:   ${CYAN}${EXISTING_RG}${NC}\n"
-    printf "  ${GREEN}Reusing existing resources and proceeding with in-place update.${NC}\n"
+    printf "\n  ${CYAN}1) Update in-place (default)${NC}\n"
+    printf "  ${CYAN}2) Teardown and redeploy fresh${NC}\n"
+    printf "  ${CYAN}3) Abort${NC}\n"
+    printf "\n  Choice [1]: "
+    read -r DEPLOY_CHOICE </dev/tty 2>/dev/null || DEPLOY_CHOICE="1"
+    DEPLOY_CHOICE=${DEPLOY_CHOICE:-1}
+    case "$DEPLOY_CHOICE" in
+      1)
+        printf "  ${GREEN}Proceeding with in-place update.${NC}\n"
+        ;;
+      2)
+        printf "  ${YELLOW}Tearing down existing deployment first...${NC}\n"
+        azd down --force --purge
+        printf "  ${GREEN}Teardown complete. Proceeding with fresh deployment.${NC}\n"
+        ;;
+      3)
+        printf "  ${RED}Aborted by user.${NC}\n"
+        exit 0
+        ;;
+      *)
+        printf "  ${GREEN}Proceeding with in-place update (default).${NC}\n"
+        ;;
+    esac
   fi
 fi
 

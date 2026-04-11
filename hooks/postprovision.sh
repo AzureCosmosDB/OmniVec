@@ -104,6 +104,19 @@ image_exists() {
   [ -n "$existing" ]
 }
 
+# Compare image digest between shared registry and local ACR — returns 0 if identical
+image_up_to_date() {
+  name=$1
+  tag=$2
+  # Get digest from local ACR
+  local_digest=$(az acr manifest show-metadata --registry "$ACR_NAME" --name "${name}:${tag}" --query "digest" -o tsv 2>/dev/null || true)
+  if [ -z "$local_digest" ]; then return 1; fi
+  # Get digest from shared registry
+  shared_digest=$(az acr manifest show-metadata --registry "omnivecregistry" --name "${name}:${tag}" --query "digest" -o tsv 2>/dev/null || true)
+  if [ -z "$shared_digest" ]; then return 1; fi
+  [ "$local_digest" = "$shared_digest" ]
+}
+
 # ── Helper: build a single image via docker or ACR ──────────────────────
 build_image() {
   name=$1
@@ -189,10 +202,12 @@ else
   import_pids=""
 
   for image in $IMAGES; do
-    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
-      printf "  ${GREEN}${image}:latest exists, skipping.${NC}\n"
+    if [ "$FORCE_IMPORT" != "true" ] && image_up_to_date "$image" "latest"; then
+      printf "  ${GREEN}${image}:latest up to date (digest match), skipping.${NC}\n"
       skip_count=$((skip_count + 1))
       continue
+    elif [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
+      printf "  ${CYAN}${image}:latest exists but digest differs, re-importing...${NC}\n"
     fi
 
     printf "  ${CYAN}Importing ${image}:latest...${NC}\n"
@@ -349,9 +364,27 @@ printf "${GREEN}Namespaces and secrets created.${NC}\n"
 
 printf "\n${YELLOW}Phase 4: Deploying OmniVec via Helm...${NC}\n"
 
-# Resolve helm chart dependencies (docgrok subchart)
-printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
-helm dependency build "${ROOT_DIR}/helm/omnivec"
+# Resolve helm chart dependencies (docgrok subchart) — skip if already up to date
+CHART_DIR="${ROOT_DIR}/helm/omnivec"
+LOCK_FILE="${CHART_DIR}/Chart.lock"
+LOCK_HASH_FILE="${CHART_DIR}/charts/.lock-hash"
+CURRENT_HASH=""
+if [ -f "$LOCK_FILE" ]; then
+  CURRENT_HASH=$(sha256sum "$LOCK_FILE" 2>/dev/null | cut -d' ' -f1)
+fi
+CACHED_HASH=""
+if [ -f "$LOCK_HASH_FILE" ]; then
+  CACHED_HASH=$(cat "$LOCK_HASH_FILE" 2>/dev/null)
+fi
+if [ -n "$CURRENT_HASH" ] && [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
+  printf "  ${GREEN}Helm dependencies up to date, skipping.${NC}\n"
+else
+  printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
+  helm dependency build "$CHART_DIR" --quiet
+  if [ -n "$CURRENT_HASH" ]; then
+    echo "$CURRENT_HASH" > "$LOCK_HASH_FILE"
+  fi
+fi
 
 # Image tag used for all images built in Phase 1
 # Generate admin token if not already set

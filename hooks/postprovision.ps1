@@ -105,6 +105,19 @@ function Test-ImageExists {
     }
 }
 
+function Test-ImageUpToDate {
+    param($Name, $Tag)
+    try {
+        $localDigest = az acr manifest show-metadata --registry $ACR_NAME --name "${Name}:${Tag}" --query "digest" -o tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $localDigest) { return $false }
+        $sharedDigest = az acr manifest show-metadata --registry "omnivecregistry" --name "${Name}:${Tag}" --query "digest" -o tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $sharedDigest) { return $false }
+        return ($localDigest.Trim() -eq $sharedDigest.Trim())
+    } catch {
+        return $false
+    }
+}
+
 # -- Helper: build a single image via docker or ACR --
 function Build-Image {
     param($Name, $Dockerfile, $Context, $Tag = "latest")
@@ -198,10 +211,12 @@ if ($DO_BUILD) {
     $imagesToImport = @()
 
     foreach ($image in $IMAGES) {
-        if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
-            Write-Host "  `e[32m${image}:latest exists, skipping.`e[0m"
+        if (-not $FORCE_IMPORT -and (Test-ImageUpToDate -Name $image -Tag "latest")) {
+            Write-Host "  `e[32m${image}:latest up to date (digest match), skipping.`e[0m"
             $skipCount++
             continue
+        } elseif (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
+            Write-Host "  `e[36m${image}:latest exists but digest differs, re-importing...`e[0m"
         }
 
         Write-Host "  `e[36mImporting ${image}:latest...`e[0m"
@@ -322,9 +337,27 @@ Write-Host "`e[32mNamespaces and secrets created.`e[0m"
 
 Write-Host "`n`e[33mPhase 4: Deploying OmniVec via Helm...`e[0m"
 
-# Resolve helm chart dependencies (docgrok subchart)
-Write-Host "  `e[36mResolving helm dependencies...`e[0m"
-helm dependency build "$RootDir/helm/omnivec"
+# Resolve helm chart dependencies — skip if already up to date
+$chartDir = "$RootDir/helm/omnivec"
+$lockFile = "$chartDir/Chart.lock"
+$lockHashFile = "$chartDir/charts/.lock-hash"
+$currentHash = ""
+if (Test-Path $lockFile) {
+    $currentHash = (Get-FileHash $lockFile -Algorithm SHA256).Hash
+}
+$cachedHash = ""
+if (Test-Path $lockHashFile) {
+    $cachedHash = (Get-Content $lockHashFile -Raw).Trim()
+}
+if ($currentHash -and $currentHash -eq $cachedHash) {
+    Write-Host "  `e[32mHelm dependencies up to date, skipping.`e[0m"
+} else {
+    Write-Host "  `e[36mResolving helm dependencies...`e[0m"
+    helm dependency build $chartDir --quiet
+    if ($currentHash) {
+        $currentHash | Set-Content $lockHashFile -NoNewline
+    }
+}
 
 # Generate admin token if not already set
 $ADMIN_TOKEN = Get-AzdValue "OMNIVEC_ADMIN_TOKEN"
