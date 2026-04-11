@@ -436,7 +436,7 @@ if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
   --set azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}"
 fi
 
-HELM_CMD="$HELM_CMD --wait --timeout 10m"
+HELM_CMD="$HELM_CMD --wait --timeout 10m --atomic"
 
 # Execute
 set +e
