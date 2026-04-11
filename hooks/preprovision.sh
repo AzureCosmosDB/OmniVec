@@ -63,6 +63,8 @@ acquire_lock
 # If pods are already running and healthy, warn before re-deploying
 EXISTING_AKS=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
 EXISTING_RG=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
+DEPLOYMENT_DETECTED=false
+IN_PLACE_UPDATE=false
 
 if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
   # Try to get credentials and check pod health (silently)
@@ -72,6 +74,7 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
   HEALTHY_PODS=$(kubectl --context "$KUBE_CTX" get pods -n omnivec --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
   if [ "$HEALTHY_PODS" -gt 0 ]; then
+    DEPLOYMENT_DETECTED=true
     printf "\n${YELLOW}Existing healthy deployment detected (${HEALTHY_PODS} running pods in omnivec).${NC}\n"
     printf "  AKS:  ${CYAN}${EXISTING_AKS}${NC}\n"
     printf "  RG:   ${CYAN}${EXISTING_RG}${NC}\n"
@@ -84,21 +87,49 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
     case "$DEPLOY_CHOICE" in
       1)
         printf "  ${GREEN}Proceeding with in-place update.${NC}\n"
+        IN_PLACE_UPDATE=true
         ;;
       2)
         printf "  ${YELLOW}Tearing down existing deployment first...${NC}\n"
         azd down --force --purge
         printf "  ${GREEN}Teardown complete. Proceeding with fresh deployment.${NC}\n"
+        DEPLOYMENT_DETECTED=false
         ;;
       3)
         printf "  ${RED}Aborted by user.${NC}\n"
-        exit 0
+        printf "  ${YELLOW}(The ERROR message below is expected — it is how azd stops.)${NC}\n"
+        exit 1
         ;;
       *)
         printf "  ${GREEN}Proceeding with in-place update (default).${NC}\n"
+        IN_PLACE_UPDATE=true
         ;;
     esac
   fi
+fi
+
+# ── In-place update: only allow node count changes, then proceed ─────────
+if [ "$IN_PLACE_UPDATE" = "true" ]; then
+  printf "\n${CYAN}In-place update — only node count changes allowed.${NC}\n"
+  cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
+  cur_sys_count=$(printf '%s' "$cur_sys_count" | tr -d '\r')
+  def_sys_count=${cur_sys_count:-2}
+  printf "  System node count [${def_sys_count}]: "
+  read -r sys_count </dev/tty 2>/dev/null || sys_count=""
+  sys_count=${sys_count:-$def_sys_count}
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count"
+
+  cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
+  cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+  def_gpu_count=${cur_gpu_count:-0}
+  printf "  GPU node count [${def_gpu_count}]: "
+  read -r gpu_count </dev/tty 2>/dev/null || gpu_count=""
+  gpu_count=${gpu_count:-$def_gpu_count}
+  azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count"
+
+  printf "  ${GREEN}System nodes: ${sys_count}, GPU nodes: ${gpu_count}${NC}\n"
+  printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
+  exit 0
 fi
 
 # ── Resume detection ────────────────────────────────────────────────────────
@@ -106,7 +137,7 @@ fi
 
 EXISTING_CONFIG=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
 if [ -n "$EXISTING_CONFIG" ]; then
-  printf "\n${CYAN}Found previous configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
+  printf "\n${CYAN}Configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
   echo "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null)"
   echo "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null)"
   echo "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null)"
@@ -119,7 +150,7 @@ if [ -n "$EXISTING_CONFIG" ]; then
   reuse=${reuse:-Y}
   case "$reuse" in
     [nN]*)
-      printf "  ${GREEN}Reconfiguring...${NC}\n"
+      printf "  ${GREEN}Reconfiguring — current values shown as defaults, press Enter to keep.${NC}\n"
       ;;
     *)
       printf "  ${GREEN}Using existing settings, skipping configuration prompts.${NC}\n"
@@ -191,9 +222,10 @@ SUBSCRIPTION=$(az account show --query name -o tsv)
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 printf "${GREEN}Logged in to subscription: ${SUBSCRIPTION} (${SUBSCRIPTION_ID})${NC}\n"
 
-# ── Check for existing OmniVec installations ────────────────────────────────
+# ── Check for existing OmniVec installations (skip if already detected above) ─
 
-printf "\n${YELLOW}Checking for existing OmniVec installations in subscription...${NC}\n"
+if [ "$DEPLOYMENT_DETECTED" = "false" ]; then
+  printf "\n${YELLOW}Checking for existing OmniVec installations in subscription...${NC}\n"
 
 EXISTING=$(az resource list --query "[?tags.\"omnivec-instance\" != null].{name:name, type:type, rg:resourceGroup, instance:tags.\"omnivec-instance\"}" -o json 2>/dev/null || echo "[]")
 
@@ -232,17 +264,27 @@ if [ "$INSTANCE_COUNT" -gt 0 ]; then
 else
   printf "${GREEN}No existing OmniVec installations found. This will be a fresh deployment.${NC}\n"
 fi
+fi
 
 # ── Metadata storage selection ──────────────────────────────────────────────
 
+cur_meta=$(azd env get-value OMNIVEC_METADATA_STORE 2>/dev/null || true)
+cur_meta=$(printf '%s' "$cur_meta" | tr -d '\r')
+def_meta_num=1
+meta_mark1=" (current)"
+meta_mark2=""
+if [ "$cur_meta" = "cosmosdb-provisioned" ]; then
+  def_meta_num=2; meta_mark1=""; meta_mark2=" (current)"
+fi
+
 echo ""
 printf "${YELLOW}Select metadata storage backend:${NC}\n"
-echo "  1) Azure CosmosDB (Serverless NoSQL) — recommended"
-echo "  2) Azure CosmosDB (Provisioned throughput)"
+echo "  1) Azure CosmosDB (Serverless NoSQL)${meta_mark1}"
+echo "  2) Azure CosmosDB (Provisioned throughput)${meta_mark2}"
 echo ""
-printf "Choice [1]: "
+printf "Choice [${def_meta_num}]: "
 read -r meta_choice || true
-meta_choice=${meta_choice:-1}
+meta_choice=${meta_choice:-$def_meta_num}
 
 case "$meta_choice" in
   1)
@@ -261,17 +303,26 @@ esac
 
 # ── Blob storage source ─────────────────────────────────────────────────────
 
+cur_blob=$(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>/dev/null || true)
+cur_blob=$(printf '%s' "$cur_blob" | tr -d '\r')
+def_blob_num=1
+blob_mark1=" (current)"
+blob_mark2=""
+if [ "$cur_blob" = "false" ]; then
+  def_blob_num=2; blob_mark1=""; blob_mark2=" (current)"
+fi
+
 echo ""
 printf "${YELLOW}Will you use Azure Blob Storage as a document source?${NC}\n"
 echo "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
 echo "  will be created alongside the Storage Account."
 echo ""
-echo "  1) Yes — enable blob source ingestion (recommended)"
-echo "  2) No  — CosmosDB sources only (skip Service Bus + Event Grid)"
+echo "  1) Yes — enable blob source ingestion${blob_mark1}"
+echo "  2) No  — CosmosDB sources only (skip Service Bus + Event Grid)${blob_mark2}"
 echo ""
-printf "Choice [1]: "
+printf "Choice [${def_blob_num}]: "
 read -r blob_choice || true
-blob_choice=${blob_choice:-1}
+blob_choice=${blob_choice:-$def_blob_num}
 
 case "$blob_choice" in
   1)
@@ -290,108 +341,211 @@ echo ""
 printf "${YELLOW}Configure AKS node pools:${NC}\n"
 echo ""
 
-# Check VM SKU availability (parallel queries)
 LOCATION="${AZURE_LOCATION:-centralus}"
-printf "${YELLOW}Checking VM SKU availability in ${LOCATION}...${NC}\n"
 
-# Run both queries in parallel
-SYS_TMP=$(mktemp)
-GPU_TMP=$(mktemp)
-
-az vm list-skus --location "$LOCATION" --size Standard_D --resource-type virtualMachines \
-  --query "[?(name=='Standard_D4s_v3' || name=='Standard_D4ds_v5' || name=='Standard_D8s_v3' || name=='Standard_D8ds_v5' || name=='Standard_D2s_v3' || name=='Standard_D2ds_v5') && (restrictions==null || restrictions[0]==null)].name" \
-  -o tsv >"$SYS_TMP" 2>/dev/null &
-
-az vm list-skus --location "$LOCATION" --size Standard_NC --resource-type virtualMachines \
-  --query "[?(name=='Standard_NC6s_v3' || name=='Standard_NC12s_v3' || name=='Standard_NC4as_T4_v3' || name=='Standard_NC8as_T4_v3' || name=='Standard_NC24ads_A100_v4') && (restrictions==null || restrictions[0]==null)].name" \
-  -o tsv >"$GPU_TMP" 2>/dev/null &
-
-wait
-
-SYS_SKUS=$(cat "$SYS_TMP" || true)
-GPU_SKUS=$(cat "$GPU_TMP" || true)
-rm -f "$SYS_TMP" "$GPU_TMP"
-
-AVAILABLE_SKUS="${SYS_SKUS}
-${GPU_SKUS}"
-
-# Helper: check if a SKU is available
-sku_available() {
-  echo "$AVAILABLE_SKUS" | grep -qx "$1" 2>/dev/null
+# Helper: validate a single SKU in the location
+validate_sku() {
+  _sku=$1
+  _result=$(az vm list-skus --location "$LOCATION" --size "$_sku" --resource-type virtualMachines \
+    --query "[?name=='$_sku' && (restrictions==null || restrictions[0]==null)].name" -o tsv 2>/dev/null || true)
+  [ -n "$_result" ] && [ "$_result" = "$_sku" ]
 }
 
-# System nodes — find available SKUs
+# -- System node pool --
 printf "${CYAN}System node pool (API, controller, worker, changefeed):${NC}\n"
-printf "  Available VM SKUs:\n"
-SYS_OPTIONS=""
-SYS_COUNT=0
-for sku in Standard_D4s_v3 Standard_D4ds_v5 Standard_D8s_v3 Standard_D8ds_v5 Standard_D2s_v3 Standard_D2ds_v5; do
-  if sku_available "$sku"; then
-    SYS_COUNT=$((SYS_COUNT + 1))
-    SYS_OPTIONS="${SYS_OPTIONS}${SYS_COUNT}:${sku}\n"
-    printf "    ${SYS_COUNT}) ${sku}\n"
+cur_sys_sku=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
+cur_sys_sku=$(printf '%s' "$cur_sys_sku" | tr -d '\r')
+
+SYS_CANDIDATES="Standard_D4s_v3:4 vCPU, 16 GB
+Standard_D4ds_v5:4 vCPU, 16 GB (v5)
+Standard_D8s_v3:8 vCPU, 32 GB
+Standard_B4ms:4 vCPU, 16 GB (burstable)
+Standard_D2s_v3:2 vCPU, 8 GB (dev)"
+SYS_TOTAL=$(echo "$SYS_CANDIDATES" | wc -l | tr -d ' ')
+
+printf "  Common options:\n"
+DEF_SYS_IDX=1
+i=0
+echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+  i=$((i + 1))
+  mark=""
+  if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then mark=" (current)"; fi
+  printf "    ${i}) ${sku} - ${desc}${mark}\n"
+done
+# Recompute default index outside subshell
+i=0
+echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+  i=$((i + 1))
+  if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then echo "$i"; fi
+done > /tmp/_omnivec_def_sys_idx
+_def=$(cat /tmp/_omnivec_def_sys_idx 2>/dev/null | head -1)
+DEF_SYS_IDX=${_def:-1}
+rm -f /tmp/_omnivec_def_sys_idx
+
+CUSTOM_IDX=$((SYS_TOTAL + 1))
+printf "    ${CUSTOM_IDX}) Enter custom SKU\n"
+echo ""
+
+SYS_SKU=""
+FAILED_SYS_SKUS=""
+while [ -z "$SYS_SKU" ]; do
+  # Re-display with failed markers
+  printf "  Common options:\n"
+  next_default=""
+  i=0
+  echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
+    mark=""
+    if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then mark=" (current)"; fi
+    if echo "$FAILED_SYS_SKUS" | grep -q "|${sku}|" 2>/dev/null; then mark=" ${RED}[✗ unavailable]${NC}"; fi
+    printf "    ${i}) ${sku} - ${desc}${mark}\n"
+  done
+  # Find next untried default
+  i=0
+  echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
+    if ! echo "$FAILED_SYS_SKUS" | grep -q "|${sku}|" 2>/dev/null; then echo "$i"; fi
+  done > /tmp/_omnivec_next_def
+  next_default=$(head -1 /tmp/_omnivec_next_def 2>/dev/null)
+  next_default=${next_default:-$DEF_SYS_IDX}
+  rm -f /tmp/_omnivec_next_def
+
+  printf "    ${CUSTOM_IDX}) Enter custom SKU\n"
+  echo ""
+  printf "  System VM SKU [${next_default}]: "
+  read -r sys_pick || true
+  sys_pick=${sys_pick:-$next_default}
+
+  if [ "$sys_pick" = "$CUSTOM_IDX" ]; then
+    def_manual=${cur_sys_sku:-Standard_D4s_v3}
+    printf "  Enter SKU name [${def_manual}]: "
+    read -r candidate || true
+    candidate=${candidate:-$def_manual}
+  else
+    candidate=$(echo "$SYS_CANDIDATES" | sed -n "${sys_pick}p" | cut -d: -f1)
+    if [ -z "$candidate" ]; then
+      candidate=$(echo "$SYS_CANDIDATES" | sed -n "${next_default}p" | cut -d: -f1)
+    fi
+  fi
+
+  # Skip already-failed SKUs
+  if echo "$FAILED_SYS_SKUS" | grep -q "|${candidate}|" 2>/dev/null; then
+    printf "  ${RED}${candidate} already checked — not available. Pick another.${NC}\n"
+    continue
+  fi
+
+  printf "  ${CYAN}Validating ${candidate} in ${LOCATION}...${NC}"
+  if validate_sku "$candidate"; then
+    printf " ${GREEN}✓ available${NC}\n"
+    SYS_SKU="$candidate"
+  else
+    printf " ${RED}✗ not available in ${LOCATION}${NC}\n"
+    FAILED_SYS_SKUS="${FAILED_SYS_SKUS}|${candidate}|"
   fi
 done
-
-if [ "$SYS_COUNT" = "0" ]; then
-  printf "  ${RED}No suitable system VM SKUs found in ${LOCATION}!${NC}\n"
-  printf "  Enter a VM SKU manually: "
-  read -r SYS_SKU || true
-else
-  echo ""
-  printf "  System VM SKU [1]: "
-  read -r sys_sku_choice || true
-  sys_sku_choice=${sys_sku_choice:-1}
-  SYS_SKU=$(printf "$SYS_OPTIONS" | grep "^${sys_sku_choice}:" | cut -d: -f2)
-  if [ -z "$SYS_SKU" ]; then
-    SYS_SKU=$(printf "$SYS_OPTIONS" | head -1 | cut -d: -f2)
-  fi
-fi
 printf "  ${GREEN}System VM SKU: ${SYS_SKU}${NC}\n"
 
-printf "  System node count [2]: "
+cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
+cur_sys_count=$(printf '%s' "$cur_sys_count" | tr -d '\r')
+def_sys_count=${cur_sys_count:-2}
+printf "  System node count [${def_sys_count}]: "
 read -r sys_count || true
-sys_count=${sys_count:-2}
+sys_count=${sys_count:-$def_sys_count}
 printf "  ${GREEN}System nodes: ${sys_count}${NC}\n"
 
 echo ""
 
-# GPU nodes — find available SKUs
+# -- GPU node pool --
 printf "${CYAN}GPU node pool (ML models — dse-qwen2, clip, bge, bge-small):${NC}\n"
 echo "  Enter 0 nodes to skip GPU pool (use external models only)."
-GPU_OPTIONS=""
-GPU_COUNT=0
-for sku in Standard_NC6s_v3 Standard_NC12s_v3 Standard_NC4as_T4_v3 Standard_NC8as_T4_v3 Standard_NC24ads_A100_v4; do
-  if sku_available "$sku"; then
-    GPU_COUNT=$((GPU_COUNT + 1))
-    GPU_OPTIONS="${GPU_OPTIONS}${GPU_COUNT}:${sku}\n"
-    printf "    ${GPU_COUNT}) ${sku}\n"
-  fi
-done
+cur_gpu_sku=$(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null || true)
+cur_gpu_sku=$(printf '%s' "$cur_gpu_sku" | tr -d '\r')
 
-if [ "$GPU_COUNT" = "0" ]; then
-  printf "  ${YELLOW}No GPU VM SKUs available in ${LOCATION}. GPU pool will be skipped.${NC}\n"
-  GPU_SKU="Standard_NC6s_v3"
-  gpu_count="0"
-else
-  echo ""
-  printf "  GPU VM SKU [1]: "
-  read -r gpu_sku_choice || true
-  gpu_sku_choice=${gpu_sku_choice:-1}
-  GPU_SKU=$(printf "$GPU_OPTIONS" | grep "^${gpu_sku_choice}:" | cut -d: -f2)
-  if [ -z "$GPU_SKU" ]; then
-    GPU_SKU=$(printf "$GPU_OPTIONS" | head -1 | cut -d: -f2)
-  fi
+cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
+cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+def_gpu_count=${cur_gpu_count:-0}
 
-  printf "  GPU node count (0 = no GPU pool) [4]: "
-  read -r gpu_count || true
-  gpu_count=${gpu_count:-4}
-fi
+printf "  GPU node count (0 = no GPU pool) [${def_gpu_count}]: "
+read -r gpu_count || true
+gpu_count=${gpu_count:-$def_gpu_count}
 
-if [ "$gpu_count" = "0" ]; then
-  printf "  ${YELLOW}GPU pool disabled — using external embedding models only.${NC}\n"
-else
+if [ "$gpu_count" != "0" ]; then
+  GPU_CANDIDATES="Standard_NC4as_T4_v3:4 vCPU, 28 GB, 1x T4 16GB
+Standard_NC6s_v3:6 vCPU, 112 GB, 1x V100 16GB
+Standard_NC8as_T4_v3:8 vCPU, 56 GB, 1x T4 16GB
+Standard_NC12s_v3:12 vCPU, 224 GB, 2x V100
+Standard_NC24ads_A100_v4:24 vCPU, 220 GB, 1x A100 80GB"
+  GPU_TOTAL=$(echo "$GPU_CANDIDATES" | wc -l | tr -d ' ')
+
+  i=0
+  echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
+    if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then echo "$i"; fi
+  done > /tmp/_omnivec_def_gpu_idx
+  _gdef=$(cat /tmp/_omnivec_def_gpu_idx 2>/dev/null | head -1)
+  DEF_GPU_IDX=${_gdef:-1}
+  rm -f /tmp/_omnivec_def_gpu_idx
+
+  GPU_CUSTOM_IDX=$((GPU_TOTAL + 1))
+
+  GPU_SKU=""
+  FAILED_GPU_SKUS=""
+  while [ -z "$GPU_SKU" ]; do
+    printf "  Common GPU options:\n"
+    next_gpu_default=""
+    i=0
+    echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+      i=$((i + 1))
+      mark=""
+      if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then mark=" (current)"; fi
+      if echo "$FAILED_GPU_SKUS" | grep -q "|${sku}|" 2>/dev/null; then mark=" ${RED}[✗ unavailable]${NC}"; fi
+      printf "    ${i}) ${sku} - ${desc}${mark}\n"
+    done
+    i=0
+    echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+      i=$((i + 1))
+      if ! echo "$FAILED_GPU_SKUS" | grep -q "|${sku}|" 2>/dev/null; then echo "$i"; fi
+    done > /tmp/_omnivec_next_gpu_def
+    next_gpu_default=$(head -1 /tmp/_omnivec_next_gpu_def 2>/dev/null)
+    next_gpu_default=${next_gpu_default:-$DEF_GPU_IDX}
+    rm -f /tmp/_omnivec_next_gpu_def
+
+    printf "    ${GPU_CUSTOM_IDX}) Enter custom SKU\n"
+    echo ""
+    printf "  GPU VM SKU [${next_gpu_default}]: "
+    read -r gpu_pick || true
+    gpu_pick=${gpu_pick:-$next_gpu_default}
+
+    if [ "$gpu_pick" = "$GPU_CUSTOM_IDX" ]; then
+      def_gpu_manual=${cur_gpu_sku:-Standard_NC4as_T4_v3}
+      printf "  Enter SKU name [${def_gpu_manual}]: "
+      read -r candidate || true
+      candidate=${candidate:-$def_gpu_manual}
+    else
+      candidate=$(echo "$GPU_CANDIDATES" | sed -n "${gpu_pick}p" | cut -d: -f1)
+      if [ -z "$candidate" ]; then
+        candidate=$(echo "$GPU_CANDIDATES" | sed -n "${next_gpu_default}p" | cut -d: -f1)
+      fi
+    fi
+
+    if echo "$FAILED_GPU_SKUS" | grep -q "|${candidate}|" 2>/dev/null; then
+      printf "  ${RED}${candidate} already checked — not available. Pick another.${NC}\n"
+      continue
+    fi
+
+    printf "  ${CYAN}Validating ${candidate} in ${LOCATION}...${NC}"
+    if validate_sku "$candidate"; then
+      printf " ${GREEN}✓ available${NC}\n"
+      GPU_SKU="$candidate"
+    else
+      printf " ${RED}✗ not available in ${LOCATION}${NC}\n"
+      FAILED_GPU_SKUS="${FAILED_GPU_SKUS}|${candidate}|"
+    fi
+  done
   printf "  ${GREEN}GPU VM: ${GPU_SKU}, nodes: ${gpu_count}${NC}\n"
+else
+  printf "  ${YELLOW}GPU pool disabled — using external embedding models only.${NC}\n"
+  GPU_SKU=${cur_gpu_sku:-}
 fi
 
 # Validate before storing
@@ -421,6 +575,19 @@ fi
 # The vault name uses the same prefix-resourceToken pattern as other resources.
 # We check if a soft-deleted vault with that name exists so Bicep can recover
 # it instead of failing with a "vault already exists in deleted state" error.
+
+# ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
+printf "\n${CYAN}Sanitizing environment values...${NC}\n"
+for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE OMNIVEC_BUILD_MODE; do
+  raw=$(azd env get-value "$key" 2>/dev/null || true)
+  if [ -n "$raw" ]; then
+    clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ "$raw" != "$clean" ]; then
+      azd env set "$key" "$clean"
+      printf "  ${YELLOW}Cleaned ${key}: removed hidden characters${NC}\n"
+    fi
+  fi
+done
 
 printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
 printf "${CYAN}Environment: ${AZURE_ENV_NAME}${NC}\n"
