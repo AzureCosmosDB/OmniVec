@@ -387,29 +387,60 @@ printf "    ${CUSTOM_IDX}) Enter custom SKU\n"
 echo ""
 
 SYS_SKU=""
+FAILED_SYS_SKUS=""
 while [ -z "$SYS_SKU" ]; do
-  printf "  System VM SKU [${DEF_SYS_IDX}]: "
+  # Re-display with failed markers
+  printf "  Common options:\n"
+  next_default=""
+  i=0
+  echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
+    mark=""
+    if [ -n "$cur_sys_sku" ] && [ "$sku" = "$cur_sys_sku" ]; then mark=" (current)"; fi
+    if echo "$FAILED_SYS_SKUS" | grep -q "|${sku}|" 2>/dev/null; then mark=" ${RED}[✗ unavailable]${NC}"; fi
+    printf "    ${i}) ${sku} - ${desc}${mark}\n"
+  done
+  # Find next untried default
+  i=0
+  echo "$SYS_CANDIDATES" | while IFS=: read -r sku desc; do
+    i=$((i + 1))
+    if ! echo "$FAILED_SYS_SKUS" | grep -q "|${sku}|" 2>/dev/null; then echo "$i"; fi
+  done > /tmp/_omnivec_next_def
+  next_default=$(head -1 /tmp/_omnivec_next_def 2>/dev/null)
+  next_default=${next_default:-$DEF_SYS_IDX}
+  rm -f /tmp/_omnivec_next_def
+
+  printf "    ${CUSTOM_IDX}) Enter custom SKU\n"
+  echo ""
+  printf "  System VM SKU [${next_default}]: "
   read -r sys_pick || true
-  sys_pick=${sys_pick:-$DEF_SYS_IDX}
+  sys_pick=${sys_pick:-$next_default}
 
   if [ "$sys_pick" = "$CUSTOM_IDX" ]; then
     def_manual=${cur_sys_sku:-Standard_D4s_v3}
     printf "  Enter SKU name [${def_manual}]: "
-    read -r SYS_SKU || true
-    SYS_SKU=${SYS_SKU:-$def_manual}
+    read -r candidate || true
+    candidate=${candidate:-$def_manual}
   else
-    SYS_SKU=$(echo "$SYS_CANDIDATES" | sed -n "${sys_pick}p" | cut -d: -f1)
-    if [ -z "$SYS_SKU" ]; then
-      SYS_SKU=$(echo "$SYS_CANDIDATES" | sed -n "${DEF_SYS_IDX}p" | cut -d: -f1)
+    candidate=$(echo "$SYS_CANDIDATES" | sed -n "${sys_pick}p" | cut -d: -f1)
+    if [ -z "$candidate" ]; then
+      candidate=$(echo "$SYS_CANDIDATES" | sed -n "${next_default}p" | cut -d: -f1)
     fi
   fi
 
-  printf "  ${CYAN}Validating ${SYS_SKU} in ${LOCATION}...${NC}"
-  if validate_sku "$SYS_SKU"; then
+  # Skip already-failed SKUs
+  if echo "$FAILED_SYS_SKUS" | grep -q "|${candidate}|" 2>/dev/null; then
+    printf "  ${RED}${candidate} already checked — not available. Pick another.${NC}\n"
+    continue
+  fi
+
+  printf "  ${CYAN}Validating ${candidate} in ${LOCATION}...${NC}"
+  if validate_sku "$candidate"; then
     printf " ${GREEN}✓ available${NC}\n"
+    SYS_SKU="$candidate"
   else
-    printf " ${RED}✗ not available in ${LOCATION}. Try again.${NC}\n"
-    SYS_SKU=""
+    printf " ${RED}✗ not available in ${LOCATION}${NC}\n"
+    FAILED_SYS_SKUS="${FAILED_SYS_SKUS}|${candidate}|"
   fi
 done
 printf "  ${GREEN}System VM SKU: ${SYS_SKU}${NC}\n"
@@ -446,14 +477,6 @@ Standard_NC12s_v3:12 vCPU, 224 GB, 2x V100
 Standard_NC24ads_A100_v4:24 vCPU, 220 GB, 1x A100 80GB"
   GPU_TOTAL=$(echo "$GPU_CANDIDATES" | wc -l | tr -d ' ')
 
-  printf "  Common GPU options:\n"
-  i=0
-  echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
-    i=$((i + 1))
-    mark=""
-    if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then mark=" (current)"; fi
-    printf "    ${i}) ${sku} - ${desc}${mark}\n"
-  done
   i=0
   echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
     i=$((i + 1))
@@ -464,33 +487,59 @@ Standard_NC24ads_A100_v4:24 vCPU, 220 GB, 1x A100 80GB"
   rm -f /tmp/_omnivec_def_gpu_idx
 
   GPU_CUSTOM_IDX=$((GPU_TOTAL + 1))
-  printf "    ${GPU_CUSTOM_IDX}) Enter custom SKU\n"
-  echo ""
 
   GPU_SKU=""
+  FAILED_GPU_SKUS=""
   while [ -z "$GPU_SKU" ]; do
-    printf "  GPU VM SKU [${DEF_GPU_IDX}]: "
+    printf "  Common GPU options:\n"
+    next_gpu_default=""
+    i=0
+    echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+      i=$((i + 1))
+      mark=""
+      if [ -n "$cur_gpu_sku" ] && [ "$sku" = "$cur_gpu_sku" ]; then mark=" (current)"; fi
+      if echo "$FAILED_GPU_SKUS" | grep -q "|${sku}|" 2>/dev/null; then mark=" ${RED}[✗ unavailable]${NC}"; fi
+      printf "    ${i}) ${sku} - ${desc}${mark}\n"
+    done
+    i=0
+    echo "$GPU_CANDIDATES" | while IFS=: read -r sku desc; do
+      i=$((i + 1))
+      if ! echo "$FAILED_GPU_SKUS" | grep -q "|${sku}|" 2>/dev/null; then echo "$i"; fi
+    done > /tmp/_omnivec_next_gpu_def
+    next_gpu_default=$(head -1 /tmp/_omnivec_next_gpu_def 2>/dev/null)
+    next_gpu_default=${next_gpu_default:-$DEF_GPU_IDX}
+    rm -f /tmp/_omnivec_next_gpu_def
+
+    printf "    ${GPU_CUSTOM_IDX}) Enter custom SKU\n"
+    echo ""
+    printf "  GPU VM SKU [${next_gpu_default}]: "
     read -r gpu_pick || true
-    gpu_pick=${gpu_pick:-$DEF_GPU_IDX}
+    gpu_pick=${gpu_pick:-$next_gpu_default}
 
     if [ "$gpu_pick" = "$GPU_CUSTOM_IDX" ]; then
       def_gpu_manual=${cur_gpu_sku:-Standard_NC4as_T4_v3}
       printf "  Enter SKU name [${def_gpu_manual}]: "
-      read -r GPU_SKU || true
-      GPU_SKU=${GPU_SKU:-$def_gpu_manual}
+      read -r candidate || true
+      candidate=${candidate:-$def_gpu_manual}
     else
-      GPU_SKU=$(echo "$GPU_CANDIDATES" | sed -n "${gpu_pick}p" | cut -d: -f1)
-      if [ -z "$GPU_SKU" ]; then
-        GPU_SKU=$(echo "$GPU_CANDIDATES" | sed -n "${DEF_GPU_IDX}p" | cut -d: -f1)
+      candidate=$(echo "$GPU_CANDIDATES" | sed -n "${gpu_pick}p" | cut -d: -f1)
+      if [ -z "$candidate" ]; then
+        candidate=$(echo "$GPU_CANDIDATES" | sed -n "${next_gpu_default}p" | cut -d: -f1)
       fi
     fi
 
-    printf "  ${CYAN}Validating ${GPU_SKU} in ${LOCATION}...${NC}"
-    if validate_sku "$GPU_SKU"; then
+    if echo "$FAILED_GPU_SKUS" | grep -q "|${candidate}|" 2>/dev/null; then
+      printf "  ${RED}${candidate} already checked — not available. Pick another.${NC}\n"
+      continue
+    fi
+
+    printf "  ${CYAN}Validating ${candidate} in ${LOCATION}...${NC}"
+    if validate_sku "$candidate"; then
       printf " ${GREEN}✓ available${NC}\n"
+      GPU_SKU="$candidate"
     else
-      printf " ${RED}✗ not available in ${LOCATION}. Try again.${NC}\n"
-      GPU_SKU=""
+      printf " ${RED}✗ not available in ${LOCATION}${NC}\n"
+      FAILED_GPU_SKUS="${FAILED_GPU_SKUS}|${candidate}|"
     fi
   done
   printf "  ${GREEN}GPU VM: ${GPU_SKU}, nodes: ${gpu_count}${NC}\n"

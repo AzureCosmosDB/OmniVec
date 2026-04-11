@@ -343,29 +343,50 @@ Write-Host "    $($sysCandidates.Count+1)) Enter custom SKU"
 Write-Host ""
 
 $SYS_SKU = $null
+$failedSkus = @{}
 while (-not $SYS_SKU) {
-    $sysPick = Read-Host "  System VM SKU [$($defIdx+1)]"
-    if (-not $sysPick) { $sysPick = "$($defIdx+1)" }
+    # Re-display list with failed SKUs marked
+    Write-Host "  Common options:"
+    $nextDefault = $null
+    for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
+        $mark = ""
+        if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { $mark = " (current)" }
+        if ($failedSkus.ContainsKey($sysCandidates[$i].name)) { $mark = " `e[31m[✗ unavailable]`e[0m" }
+        elseif (-not $nextDefault) { $nextDefault = $($i+1) }
+        Write-Host "    $($i+1)) $($sysCandidates[$i].name) - $($sysCandidates[$i].desc)$mark"
+    }
+    Write-Host "    $($sysCandidates.Count+1)) Enter custom SKU"
+    Write-Host ""
+    if (-not $nextDefault) { $nextDefault = $($defIdx+1) }
+
+    $sysPick = Read-Host "  System VM SKU [$nextDefault]"
+    if (-not $sysPick) { $sysPick = "$nextDefault" }
 
     if ([int]$sysPick -eq ($sysCandidates.Count + 1)) {
         $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
-        $SYS_SKU = Read-Host "  Enter SKU name [$defManual]"
-        if (-not $SYS_SKU) { $SYS_SKU = $defManual }
+        $candidate = Read-Host "  Enter SKU name [$defManual]"
+        if (-not $candidate) { $candidate = $defManual }
     } else {
         $idx = [int]$sysPick - 1
         if ($idx -ge 0 -and $idx -lt $sysCandidates.Count) {
-            $SYS_SKU = $sysCandidates[$idx].name
+            $candidate = $sysCandidates[$idx].name
         } else {
-            $SYS_SKU = $sysCandidates[$defIdx].name
+            $candidate = $sysCandidates[[int]$nextDefault - 1].name
         }
     }
 
-    Write-Host "  `e[36mValidating $SYS_SKU in $location...`e[0m" -NoNewline
-    if (Test-SkuAvailable -Sku $SYS_SKU -Location $location) {
+    if ($failedSkus.ContainsKey($candidate)) {
+        Write-Host "  `e[31m$candidate already checked — not available. Pick another.`e[0m"
+        continue
+    }
+
+    Write-Host "  `e[36mValidating $candidate in $location...`e[0m" -NoNewline
+    if (Test-SkuAvailable -Sku $candidate -Location $location) {
         Write-Host " `e[32m✓ available`e[0m"
+        $SYS_SKU = $candidate
     } else {
-        Write-Host " `e[31m✗ not available in $location. Try again.`e[0m"
-        $SYS_SKU = $null
+        Write-Host " `e[31m✗ not available in $location`e[0m"
+        $failedSkus[$candidate] = $true
     }
 }
 Write-Host "  `e[32mSystem VM SKU: $SYS_SKU`e[0m"
@@ -417,29 +438,49 @@ if ($gpuCount -ne "0") {
     Write-Host ""
 
     $GPU_SKU = $null
+    $failedGpuSkus = @{}
     while (-not $GPU_SKU) {
-        $gpuPick = Read-Host "  GPU VM SKU [$($defGpuIdx+1)]"
-        if (-not $gpuPick) { $gpuPick = "$($defGpuIdx+1)" }
+        Write-Host "  Common GPU options:"
+        $nextGpuDefault = $null
+        for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
+            $mark = ""
+            if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { $mark = " (current)" }
+            if ($failedGpuSkus.ContainsKey($gpuCandidates[$i].name)) { $mark = " `e[31m[✗ unavailable]`e[0m" }
+            elseif (-not $nextGpuDefault) { $nextGpuDefault = $($i+1) }
+            Write-Host "    $($i+1)) $($gpuCandidates[$i].name) - $($gpuCandidates[$i].desc)$mark"
+        }
+        Write-Host "    $($gpuCandidates.Count+1)) Enter custom SKU"
+        Write-Host ""
+        if (-not $nextGpuDefault) { $nextGpuDefault = $($defGpuIdx+1) }
+
+        $gpuPick = Read-Host "  GPU VM SKU [$nextGpuDefault]"
+        if (-not $gpuPick) { $gpuPick = "$nextGpuDefault" }
 
         if ([int]$gpuPick -eq ($gpuCandidates.Count + 1)) {
             $defGpuManual = if ($curGpuSku) { $curGpuSku } else { "Standard_NC4as_T4_v3" }
-            $GPU_SKU = Read-Host "  Enter SKU name [$defGpuManual]"
-            if (-not $GPU_SKU) { $GPU_SKU = $defGpuManual }
+            $candidate = Read-Host "  Enter SKU name [$defGpuManual]"
+            if (-not $candidate) { $candidate = $defGpuManual }
         } else {
             $idx = [int]$gpuPick - 1
             if ($idx -ge 0 -and $idx -lt $gpuCandidates.Count) {
-                $GPU_SKU = $gpuCandidates[$idx].name
+                $candidate = $gpuCandidates[$idx].name
             } else {
-                $GPU_SKU = $gpuCandidates[$defGpuIdx].name
+                $candidate = $gpuCandidates[[int]$nextGpuDefault - 1].name
             }
         }
 
-        Write-Host "  `e[36mValidating $GPU_SKU in $location...`e[0m" -NoNewline
-        if (Test-SkuAvailable -Sku $GPU_SKU -Location $location) {
+        if ($failedGpuSkus.ContainsKey($candidate)) {
+            Write-Host "  `e[31m$candidate already checked — not available. Pick another.`e[0m"
+            continue
+        }
+
+        Write-Host "  `e[36mValidating $candidate in $location...`e[0m" -NoNewline
+        if (Test-SkuAvailable -Sku $candidate -Location $location) {
             Write-Host " `e[32m✓ available`e[0m"
+            $GPU_SKU = $candidate
         } else {
-            Write-Host " `e[31m✗ not available in $location. Try again.`e[0m"
-            $GPU_SKU = $null
+            Write-Host " `e[31m✗ not available in $location`e[0m"
+            $failedGpuSkus[$candidate] = $true
         }
     }
     Write-Host "  `e[32mGPU VM: $GPU_SKU, nodes: $gpuCount`e[0m"
