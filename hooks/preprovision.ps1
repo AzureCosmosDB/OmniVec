@@ -32,7 +32,7 @@ function Acquire-Lock {
         if ($alive) {
             Write-Host "`n`e[31mERROR: Another deployment for '$env:AZURE_ENV_NAME' is already running (PID $lockPid).`e[0m"
             Write-Host "  If that process is stuck, you can force-take the lock."
-            $forceLock = Read-Host "  Take over lock and continue? [y/N]"
+            $forceLock = (Read-Host "  Take over lock and continue? [y/N]").Trim()
             if ($forceLock -match "^[yY]") {
                 Write-Host "  `e[33mKilling PID $lockPid and taking lock...`e[0m"
                 try { Stop-Process -Id ([int]$lockPid) -Force -ErrorAction SilentlyContinue } catch {}
@@ -62,10 +62,15 @@ try {
 # -- Check for existing healthy deployment --
 $ErrorActionPreference = "SilentlyContinue"
 $existingAks = azd env get-value AZURE_AKS_CLUSTER_NAME 2>$null
+$aksExitCode = $LASTEXITCODE
 $existingRg = azd env get-value AZURE_RESOURCE_GROUP 2>$null
+$rgExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 
-if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $existingRg -notmatch "^ERROR") {
+$deploymentDetected = $false
+$inPlaceUpdate = $false
+
+if ($aksExitCode -eq 0 -and $rgExitCode -eq 0 -and $existingAks -and $existingRg -and "$existingAks" -notmatch "ERROR" -and "$existingRg" -notmatch "ERROR") {
     $kubeCtx = $existingAks.Trim()
     az aks get-credentials --resource-group $existingRg.Trim() --name $kubeCtx --context $kubeCtx --overwrite-existing 2>$null | Out-Null
 
@@ -76,43 +81,67 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
     } catch {}
 
     if ($healthyPods -gt 0) {
+        $deploymentDetected = $true
         Write-Host "`n`e[33mExisting healthy deployment detected ($healthyPods running pods in omnivec).`e[0m"
         Write-Host "  AKS:  `e[36m$kubeCtx`e[0m"
         Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
         Write-Host ""
         Write-Host "  `e[36m1) Update in-place (default)`e[0m"
-        Write-Host "  `e[36m2) Teardown and redeploy fresh`e[0m"
-        Write-Host "  `e[36m3) Abort`e[0m"
+        Write-Host "  `e[36m2) Abort (use 'azd down' to teardown)`e[0m"
         Write-Host ""
-        $choice = Read-Host "  Choice [1]"
+        $choice = (Read-Host "  Choice [1]").Trim()
         if (-not $choice) { $choice = "1" }
         switch ($choice) {
             "1" {
                 Write-Host "  `e[32mProceeding with in-place update.`e[0m"
+                $inPlaceUpdate = $true
             }
             "2" {
-                Write-Host "  `e[33mTearing down existing deployment first...`e[0m"
-                azd down --force --purge
-                Write-Host "  `e[32mTeardown complete. Proceeding with fresh deployment.`e[0m"
-            }
-            "3" {
                 Write-Host "  `e[31mAborted by user.`e[0m"
-                exit 0
+                Write-Host "  `e[33mTo teardown, run: azd down --force --purge`e[0m"
+                exit 1
             }
             default {
                 Write-Host "  `e[32mProceeding with in-place update (default).`e[0m"
+                $inPlaceUpdate = $true
             }
         }
     }
+}
+
+# -- In-place update: only allow node count changes, then proceed --
+if ($inPlaceUpdate) {
+    Write-Host "`n`e[36mIn-place update — only node count changes allowed.`e[0m"
+    $ErrorActionPreference = "SilentlyContinue"
+    $curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+    $sysExitCode2 = $LASTEXITCODE
+    $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
+    $gpuExitCode2 = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    $defSysCount = if ($sysExitCode2 -eq 0 -and $curSysCount -and "$curSysCount".Trim()) { "$curSysCount".Trim() } else { "2" }
+    $defGpuCount = if ($gpuExitCode2 -eq 0 -and $curGpuCount -and "$curGpuCount".Trim()) { "$curGpuCount".Trim() } else { "0" }
+
+    $sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
+    if (-not $sysCount) { $sysCount = $defSysCount }
+    azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
+
+    $gpuCount = (Read-Host "  GPU node count [$defGpuCount]").Trim()
+    if (-not $gpuCount) { $gpuCount = $defGpuCount }
+    azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
+
+    Write-Host "  `e[32mSystem nodes: $sysCount, GPU nodes: $gpuCount`e[0m"
+    Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
+    exit 0
 }
 
 # -- Resume detection --
 $existingConfig = $null
 $ErrorActionPreference = "SilentlyContinue"
 $existingConfig = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
+$configExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
-if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ERROR") {
-    Write-Host "`n`e[36mFound previous configuration for environment '$env:AZURE_ENV_NAME':`e[0m"
+if ($configExitCode -eq 0 -and $existingConfig -and "$existingConfig" -notmatch "ERROR") {
+    Write-Host "`n`e[36mConfiguration for environment '$env:AZURE_ENV_NAME':`e[0m"
     Write-Host "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null)"
     Write-Host "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null)"
     Write-Host "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null)"
@@ -120,12 +149,44 @@ if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ER
     Write-Host "  Blob source:     $(azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)"
     Write-Host "  Metadata store:  $(azd env get-value OMNIVEC_METADATA_STORE 2>$null)"
     Write-Host ""
-    $reuse = Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)"
+    $reuse = (Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)").Trim()
     if (-not $reuse) { $reuse = "Y" }
     if ($reuse -match "^[nN]") {
-        Write-Host "  `e[32mReconfiguring...`e[0m"
+        Write-Host "  `e[32mReconfiguring — current values shown as defaults, press Enter to keep.`e[0m"
     } else {
-        Write-Host "  `e[32mUsing existing settings, skipping configuration prompts.`e[0m"
+        Write-Host "  `e[32mUsing existing settings, running recovery checks before proceeding...`e[0m"
+
+        # -- Recovery: check for soft-deleted Key Vaults that block provisioning --
+        Write-Host "`n`e[33mChecking for soft-deleted Key Vaults that may block provisioning...`e[0m"
+        $ErrorActionPreference = "SilentlyContinue"
+        $deletedVaults = az keyvault list-deleted --query "[?contains(name, 'omnivec-kv')].{name:name, location:properties.location}" -o json 2>$null | ConvertFrom-Json
+        $ErrorActionPreference = "Stop"
+        if ($deletedVaults -and $deletedVaults.Count -gt 0) {
+            Write-Host "  `e[33mFound $($deletedVaults.Count) soft-deleted OmniVec Key Vault(s):`e[0m"
+            foreach ($dv in $deletedVaults) {
+                Write-Host "    - $($dv.name) (location: $($dv.location))"
+            }
+            Write-Host ""
+            $purgeChoice = (Read-Host "  Purge these to unblock provisioning? [Y/n]").Trim()
+            if (-not $purgeChoice) { $purgeChoice = "Y" }
+            if ($purgeChoice -match "^[yY]") {
+                foreach ($dv in $deletedVaults) {
+                    Write-Host "  `e[36mPurging $($dv.name)...`e[0m" -NoNewline
+                    az keyvault purge --name $dv.name 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host " `e[32m✓`e[0m"
+                    } else {
+                        Write-Host " `e[31m✗ (may need elevated permissions)`e[0m"
+                    }
+                }
+            } else {
+                Write-Host "  `e[33mSkipping purge — provisioning may fail if vault name collides.`e[0m"
+            }
+        } else {
+            Write-Host "  `e[32mNo soft-deleted Key Vaults found.`e[0m"
+        }
+
+        Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
         exit 0
     }
 }
@@ -186,11 +247,12 @@ if (-not $acct) {
 }
 Write-Host "`e[32mLogged in to subscription: $($acct.name) ($($acct.id))`e[0m"
 
-# -- Check for existing OmniVec installations --
-Write-Host "`n`e[33mChecking for existing OmniVec installations in subscription...`e[0m"
+# -- Check for existing OmniVec installations (skip if already detected above) --
+if (-not $deploymentDetected) {
+    Write-Host "`n`e[33mChecking for existing OmniVec installations in subscription...`e[0m"
 
-$existing = az resource list --query "[?tags.""omnivec-instance"" != null].{name:name, type:type, rg:resourceGroup, instance:tags.""omnivec-instance""}" -o json 2>$null | ConvertFrom-Json
-if ($existing -and $existing.Count -gt 0) {
+    $existing = az resource list --query "[?tags.""omnivec-instance"" != null].{name:name, type:type, rg:resourceGroup, instance:tags.""omnivec-instance""}" -o json 2>$null | ConvertFrom-Json
+    if ($existing -and $existing.Count -gt 0) {
     $instances = $existing | Group-Object -Property instance
     Write-Host "`e[36mFound $($instances.Count) existing OmniVec installation(s):`e[0m"
     Write-Host ""
@@ -204,7 +266,7 @@ if ($existing -and $existing.Count -gt 0) {
     Write-Host "  1) Launch a NEW OmniVec installation (unique resources alongside existing)"
     Write-Host "  2) Cancel deployment"
     Write-Host ""
-    $choice = Read-Host "Choice [1/2]"
+    $choice = (Read-Host "Choice [1/2]").Trim()
     if ($choice -eq "2") {
         Write-Host "`e[31mDeployment cancelled.`e[0m"
         exit 1
@@ -213,15 +275,24 @@ if ($existing -and $existing.Count -gt 0) {
 } else {
     Write-Host "`e[32mNo existing OmniVec installations found. This will be a fresh deployment.`e[0m"
 }
+}
 
 # -- Metadata storage selection --
+$ErrorActionPreference = "SilentlyContinue"
+$curMeta = azd env get-value OMNIVEC_METADATA_STORE 2>$null
+$metaExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$defMeta = if ($metaExitCode -eq 0 -and $curMeta -and "$curMeta" -notmatch "ERROR") { "$curMeta".Trim() } else { "cosmosdb-serverless" }
+$defMetaNum = if ($defMeta -eq "cosmosdb-provisioned") { "2" } else { "1" }
+$mark1 = if ($defMetaNum -eq "1") { " (current)" } else { "" }
+$mark2 = if ($defMetaNum -eq "2") { " (current)" } else { "" }
 Write-Host ""
 Write-Host "`e[33mSelect metadata storage backend:`e[0m"
-Write-Host "  1) Azure CosmosDB (Serverless NoSQL) - recommended"
-Write-Host "  2) Azure CosmosDB (Provisioned throughput)"
+Write-Host "  1) Azure CosmosDB (Serverless NoSQL)$mark1"
+Write-Host "  2) Azure CosmosDB (Provisioned throughput)$mark2"
 Write-Host ""
-$metaChoice = Read-Host "Choice [1]"
-if (-not $metaChoice) { $metaChoice = "1" }
+$metaChoice = (Read-Host "Choice [$defMetaNum]").Trim()
+if (-not $metaChoice) { $metaChoice = $defMetaNum }
 
 switch ($metaChoice) {
     "2" {
@@ -235,16 +306,24 @@ switch ($metaChoice) {
 }
 
 # -- Blob storage source --
+$ErrorActionPreference = "SilentlyContinue"
+$curBlob = azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null
+$blobExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$defBlob = if ($blobExitCode -eq 0 -and $curBlob -and "$curBlob" -notmatch "ERROR") { "$curBlob".Trim() } else { "true" }
+$defBlobNum = if ($defBlob -eq "false") { "2" } else { "1" }
+$bmark1 = if ($defBlobNum -eq "1") { " (current)" } else { "" }
+$bmark2 = if ($defBlobNum -eq "2") { " (current)" } else { "" }
 Write-Host ""
 Write-Host "`e[33mWill you use Azure Blob Storage as a document source?`e[0m"
 Write-Host "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
 Write-Host "  will be created alongside the Storage Account."
 Write-Host ""
-Write-Host "  1) Yes - enable blob source ingestion (recommended)"
-Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)"
+Write-Host "  1) Yes - enable blob source ingestion$bmark1"
+Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)$bmark2"
 Write-Host ""
-$blobChoice = Read-Host "Choice [1]"
-if (-not $blobChoice) { $blobChoice = "1" }
+$blobChoice = (Read-Host "Choice [$defBlobNum]").Trim()
+if (-not $blobChoice) { $blobChoice = $defBlobNum }
 
 if ($blobChoice -eq "1") {
     Write-Host "`e[32mBlob source enabled - will create Storage Account, Service Bus, and Event Grid.`e[0m"
@@ -259,112 +338,187 @@ Write-Host ""
 Write-Host "`e[33mConfigure AKS node pools:`e[0m"
 Write-Host ""
 
-# Query available VM SKUs in the selected location (parallel queries)
 $location = $env:AZURE_LOCATION
 if (-not $location) { $location = "centralus" }
-Write-Host "`e[33mChecking VM SKU availability in $location...`e[0m"
 
-# Run both SKU queries in parallel
-$sysJob = Start-Job -ScriptBlock {
-    az vm list-skus --location $args[0] --size Standard_D --resource-type virtualMachines --query "[?(restrictions==null || restrictions[0]==null)].name" -o json 2>$null
-} -ArgumentList $location
-$gpuJob = Start-Job -ScriptBlock {
-    az vm list-skus --location $args[0] --size Standard_NC --resource-type virtualMachines --query "[?(restrictions==null || restrictions[0]==null)].name" -o json 2>$null
-} -ArgumentList $location
-
-# Wait for both to finish
-$null = Wait-Job $sysJob, $gpuJob
-$sysJson = Receive-Job $sysJob
-$gpuJson = Receive-Job $gpuJob
-Remove-Job $sysJob, $gpuJob
-
-$availableRaw = @()
-if ($sysJson) { $availableRaw += ($sysJson | ConvertFrom-Json) }
-if ($gpuJson) { $availableRaw += ($gpuJson | ConvertFrom-Json) }
-if (-not $availableRaw) { $availableRaw = @() }
-
-# System node candidates
-$sysCandidates = @(
-    @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB RAM" },
-    @{ name = "Standard_D4ds_v5"; desc = "4 vCPU, 16 GB RAM (v5)" },
-    @{ name = "Standard_D8s_v3";  desc = "8 vCPU, 32 GB RAM" },
-    @{ name = "Standard_D8ds_v5"; desc = "8 vCPU, 32 GB RAM (v5)" },
-    @{ name = "Standard_D2s_v3";  desc = "2 vCPU, 8 GB RAM (dev)" },
-    @{ name = "Standard_D2ds_v5"; desc = "2 vCPU, 8 GB RAM (dev, v5)" }
-)
-$availableSys = @()
-foreach ($c in $sysCandidates) {
-    if ($availableRaw -contains $c.name) {
-        $availableSys += $c
-    }
+# Helper: validate a single SKU in the location
+function Test-SkuAvailable {
+    param($Sku, $Location)
+    $result = az vm list-skus --location $Location --size $Sku --resource-type virtualMachines --query "[?name=='$Sku' && (restrictions==null || restrictions[0]==null)].name" -o tsv 2>$null
+    return ($result -and $result.Trim() -eq $Sku)
 }
 
+# -- System node pool --
 Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
-if ($availableSys.Count -eq 0) {
-    Write-Host "  `e[31mNo suitable system VM SKUs found in $location!`e[0m"
-    $SYS_SKU = Read-Host "  Enter a VM SKU manually"
+$ErrorActionPreference = "SilentlyContinue"
+$curSysSku = $null
+try { $curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null } catch {}
+$sysSkuExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($curSysSku -and $sysSkuExitCode -eq 0 -and "$curSysSku" -notmatch "ERROR") {
+    $curSysSku = $curSysSku.Trim()
 } else {
-    Write-Host "  Available VM SKUs:"
-    for ($i = 0; $i -lt $availableSys.Count; $i++) {
-        $rec = if ($i -eq 0) { " (recommended)" } else { "" }
-        Write-Host "    $($i+1)) $($availableSys[$i].name) - $($availableSys[$i].desc)$rec"
+    $curSysSku = ""
+}
+
+$sysCandidates = @(
+    @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB" },
+    @{ name = "Standard_D4ds_v5"; desc = "4 vCPU, 16 GB (v5)" },
+    @{ name = "Standard_D8s_v3";  desc = "8 vCPU, 32 GB" },
+    @{ name = "Standard_B4ms";    desc = "4 vCPU, 16 GB (burstable)" },
+    @{ name = "Standard_D2s_v3";  desc = "2 vCPU, 8 GB (dev)" }
+)
+$defIdx = 0
+for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
+    if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { $defIdx = $i }
+}
+
+$SYS_SKU = $null
+$failedSkus = @{}
+while (-not $SYS_SKU) {
+    # Re-display list with failed SKUs marked
+    Write-Host "  Common options:"
+    $nextDefault = $null
+    for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
+        $mark = ""
+        if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { $mark = " (current)" }
+        if ($failedSkus.ContainsKey($sysCandidates[$i].name)) { $mark = " `e[31m[✗ unavailable]`e[0m" }
+        elseif (-not $nextDefault) { $nextDefault = $($i+1) }
+        Write-Host "    $($i+1)) $($sysCandidates[$i].name) - $($sysCandidates[$i].desc)$mark"
     }
+    Write-Host "    $($sysCandidates.Count+1)) Enter custom SKU"
     Write-Host ""
-    $sysSku = Read-Host "  System VM SKU [1]"
-    if (-not $sysSku) { $sysSku = "1" }
-    $idx = [int]$sysSku - 1
-    if ($idx -lt 0 -or $idx -ge $availableSys.Count) { $idx = 0 }
-    $SYS_SKU = $availableSys[$idx].name
+    if (-not $nextDefault) { $nextDefault = $($defIdx+1) }
+
+    $sysPick = (Read-Host "  System VM SKU [$nextDefault]").Trim()
+    if (-not $sysPick) { $sysPick = "$nextDefault" }
+
+    if ([int]$sysPick -eq ($sysCandidates.Count + 1)) {
+        $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
+        $candidate = (Read-Host "  Enter SKU name [$defManual]").Trim()
+        if (-not $candidate) { $candidate = $defManual }
+    } else {
+        $idx = [int]$sysPick - 1
+        if ($idx -ge 0 -and $idx -lt $sysCandidates.Count) {
+            $candidate = $sysCandidates[$idx].name
+        } else {
+            $candidate = $sysCandidates[[int]$nextDefault - 1].name
+        }
+    }
+
+    if ($failedSkus.ContainsKey($candidate)) {
+        Write-Host "  `e[31m$candidate already checked — not available. Pick another.`e[0m"
+        continue
+    }
+
+    Write-Host "  `e[36mValidating $candidate in $location...`e[0m" -NoNewline
+    if (Test-SkuAvailable -Sku $candidate -Location $location) {
+        Write-Host " `e[32m✓ available`e[0m"
+        $SYS_SKU = $candidate
+    } else {
+        Write-Host " `e[31m✗ not available in $location`e[0m"
+        $failedSkus[$candidate] = $true
+    }
 }
 Write-Host "  `e[32mSystem VM SKU: $SYS_SKU`e[0m"
 
-$sysCount = Read-Host "  System node count [2]"
-if (-not $sysCount) { $sysCount = "2" }
+$ErrorActionPreference = "SilentlyContinue"
+$curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+$sysExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$defSysCount = if ($sysExitCode -eq 0 -and $curSysCount -and "$curSysCount".Trim()) { "$curSysCount".Trim() } else { "2" }
+$sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
+if (-not $sysCount) { $sysCount = $defSysCount }
 Write-Host "  `e[32mSystem nodes: $sysCount`e[0m"
 
 Write-Host ""
 
-# GPU node candidates
-$gpuCandidates = @(
-    @{ name = "Standard_NC6s_v3";     desc = "6 vCPU, 112 GB, 1x V100 16GB" },
-    @{ name = "Standard_NC12s_v3";    desc = "12 vCPU, 224 GB, 2x V100" },
-    @{ name = "Standard_NC4as_T4_v3"; desc = "4 vCPU, 28 GB, 1x T4 16GB" },
-    @{ name = "Standard_NC8as_T4_v3"; desc = "8 vCPU, 56 GB, 1x T4 16GB" },
-    @{ name = "Standard_NC24ads_A100_v4"; desc = "24 vCPU, 220 GB, 1x A100 80GB" }
-)
-$availableGpu = @()
-foreach ($c in $gpuCandidates) {
-    if ($availableRaw -contains $c.name) {
-        $availableGpu += $c
-    }
-}
-
+# -- GPU node pool --
 Write-Host "`e[36mGPU node pool (ML models - dse-qwen2, clip, bge, bge-small):`e[0m"
 Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
-if ($availableGpu.Count -eq 0) {
-    Write-Host "  `e[33mNo GPU VM SKUs available in $location. GPU pool will be skipped.`e[0m"
-    $GPU_SKU = "Standard_NC6s_v3"
-    $gpuCount = "0"
+$ErrorActionPreference = "SilentlyContinue"
+$curGpuSku = $null
+try { $curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null } catch {}
+$gpuSkuExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($curGpuSku -and $gpuSkuExitCode -eq 0 -and "$curGpuSku" -notmatch "ERROR") {
+    $curGpuSku = $curGpuSku.Trim()
 } else {
-    Write-Host "  Available GPU SKUs:"
-    for ($i = 0; $i -lt $availableGpu.Count; $i++) {
-        $rec = if ($i -eq 0) { " (recommended)" } else { "" }
-        Write-Host "    $($i+1)) $($availableGpu[$i].name) - $($availableGpu[$i].desc)$rec"
-    }
-    Write-Host ""
-    $gpuSku = Read-Host "  GPU VM SKU [1]"
-    if (-not $gpuSku) { $gpuSku = "1" }
-    $idx = [int]$gpuSku - 1
-    if ($idx -lt 0 -or $idx -ge $availableGpu.Count) { $idx = 0 }
-    $GPU_SKU = $availableGpu[$idx].name
-
-    $gpuCount = Read-Host "  GPU node count (0 = no GPU pool) [4]"
-    if (-not $gpuCount) { $gpuCount = "4" }
+    $curGpuSku = ""
 }
-if ($gpuCount -eq "0") {
-    Write-Host "  `e[33mGPU pool disabled - using external embedding models only.`e[0m"
-} else {
+
+$ErrorActionPreference = "SilentlyContinue"
+$curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
+$gpuCountExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$defGpuCount = if ($gpuCountExitCode -eq 0 -and $curGpuCount -and "$curGpuCount".Trim()) { "$curGpuCount".Trim() } else { "0" }
+
+$gpuCount = (Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]").Trim()
+if (-not $gpuCount) { $gpuCount = $defGpuCount }
+
+if ($gpuCount -ne "0") {
+    $gpuCandidates = @(
+        @{ name = "Standard_NC4as_T4_v3";     desc = "4 vCPU, 28 GB, 1x T4 16GB" },
+        @{ name = "Standard_NC6s_v3";          desc = "6 vCPU, 112 GB, 1x V100 16GB" },
+        @{ name = "Standard_NC8as_T4_v3";      desc = "8 vCPU, 56 GB, 1x T4 16GB" },
+        @{ name = "Standard_NC12s_v3";         desc = "12 vCPU, 224 GB, 2x V100" },
+        @{ name = "Standard_NC24ads_A100_v4";  desc = "24 vCPU, 220 GB, 1x A100 80GB" }
+    )
+    $defGpuIdx = 0
+    for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
+        if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { $defGpuIdx = $i }
+    }
+
+    $GPU_SKU = $null
+    $failedGpuSkus = @{}
+    while (-not $GPU_SKU) {
+        Write-Host "  Common GPU options:"
+        $nextGpuDefault = $null
+        for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
+            $mark = ""
+            if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { $mark = " (current)" }
+            if ($failedGpuSkus.ContainsKey($gpuCandidates[$i].name)) { $mark = " `e[31m[✗ unavailable]`e[0m" }
+            elseif (-not $nextGpuDefault) { $nextGpuDefault = $($i+1) }
+            Write-Host "    $($i+1)) $($gpuCandidates[$i].name) - $($gpuCandidates[$i].desc)$mark"
+        }
+        Write-Host "    $($gpuCandidates.Count+1)) Enter custom SKU"
+        Write-Host ""
+        if (-not $nextGpuDefault) { $nextGpuDefault = $($defGpuIdx+1) }
+
+        $gpuPick = (Read-Host "  GPU VM SKU [$nextGpuDefault]").Trim()
+        if (-not $gpuPick) { $gpuPick = "$nextGpuDefault" }
+
+        if ([int]$gpuPick -eq ($gpuCandidates.Count + 1)) {
+            $defGpuManual = if ($curGpuSku) { $curGpuSku } else { "Standard_NC4as_T4_v3" }
+            $candidate = (Read-Host "  Enter SKU name [$defGpuManual]").Trim()
+            if (-not $candidate) { $candidate = $defGpuManual }
+        } else {
+            $idx = [int]$gpuPick - 1
+            if ($idx -ge 0 -and $idx -lt $gpuCandidates.Count) {
+                $candidate = $gpuCandidates[$idx].name
+            } else {
+                $candidate = $gpuCandidates[[int]$nextGpuDefault - 1].name
+            }
+        }
+
+        if ($failedGpuSkus.ContainsKey($candidate)) {
+            Write-Host "  `e[31m$candidate already checked — not available. Pick another.`e[0m"
+            continue
+        }
+
+        Write-Host "  `e[36mValidating $candidate in $location...`e[0m" -NoNewline
+        if (Test-SkuAvailable -Sku $candidate -Location $location) {
+            Write-Host " `e[32m✓ available`e[0m"
+            $GPU_SKU = $candidate
+        } else {
+            Write-Host " `e[31m✗ not available in $location`e[0m"
+            $failedGpuSkus[$candidate] = $true
+        }
+    }
     Write-Host "  `e[32mGPU VM: $GPU_SKU, nodes: $gpuCount`e[0m"
+} else {
+    Write-Host "  `e[33mGPU pool disabled - using external embedding models only.`e[0m"
+    $GPU_SKU = if ($curGpuSku) { $curGpuSku } else { "" }
 }
 
 # Validate before storing
@@ -393,6 +547,22 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
 } else {
     Write-Host "`e[33mNo Docker daemon - will use 'az acr build' for remote builds.`e[0m"
     azd env set OMNIVEC_BUILD_MODE "acr"
+}
+
+# -- Sanitize env values: strip BOM, tabs, carriage returns --
+Write-Host "`n`e[36mSanitizing environment values...`e[0m"
+$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_ENABLE_BLOB_SOURCE", "OMNIVEC_METADATA_STORE", "OMNIVEC_BUILD_MODE")
+foreach ($key in $envKeys) {
+    $ErrorActionPreference = "SilentlyContinue"
+    $raw = azd env get-value $key 2>$null
+    $ErrorActionPreference = "Stop"
+    if ($raw) {
+        $clean = $raw -replace '[\t\r]','' -replace '^\xEF\xBB\xBF','' -replace '^\s+|\s+$',''
+        if ($clean -ne $raw) {
+            azd env set $key $clean
+            Write-Host "  `e[33mCleaned ${key}: removed hidden characters`e[0m"
+        }
+    }
 }
 
 Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
