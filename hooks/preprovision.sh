@@ -120,7 +120,13 @@ if [ -n "$EXISTING_CONFIG" ]; then
   reuse=${reuse:-Y}
   case "$reuse" in
     [nN]*)
-      printf "  ${GREEN}Reconfiguring...${NC}\n"
+      printf "  ${GREEN}Reconfiguring — clearing saved settings...${NC}\n"
+      azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "" 2>/dev/null || true
+      azd env set OMNIVEC_SYSTEM_NODE_COUNT "" 2>/dev/null || true
+      azd env set OMNIVEC_GPU_NODE_VM_SIZE "" 2>/dev/null || true
+      azd env set OMNIVEC_GPU_NODE_COUNT "" 2>/dev/null || true
+      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "" 2>/dev/null || true
+      azd env set OMNIVEC_METADATA_STORE "" 2>/dev/null || true
       ;;
     *)
       printf "  ${GREEN}Using existing settings, skipping configuration prompts.${NC}\n"

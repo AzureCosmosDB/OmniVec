@@ -124,7 +124,13 @@ if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ER
     $reuse = Read-Host "  Keep these settings? [Y/n] (n = reconfigure from scratch)"
     if (-not $reuse) { $reuse = "Y" }
     if ($reuse -match "^[nN]") {
-        Write-Host "  `e[32mReconfiguring...`e[0m"
+        Write-Host "  `e[32mReconfiguring — clearing saved settings...`e[0m"
+        azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "" 2>$null
+        azd env set OMNIVEC_SYSTEM_NODE_COUNT "" 2>$null
+        azd env set OMNIVEC_GPU_NODE_VM_SIZE "" 2>$null
+        azd env set OMNIVEC_GPU_NODE_COUNT "" 2>$null
+        azd env set OMNIVEC_ENABLE_BLOB_SOURCE "" 2>$null
+        azd env set OMNIVEC_METADATA_STORE "" 2>$null
     } else {
         Write-Host "  `e[32mUsing existing settings, skipping configuration prompts.`e[0m"
         exit 0
