@@ -320,20 +320,31 @@ foreach ($c in $sysCandidates) {
 }
 
 Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
+$ErrorActionPreference = "SilentlyContinue"
+$curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
+$ErrorActionPreference = "Stop"
+$curSysSku = if ($curSysSku -and $curSysSku -notmatch "^ERROR") { $curSysSku.Trim() } else { "" }
 if ($availableSys.Count -eq 0) {
     Write-Host "  `e[31mNo suitable system VM SKUs found in $location!`e[0m"
-    $SYS_SKU = Read-Host "  Enter a VM SKU manually"
+    $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
+    $SYS_SKU = Read-Host "  Enter a VM SKU manually [$defManual]"
+    if (-not $SYS_SKU) { $SYS_SKU = $defManual }
 } else {
+    # Find default index — match current SKU or fall back to first
+    $defIdx = 0
+    for ($i = 0; $i -lt $availableSys.Count; $i++) {
+        if ($curSysSku -and $availableSys[$i].name -eq $curSysSku) { $defIdx = $i }
+    }
     Write-Host "  Available VM SKUs:"
     for ($i = 0; $i -lt $availableSys.Count; $i++) {
-        $rec = if ($i -eq 0) { " (recommended)" } else { "" }
-        Write-Host "    $($i+1)) $($availableSys[$i].name) - $($availableSys[$i].desc)$rec"
+        $mark = if ($curSysSku -and $availableSys[$i].name -eq $curSysSku) { " (current)" } else { "" }
+        Write-Host "    $($i+1)) $($availableSys[$i].name) - $($availableSys[$i].desc)$mark"
     }
     Write-Host ""
-    $sysSku = Read-Host "  System VM SKU [1]"
-    if (-not $sysSku) { $sysSku = "1" }
+    $sysSku = Read-Host "  System VM SKU [$($defIdx+1)]"
+    if (-not $sysSku) { $sysSku = "$($defIdx+1)" }
     $idx = [int]$sysSku - 1
-    if ($idx -lt 0 -or $idx -ge $availableSys.Count) { $idx = 0 }
+    if ($idx -lt 0 -or $idx -ge $availableSys.Count) { $idx = $defIdx }
     $SYS_SKU = $availableSys[$idx].name
 }
 Write-Host "  `e[32mSystem VM SKU: $SYS_SKU`e[0m"
@@ -365,21 +376,29 @@ foreach ($c in $gpuCandidates) {
 
 Write-Host "`e[36mGPU node pool (ML models - dse-qwen2, clip, bge, bge-small):`e[0m"
 Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
+$ErrorActionPreference = "SilentlyContinue"
+$curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null
+$ErrorActionPreference = "Stop"
+$curGpuSku = if ($curGpuSku -and $curGpuSku -notmatch "^ERROR") { $curGpuSku.Trim() } else { "" }
 if ($availableGpu.Count -eq 0) {
     Write-Host "  `e[33mNo GPU VM SKUs available in $location. GPU pool will be skipped.`e[0m"
-    $GPU_SKU = "Standard_NC6s_v3"
+    $GPU_SKU = if ($curGpuSku) { $curGpuSku } else { "Standard_NC6s_v3" }
     $gpuCount = "0"
 } else {
+    $defGpuIdx = 0
+    for ($i = 0; $i -lt $availableGpu.Count; $i++) {
+        if ($curGpuSku -and $availableGpu[$i].name -eq $curGpuSku) { $defGpuIdx = $i }
+    }
     Write-Host "  Available GPU SKUs:"
     for ($i = 0; $i -lt $availableGpu.Count; $i++) {
-        $rec = if ($i -eq 0) { " (recommended)" } else { "" }
-        Write-Host "    $($i+1)) $($availableGpu[$i].name) - $($availableGpu[$i].desc)$rec"
+        $mark = if ($curGpuSku -and $availableGpu[$i].name -eq $curGpuSku) { " (current)" } else { "" }
+        Write-Host "    $($i+1)) $($availableGpu[$i].name) - $($availableGpu[$i].desc)$mark"
     }
     Write-Host ""
-    $gpuSku = Read-Host "  GPU VM SKU [1]"
-    if (-not $gpuSku) { $gpuSku = "1" }
+    $gpuSku = Read-Host "  GPU VM SKU [$($defGpuIdx+1)]"
+    if (-not $gpuSku) { $gpuSku = "$($defGpuIdx+1)" }
     $idx = [int]$gpuSku - 1
-    if ($idx -lt 0 -or $idx -ge $availableGpu.Count) { $idx = 0 }
+    if ($idx -lt 0 -or $idx -ge $availableGpu.Count) { $idx = $defGpuIdx }
     $GPU_SKU = $availableGpu[$idx].name
 
     $ErrorActionPreference = "SilentlyContinue"
