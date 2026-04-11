@@ -319,9 +319,14 @@ function Test-SkuAvailable {
 # -- System node pool --
 Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
 $ErrorActionPreference = "SilentlyContinue"
-$curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
+$curSysSku = $null
+try { $curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null } catch {}
 $ErrorActionPreference = "Stop"
-$curSysSku = if ($curSysSku -and $curSysSku -notmatch "^ERROR") { $curSysSku.Trim() } else { "" }
+if ($curSysSku -and $LASTEXITCODE -eq 0 -and $curSysSku -notmatch "^ERROR") {
+    $curSysSku = $curSysSku.Trim()
+} else {
+    $curSysSku = ""
+}
 
 $sysCandidates = @(
     @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB" },
@@ -405,9 +410,14 @@ Write-Host ""
 Write-Host "`e[36mGPU node pool (ML models - dse-qwen2, clip, bge, bge-small):`e[0m"
 Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
 $ErrorActionPreference = "SilentlyContinue"
-$curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null
+$curGpuSku = $null
+try { $curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null } catch {}
 $ErrorActionPreference = "Stop"
-$curGpuSku = if ($curGpuSku -and $curGpuSku -notmatch "^ERROR") { $curGpuSku.Trim() } else { "" }
+if ($curGpuSku -and $LASTEXITCODE -eq 0 -and $curGpuSku -notmatch "^ERROR") {
+    $curGpuSku = $curGpuSku.Trim()
+} else {
+    $curGpuSku = ""
+}
 
 $ErrorActionPreference = "SilentlyContinue"
 $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
