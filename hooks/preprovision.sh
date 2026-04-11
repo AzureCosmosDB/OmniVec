@@ -92,6 +92,7 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
         ;;
       3)
         printf "  ${RED}Aborted by user.${NC}\n"
+        printf "  ${YELLOW}(The ERROR message below is expected — it is how azd stops.)${NC}\n"
         exit 1
         ;;
       *)

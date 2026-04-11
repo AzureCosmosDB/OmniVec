@@ -97,6 +97,7 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
             }
             "3" {
                 Write-Host "  `e[31mAborted by user.`e[0m"
+                Write-Host "  `e[33m(The ERROR message below is expected — it is how azd stops.)`e[0m"
                 exit 1
             }
             default {
