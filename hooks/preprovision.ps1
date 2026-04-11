@@ -66,6 +66,7 @@ $existingRg = azd env get-value AZURE_RESOURCE_GROUP 2>$null
 $ErrorActionPreference = "Stop"
 
 $deploymentDetected = $false
+$inPlaceUpdate = $false
 
 if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $existingRg -notmatch "^ERROR") {
     $kubeCtx = $existingAks.Trim()
@@ -92,11 +93,13 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
         switch ($choice) {
             "1" {
                 Write-Host "  `e[32mProceeding with in-place update.`e[0m"
+                $inPlaceUpdate = $true
             }
             "2" {
                 Write-Host "  `e[33mTearing down existing deployment first...`e[0m"
                 azd down --force --purge
                 Write-Host "  `e[32mTeardown complete. Proceeding with fresh deployment.`e[0m"
+                $deploymentDetected = $false
             }
             "3" {
                 Write-Host "  `e[31mAborted by user.`e[0m"
@@ -105,9 +108,33 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
             }
             default {
                 Write-Host "  `e[32mProceeding with in-place update (default).`e[0m"
+                $inPlaceUpdate = $true
             }
         }
     }
+}
+
+# -- In-place update: only allow node count changes, then proceed --
+if ($inPlaceUpdate) {
+    Write-Host "`n`e[36mIn-place update — only node count changes allowed.`e[0m"
+    $ErrorActionPreference = "SilentlyContinue"
+    $curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+    $curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
+    $ErrorActionPreference = "Stop"
+    $defSysCount = if ($curSysCount -and $curSysCount -notmatch "^ERROR" -and $curSysCount.Trim()) { $curSysCount.Trim() } else { "2" }
+    $defGpuCount = if ($curGpuCount -and $curGpuCount -notmatch "^ERROR" -and $curGpuCount.Trim()) { $curGpuCount.Trim() } else { "0" }
+
+    $sysCount = Read-Host "  System node count [$defSysCount]"
+    if (-not $sysCount) { $sysCount = $defSysCount }
+    azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
+
+    $gpuCount = Read-Host "  GPU node count [$defGpuCount]"
+    if (-not $gpuCount) { $gpuCount = $defGpuCount }
+    azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
+
+    Write-Host "  `e[32mSystem nodes: $sysCount, GPU nodes: $gpuCount`e[0m"
+    Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
+    exit 0
 }
 
 # -- Resume detection --

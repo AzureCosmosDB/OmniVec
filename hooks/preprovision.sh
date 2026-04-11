@@ -64,6 +64,7 @@ acquire_lock
 EXISTING_AKS=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
 EXISTING_RG=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
 DEPLOYMENT_DETECTED=false
+IN_PLACE_UPDATE=false
 
 if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
   # Try to get credentials and check pod health (silently)
@@ -86,11 +87,13 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
     case "$DEPLOY_CHOICE" in
       1)
         printf "  ${GREEN}Proceeding with in-place update.${NC}\n"
+        IN_PLACE_UPDATE=true
         ;;
       2)
         printf "  ${YELLOW}Tearing down existing deployment first...${NC}\n"
         azd down --force --purge
         printf "  ${GREEN}Teardown complete. Proceeding with fresh deployment.${NC}\n"
+        DEPLOYMENT_DETECTED=false
         ;;
       3)
         printf "  ${RED}Aborted by user.${NC}\n"
@@ -99,9 +102,34 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
         ;;
       *)
         printf "  ${GREEN}Proceeding with in-place update (default).${NC}\n"
+        IN_PLACE_UPDATE=true
         ;;
     esac
   fi
+fi
+
+# ── In-place update: only allow node count changes, then proceed ─────────
+if [ "$IN_PLACE_UPDATE" = "true" ]; then
+  printf "\n${CYAN}In-place update — only node count changes allowed.${NC}\n"
+  cur_sys_count=$(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null || true)
+  cur_sys_count=$(printf '%s' "$cur_sys_count" | tr -d '\r')
+  def_sys_count=${cur_sys_count:-2}
+  printf "  System node count [${def_sys_count}]: "
+  read -r sys_count </dev/tty 2>/dev/null || sys_count=""
+  sys_count=${sys_count:-$def_sys_count}
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count"
+
+  cur_gpu_count=$(azd env get-value OMNIVEC_GPU_NODE_COUNT 2>/dev/null || true)
+  cur_gpu_count=$(printf '%s' "$cur_gpu_count" | tr -d '\r')
+  def_gpu_count=${cur_gpu_count:-0}
+  printf "  GPU node count [${def_gpu_count}]: "
+  read -r gpu_count </dev/tty 2>/dev/null || gpu_count=""
+  gpu_count=${gpu_count:-$def_gpu_count}
+  azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count"
+
+  printf "  ${GREEN}System nodes: ${sys_count}, GPU nodes: ${gpu_count}${NC}\n"
+  printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
+  exit 0
 fi
 
 # ── Resume detection ────────────────────────────────────────────────────────
