@@ -107,7 +107,7 @@ fi
 
 EXISTING_CONFIG=$(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null || true)
 if [ -n "$EXISTING_CONFIG" ]; then
-  printf "\n${CYAN}Found previous configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
+  printf "\n${CYAN}Configuration for environment '${AZURE_ENV_NAME}':${NC}\n"
   echo "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>/dev/null)"
   echo "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>/dev/null)"
   echo "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>/dev/null)"

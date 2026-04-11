@@ -113,7 +113,7 @@ $ErrorActionPreference = "SilentlyContinue"
 $existingConfig = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
 $ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -eq 0 -and $existingConfig -and $existingConfig -notmatch "^ERROR") {
-    Write-Host "`n`e[36mFound previous configuration for environment '$env:AZURE_ENV_NAME':`e[0m"
+    Write-Host "`n`e[36mConfiguration for environment '$env:AZURE_ENV_NAME':`e[0m"
     Write-Host "  System SKU:      $(azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null)"
     Write-Host "  System nodes:    $(azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null)"
     Write-Host "  GPU SKU:         $(azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null)"
