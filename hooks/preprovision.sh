@@ -63,6 +63,7 @@ acquire_lock
 # If pods are already running and healthy, warn before re-deploying
 EXISTING_AKS=$(azd env get-value AZURE_AKS_CLUSTER_NAME 2>/dev/null || true)
 EXISTING_RG=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
+DEPLOYMENT_DETECTED=false
 
 if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
   # Try to get credentials and check pod health (silently)
@@ -72,6 +73,7 @@ if [ -n "$EXISTING_AKS" ] && [ -n "$EXISTING_RG" ]; then
   HEALTHY_PODS=$(kubectl --context "$KUBE_CTX" get pods -n omnivec --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
   if [ "$HEALTHY_PODS" -gt 0 ]; then
+    DEPLOYMENT_DETECTED=true
     printf "\n${YELLOW}Existing healthy deployment detected (${HEALTHY_PODS} running pods in omnivec).${NC}\n"
     printf "  AKS:  ${CYAN}${EXISTING_AKS}${NC}\n"
     printf "  RG:   ${CYAN}${EXISTING_RG}${NC}\n"
@@ -198,9 +200,10 @@ SUBSCRIPTION=$(az account show --query name -o tsv)
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 printf "${GREEN}Logged in to subscription: ${SUBSCRIPTION} (${SUBSCRIPTION_ID})${NC}\n"
 
-# ── Check for existing OmniVec installations ────────────────────────────────
+# ── Check for existing OmniVec installations (skip if already detected above) ─
 
-printf "\n${YELLOW}Checking for existing OmniVec installations in subscription...${NC}\n"
+if [ "$DEPLOYMENT_DETECTED" = "false" ]; then
+  printf "\n${YELLOW}Checking for existing OmniVec installations in subscription...${NC}\n"
 
 EXISTING=$(az resource list --query "[?tags.\"omnivec-instance\" != null].{name:name, type:type, rg:resourceGroup, instance:tags.\"omnivec-instance\"}" -o json 2>/dev/null || echo "[]")
 
@@ -238,6 +241,7 @@ if [ "$INSTANCE_COUNT" -gt 0 ]; then
   esac
 else
   printf "${GREEN}No existing OmniVec installations found. This will be a fresh deployment.${NC}\n"
+fi
 fi
 
 # ── Metadata storage selection ──────────────────────────────────────────────

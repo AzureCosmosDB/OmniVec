@@ -65,6 +65,8 @@ $existingAks = azd env get-value AZURE_AKS_CLUSTER_NAME 2>$null
 $existingRg = azd env get-value AZURE_RESOURCE_GROUP 2>$null
 $ErrorActionPreference = "Stop"
 
+$deploymentDetected = $false
+
 if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $existingRg -notmatch "^ERROR") {
     $kubeCtx = $existingAks.Trim()
     az aks get-credentials --resource-group $existingRg.Trim() --name $kubeCtx --context $kubeCtx --overwrite-existing 2>$null | Out-Null
@@ -76,6 +78,7 @@ if ($existingAks -and $existingRg -and $existingAks -notmatch "^ERROR" -and $exi
     } catch {}
 
     if ($healthyPods -gt 0) {
+        $deploymentDetected = $true
         Write-Host "`n`e[33mExisting healthy deployment detected ($healthyPods running pods in omnivec).`e[0m"
         Write-Host "  AKS:  `e[36m$kubeCtx`e[0m"
         Write-Host "  RG:   `e[36m$($existingRg.Trim())`e[0m"
@@ -193,11 +196,12 @@ if (-not $acct) {
 }
 Write-Host "`e[32mLogged in to subscription: $($acct.name) ($($acct.id))`e[0m"
 
-# -- Check for existing OmniVec installations --
-Write-Host "`n`e[33mChecking for existing OmniVec installations in subscription...`e[0m"
+# -- Check for existing OmniVec installations (skip if already detected above) --
+if (-not $deploymentDetected) {
+    Write-Host "`n`e[33mChecking for existing OmniVec installations in subscription...`e[0m"
 
-$existing = az resource list --query "[?tags.""omnivec-instance"" != null].{name:name, type:type, rg:resourceGroup, instance:tags.""omnivec-instance""}" -o json 2>$null | ConvertFrom-Json
-if ($existing -and $existing.Count -gt 0) {
+    $existing = az resource list --query "[?tags.""omnivec-instance"" != null].{name:name, type:type, rg:resourceGroup, instance:tags.""omnivec-instance""}" -o json 2>$null | ConvertFrom-Json
+    if ($existing -and $existing.Count -gt 0) {
     $instances = $existing | Group-Object -Property instance
     Write-Host "`e[36mFound $($instances.Count) existing OmniVec installation(s):`e[0m"
     Write-Host ""
@@ -219,6 +223,7 @@ if ($existing -and $existing.Count -gt 0) {
     Write-Host "`e[32mCreating new installation with environment '$env:AZURE_ENV_NAME'.`e[0m"
 } else {
     Write-Host "`e[32mNo existing OmniVec installations found. This will be a fresh deployment.`e[0m"
+}
 }
 
 # -- Metadata storage selection --
