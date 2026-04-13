@@ -36,6 +36,9 @@ public class PipelineSource
 {
     [JsonPropertyName("source_id")]
     public string SourceId { get; set; } = "";
+
+    [JsonPropertyName("content_fields")]
+    public List<string> ContentFields { get; set; } = new() { "content" };
 }
 
 public class PipelinesResponse

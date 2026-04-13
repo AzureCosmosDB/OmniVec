@@ -64,7 +64,6 @@ async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> Lis
     container = database.get_container_client(config["container"])
 
     query = config.get("query", "SELECT * FROM c")
-    content_field = config.get("content_field", "content")
 
     documents = []
     for item in container.query_items(query, enable_cross_partition_query=True):
@@ -80,13 +79,14 @@ async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> Lis
     return documents
 
 
-async def get_document(config: Dict[str, Any], doc_id: str) -> str:
+async def get_document(config: Dict[str, Any], doc_id: str, content_fields: list = None) -> str:
     """Get document content. Raises SkipDocument if embedding already exists."""
     client = await get_cosmos_client(config)
     database = client.get_database_client(config["database"])
     container = database.get_container_client(config["container"])
 
-    content_field = config.get("content_field", "content")
+    if content_fields is None:
+        content_fields = ["content"]
 
     # Try to read document
     items = list(container.query_items(
@@ -100,7 +100,7 @@ async def get_document(config: Dict[str, Any], doc_id: str) -> str:
     doc = items[0]
 
     # Support multiple content fields — concatenate in order
-    content = _extract_content(doc, content_field)
+    content = _extract_content(doc, content_fields)
     current_hash = hashlib.sha256(content.encode("utf-8") if isinstance(content, str) else content).hexdigest()
 
     # Skip if embedding exists and content hasn't changed

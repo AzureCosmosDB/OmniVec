@@ -188,6 +188,10 @@ public class SourceWatcher : ISourceWatcher
         var inlinePipelines = pipelines.Where(p => p.ProcessingMode == "inline").ToList();
         var queuePipelines = pipelines.Where(p => p.ProcessingMode != "inline").ToList();
 
+        // Get content_fields from the first pipeline's source config
+        var pipelineSource = pipelines[0].Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
+        var cfFields = pipelineSource?.ContentFields ?? new List<string> { "content" };
+
         // Extract eligible documents (content present, not unchanged)
         var eligibleDocs = new List<(string docId, string content, string contentHash, string pkValue, JObject doc)>();
         int skippedNoContent = 0, skippedUnchanged = 0;
@@ -198,12 +202,12 @@ public class SourceWatcher : ISourceWatcher
             {
                 if (doc is null) continue;
 
-                if (!_source.HasContent(doc))
+                if (!Source.HasContent(doc, cfFields))
                 {
                     skippedNoContent++;
                     continue;
                 }
-                var contentText = _source.ExtractContent(doc);
+                var contentText = Source.ExtractContent(doc, cfFields);
                 if (string.IsNullOrEmpty(contentText))
                 {
                     skippedNoContent++;
@@ -305,9 +309,11 @@ public class SourceWatcher : ISourceWatcher
                     foreach (var pipeline in queuePipelines)
                     {
                         var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-                        // Extract only the configured content fields with their original names
+                        // Extract content fields from pipeline source config (not source)
+                        var pipelineSource = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
+                        var fieldNames = pipelineSource?.ContentFields ?? new List<string> { "content" };
                         var contentFields = new Dictionary<string, string>();
-                        foreach (var field in _source.ContentFields)
+                        foreach (var field in fieldNames)
                         {
                             var token = doc[field];
                             if (token is not null && token.Type != Newtonsoft.Json.Linq.JTokenType.Null)

@@ -2384,23 +2384,21 @@ async def playground_search(req: SearchRequest):
     # Search all indexes in parallel
     search_start = time.time()
 
-    # Resolve content_field per destination from pipeline's source config
-    source_content_fields = {}  # dest_id -> content_field
+    # Resolve content_fields per destination from pipeline source config
+    source_content_fields = {}  # dest_id -> content_fields
     for dest_id, dest, pip in dest_infos:
-        cf = "content"
+        cf = ["content"]
         if pip:
             sources = pip.get("sources", [])
             if sources:
-                src_id = sources[0].get("source_id") if isinstance(sources[0], dict) else sources[0].source_id
-                src_doc = await asyncio.to_thread(store.get, src_id, "source")
-                if src_doc:
-                    cf = src_doc.get("config", {}).get("content_field", "content")
+                src = sources[0] if isinstance(sources[0], dict) else sources[0].dict()
+                cf = src.get("content_fields", ["content"])
         source_content_fields[dest_id] = cf
 
     async def search_one(dest_id, destination, model_ref):
         try:
             t0 = time.time()
-            cf = source_content_fields.get(dest_id, "content")
+            cf = source_content_fields.get(dest_id, ["content"])
             results = await asyncio.to_thread(
                 _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf
             )
@@ -3649,14 +3647,12 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
                 query_embedding = (embed_result.get("pages") or embed_result.get("output") or [[]])[0]
                 if not query_embedding:
                     continue
-                # Resolve content_field
-                cf = "content"
+                # Resolve content_fields from pipeline source
+                cf = ["content"]
                 sources = matched_pip.get("sources", [])
                 if sources:
-                    src_id = sources[0].get("source_id") if isinstance(sources[0], dict) else sources[0].source_id
-                    src_doc = await asyncio.to_thread(store.get, src_id, "source")
-                    if src_doc:
-                        cf = src_doc.get("config", {}).get("content_field", "content")
+                    src = sources[0] if isinstance(sources[0], dict) else sources[0]
+                    cf = src.get("content_fields", ["content"]) if isinstance(src, dict) else getattr(src, "content_fields", ["content"])
                 results = await asyncio.to_thread(
                     _search_single_index, destination, query_embedding, assistant.top_k, cf
                 )

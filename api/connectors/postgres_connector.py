@@ -61,6 +61,7 @@ async def get_rows_since(
     config: Dict[str, Any],
     since: Optional[datetime] = None,
     limit: int = 1000,
+    content_fields: list = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[datetime]]:
     """
     Get rows modified since a timestamp.
@@ -73,7 +74,7 @@ async def get_rows_since(
     table = config["table"]
     id_col = config.get("id_column", "id")
     ts_col = config.get("timestamp_column", "updated_at")
-    content_cols = config.get("content_columns", ["content"])
+    content_cols = content_fields or ["content"]
 
     # Build column list
     columns = [id_col, ts_col] + content_cols
@@ -132,13 +133,14 @@ async def get_rows_since(
 async def get_row_by_id(
     config: Dict[str, Any],
     row_id: str,
+    content_fields: list = None,
 ) -> Optional[Dict[str, Any]]:
     """Get a single row by ID."""
     pool = await get_pool(config)
 
     table = config["table"]
     id_col = config.get("id_column", "id")
-    content_cols = config.get("content_columns", ["content"])
+    content_cols = content_fields or ["content"]
 
     columns = [id_col] + content_cols
     col_str = ", ".join(f'"{c}"' for c in columns)
@@ -179,13 +181,14 @@ async def count_rows(config: Dict[str, Any]) -> int:
 async def stream_all_rows(
     config: Dict[str, Any],
     batch_size: int = 100,
+    content_fields: list = None,
 ) -> AsyncGenerator[List[Dict[str, Any]], None]:
     """Stream all rows in batches for initial backfill."""
     pool = await get_pool(config)
 
     table = config["table"]
     id_col = config.get("id_column", "id")
-    content_cols = config.get("content_columns", ["content"])
+    content_cols = content_fields or ["content"]
 
     columns = [id_col] + content_cols
     col_str = ", ".join(f'"{c}"' for c in columns)

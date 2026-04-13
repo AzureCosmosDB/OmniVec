@@ -108,7 +108,6 @@ class CosmosDBSourceConfig(BaseModel):
     use_change_feed: bool = True
     # Content configuration
     content_mode: CosmosDBContentMode = CosmosDBContentMode.FIELD
-    content_field: Any = "content"  # Field(s) containing content or URL — string or list of strings
     # For URL modes - what content types to expect
     url_content_types: List[str] = ["txt", "json", "pdf"]
     # Optional: field containing the content type hint
@@ -125,7 +124,6 @@ class PostgreSQLSourceConfig(BaseModel):
     ssl_mode: str = "require"  # disable, allow, prefer, require, verify-ca, verify-full
     table: str  # Table to read from
     id_column: str = "id"  # Primary key column
-    content_columns: List[str] = ["content"]  # Columns containing text to embed
     timestamp_column: str = "updated_at"  # For change tracking (polling)
     query: Optional[str] = None  # Optional custom query instead of table
     poll_interval_seconds: int = 60  # How often to poll for changes
@@ -227,6 +225,7 @@ class Destination(BaseModel):
 class PipelineSource(BaseModel):
     source_id: str
     filters: Dict[str, Any] = {}  # Additional filters like file patterns
+    content_fields: List[str] = ["content"]  # Field(s) to concatenate for embedding
 
 
 class Pipeline(BaseModel):
