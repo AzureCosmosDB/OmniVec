@@ -188,132 +188,129 @@ public class SourceWatcher : ISourceWatcher
         var inlinePipelines = pipelines.Where(p => p.ProcessingMode == "inline").ToList();
         var queuePipelines = pipelines.Where(p => p.ProcessingMode != "inline").ToList();
 
-        // Get content_fields from the first pipeline's source config
-        var pipelineSource = pipelines[0].Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
-        var cfFields = pipelineSource?.ContentFields ?? new List<string> { "content" };
-
-        // Extract eligible documents (content present, not unchanged)
-        var eligibleDocs = new List<(string docId, string content, string contentHash, string pkValue, JObject doc)>();
+        // Process documents per-pipeline (each pipeline may have different content_fields)
         int skippedNoContent = 0, skippedUnchanged = 0;
+        var allEligibleDocs = new Dictionary<string, List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields)>>();
 
-        foreach (var doc in changes)
+        foreach (var pipeline in pipelines)
         {
-            try
+            var pipSrcOuter = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
+            var cfFields = pipSrcOuter?.ContentFields ?? new List<string> { "content" };
+            var eligible = new List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields)>();
+
+            foreach (var doc in changes)
             {
-                if (doc is null) continue;
+                try
+                {
+                    if (doc is null) continue;
 
-                if (!Source.HasContent(doc, cfFields))
-                {
-                    skippedNoContent++;
-                    continue;
-                }
-                var contentText = Source.ExtractContent(doc, cfFields);
-                if (string.IsNullOrEmpty(contentText))
-                {
-                    skippedNoContent++;
-                    continue;
-                }
-
-                // Content hash dedup (respects reset_at)
-                // NOTE: JObject auto-parses ISO dates → Value<string>() returns MM/dd/yyyy format.
-                // Must compare as DateTime, not strings.
-                if (!SkipContentHash)
-                {
-                    var existingHash = doc["content_hash"]?.Value<string>();
-                    if (!string.IsNullOrEmpty(existingHash))
+                    if (!Source.HasContent(doc, cfFields))
                     {
-                        var currentHash = _hasher.ComputeHash(contentText);
-                        if (currentHash == existingHash)
-                        {
-                            var embeddedAtToken = doc["embedded_at"];
-                            bool needsReprocess = false;
-                            if (embeddedAtToken is not null && embeddedAtToken.Type != JTokenType.Null)
-                            {
-                                DateTime embeddedDt;
-                                if (embeddedAtToken.Type == JTokenType.Date)
-                                    embeddedDt = embeddedAtToken.Value<DateTime>();
-                                else if (!DateTime.TryParse(embeddedAtToken.Value<string>(), out embeddedDt))
-                                    needsReprocess = true;
+                        skippedNoContent++;
+                        continue;
+                    }
+                    var contentText = Source.ExtractContent(doc, cfFields);
+                    if (string.IsNullOrEmpty(contentText))
+                    {
+                        skippedNoContent++;
+                        continue;
+                    }
 
-                                if (!needsReprocess)
+                    // Content hash dedup (respects reset_at)
+                    if (!SkipContentHash)
+                    {
+                        var existingHash = doc["content_hash"]?.Value<string>();
+                        if (!string.IsNullOrEmpty(existingHash))
+                        {
+                            var currentHash = _hasher.ComputeHash(contentText);
+                            if (currentHash == existingHash)
+                            {
+                                var embeddedAtToken = doc["embedded_at"];
+                                bool needsReprocess = false;
+                                if (embeddedAtToken is not null && embeddedAtToken.Type != JTokenType.Null)
                                 {
-                                    foreach (var p in pipelines)
+                                    DateTime embeddedDt;
+                                    if (embeddedAtToken.Type == JTokenType.Date)
+                                        embeddedDt = embeddedAtToken.Value<DateTime>();
+                                    else if (!DateTime.TryParse(embeddedAtToken.Value<string>(), out embeddedDt))
+                                        needsReprocess = true;
+
+                                    if (!needsReprocess)
                                     {
-                                        if (!string.IsNullOrEmpty(p.ResetAt) &&
-                                            DateTime.TryParse(p.ResetAt, out var resetDt) &&
+                                        if (!string.IsNullOrEmpty(pipeline.ResetAt) &&
+                                            DateTime.TryParse(pipeline.ResetAt, out var resetDt) &&
                                             resetDt > embeddedDt)
                                         {
                                             needsReprocess = true;
-                                            break;
                                         }
                                     }
                                 }
-                            }
-                            if (!needsReprocess)
-                            {
-                                skippedUnchanged++;
-                                continue;
+                                if (!needsReprocess)
+                                {
+                                    skippedUnchanged++;
+                                    continue;
+                                }
                             }
                         }
                     }
+
+                    var docId = doc["id"]?.Value<string>() ?? "";
+                    var contentHash2 = _hasher.ComputeHash(contentText);
+                    var pkField = _partitionKeyPath.TrimStart('/');
+                    var pkValue = pkField == "id" ? docId : (doc[pkField]?.Value<string>() ?? "");
+
+                    eligible.Add((docId, contentText, contentHash2, pkValue, doc, cfFields));
                 }
-
-                var docId = doc["id"]?.Value<string>() ?? "";
-                var contentHash = _hasher.ComputeHash(contentText);
-
-                // Read partition key value from the actual PK field (e.g. "/partition_id" → "partition_id")
-                var pkField = _partitionKeyPath.TrimStart('/');
-                var pkValue = pkField == "id" ? docId : (doc[pkField]?.Value<string>() ?? "");
-
-                eligibleDocs.Add((docId, contentText, contentHash, pkValue, doc));
+                catch (Exception ex)
+                {
+                    var failDocId = doc?["id"]?.Value<string>() ?? "unknown";
+                    _logger.LogError(ex, "CRITICAL: Error processing CF document {DocId} — aborting batch to prevent data loss.", failDocId);
+                    throw new InvalidOperationException($"Failed to process document {failDocId}, aborting to prevent data loss", ex);
+                }
             }
-            catch (Exception ex)
-            {
-                var failDocId = doc?["id"]?.Value<string>() ?? "unknown";
-                _logger.LogError(ex, "CRITICAL: Error processing CF document {DocId} — aborting batch to prevent data loss. Batch will retry.", failDocId);
-                // Re-throw to prevent checkpoint — CFP will re-deliver this batch
-                throw new InvalidOperationException($"Failed to process document {failDocId}, aborting to prevent data loss", ex);
-            }
+            allEligibleDocs[pipeline.Id] = eligible;
         }
 
+        var totalEligible = allEligibleDocs.Values.Sum(e => e.Count);
         _logger.LogInformation(
             "CF source={SourceId} partition={Partition}: {Total} docs → {Eligible} eligible, skipped: {NoContent} no-content, {Unchanged} unchanged",
-            _source.Id, context.LeaseToken, changes.Count, eligibleDocs.Count, skippedNoContent, skippedUnchanged);
+            _source.Id, context.LeaseToken, changes.Count, totalEligible, skippedNoContent, skippedUnchanged);
 
         // Report changefeed metrics (fire-and-forget)
-        int jobsCreated = 0; // Will be updated below for queue mode
+        int jobsCreated = 0;
 
-        if (eligibleDocs.Count == 0)
+        if (totalEligible == 0)
         {
-            // Still report metrics even when no eligible docs
             _ = _apiClient.ReportChangeFeedMetricsAsync(
                 _source.Id, changes.Count, 0, skippedNoContent, skippedUnchanged, 0, context.LeaseToken, CancellationToken.None);
             return;
         }
 
-        // Handle INLINE pipelines: call DocGrok + patch documents directly
+        // Handle INLINE pipelines
         if (inlinePipelines.Count > 0)
         {
-            await ProcessInlineAsync(inlinePipelines, eligibleDocs, context.LeaseToken, ct);
+            var inlineEligible = inlinePipelines
+                .Where(p => allEligibleDocs.ContainsKey(p.Id))
+                .SelectMany(p => allEligibleDocs[p.Id].Select(e => (e.docId, e.content, e.contentHash, e.pkValue, e.doc)))
+                .ToList();
+            if (inlineEligible.Count > 0)
+                await ProcessInlineAsync(inlinePipelines, inlineEligible, context.LeaseToken, ct);
         }
 
-        // Handle QUEUE pipelines: publish to Service Bus or create jobs via API (legacy)
+        // Handle QUEUE pipelines: publish to Service Bus
         if (queuePipelines.Count > 0)
         {
             if (_sbPublisher?.IsEnabled == true)
             {
-                // Service Bus path: self-contained messages with content + destination config
                 var messages = new List<EmbeddingMessage>();
-                foreach (var (docId, content, contentHash, pkValue, doc) in eligibleDocs)
+                foreach (var pipeline in queuePipelines)
                 {
-                    foreach (var pipeline in queuePipelines)
+                    if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
+                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields) in pipelineDocs)
                     {
                         var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-                        // Extract content fields from pipeline source config (not source)
-                        var pipSrc = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
-                        var fieldNames = pipSrc?.ContentFields ?? new List<string> { "content" };
                         var contentFields = new Dictionary<string, string>();
-                        foreach (var field in fieldNames)
+                        foreach (var field in cfFields)
                         {
                             var token = doc[field];
                             if (token is not null && token.Type != Newtonsoft.Json.Linq.JTokenType.Null)
