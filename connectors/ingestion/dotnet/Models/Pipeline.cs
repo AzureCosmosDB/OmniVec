@@ -39,6 +39,15 @@ public class PipelineSource
 
     [JsonPropertyName("content_fields")]
     public List<string> ContentFields { get; set; } = new() { "content" };
+
+    [JsonPropertyName("content_mode")]
+    public string ContentMode { get; set; } = "field";
+
+    [JsonPropertyName("url_content_types")]
+    public List<string> UrlContentTypes { get; set; } = new() { "txt", "json", "pdf" };
+
+    [JsonPropertyName("content_type_field")]
+    public string? ContentTypeField { get; set; }
 }
 
 public class PipelinesResponse

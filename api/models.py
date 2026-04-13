@@ -106,12 +106,6 @@ class CosmosDBSourceConfig(BaseModel):
     container: str
     query: Optional[str] = "SELECT * FROM c"
     use_change_feed: bool = True
-    # Content configuration
-    content_mode: CosmosDBContentMode = CosmosDBContentMode.FIELD
-    # For URL modes - what content types to expect
-    url_content_types: List[str] = ["txt", "json", "pdf"]
-    # Optional: field containing the content type hint
-    content_type_field: Optional[str] = None
 
 
 class PostgreSQLSourceConfig(BaseModel):
@@ -225,7 +219,11 @@ class Destination(BaseModel):
 class PipelineSource(BaseModel):
     source_id: str
     filters: Dict[str, Any] = {}  # Additional filters like file patterns
+    # Content extraction config (how to read content from this source)
     content_fields: List[str] = ["content"]  # Field(s) to concatenate for embedding
+    content_mode: str = "field"  # "field" (direct value), "blob_url", "http_url"
+    url_content_types: List[str] = ["txt", "json", "pdf"]  # For URL modes
+    content_type_field: Optional[str] = None  # Optional: field containing content type hint
 
 
 class Pipeline(BaseModel):

@@ -4805,15 +4805,7 @@
                     <div class="form-group"><label class="form-label">Database</label>
                         <input type="text" class="form-input" id="${prefix}-database" placeholder="mydb"></div>
                     <div class="form-group"><label class="form-label">Container</label>
-                        <input type="text" class="form-input" id="${prefix}-container" placeholder="documents"></div>
-                    <div class="form-group"><label class="form-label">Content Source</label>
-                        <select class="form-input" id="${prefix}-content-mode" onchange="updateCosmosContentFieldsInline(this.value, '${prefix}')">
-                            <option value="field">Field Value</option><option value="blob_url">Blob Storage URL</option><option value="http_url">HTTP URL</option>
-                        </select></div>
-                    <div id="${prefix}-cosmos-content-fields">
-                        <div class="form-group"><label class="form-label">Content Field</label>
-                            <input type="text" class="form-input" id="${prefix}-content-field" value="content"></div>
-                    </div>`;
+                        <input type="text" class="form-input" id="${prefix}-container" placeholder="documents"></div>`;
             } else if (type === 'postgresql') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Host</label>
@@ -4832,25 +4824,6 @@
                         <input type="number" class="form-input" id="${prefix}-poll-interval" value="60"></div>`;
             }
             document.getElementById(`${prefix}-test-result`).innerHTML = '';
-        }
-
-        function updateCosmosContentFieldsInline(mode, prefix) {
-            const container = document.getElementById(`${prefix}-cosmos-content-fields`);
-            if (mode === 'field') {
-                container.innerHTML = `<div class="form-group"><label class="form-label">Content Field</label>
-                    <input type="text" class="form-input" id="${prefix}-content-field" value="content"></div>`;
-            } else {
-                container.innerHTML = `
-                    <div class="form-group"><label class="form-label">URL Field</label>
-                        <input type="text" class="form-input" id="${prefix}-content-field" value="${mode === 'blob_url' ? 'fileUrl' : 'webUrl'}"></div>
-                    <div class="form-group"><label class="form-label">Content Types</label>
-                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:12px;">
-                            ${['txt','json','pdf','docx','md','csv'].map(ft =>
-                                `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
-                                    <input type="checkbox" class="${prefix}-url-content-type" value="${ft}" ${['txt','json','pdf'].includes(ft)?'checked':''}> .${ft}
-                                </label>`).join('')}
-                        </div></div>`;
-            }
         }
 
         function updateDestConfigInline(type, prefix) {
@@ -5329,19 +5302,6 @@
                 const fileTypes = [];
                 form.querySelectorAll('input[name="override_file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
                 if (fileTypes.length > 0) sourceConfig.file_types = fileTypes;
-                const contentMode = formData.get('override_content_mode');
-                if (contentMode) sourceConfig.content_mode = contentMode;
-                const overrideTags = document.getElementById('override-content-field-tags');
-                if (overrideTags) {
-                    const fields = getContentFieldsFromContainer(overrideTags);
-                    if (fields.length > 0) sourceConfig.content_field = fields;
-                } else {
-                    const contentField = formData.get('override_content_field');
-                    if (contentField) sourceConfig.content_field = [contentField];
-                }
-                const urlContentTypes = [];
-                form.querySelectorAll('input[name="override_url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
-                if (urlContentTypes.length > 0) sourceConfig.url_content_types = urlContentTypes;
             } else {
                 // Create new source first
                 const srcData = collectInlineSourceData('pl-src');
@@ -5444,10 +5404,24 @@
                 if (fields.length > 0) contentFields = fields;
             }
 
+            // Collect content_mode and url_content_types for pipeline source
+            const contentMode = formData.get('override_content_mode') || 'field';
+            const urlContentTypes = [];
+            form.querySelectorAll('input[name="override_url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
+
+            // Build pipeline source entry
+            const pipelineSourceEntry = {
+                source_id: sourceId,
+                filters: sourceConfig,
+                content_fields: contentFields,
+                content_mode: contentMode,
+            };
+            if (urlContentTypes.length > 0) pipelineSourceEntry.url_content_types = urlContentTypes;
+
             const data = {
                 name: formData.get('name'),
                 description: formData.get('description') || '',
-                sources: [{ source_id: sourceId, filters: sourceConfig, content_fields: contentFields }],
+                sources: [pipelineSourceEntry],
                 docgrok_pipeline: docgrokPipelineName,
                 destination_id: destinationId,
                 process_existing: form.querySelector('input[name="process_existing"]').checked,
@@ -5745,86 +5719,6 @@
         function getContentFieldsFromId(id) {
             const el = document.getElementById(id);
             return el ? getContentFieldsFromContainer(el) : null;
-        }
-
-        function updateCosmosContentFields(mode) {
-            const container = document.getElementById('cosmos-content-fields');
-            if (mode === 'field') {
-                container.innerHTML = `
-                    <div class="form-group">
-                        <label class="form-label">Content Fields</label>
-                        <div class="content-field-tags" id="content-field-tags" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;border:1px solid var(--border-default);border-radius:var(--radius-md);min-height:42px;background:var(--bg-tertiary);align-items:center;">
-                            <span class="content-field-tag" data-field="content" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:16px;font-size:12px;color:var(--accent-secondary);">
-                                content <span onclick="removeContentFieldTag(this.parentElement)" style="cursor:pointer;font-size:14px;line-height:1;opacity:0.7;">&times;</span>
-                            </span>
-                            <input type="text" class="content-field-input" placeholder="Add field..." style="border:none;outline:none;background:transparent;color:var(--text-primary);font-size:13px;min-width:80px;flex:1;" onkeydown="handleContentFieldKey(event, this)">
-                        </div>
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Fields concatenated in order for embedding. Press Enter to add.
-                        </small>
-                    </div>
-                `;
-            } else if (mode === 'blob_url') {
-                container.innerHTML = `
-                    <div class="form-group">
-                        <label class="form-label">URL Field</label>
-                        <input type="text" class="form-input" name="content_field" placeholder="fileUrl" value="fileUrl">
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Field containing Azure Blob Storage URL
-                        </small>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Content Types to Process</label>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="txt" checked> .txt
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="json" checked> .json
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="pdf" checked> .pdf
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="docx"> .docx
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="md"> .md
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="csv"> .csv
-                            </label>
-                        </div>
-                    </div>
-                `;
-            } else if (mode === 'http_url') {
-                container.innerHTML = `
-                    <div class="form-group">
-                        <label class="form-label">URL Field</label>
-                        <input type="text" class="form-input" name="content_field" placeholder="webUrl" value="webUrl">
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Field containing HTTP/HTTPS URL to fetch
-                        </small>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Content Types to Process</label>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="html" checked> HTML
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="json" checked> JSON
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="txt" checked> Text
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="pdf"> PDF
-                            </label>
-                        </div>
-                    </div>
-                `;
-            }
         }
 
         function updateAuthFields() {
