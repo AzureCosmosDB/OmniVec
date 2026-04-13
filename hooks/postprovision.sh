@@ -252,6 +252,7 @@ if [ "$OMNIVEC_BUILD" = "true" ] || { [ "$ANON_OK" = "false" ] && [ "$TOKEN_OK" 
   # BUILD MODE: Build images from source
   printf "\n${YELLOW}Phase 1: Building images from source...${NC}\n"
   build_all_images
+  IMAGES_CHANGED=true
   printf "${GREEN}All images built and pushed.${NC}\n"
 else
   # IMPORT MODE: first image already imported by test above, do the rest
@@ -326,6 +327,7 @@ else
   rm -rf "$IMPORT_TMP"
 
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
+  if [ "$import_count" -gt 0 ]; then IMAGES_CHANGED=true; fi
 
   # If no images available from import, auto-fallback to build mode
   total_available=$((import_count + skip_count))
@@ -333,6 +335,7 @@ else
     printf "\n${YELLOW}Import provided no usable images. Falling back to source build mode...${NC}\n"
     BUILD_MODE=${BUILD_MODE:-acr}
     build_all_images
+    IMAGES_CHANGED=true
   fi
 fi
 
@@ -526,6 +529,14 @@ if [ "$helm_rc" -ne 0 ]; then
 fi
 
 printf "${GREEN}Helm deployment complete.${NC}\n"
+
+# Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
+if [ "$IMAGES_CHANGED" = "true" ]; then
+  printf "\n${YELLOW}Images updated — restarting pods to pull new images...${NC}\n"
+  kubectl --context "$KUBE_CONTEXT" rollout restart deployment -n omnivec 2>/dev/null || true
+  kubectl --context "$KUBE_CONTEXT" rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>/dev/null || true
+  printf "${GREEN}Pods restarted with new images.${NC}\n"
+fi
 
 # =============================================================================
 # PHASE 5: Verify and print info

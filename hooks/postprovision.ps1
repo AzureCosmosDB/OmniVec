@@ -261,6 +261,7 @@ if ($DO_BUILD) {
     Write-Host "`n`e[33mPhase 1: Building images from source...`e[0m"
 
     Build-AllImages
+    $script:imagesChanged = $true
 
     Write-Host "`e[32mAll images built and pushed.`e[0m"
 } else {
@@ -323,12 +324,14 @@ if ($DO_BUILD) {
     }
 
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
+    $script:imagesChanged = $importCount -gt 0
 
     # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
     if ($totalAvailable -eq 0) {
         Write-Host "`n`e[33mImport provided no usable images. Falling back to source build mode...`e[0m"
         Build-AllImages
+        $script:imagesChanged = $true
     }
 }
 
@@ -500,6 +503,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "`e[32mHelm deployment complete.`e[0m"
+
+# Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
+if ($script:imagesChanged) {
+    Write-Host "`n`e[33mImages updated — restarting pods to pull new images...`e[0m"
+    kubectl --context $KUBE_CONTEXT rollout restart deployment -n omnivec 2>$null
+    kubectl --context $KUBE_CONTEXT rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>$null
+    Write-Host "`e[32mPods restarted with new images.`e[0m"
+}
 
 # =============================================================================
 # PHASE 5: Verify and print info
