@@ -229,6 +229,7 @@ class Pipeline(BaseModel):
     sources: List[PipelineSource]
     docgrok_pipeline: str  # Name of DocGrok pipeline to use
     destination_id: str
+    vector_index_path: str  # Selected from destination's vector indexing policy (e.g. "embedding", "content_vector")
     status: PipelineStatus = PipelineStatus.ACTIVE
     process_existing: bool = True  # Process existing documents on creation
     metadata_mapping: Dict[str, str] = {}  # Map source fields to destination
@@ -321,6 +322,7 @@ class CreatePipelineRequest(BaseModel):
     sources: List[PipelineSource]
     docgrok_pipeline: str
     destination_id: str
+    vector_index_path: str  # Must match a path in destination's vector indexing policy
     process_existing: bool = True
     metadata_mapping: Dict[str, str] = {}
     processing_mode: str = "queue"  # "queue" or "inline"

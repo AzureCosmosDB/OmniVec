@@ -1675,11 +1675,23 @@ async def create_pipeline(req: CreatePipelineRequest):
             )
 
     # Validate destination exists
-    if not store.get(req.destination_id, "destination"):
+    dest_doc = store.get(req.destination_id, "destination")
+    if not dest_doc:
         raise HTTPException(
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+
+    # Validate vector_index_path exists in destination's vector policies
+    dest_config = dest_doc.get("config", {})
+    vector_indexes = dest_config.get("vector_indexes", [])
+    if vector_indexes:
+        valid_paths = [vi.get("path", "").lstrip("/") for vi in vector_indexes]
+        if req.vector_index_path.lstrip("/") not in valid_paths:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Vector index path '/{req.vector_index_path}' not found in destination. Available: {[f'/{p}' for p in valid_paths]}"
+            )
 
     # Validate docgrok_pipeline (must be a valid model ID or transform pipeline)
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
@@ -1707,6 +1719,7 @@ async def create_pipeline(req: CreatePipelineRequest):
         sources=req.sources,
         docgrok_pipeline=resolved_pipeline,
         destination_id=req.destination_id,
+        vector_index_path=req.vector_index_path,
         status=initial_status,
         process_existing=req.process_existing,
         metadata_mapping=req.metadata_mapping,
