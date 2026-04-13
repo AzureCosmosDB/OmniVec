@@ -1324,6 +1324,9 @@ async def create_destination(req: CreateDestinationRequest):
             # Auto-set vector field
             if "vector_field" not in config and probe_result.get("vector_field"):
                 config["vector_field"] = probe_result["vector_field"]
+            # Store all vector indexes from probe
+            if probe_result.get("vector_indexes"):
+                config["vector_indexes"] = probe_result["vector_indexes"]
             # Check vector embedding policy
             if not probe_result.get("has_vector_policy"):
                 enabled = False
@@ -1415,6 +1418,13 @@ async def test_destination(dest_id: str):
     from connectors.cosmosdb_vector_connector import test_vector_connection
     ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
     if ok:
+        # Persist vector_indexes back into destination config so pipeline creation can use them
+        vi = result.get("vector_indexes")
+        if vi is not None:
+            config = dict(destination.config)
+            config["vector_indexes"] = vi
+            destination.config = config
+            store.upsert(_to_doc(destination, "destination"))
         return {"success": True, "result": result}
     return {"success": False, "error": result}
 
@@ -1744,12 +1754,26 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
 
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
 
+    # Validate vector_index_path against destination if provided
+    dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    if dest_doc:
+        dest_config = dest_doc.get("config", {})
+        vector_indexes = dest_config.get("vector_indexes", [])
+        if vector_indexes:
+            valid_paths = [vi.get("path", "").lstrip("/") for vi in vector_indexes]
+            if req.vector_index_path.lstrip("/") not in valid_paths:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Vector index path '/{req.vector_index_path}' not found in destination. Available: {[f'/{p}' for p in valid_paths]}"
+                )
+
     pipeline = _pipeline_from_doc(doc)
     pipeline.name = req.name
     pipeline.description = req.description
     pipeline.sources = req.sources
     pipeline.docgrok_pipeline = resolved_pipeline
     pipeline.destination_id = req.destination_id
+    pipeline.vector_index_path = req.vector_index_path
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
@@ -2199,25 +2223,29 @@ def _extract_text_parts_from_doc(doc: dict, content_field) -> list:
     return parts
 
 
-def _search_single_index(destination, query_embedding: list, top_k: int, content_field="content") -> list:
+def _search_single_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
     """Synchronous vector search on a single destination (CosmosDB or pgvector)."""
     from models import DestinationType
 
     # Check destination type and route to appropriate search function
     if destination.type == DestinationType.PGVECTOR:
-        return _search_pgvector_index(destination, query_embedding, top_k, content_field)
+        return _search_pgvector_index(destination, query_embedding, top_k, content_field, vector_field)
     else:
-        return _search_cosmosdb_index(destination, query_embedding, top_k, content_field)
+        return _search_cosmosdb_index(destination, query_embedding, top_k, content_field, vector_field)
 
 
-def _search_pgvector_index(destination, query_embedding: list, top_k: int, content_field="content") -> list:
+def _search_pgvector_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
     """Synchronous vector search on a pgvector table."""
     import asyncio
     from connectors.postgres_connector import search_vectors
 
-    # Run async search synchronously using asyncio.run() which properly manages the event loop
+    # Override vector_column in config if pipeline specifies a vector_index_path
+    search_config = dict(destination.config)
+    if vector_field:
+        search_config["vector_column"] = vector_field
+
     raw_results = asyncio.run(
-        search_vectors(destination.config, query_embedding, top_k)
+        search_vectors(search_config, query_embedding, top_k)
     )
 
     results = []
@@ -2235,7 +2263,7 @@ def _search_pgvector_index(destination, query_embedding: list, top_k: int, conte
     return results
 
 
-def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, content_field="content") -> list:
+def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
     """Synchronous vector search on a single CosmosDB container."""
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
@@ -2245,14 +2273,17 @@ def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, conte
     database = client.get_database_client(destination.config["database"])
     container = database.get_container_client(destination.config["container"])
 
+    # Use pipeline's vector_index_path, fall back to destination config, then default
+    vf = vector_field or destination.config.get("vector_field", "embedding")
+
     validated = [float(x) for x in query_embedding]
     embedding_str = "[" + ",".join(str(x) for x in validated) + "]"
 
     query = f"""
         SELECT TOP @top_k
-            c, VectorDistance(c.embedding, {embedding_str}) as distance
+            c, VectorDistance(c.{vf}, {embedding_str}) as distance
         FROM c
-        ORDER BY VectorDistance(c.embedding, {embedding_str})
+        ORDER BY VectorDistance(c.{vf}, {embedding_str})
     """
 
     fields = _resolve_content_fields(content_field)
@@ -2268,7 +2299,8 @@ def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, conte
         text_parts = _extract_text_parts_from_doc(doc, content_field)
         # Build metadata from scalar fields
         skip_fields = {"id", "text", "content", "source", "source_ref",
-                       "embedding", "metadata", "_rid", "_self", "_etag", "_attachments", "_ts"}
+                       "embedding", "metadata", "_rid", "_self", "_etag", "_attachments", "_ts",
+                       vf}
         skip_fields.update(fields)
         metadata = doc.get("metadata", {})
         for k, v in doc.items():
@@ -2397,8 +2429,9 @@ async def playground_search(req: SearchRequest):
     # Search all indexes in parallel
     search_start = time.time()
 
-    # Resolve content_fields per destination from pipeline source config
+    # Resolve content_fields and vector_index_path per destination from pipeline config
     source_content_fields = {}  # dest_id -> content_fields
+    dest_vector_fields = {}  # dest_id -> vector_index_path
     for dest_id, dest, pip in dest_infos:
         cf = ["content"]
         if pip:
@@ -2406,14 +2439,18 @@ async def playground_search(req: SearchRequest):
             if sources:
                 src = sources[0] if isinstance(sources[0], dict) else sources[0].dict()
                 cf = src.get("content_fields", ["content"])
+            vip = pip.get("vector_index_path")
+            if vip:
+                dest_vector_fields[dest_id] = vip.lstrip("/")
         source_content_fields[dest_id] = cf
 
     async def search_one(dest_id, destination, model_ref):
         try:
             t0 = time.time()
             cf = source_content_fields.get(dest_id, ["content"])
+            vf = dest_vector_fields.get(dest_id)
             results = await asyncio.to_thread(
-                _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf
+                _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf, vf
             )
             search_ms = int((time.time() - t0) * 1000)
             for r in results:
@@ -3668,8 +3705,10 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
                 if sources:
                     src = sources[0] if isinstance(sources[0], dict) else sources[0]
                     cf = src.get("content_fields", ["content"]) if isinstance(src, dict) else getattr(src, "content_fields", ["content"])
+                # Use pipeline's vector_index_path for search
+                vf = matched_pip.get("vector_index_path", "").lstrip("/") or None
                 results = await asyncio.to_thread(
-                    _search_single_index, destination, query_embedding, assistant.top_k, cf
+                    _search_single_index, destination, query_embedding, assistant.top_k, cf, vf
                 )
                 search_results.extend(results)
             except Exception as e:

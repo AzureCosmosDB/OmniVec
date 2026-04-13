@@ -151,7 +151,7 @@ async def test_vector_connection(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def probe_container_config(config: Dict[str, Any]) -> Dict[str, str]:
-    """Probe a CosmosDB container and return partition_key_path and vector_field."""
+    """Probe a CosmosDB container and return partition_key_path, vector_field, and all vector_indexes."""
     client = await get_cosmos_client(config)
     database = client.get_database_client(config["database"])
     container = database.get_container_client(config["container"])
@@ -164,12 +164,35 @@ async def probe_container_config(config: Dict[str, Any]) -> Dict[str, str]:
     if pk_paths:
         result["partition_key_path"] = pk_paths[0]
 
-    # Vector field from embedding policy
-    vector_embeddings = props.get("vectorEmbeddingPolicy", {}).get("vectorEmbeddings", [])
+    # Vector field from embedding policy (first one for backward compat)
+    vector_embedding_policy = props.get("vectorEmbeddingPolicy", {})
+    vector_embeddings = vector_embedding_policy.get("vectorEmbeddings", [])
     if vector_embeddings:
         vf = vector_embeddings[0].get("path", "").lstrip("/")
         if vf:
             result["vector_field"] = vf
+
+    # All vector indexes with full details
+    indexing_policy = props.get("indexingPolicy", {})
+    vector_indexes = indexing_policy.get("vectorIndexes", [])
+    structured_indexes = []
+    for vi in vector_indexes:
+        vi_path = vi.get("path", "")
+        vi_type = vi.get("type", "")
+        embedding_info = {}
+        for ve in vector_embeddings:
+            if ve.get("path") == vi_path:
+                embedding_info = ve
+                break
+        structured_indexes.append({
+            "path": vi_path,
+            "indexType": vi_type,
+            "dimensions": embedding_info.get("dimensions"),
+            "dataType": embedding_info.get("dataType"),
+            "distanceFunction": embedding_info.get("distanceFunction"),
+            "quantizationByteSize": vi.get("quantizationByteSize"),
+        })
+    result["vector_indexes"] = structured_indexes
 
     return result
 
