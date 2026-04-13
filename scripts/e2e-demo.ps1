@@ -12,6 +12,7 @@ param(
     [int]$FromStep = 1,
     [switch]$Quiet,
     [switch]$Existing,  # Use an existing deployment (skip provisioning)
+    [switch]$Cleanup,   # Delete test resources (OmniVec + Azure) after run
     [string]$EnvName = $env:AZURE_ENV_NAME,
     [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
@@ -811,3 +812,40 @@ Write-Host ""
 # Clean up checkpoint on successful completion
 Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
 Save-Checkpoint 11
+
+# =============================================================================
+# Cleanup (only when -Cleanup flag is passed)
+# =============================================================================
+if ($Cleanup) {
+    Write-Host "`n`e[33mCleaning up test resources...`e[0m"
+
+    # Delete OmniVec resources (pipeline → source → destination → model)
+    if ($PIP_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted pipeline: $PIP_ID" } catch { LogWarn "Failed to delete pipeline: $_" }
+    }
+    if ($SOURCE_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$SOURCE_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted source: $SOURCE_ID" } catch { LogWarn "Failed to delete source: $_" }
+    }
+    if ($DEST_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$DEST_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted destination: $DEST_ID" } catch { LogWarn "Failed to delete destination: $_" }
+    }
+    if ($MODEL_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/models/$MODEL_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted model: $MODEL_ID" } catch { LogWarn "Failed to delete model: $_" }
+    }
+
+    # Delete Azure test CosmosDB account
+    if ($TEST_COSMOS_ACCOUNT -and $RESOURCE_GROUP) {
+        Log "  Deleting test CosmosDB account: $TEST_COSMOS_ACCOUNT..."
+        az cosmosdb delete --name $TEST_COSMOS_ACCOUNT --resource-group $RESOURCE_GROUP --yes 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            LogOk "Deleted Azure CosmosDB: $TEST_COSMOS_ACCOUNT"
+        } else {
+            LogWarn "Failed to delete CosmosDB account (may not exist or already deleted)"
+        }
+    }
+
+    # Remove checkpoint file
+    Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
+
+    LogOk "Cleanup complete."
+}
