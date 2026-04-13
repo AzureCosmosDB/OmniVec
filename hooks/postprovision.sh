@@ -205,29 +205,67 @@ build_missing_images() {
 }
 
 # ── If not explicitly set to build, try import ──────────────────────────
+ANON_OK=false
+TOKEN_OK=false
+FIRST_IMAGE=$(echo "$IMAGES" | awk '{print $1}')
+
 if [ "$OMNIVEC_BUILD" != "true" ]; then
   printf "\n${YELLOW}Phase 1: Importing pre-built images from shared registry...${NC}\n"
   printf "  ${CYAN}Source: $SHARED_REGISTRY${NC}\n"
-  if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
-    printf "  ${CYAN}Using provided registry token for import.${NC}\n"
+
+  # Try anonymous pull first
+  printf "  ${CYAN}Testing anonymous pull...${NC}"
+  if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
+    printf " ${GREEN}✓ anonymous pull works${NC}\n"
+    ANON_OK=true
   else
-    printf "  ${CYAN}No token provided — assuming public registry (anonymous pull).${NC}\n"
+    printf " ${YELLOW}✗ requires auth${NC}\n"
+    # Try stored token
+    if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
+      printf "  ${CYAN}Trying stored token...${NC}"
+      if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
+        printf " ${GREEN}✓ token works${NC}\n"
+        TOKEN_OK=true
+      else
+        printf " ${RED}✗ token invalid/expired${NC}\n"
+      fi
+    fi
+    # Prompt for token if nothing worked
+    if [ "$TOKEN_OK" = "false" ]; then
+      printf "  ${YELLOW}Registry token required for import.${NC}\n"
+      _new_token=$(read_input "  Enter token for $SHARED_REGISTRY (or Enter to build from source): ")
+      if [ -n "$_new_token" ]; then
+        if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
+          SHARED_REGISTRY_TOKEN="$_new_token"
+          azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" 2>/dev/null || true
+          printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
+          TOKEN_OK=true
+        else
+          printf "  ${RED}Token invalid. Will build from source.${NC}\n"
+        fi
+      fi
+    fi
   fi
 fi
 
-if [ "$OMNIVEC_BUILD" = "true" ]; then
+if [ "$OMNIVEC_BUILD" = "true" ] || { [ "$ANON_OK" = "false" ] && [ "$TOKEN_OK" = "false" ]; }; then
   # BUILD MODE: Build images from source
   printf "\n${YELLOW}Phase 1: Building images from source...${NC}\n"
   build_all_images
   printf "${GREEN}All images built and pushed.${NC}\n"
 else
-  # IMPORT MODE: Token validated, proceed with parallel imports
-  import_count=0
+  # IMPORT MODE: first image already imported by test above, do the rest
+  import_count=1
   skip_count=0
   IMPORT_TMP=$(mktemp -d)
   import_pids=""
 
   for image in $IMAGES; do
+    # Skip first image — already imported during auth test
+    if [ "$image" = "$FIRST_IMAGE" ]; then
+      printf "  ${GREEN}${image}:latest already imported (auth test).${NC}\n"
+      continue
+    fi
     if [ "$FORCE_IMPORT" != "true" ] && image_up_to_date "$image" "latest"; then
       printf "  ${GREEN}${image}:latest up to date (digest match), skipping.${NC}\n"
       skip_count=$((skip_count + 1))
