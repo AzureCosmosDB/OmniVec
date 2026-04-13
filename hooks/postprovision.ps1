@@ -38,7 +38,14 @@ $ACR_NAME = Get-AzdValue "AZURE_ACR_NAME"
 $COSMOS_ENDPOINT = Get-AzdValue "AZURE_COSMOS_ENDPOINT"
 $IDENTITY_CLIENT_ID = Get-AzdValue "AZURE_IDENTITY_CLIENT_ID"
 $RESOURCE_GROUP = Get-AzdValue "AZURE_RESOURCE_GROUP"
-$BUILD_MODE = if (Get-AzdValue "OMNIVEC_BUILD_MODE") { Get-AzdValue "OMNIVEC_BUILD_MODE" } else { "acr" }
+$BUILD_MODE = Get-AzdValue "OMNIVEC_BUILD_MODE"
+if (-not $BUILD_MODE) {
+    # Auto-detect build mode
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        $dockerInfo = docker info 2>$null
+        if ($LASTEXITCODE -eq 0) { $BUILD_MODE = "docker" } else { $BUILD_MODE = "acr" }
+    } else { $BUILD_MODE = "acr" }
+}
 $ENABLE_BLOB_SOURCE = if (Get-AzdValue "AZURE_ENABLE_BLOB_SOURCE") { Get-AzdValue "AZURE_ENABLE_BLOB_SOURCE" } else { "false" }
 
 $STORAGE_ACCOUNT = Get-AzdValue "AZURE_STORAGE_ACCOUNT_NAME"
@@ -208,10 +215,44 @@ function Build-MissingImages {
 if (-not $DO_BUILD) {
     Write-Host "`n`e[33mPhase 1: Importing pre-built images from shared registry...`e[0m"
     Write-Host "  `e[36mSource: $SHARED_REGISTRY`e[0m"
-    if ($SHARED_REGISTRY_TOKEN) {
-        Write-Host "  `e[36mUsing provided registry token for import.`e[0m"
+
+    # Try anonymous pull first with a single test image
+    $anonOk = $false
+    $tokenOk = $false
+    Write-Host "  `e[36mTesting anonymous pull...`e[0m" -NoNewline
+    $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):latest" --image "$($IMAGES[0]):latest" --force 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host " `e[32m✓ anonymous pull works`e[0m"
+        $anonOk = $true
     } else {
-        Write-Host "  `e[36mNo token provided - assuming public registry (anonymous pull).`e[0m"
+        Write-Host " `e[33m✗ requires auth`e[0m"
+        # Try with stored token
+        if ($SHARED_REGISTRY_TOKEN) {
+            Write-Host "  `e[36mTrying stored token...`e[0m" -NoNewline
+            $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):latest" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host " `e[32m✓ token works`e[0m"
+                $tokenOk = $true
+            } else {
+                Write-Host " `e[31m✗ token invalid/expired`e[0m"
+            }
+        }
+        # Prompt for token if nothing worked
+        if (-not $tokenOk) {
+            Write-Host "  `e[33mRegistry token required for import.`e[0m"
+            $newToken = (Read-Host "  Enter token for $SHARED_REGISTRY (or Enter to build from source)").Trim()
+            if ($newToken) {
+                $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):latest" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $SHARED_REGISTRY_TOKEN = $newToken
+                    azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $newToken 2>$null
+                    Write-Host "  `e[32mToken valid — saved for future use.`e[0m"
+                    $tokenOk = $true
+                } else {
+                    Write-Host "  `e[31mToken invalid. Will build from source.`e[0m"
+                }
+            }
+        }
     }
 }
 
@@ -220,6 +261,7 @@ if ($DO_BUILD) {
     Write-Host "`n`e[33mPhase 1: Building images from source...`e[0m"
 
     Build-AllImages
+    $script:imagesChanged = $true
 
     Write-Host "`e[32mAll images built and pushed.`e[0m"
 } else {
@@ -282,12 +324,14 @@ if ($DO_BUILD) {
     }
 
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
+    $script:imagesChanged = $importCount -gt 0
 
     # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
     if ($totalAvailable -eq 0) {
         Write-Host "`n`e[33mImport provided no usable images. Falling back to source build mode...`e[0m"
         Build-AllImages
+        $script:imagesChanged = $true
     }
 }
 
@@ -459,6 +503,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "`e[32mHelm deployment complete.`e[0m"
+
+# Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
+if ($script:imagesChanged) {
+    Write-Host "`n`e[33mImages updated — restarting pods to pull new images...`e[0m"
+    kubectl --context $KUBE_CONTEXT rollout restart deployment -n omnivec 2>$null
+    kubectl --context $KUBE_CONTEXT rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>$null
+    Write-Host "`e[32mPods restarted with new images.`e[0m"
+}
 
 # =============================================================================
 # PHASE 5: Verify and print info

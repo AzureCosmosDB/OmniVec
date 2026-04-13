@@ -70,10 +70,11 @@ public class Source
     }
 
     /// <summary>Extract content from a row dictionary (for SQL sources).</summary>
-    public string ExtractContentFromRow(Dictionary<string, object?> row)
+    public static string ExtractContentFromRow(Dictionary<string, object?> row, List<string>? contentFields = null)
     {
+        var fields = contentFields ?? new List<string> { "content" };
         var parts = new List<string>();
-        foreach (var field in ContentFields)
+        foreach (var field in fields)
         {
             if (row.TryGetValue(field, out var val) && val is string s && !string.IsNullOrEmpty(s))
                 parts.Add(s);
@@ -81,9 +82,10 @@ public class Source
         return string.Join("\n\n", parts);
     }
 
-    public bool RowHasContent(Dictionary<string, object?> row)
+    public static bool RowHasContent(Dictionary<string, object?> row, List<string>? contentFields = null)
     {
-        foreach (var field in ContentFields)
+        var fields = contentFields ?? new List<string> { "content" };
+        foreach (var field in fields)
         {
             if (row.TryGetValue(field, out var val) && val is string s && !string.IsNullOrEmpty(s))
                 return true;
@@ -92,46 +94,13 @@ public class Source
     }
 
     /// <summary>
-    /// Returns the content field(s) as a list. Supports both string and array configs.
+    /// Extract concatenated content from a JObject using specified content fields.
     /// </summary>
-    public List<string> ContentFields
+    public static string ExtractContent(Newtonsoft.Json.Linq.JObject doc, List<string>? contentFields = null)
     {
-        get
-        {
-            if (!Config.TryGetValue("content_field", out var v))
-                return new List<string> { "content" };
-
-            if (v.ValueKind == JsonValueKind.Array)
-            {
-                var fields = new List<string>();
-                foreach (var item in v.EnumerateArray())
-                {
-                    var s = item.GetString();
-                    if (!string.IsNullOrEmpty(s)) fields.Add(s);
-                }
-                return fields.Count > 0 ? fields : new List<string> { "content" };
-            }
-
-            if (v.ValueKind == JsonValueKind.String)
-            {
-                var s = v.GetString();
-                return new List<string> { string.IsNullOrEmpty(s) ? "content" : s };
-            }
-
-            return new List<string> { "content" };
-        }
-    }
-
-    /// <summary>Single content field (backward compat). Returns first field.</summary>
-    public string ContentField => ContentFields[0];
-
-    /// <summary>
-    /// Extract concatenated content from a JObject using all configured content fields.
-    /// </summary>
-    public string ExtractContent(Newtonsoft.Json.Linq.JObject doc)
-    {
+        var fields = contentFields ?? new List<string> { "content" };
         var parts = new List<string>();
-        foreach (var field in ContentFields)
+        foreach (var field in fields)
         {
             var token = doc[field];
             if (token is null || token.Type == Newtonsoft.Json.Linq.JTokenType.Null)
@@ -146,11 +115,12 @@ public class Source
     }
 
     /// <summary>
-    /// Check if a JObject has any of the configured content fields with non-empty values.
+    /// Check if a JObject has any of the specified content fields with non-empty values.
     /// </summary>
-    public bool HasContent(Newtonsoft.Json.Linq.JObject doc)
+    public static bool HasContent(Newtonsoft.Json.Linq.JObject doc, List<string>? contentFields = null)
     {
-        foreach (var field in ContentFields)
+        var fields = contentFields ?? new List<string> { "content" };
+        foreach (var field in fields)
         {
             var token = doc[field];
             if (token is null || token.Type == Newtonsoft.Json.Linq.JTokenType.Null)

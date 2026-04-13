@@ -2384,23 +2384,21 @@ async def playground_search(req: SearchRequest):
     # Search all indexes in parallel
     search_start = time.time()
 
-    # Resolve content_field per destination from pipeline's source config
-    source_content_fields = {}  # dest_id -> content_field
+    # Resolve content_fields per destination from pipeline source config
+    source_content_fields = {}  # dest_id -> content_fields
     for dest_id, dest, pip in dest_infos:
-        cf = "content"
+        cf = ["content"]
         if pip:
             sources = pip.get("sources", [])
             if sources:
-                src_id = sources[0].get("source_id") if isinstance(sources[0], dict) else sources[0].source_id
-                src_doc = await asyncio.to_thread(store.get, src_id, "source")
-                if src_doc:
-                    cf = src_doc.get("config", {}).get("content_field", "content")
+                src = sources[0] if isinstance(sources[0], dict) else sources[0].dict()
+                cf = src.get("content_fields", ["content"])
         source_content_fields[dest_id] = cf
 
     async def search_one(dest_id, destination, model_ref):
         try:
             t0 = time.time()
-            cf = source_content_fields.get(dest_id, "content")
+            cf = source_content_fields.get(dest_id, ["content"])
             results = await asyncio.to_thread(
                 _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf
             )
@@ -2570,14 +2568,10 @@ async def process_event(event: dict):
         source_account = source.config.get("account_url", "")
         source_container = source.config.get("container", "")
         source_prefix = source.config.get("prefix", "")
-        allowed_types = source.config.get("file_types", ["txt", "json", "pdf", "md", "csv"])
 
         if account_name in source_account and container_name == source_container:
             if not source_prefix or blob_path.startswith(source_prefix):
-                if file_ext in allowed_types:
-                    matching_sources.append(source)
-                else:
-                    print(f"Skipping blob {blob_path}: file type '{file_ext}' not in allowed types {allowed_types}")
+                matching_sources.append(source)
 
     if not matching_sources:
         print(f"No matching sources for blob: {blob_url}")
@@ -2590,8 +2584,14 @@ async def process_event(event: dict):
             if pipeline.status != PipelineStatus.ACTIVE:
                 continue
 
-            source_in_pipeline = any(ps.source_id == source.id for ps in pipeline.sources)
-            if not source_in_pipeline:
+            pipeline_source = next((ps for ps in pipeline.sources if ps.source_id == source.id), None)
+            if not pipeline_source:
+                continue
+
+            # Check file_types from pipeline source config
+            allowed_types = pipeline_source.file_types
+            if file_ext not in allowed_types:
+                print(f"Skipping blob {blob_path}: file type '{file_ext}' not in allowed types {allowed_types} for pipeline {pipeline.name}")
                 continue
 
             if event_type == "blob_created":
@@ -3649,14 +3649,12 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
                 query_embedding = (embed_result.get("pages") or embed_result.get("output") or [[]])[0]
                 if not query_embedding:
                     continue
-                # Resolve content_field
-                cf = "content"
+                # Resolve content_fields from pipeline source
+                cf = ["content"]
                 sources = matched_pip.get("sources", [])
                 if sources:
-                    src_id = sources[0].get("source_id") if isinstance(sources[0], dict) else sources[0].source_id
-                    src_doc = await asyncio.to_thread(store.get, src_id, "source")
-                    if src_doc:
-                        cf = src_doc.get("config", {}).get("content_field", "content")
+                    src = sources[0] if isinstance(sources[0], dict) else sources[0]
+                    cf = src.get("content_fields", ["content"]) if isinstance(src, dict) else getattr(src, "content_fields", ["content"])
                 results = await asyncio.to_thread(
                     _search_single_index, destination, query_embedding, assistant.top_k, cf
                 )

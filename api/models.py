@@ -94,10 +94,6 @@ class AzureBlobConfig(BaseModel):
     account_url: Optional[str] = None  # For managed identity
     container: str
     prefix: Optional[str] = ""
-    # Content types to process
-    file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv"]
-    # Legacy field for backward compatibility
-    extensions: Optional[List[str]] = None
 
 
 class CosmosDBSourceConfig(BaseModel):
@@ -106,13 +102,6 @@ class CosmosDBSourceConfig(BaseModel):
     container: str
     query: Optional[str] = "SELECT * FROM c"
     use_change_feed: bool = True
-    # Content configuration
-    content_mode: CosmosDBContentMode = CosmosDBContentMode.FIELD
-    content_field: Any = "content"  # Field(s) containing content or URL — string or list of strings
-    # For URL modes - what content types to expect
-    url_content_types: List[str] = ["txt", "json", "pdf"]
-    # Optional: field containing the content type hint
-    content_type_field: Optional[str] = None
 
 
 class PostgreSQLSourceConfig(BaseModel):
@@ -125,7 +114,6 @@ class PostgreSQLSourceConfig(BaseModel):
     ssl_mode: str = "require"  # disable, allow, prefer, require, verify-ca, verify-full
     table: str  # Table to read from
     id_column: str = "id"  # Primary key column
-    content_columns: List[str] = ["content"]  # Columns containing text to embed
     timestamp_column: str = "updated_at"  # For change tracking (polling)
     query: Optional[str] = None  # Optional custom query instead of table
     poll_interval_seconds: int = 60  # How often to poll for changes
@@ -136,7 +124,6 @@ class S3Config(BaseModel):
     bucket: str
     prefix: Optional[str] = ""
     region: str = "us-east-1"
-    extensions: List[str] = [".pdf", ".png", ".jpg", ".jpeg", ".txt", ".json"]
 
 
 class HTTPConfig(BaseModel):
@@ -227,6 +214,12 @@ class Destination(BaseModel):
 class PipelineSource(BaseModel):
     source_id: str
     filters: Dict[str, Any] = {}  # Additional filters like file patterns
+    # Content extraction config (how to read content from this source)
+    content_fields: List[str] = ["content"]  # Field(s) to concatenate for embedding
+    content_mode: str = "field"  # "field" (direct value), "blob_url", "http_url"
+    url_content_types: List[str] = ["txt", "json", "pdf"]  # For URL modes
+    content_type_field: Optional[str] = None  # Optional: field containing content type hint
+    file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv"]  # For blob/S3 sources: which file types to process
 
 
 class Pipeline(BaseModel):

@@ -819,13 +819,7 @@
                         Pipelines
                         <span class="nav-badge" id="pipelines-count">0</span>
                     </a>
-                    <a class="nav-item" onclick="showSection('assistants')">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>
-                        </svg>
-                        Assistants
-                        <span class="nav-badge" id="assistants-count">0</span>
-                    </a>
+
                 </div>
 
                 <div class="nav-section">
@@ -836,12 +830,7 @@
                         </svg>
                         Vector Search
                     </a>
-                    <a class="nav-item" onclick="showSection('assistant-playground')">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                        </svg>
-                        Assistant Chat
-                    </a>
+
                 </div>
 
                 <div class="nav-section">
@@ -1296,119 +1285,6 @@
                 </div>
             </section>
 
-            <!-- Assistants Section -->
-            <section id="section-assistants" class="section" style="display: none;">
-                <header class="header">
-                    <h2 class="header-title">Assistants</h2>
-                    <div class="header-actions">
-                        <button class="btn btn-primary" onclick="showModal('assistant-modal')">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-                            Create Assistant
-                        </button>
-                    </div>
-                </header>
-                <div class="content">
-                    <div id="assistants-list">
-                        <div style="text-align: center; padding: 60px; color: var(--text-tertiary);">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="64" height="64" style="margin-bottom: 16px; opacity: 0.5;">
-                                <path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>
-                            </svg>
-                            <h3 style="margin-bottom: 8px;">No assistants yet</h3>
-                            <p>Create an assistant that combines a chat model with vector indexes</p>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Assistant Create/Edit Modal -->
-            <div class="modal-overlay" id="assistant-modal">
-                <div class="modal" style="max-width: 600px;">
-                    <div class="modal-header">
-                        <h3 class="modal-title" id="assistant-modal-title">Create Assistant</h3>
-                        <button class="modal-close" onclick="closeModal('assistant-modal')">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-                        </button>
-                    </div>
-                    <div class="modal-body">
-                        <form id="assistant-form">
-                            <input type="hidden" name="assistant_id" value="">
-                            <div class="form-group">
-                                <label class="form-label">Name</label>
-                                <input type="text" class="form-input" name="name" placeholder="e.g., SKF Product Expert">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Description</label>
-                                <textarea class="form-input" name="description" rows="2" placeholder="What does this assistant do?"></textarea>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Chat Model</label>
-                                <select class="form-input" name="model_id" id="assistant-model-select">
-                                    <!-- Populated dynamically with chat models -->
-                                </select>
-                                <small style="color: var(--text-tertiary); font-size: 12px;">Only chat/LLM models are shown</small>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Vector Indexes</label>
-                                <div id="assistant-dest-checkboxes" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 8px;"></div>
-                                <small style="color: var(--text-tertiary); font-size: 12px;">Select indexes to search for context</small>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">System Prompt</label>
-                                <textarea class="form-input" name="system_prompt" rows="4" placeholder="You are a helpful assistant that answers questions about SKF products..."></textarea>
-                            </div>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                                <div class="form-group">
-                                    <label class="form-label">Top K (context docs)</label>
-                                    <input type="number" class="form-input" name="top_k" value="5" min="1" max="20">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Temperature</label>
-                                    <input type="number" class="form-input" name="temperature" value="0.7" min="0" max="2" step="0.1">
-                                </div>
-                            </div>
-                        </form>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary" onclick="closeModal('assistant-modal')">Cancel</button>
-                        <button class="btn btn-primary" onclick="saveAssistant()">Save Assistant</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Assistant Playground Section -->
-            <section id="section-assistant-playground" class="section" style="display: none;">
-                <header class="header">
-                    <h2 class="header-title">Assistant Chat</h2>
-                </header>
-                <div class="content" style="display: flex; flex-direction: column; height: calc(100vh - 120px);">
-                    <div style="margin-bottom: 16px; display: flex; gap: 16px; align-items: end;">
-                        <div class="form-group" style="margin-bottom: 0; flex: 1;">
-                            <label class="form-label">Assistant</label>
-                            <select class="form-input" id="chat-assistant-select" onchange="onAssistantSelected()">
-                                <option value="">Select an assistant...</option>
-                            </select>
-                        </div>
-                        <button class="btn btn-secondary" onclick="clearChat()" style="height: 42px;">Clear Chat</button>
-                    </div>
-                    <div id="chat-assistant-info" style="display: none; margin-bottom: 16px; background: var(--bg-tertiary); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px;">
-                    </div>
-                    <div id="chat-messages" style="flex: 1; overflow-y: auto; padding: 16px; background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); margin-bottom: 16px; min-height: 200px;">
-                        <div style="text-align: center; padding: 60px; color: var(--text-tertiary);">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="margin-bottom: 12px; opacity: 0.5;">
-                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                            </svg>
-                            <p>Select an assistant and start chatting</p>
-                        </div>
-                    </div>
-                    <div style="display: flex; gap: 12px;">
-                        <input type="text" class="form-input" id="chat-input" placeholder="Type your message..." style="flex: 1; font-size: 15px; padding: 14px 16px;" onkeypress="if(event.key==='Enter')sendChatMessage()">
-                        <button class="btn btn-primary" onclick="sendChatMessage()" id="chat-send-btn" style="padding: 14px 24px;">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
-                            Send
-                        </button>
-                    </div>
-                </div>
-            </section>
 
             <!-- Playground Section -->
             <section id="section-playground" class="section" style="display: none;">
@@ -2233,7 +2109,7 @@
                             <option value="embedding">Embedding</option>
                             <option value="chat">Chat / LLM</option>
                         </select>
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Embedding models are used in pipelines; Chat models are used in assistants</small>
+                        <small style="color: var(--text-tertiary); font-size: 12px;">Embedding models are used in pipelines</small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Provider</label>
@@ -2882,10 +2758,6 @@
                             <label class="form-label">Timestamp Column</label>
                             <input type="text" class="form-input" id="detail-pg-ts-column" value="${config.timestamp_column || 'updated_at'}">
                         </div>
-                        <div class="form-group">
-                            <label class="form-label">Content Columns (comma-separated)</label>
-                            <input type="text" class="form-input" id="detail-pg-content-cols" value="${(config.content_columns || ['content']).join(', ')}">
-                        </div>
                     ` : `
                         <div class="form-group">
                             <label class="form-label">Endpoint</label>
@@ -2953,42 +2825,14 @@
                 `;
             } else if (currentDetailTab === 'content') {
                 if (source.type === 'azure-blob') {
-                    const fileTypes = config.file_types || ['txt', 'json', 'pdf', 'md', 'csv'];
                     configPanel.innerHTML = `
                         <h4 style="margin: 0 0 20px 0; font-size: 16px;">File Types to Process</h4>
-                        <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">Select which file types should be processed from this blob storage source.</p>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                            ${['txt', 'json', 'pdf', 'md', 'csv', 'docx', 'html', 'xml', 'pptx', 'xlsx', 'png', 'jpg'].map(ft => `
-                                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-tertiary); border-radius: 8px;">
-                                    <input type="checkbox" name="detail-file-types" value="${ft}" ${fileTypes.includes(ft) ? 'checked' : ''}>
-                                    <span style="font-weight: 500;">.${ft}</span>
-                                </label>
-                            `).join('')}
-                        </div>
+                        <p style="font-size: 13px; color: var(--text-tertiary);">File type filtering is now configured per-pipeline in the pipeline source settings.</p>
                     `;
                 } else {
                     configPanel.innerHTML = `
                         <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Configuration</h4>
-                        <div class="form-group">
-                            <label class="form-label">Content Mode</label>
-                            <select class="form-input" id="detail-content-mode">
-                                <option value="field" ${config.content_mode === 'field' ? 'selected' : ''}>Field Value (content directly in document)</option>
-                                <option value="blob_url" ${config.content_mode === 'blob_url' ? 'selected' : ''}>Blob Storage URL (field contains Azure Blob URL)</option>
-                                <option value="http_url" ${config.content_mode === 'http_url' ? 'selected' : ''}>HTTP URL (field contains HTTP/HTTPS URL)</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Content Fields</label>
-                            <div class="content-field-tags" id="detail-content-field-tags" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;border:1px solid var(--border-default);border-radius:var(--radius-md);min-height:42px;background:var(--bg-tertiary);align-items:center;">
-                                ${(Array.isArray(config.content_field) ? config.content_field : [config.content_field || 'content']).map(f =>
-                                    `<span class="content-field-tag" data-field="${escapeHtml(f)}" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:16px;font-size:12px;color:var(--accent-secondary);">
-                                        ${escapeHtml(f)} <span onclick="removeContentFieldTag(this.parentElement)" style="cursor:pointer;font-size:14px;line-height:1;opacity:0.7;">&times;</span>
-                                    </span>`
-                                ).join('')}
-                                <input type="text" class="content-field-input" placeholder="Add field..." style="border:none;outline:none;background:transparent;color:var(--text-primary);font-size:13px;min-width:80px;flex:1;" onkeydown="handleContentFieldKey(event, this)">
-                            </div>
-                            <p style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">Fields concatenated in order for embedding. Press Enter to add.</p>
-                        </div>
+                        <p style="font-size: 13px; color: var(--text-tertiary);">Content fields are now configured per-pipeline in the pipeline source settings.</p>
                     `;
                 }
             } else if (currentDetailTab === 'health') {
@@ -3122,29 +2966,13 @@
                 if (urlEl) editedSourceData.account_url = urlEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
                 if (prefixEl) editedSourceData.prefix = prefixEl.value;
-
-                // File types from Content tab
-                const fileTypeEls = document.querySelectorAll('input[name="detail-file-types"]:checked');
-                if (fileTypeEls.length > 0 || document.querySelector('input[name="detail-file-types"]')) {
-                    editedSourceData.file_types = [];
-                    fileTypeEls.forEach(cb => editedSourceData.file_types.push(cb.value));
-                }
             } else if (source.type === 'cosmosdb') {
                 const endpointEl = document.getElementById('detail-endpoint');
                 const dbEl = document.getElementById('detail-database');
                 const containerEl = document.getElementById('detail-container');
-                const modeEl = document.getElementById('detail-content-mode');
-                const fieldEl = document.getElementById('detail-content-field');
                 if (endpointEl) editedSourceData.endpoint = endpointEl.value;
                 if (dbEl) editedSourceData.database = dbEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
-                if (modeEl) editedSourceData.content_mode = modeEl.value;
-                const detailTags = document.getElementById('detail-content-field-tags');
-                if (detailTags) {
-                    editedSourceData.content_field = getContentFieldsFromContainer(detailTags);
-                } else if (fieldEl) {
-                    editedSourceData.content_field = fieldEl.value;
-                }
             }
         }
 
@@ -3167,13 +2995,10 @@
                 config.account_url = editedSourceData.account_url || source.config?.account_url || '';
                 config.container = editedSourceData.container || source.config?.container || '';
                 config.prefix = editedSourceData.prefix || source.config?.prefix || '';
-                config.file_types = editedSourceData.file_types || source.config?.file_types || ['txt', 'json', 'pdf', 'md', 'csv'];
             } else if (source.type === 'cosmosdb') {
                 config.endpoint = editedSourceData.endpoint || source.config?.endpoint || '';
                 config.database = editedSourceData.database || source.config?.database || '';
                 config.container = editedSourceData.container || source.config?.container || '';
-                config.content_mode = editedSourceData.content_mode || source.config?.content_mode || 'field';
-                config.content_field = editedSourceData.content_field || source.config?.content_field || ['content'];
             }
 
             try {
@@ -4963,15 +4788,7 @@
                     <div class="form-group"><label class="form-label">Database</label>
                         <input type="text" class="form-input" id="${prefix}-database" placeholder="mydb"></div>
                     <div class="form-group"><label class="form-label">Container</label>
-                        <input type="text" class="form-input" id="${prefix}-container" placeholder="documents"></div>
-                    <div class="form-group"><label class="form-label">Content Source</label>
-                        <select class="form-input" id="${prefix}-content-mode" onchange="updateCosmosContentFieldsInline(this.value, '${prefix}')">
-                            <option value="field">Field Value</option><option value="blob_url">Blob Storage URL</option><option value="http_url">HTTP URL</option>
-                        </select></div>
-                    <div id="${prefix}-cosmos-content-fields">
-                        <div class="form-group"><label class="form-label">Content Field</label>
-                            <input type="text" class="form-input" id="${prefix}-content-field" value="content"></div>
-                    </div>`;
+                        <input type="text" class="form-input" id="${prefix}-container" placeholder="documents"></div>`;
             } else if (type === 'postgresql') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Host</label>
@@ -4986,31 +4803,10 @@
                         <input type="text" class="form-input" id="${prefix}-id-column" value="id"></div>
                     <div class="form-group"><label class="form-label">Timestamp Column</label>
                         <input type="text" class="form-input" id="${prefix}-timestamp-column" value="updated_at"></div>
-                    <div class="form-group"><label class="form-label">Content Columns</label>
-                        <input type="text" class="form-input" id="${prefix}-content-columns" value="content" placeholder="content,title"></div>
                     <div class="form-group"><label class="form-label">Poll Interval (sec)</label>
                         <input type="number" class="form-input" id="${prefix}-poll-interval" value="60"></div>`;
             }
             document.getElementById(`${prefix}-test-result`).innerHTML = '';
-        }
-
-        function updateCosmosContentFieldsInline(mode, prefix) {
-            const container = document.getElementById(`${prefix}-cosmos-content-fields`);
-            if (mode === 'field') {
-                container.innerHTML = `<div class="form-group"><label class="form-label">Content Field</label>
-                    <input type="text" class="form-input" id="${prefix}-content-field" value="content"></div>`;
-            } else {
-                container.innerHTML = `
-                    <div class="form-group"><label class="form-label">URL Field</label>
-                        <input type="text" class="form-input" id="${prefix}-content-field" value="${mode === 'blob_url' ? 'fileUrl' : 'webUrl'}"></div>
-                    <div class="form-group"><label class="form-label">Content Types</label>
-                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:12px;">
-                            ${['txt','json','pdf','docx','md','csv'].map(ft =>
-                                `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
-                                    <input type="checkbox" class="${prefix}-url-content-type" value="${ft}" ${['txt','json','pdf'].includes(ft)?'checked':''}> .${ft}
-                                </label>`).join('')}
-                        </div></div>`;
-            }
         }
 
         function updateDestConfigInline(type, prefix) {
@@ -5149,24 +4945,16 @@
             const sourceType = document.getElementById(`${prefix}-type`).value;
             let config = {};
             if (sourceType === 'azure-blob') {
-                const fileTypes = [];
-                document.querySelectorAll(`.${prefix}-file-type:checked`).forEach(cb => fileTypes.push(cb.value));
                 config = {
                     account_url: document.getElementById(`${prefix}-account-url`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || '',
                     prefix: document.getElementById(`${prefix}-prefix`)?.value || '',
-                    file_types: fileTypes
                 };
             } else if (sourceType === 'cosmosdb') {
-                const urlContentTypes = [];
-                document.querySelectorAll(`.${prefix}-url-content-type:checked`).forEach(cb => urlContentTypes.push(cb.value));
                 config = {
                     endpoint: document.getElementById(`${prefix}-endpoint`)?.value || '',
                     database: document.getElementById(`${prefix}-database`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || '',
-                    content_mode: document.getElementById(`${prefix}-content-mode`)?.value || 'field',
-                    content_field: getContentFieldsFromId(`${prefix}-content-field-tags`) || ['content'],
-                    url_content_types: urlContentTypes.length > 0 ? urlContentTypes : ['txt', 'json', 'pdf']
                 };
             }
             return { name: document.getElementById(`${prefix}-name`)?.value || '', type: sourceType, config };
@@ -5246,9 +5034,11 @@
 
             configDiv.style.display = 'block';
 
+            let sourceSpecificHtml = '';
+
             if (source.type === 'azure-blob') {
-                const fileTypes = source.config.file_types || ['txt', 'json', 'pdf', 'md', 'csv'];
-                configDiv.innerHTML = `
+                const fileTypes = ['txt', 'json', 'pdf', 'md', 'csv', 'docx'];
+                sourceSpecificHtml = `
                     <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">File Types to Process</div>
                     <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; font-size: 13px;">
                         ${['txt', 'json', 'pdf', 'md', 'csv', 'docx', 'html', 'xml', 'pptx'].map(ft => `
@@ -5264,8 +5054,8 @@
                     </div>
                 `;
             } else if (source.type === 'cosmosdb') {
-                const contentMode = source.config.content_mode || 'field';
-                configDiv.innerHTML = `
+                const contentMode = 'field';
+                sourceSpecificHtml = `
                     <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Content Source</div>
                     <div class="form-group" style="margin-bottom: 12px;">
                         <select class="form-input" name="override_content_mode" onchange="updatePipelineCosmosMode(this.value, '${sourceId}')">
@@ -5282,7 +5072,36 @@
                         <strong>Container:</strong> ${source.config.container || 'N/A'}
                     </div>
                 `;
+            } else if (source.type === 'postgresql') {
+                sourceSpecificHtml = `
+                    <div style="margin-bottom: 12px; font-size: 12px; color: var(--text-tertiary);">
+                        <strong>Host:</strong> ${source.config.host || 'N/A'}<br>
+                        <strong>Database:</strong> ${source.config.database || 'N/A'}<br>
+                        <strong>Table:</strong> ${source.config.table || 'N/A'}
+                    </div>
+                `;
             }
+
+            // Content fields configuration (common to all source types)
+            const defaultFields = ['content'];
+            const contentFieldsHtml = `
+                <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-subtle);">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label" style="font-size: 12px;">Content Fields</label>
+                        <div class="content-field-tags" id="pipeline-content-field-tags" style="display:flex;flex-wrap:wrap;gap:6px;padding:6px 8px;border:1px solid var(--border-default);border-radius:var(--radius-md);min-height:36px;background:var(--bg-tertiary);align-items:center;">
+                            ${defaultFields.map(f => `<span class="content-field-tag" data-field="${f}" style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:16px;font-size:11px;color:var(--accent-secondary);">
+                                ${f} <span onclick="removeContentFieldTag(this.parentElement)" style="cursor:pointer;font-size:13px;line-height:1;opacity:0.7;">&times;</span>
+                            </span>`).join('')}
+                            <input type="text" class="content-field-input" placeholder="Add field..." style="border:none;outline:none;background:transparent;color:var(--text-primary);font-size:12px;min-width:60px;flex:1;" onkeydown="handleContentFieldKey(event, this)">
+                        </div>
+                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
+                            Fields from this source to concatenate for embedding. Press Enter to add.
+                        </small>
+                    </div>
+                </div>
+            `;
+
+            configDiv.innerHTML = sourceSpecificHtml + contentFieldsHtml;
         }
 
         function updatePipelineCosmosMode(mode, sourceId) {
@@ -5293,7 +5112,7 @@
 
         function getCosmosConfigHtml(mode, config) {
             if (mode === 'field') {
-                const fields = Array.isArray(config.content_field) ? config.content_field : [config.content_field || 'content'];
+                const fields = ['content'];
                 return `
                     <div class="form-group" style="margin-bottom: 0;">
                         <label class="form-label" style="font-size: 12px;">Content Fields</label>
@@ -5310,7 +5129,7 @@
                 return `
                     <div class="form-group" style="margin-bottom: 8px;">
                         <label class="form-label" style="font-size: 12px;">URL Field</label>
-                        <input type="text" class="form-input" name="override_content_field" value="${Array.isArray(config.content_field) ? config.content_field[0] : (config.content_field || 'fileUrl')}" placeholder="fileUrl">
+                        <input type="text" class="form-input" name="override_content_field" value="fileUrl" placeholder="fileUrl">
                     </div>
                     <div style="font-size: 12px; font-weight: 500; margin-bottom: 8px;">Content Types</div>
                     <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 12px;">
@@ -5334,40 +5153,18 @@
             let config = {};
 
             if (sourceType === 'azure-blob') {
-                // Collect file types
-                const fileTypes = [];
-                form.querySelectorAll('input[name="file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
-
                 config = {
                     account_url: formData.get('account_url'),
                     container: formData.get('container'),
                     prefix: formData.get('prefix') || '',
-                    file_types: fileTypes
                 };
             } else if (sourceType === 'cosmosdb') {
-                const contentMode = formData.get('content_mode') || 'field';
-
-                // Collect URL content types if applicable
-                const urlContentTypes = [];
-                form.querySelectorAll('input[name="url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
-
-                // Collect content fields from tag container
-                const tagContainer = document.getElementById('content-field-tags');
-                const contentFields = tagContainer ? getContentFieldsFromContainer(tagContainer) : [formData.get('content_field') || 'content'];
-
                 config = {
                     endpoint: formData.get('endpoint'),
                     database: formData.get('database'),
                     container: formData.get('container'),
-                    content_mode: contentMode,
-                    content_field: contentFields,
-                    url_content_types: urlContentTypes.length > 0 ? urlContentTypes : ['txt', 'json', 'pdf']
                 };
             } else if (sourceType === 'postgresql') {
-                // Parse content_columns from comma-separated string
-                const contentColsStr = formData.get('content_columns') || 'content';
-                const contentColumns = contentColsStr.split(',').map(s => s.trim()).filter(s => s);
-
                 config = {
                     host: formData.get('host'),
                     port: parseInt(formData.get('port')) || 5432,
@@ -5375,7 +5172,6 @@
                     table: formData.get('table'),
                     id_column: formData.get('id_column') || 'id',
                     timestamp_column: formData.get('timestamp_column') || 'updated_at',
-                    content_columns: contentColumns,
                     poll_interval_seconds: parseInt(formData.get('poll_interval_seconds')) || 60,
                     ssl_mode: 'require'
                 };
@@ -5469,23 +5265,7 @@
                     showPipelineStep('source');
                     return;
                 }
-                // Collect file type overrides for blob storage
-                const fileTypes = [];
-                form.querySelectorAll('input[name="override_file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
-                if (fileTypes.length > 0) sourceConfig.file_types = fileTypes;
-                const contentMode = formData.get('override_content_mode');
-                if (contentMode) sourceConfig.content_mode = contentMode;
-                const overrideTags = document.getElementById('override-content-field-tags');
-                if (overrideTags) {
-                    const fields = getContentFieldsFromContainer(overrideTags);
-                    if (fields.length > 0) sourceConfig.content_field = fields;
-                } else {
-                    const contentField = formData.get('override_content_field');
-                    if (contentField) sourceConfig.content_field = [contentField];
-                }
-                const urlContentTypes = [];
-                form.querySelectorAll('input[name="override_url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
-                if (urlContentTypes.length > 0) sourceConfig.url_content_types = urlContentTypes;
+                // File type overrides are collected below for the pipeline source entry
             } else {
                 // Create new source first
                 const srcData = collectInlineSourceData('pl-src');
@@ -5577,10 +5357,38 @@
             // --- Create Pipeline ---
             const contentStrategy = formData.get('content_strategy') || 'truncate';
             const processingMode = formData.get('processing_mode') || 'queue';
+
+            // Collect content_fields from pipeline source config
+            const pipelineContentTags = document.getElementById('pipeline-content-field-tags');
+            let contentFields = ['content'];
+            if (pipelineContentTags) {
+                const fields = getContentFieldsFromContainer(pipelineContentTags);
+                if (fields.length > 0) contentFields = fields;
+            }
+
+            // Collect content_mode and url_content_types for pipeline source
+            const contentMode = formData.get('override_content_mode') || 'field';
+            const urlContentTypes = [];
+            form.querySelectorAll('input[name="override_url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
+
+            // Collect file_types for pipeline source (blob storage)
+            const fileTypes = [];
+            form.querySelectorAll('input[name="override_file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
+
+            // Build pipeline source entry
+            const pipelineSourceEntry = {
+                source_id: sourceId,
+                filters: sourceConfig,
+                content_fields: contentFields,
+                content_mode: contentMode,
+            };
+            if (urlContentTypes.length > 0) pipelineSourceEntry.url_content_types = urlContentTypes;
+            if (fileTypes.length > 0) pipelineSourceEntry.file_types = fileTypes;
+
             const data = {
                 name: formData.get('name'),
                 description: formData.get('description') || '',
-                sources: [{ source_id: sourceId, filters: sourceConfig }],
+                sources: [pipelineSourceEntry],
                 docgrok_pipeline: docgrokPipelineName,
                 destination_id: destinationId,
                 process_existing: form.querySelector('input[name="process_existing"]').checked,
@@ -5757,38 +5565,7 @@
                         <label class="form-label">Prefix (optional)</label>
                         <input type="text" class="form-input" name="prefix" placeholder="uploads/">
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">File Types to Process</label>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="txt" checked> .txt
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="json" checked> .json
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="pdf" checked> .pdf
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="md" checked> .md
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="csv" checked> .csv
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="docx"> .docx
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="html"> .html
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="xml"> .xml
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="pptx"> .pptx
-                            </label>
-                        </div>
-                    </div>
+                    <p style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">File type filtering is configured per-pipeline in the pipeline source settings.</p>
                 `;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
@@ -5803,28 +5580,6 @@
                     <div class="form-group">
                         <label class="form-label">Container</label>
                         <input type="text" class="form-input" name="container" placeholder="documents">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Content Source</label>
-                        <select class="form-input" name="content_mode" onchange="updateCosmosContentFields(this.value)">
-                            <option value="field">Field Value (content in document)</option>
-                            <option value="blob_url">Blob Storage URL (field contains blob URL)</option>
-                            <option value="http_url">HTTP URL (field contains web URL)</option>
-                        </select>
-                    </div>
-                    <div id="cosmos-content-fields">
-                        <div class="form-group">
-                            <label class="form-label">Content Fields</label>
-                            <div class="content-field-tags" id="content-field-tags" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;border:1px solid var(--border-default);border-radius:var(--radius-md);min-height:42px;background:var(--bg-tertiary);align-items:center;">
-                                <span class="content-field-tag" data-field="content" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:16px;font-size:12px;color:var(--accent-secondary);">
-                                    content <span onclick="removeContentFieldTag(this.parentElement)" style="cursor:pointer;font-size:14px;line-height:1;opacity:0.7;">&times;</span>
-                                </span>
-                                <input type="text" class="content-field-input" placeholder="Add field..." style="border:none;outline:none;background:transparent;color:var(--text-primary);font-size:13px;min-width:80px;flex:1;" onkeydown="handleContentFieldKey(event, this)">
-                            </div>
-                            <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                                Fields concatenated in order for embedding. Press Enter to add.
-                            </small>
-                        </div>
                     </div>
                 `;
             } else if (type === 'postgresql') {
@@ -5854,13 +5609,6 @@
                         <input type="text" class="form-input" name="timestamp_column" value="updated_at" placeholder="updated_at">
                         <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
                             Used for polling changes. Must be updated when row changes.
-                        </small>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Content Columns (comma-separated)</label>
-                        <input type="text" class="form-input" name="content_columns" value="content" placeholder="content,title,description">
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Columns to concatenate for embedding.
                         </small>
                     </div>
                     <div class="form-group">
@@ -5907,86 +5655,6 @@
         function getContentFieldsFromId(id) {
             const el = document.getElementById(id);
             return el ? getContentFieldsFromContainer(el) : null;
-        }
-
-        function updateCosmosContentFields(mode) {
-            const container = document.getElementById('cosmos-content-fields');
-            if (mode === 'field') {
-                container.innerHTML = `
-                    <div class="form-group">
-                        <label class="form-label">Content Fields</label>
-                        <div class="content-field-tags" id="content-field-tags" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;border:1px solid var(--border-default);border-radius:var(--radius-md);min-height:42px;background:var(--bg-tertiary);align-items:center;">
-                            <span class="content-field-tag" data-field="content" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:16px;font-size:12px;color:var(--accent-secondary);">
-                                content <span onclick="removeContentFieldTag(this.parentElement)" style="cursor:pointer;font-size:14px;line-height:1;opacity:0.7;">&times;</span>
-                            </span>
-                            <input type="text" class="content-field-input" placeholder="Add field..." style="border:none;outline:none;background:transparent;color:var(--text-primary);font-size:13px;min-width:80px;flex:1;" onkeydown="handleContentFieldKey(event, this)">
-                        </div>
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Fields concatenated in order for embedding. Press Enter to add.
-                        </small>
-                    </div>
-                `;
-            } else if (mode === 'blob_url') {
-                container.innerHTML = `
-                    <div class="form-group">
-                        <label class="form-label">URL Field</label>
-                        <input type="text" class="form-input" name="content_field" placeholder="fileUrl" value="fileUrl">
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Field containing Azure Blob Storage URL
-                        </small>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Content Types to Process</label>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="txt" checked> .txt
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="json" checked> .json
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="pdf" checked> .pdf
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="docx"> .docx
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="md"> .md
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="csv"> .csv
-                            </label>
-                        </div>
-                    </div>
-                `;
-            } else if (mode === 'http_url') {
-                container.innerHTML = `
-                    <div class="form-group">
-                        <label class="form-label">URL Field</label>
-                        <input type="text" class="form-input" name="content_field" placeholder="webUrl" value="webUrl">
-                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Field containing HTTP/HTTPS URL to fetch
-                        </small>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Content Types to Process</label>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="html" checked> HTML
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="json" checked> JSON
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="txt" checked> Text
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="url_content_types" value="pdf"> PDF
-                            </label>
-                        </div>
-                    </div>
-                `;
-            }
         }
 
         function updateAuthFields() {
@@ -7660,8 +7328,6 @@
             else if (section === 'dg-health') loadDgHealth();
             else if (section === 'dg-deployments') loadDgDeployments();
             else if (section === 'playground') loadPlaygroundDestinations();
-            else if (section === 'assistants') loadAssistants();
-            else if (section === 'assistant-playground') loadAssistantPlayground();
             else if (section === 'triggers') loadTriggersStatus();
         };
 
@@ -9137,361 +8803,6 @@ az eventgrid event-subscription create \\
             alert(message);
         }
 
-        // =====================================================================
-        // ASSISTANTS
-        // =====================================================================
-
-        let allAssistants = [];
-        let chatConversation = [];
-        let chatAssistantId = null;
-
-        async function loadAssistants() {
-            try {
-                const res = await apiFetch('/api/assistants');
-                const data = await res.json();
-                allAssistants = data.assistants || [];
-                document.getElementById('assistants-count').textContent = allAssistants.length;
-                renderAssistants();
-            } catch (err) {
-                console.error('Failed to load assistants:', err);
-            }
-        }
-
-        function renderAssistants() {
-            const container = document.getElementById('assistants-list');
-            if (allAssistants.length === 0) {
-                container.innerHTML = `
-                    <div style="text-align: center; padding: 60px; color: var(--text-tertiary);">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="64" height="64" style="margin-bottom: 16px; opacity: 0.5;">
-                            <path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>
-                        </svg>
-                        <h3 style="margin-bottom: 8px;">No assistants yet</h3>
-                        <p>Create an assistant that combines a chat model with vector indexes</p>
-                    </div>`;
-                return;
-            }
-
-            let html = '<div style="display: grid; gap: 16px;">';
-            allAssistants.forEach(a => {
-                const model = dgAllModels.find(m => m.id === a.model_id);
-                const modelName = model ? model.name : a.model_id;
-                const indexCount = (a.destination_ids || []).length;
-                html += `
-                <div class="card" style="cursor: pointer;" onclick="openAssistantChat('${a.id}')">
-                    <div class="card-body" style="display: flex; align-items: center; gap: 16px;">
-                        <div style="width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0;">
-                            &#129302;
-                        </div>
-                        <div style="flex: 1; min-width: 0;">
-                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                                <strong style="font-size: 16px;">${escapeHtml(a.name)}</strong>
-                            </div>
-                            <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">${escapeHtml(a.description || 'No description')}</div>
-                            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                <span class="badge badge-warning">${escapeHtml(modelName)}</span>
-                                <span class="badge badge-info">${indexCount} index${indexCount !== 1 ? 'es' : ''}</span>
-                                <span class="badge badge-neutral">top_k: ${a.top_k}</span>
-                                <span class="badge badge-neutral">temp: ${a.temperature}</span>
-                            </div>
-                        </div>
-                        <div style="display: flex; gap: 8px;">
-                            <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); editAssistant('${a.id}')">Edit</button>
-                            <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); deleteAssistant('${a.id}')" style="color: var(--error);">Delete</button>
-                        </div>
-                    </div>
-                </div>`;
-            });
-            html += '</div>';
-            container.innerHTML = html;
-        }
-
-        function openAssistantChat(id) {
-            chatAssistantId = id;
-            // Navigate to assistant playground
-            const navItems = document.querySelectorAll('.nav-item');
-            navItems.forEach(n => n.classList.remove('active'));
-            document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
-            document.getElementById('section-assistant-playground').style.display = 'block';
-            loadAssistantPlayground();
-            // Select this assistant
-            setTimeout(() => {
-                const select = document.getElementById('chat-assistant-select');
-                if (select) { select.value = id; onAssistantSelected(); }
-            }, 300);
-        }
-
-        async function populateAssistantForm(assistant) {
-            // Load models to populate chat model dropdown
-            if (!dgAllModels.length) {
-                try { const r = await apiFetch('/api/models'); const d = await r.json(); dgAllModels = d.models || []; } catch(e) {}
-            }
-            const select = document.getElementById('assistant-model-select');
-            let modelHtml = '<option value="">Select a chat model...</option>';
-            dgAllModels.filter(m => m.model_category === 'chat').forEach(m => {
-                const sel = assistant && assistant.model_id === m.id ? 'selected' : '';
-                modelHtml += `<option value="${m.id}" ${sel}>${m.name} (${m.type || 'api'})</option>`;
-            });
-            select.innerHTML = modelHtml;
-
-            // Load destinations for checkboxes
-            try {
-                const res = await apiFetch('/api/destinations');
-                const data = await res.json();
-                const dests = (data.destinations || []).filter(d => d.type === 'cosmosdb-vector' || d.type === 'pgvector');
-                const selectedIds = assistant ? (assistant.destination_ids || []) : [];
-                let cbHtml = '';
-                dests.forEach(d => {
-                    const checked = selectedIds.includes(d.id) ? 'checked' : '';
-                    cbHtml += `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-radius:var(--radius-sm);font-size:13px;" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">
-                        <input type="checkbox" class="assistant-dest-cb" value="${d.id}" ${checked} style="accent-color:var(--accent-primary);">
-                        ${escapeHtml(d.name)}
-                    </label>`;
-                });
-                document.getElementById('assistant-dest-checkboxes').innerHTML = cbHtml || '<div style="padding:12px;color:var(--text-tertiary);">No vector indexes available</div>';
-            } catch(e) {}
-
-            // Fill form if editing
-            if (assistant) {
-                const form = document.getElementById('assistant-form');
-                form.querySelector('[name="assistant_id"]').value = assistant.id;
-                form.querySelector('[name="name"]').value = assistant.name || '';
-                form.querySelector('[name="description"]').value = assistant.description || '';
-                form.querySelector('[name="system_prompt"]').value = assistant.system_prompt || '';
-                form.querySelector('[name="top_k"]').value = assistant.top_k || 5;
-                form.querySelector('[name="temperature"]').value = assistant.temperature || 0.7;
-                document.getElementById('assistant-modal-title').textContent = 'Edit Assistant';
-            } else {
-                document.getElementById('assistant-form').reset();
-                document.getElementById('assistant-form').querySelector('[name="assistant_id"]').value = '';
-                document.getElementById('assistant-modal-title').textContent = 'Create Assistant';
-            }
-        }
-
-        async function editAssistant(id) {
-            const assistant = allAssistants.find(a => a.id === id);
-            if (!assistant) return;
-            await populateAssistantForm(assistant);
-            showModal('assistant-modal');
-        }
-
-        async function saveAssistant() {
-            const form = document.getElementById('assistant-form');
-            const formData = new FormData(form);
-            const assistantId = formData.get('assistant_id');
-            const destIds = [...document.querySelectorAll('.assistant-dest-cb:checked')].map(cb => cb.value);
-
-            const data = {
-                name: formData.get('name'),
-                description: formData.get('description'),
-                model_id: formData.get('model_id'),
-                destination_ids: destIds,
-                system_prompt: formData.get('system_prompt'),
-                top_k: parseInt(formData.get('top_k')) || 5,
-                temperature: parseFloat(formData.get('temperature')) || 0.7,
-            };
-
-            if (!data.name) { alert('Please enter a name'); return; }
-            if (!data.model_id) { alert('Please select a chat model'); return; }
-
-            try {
-                const url = assistantId ? `/api/assistants/${assistantId}` : '/api/assistants';
-                const method = assistantId ? 'PUT' : 'POST';
-                const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-                if (res.ok) {
-                    closeModal('assistant-modal');
-                    loadAssistants();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Failed to save assistant');
-                }
-            } catch (err) {
-                alert('Error: ' + err.message);
-            }
-        }
-
-        async function deleteAssistant(id) {
-            if (!confirm('Delete this assistant?')) return;
-            try {
-                await apiFetch(`/api/assistants/${id}`, { method: 'DELETE' });
-                loadAssistants();
-            } catch (err) {
-                alert('Error: ' + err.message);
-            }
-        }
-
-        // Show the form when clicking "Create Assistant"
-        const origShowModal = showModal;
-        showModal = function(id) {
-            origShowModal(id);
-            if (id === 'assistant-modal') {
-                const assistantIdField = document.querySelector('#assistant-form [name="assistant_id"]');
-                if (!assistantIdField || !assistantIdField.value) {
-                    populateAssistantForm(null);
-                }
-            }
-        };
-
-        // =====================================================================
-        // ASSISTANT PLAYGROUND (Chat)
-        // =====================================================================
-
-        async function loadAssistantPlayground() {
-            // Load assistants into dropdown
-            try {
-                const res = await apiFetch('/api/assistants');
-                const data = await res.json();
-                allAssistants = data.assistants || [];
-            } catch(e) {}
-
-            const select = document.getElementById('chat-assistant-select');
-            let html = '<option value="">Select an assistant...</option>';
-            allAssistants.forEach(a => {
-                const sel = a.id === chatAssistantId ? 'selected' : '';
-                html += `<option value="${a.id}" ${sel}>${escapeHtml(a.name)}</option>`;
-            });
-            select.innerHTML = html;
-            if (chatAssistantId) onAssistantSelected();
-        }
-
-        function onAssistantSelected() {
-            const select = document.getElementById('chat-assistant-select');
-            const id = select.value;
-            const info = document.getElementById('chat-assistant-info');
-            if (!id) {
-                info.style.display = 'none';
-                chatAssistantId = null;
-                return;
-            }
-            chatAssistantId = id;
-            const a = allAssistants.find(x => x.id === id);
-            if (a) {
-                const model = dgAllModels.find(m => m.id === a.model_id);
-                info.style.display = 'block';
-                info.innerHTML = `
-                    <div style="display: flex; align-items: center; gap: 12px;">
-                        <div style="font-size: 24px;">&#129302;</div>
-                        <div>
-                            <strong>${escapeHtml(a.name)}</strong>
-                            <div style="font-size: 12px; color: var(--text-tertiary);">${escapeHtml(a.description || '')}</div>
-                        </div>
-                        <div style="margin-left: auto; display: flex; gap: 8px;">
-                            <span class="badge badge-warning">${escapeHtml(model ? model.name : a.model_id)}</span>
-                            <span class="badge badge-info">${(a.destination_ids||[]).length} indexes</span>
-                        </div>
-                    </div>`;
-            }
-        }
-
-        function clearChat() {
-            chatConversation = [];
-            const msgs = document.getElementById('chat-messages');
-            msgs.innerHTML = `
-                <div style="text-align: center; padding: 60px; color: var(--text-tertiary);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="margin-bottom: 12px; opacity: 0.5;">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                    </svg>
-                    <p>Select an assistant and start chatting</p>
-                </div>`;
-        }
-
-        function appendChatMessage(role, content, sources) {
-            const msgs = document.getElementById('chat-messages');
-            // Remove empty state
-            if (msgs.querySelector('div[style*="text-align: center"]')) {
-                msgs.innerHTML = '';
-            }
-            const isUser = role === 'user';
-            const align = isUser ? 'flex-end' : 'flex-start';
-            const bg = isUser ? 'var(--accent-primary)' : 'var(--bg-tertiary)';
-            const color = isUser ? 'white' : 'var(--text-primary)';
-            const borderRadius = isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px';
-
-            let sourcesHtml = '';
-            if (sources && sources.length > 0) {
-                sourcesHtml = `<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-subtle);">
-                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Sources:</div>
-                    ${sources.map(s => `<div style="font-size: 12px; color: var(--text-secondary); padding: 4px 0; display: flex; gap: 6px;">
-                        <span class="badge badge-success" style="font-size: 10px; padding: 1px 6px;">${(s.score * 100).toFixed(0)}%</span>
-                        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(s.text || s.id || '')}</span>
-                    </div>`).join('')}
-                </div>`;
-            }
-
-            msgs.innerHTML += `
-                <div style="display: flex; justify-content: ${align}; margin-bottom: 12px;">
-                    <div style="max-width: 80%; background: ${bg}; color: ${color}; padding: 12px 16px; border-radius: ${borderRadius}; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word;">
-                        ${escapeHtml(content)}
-                        ${sourcesHtml}
-                    </div>
-                </div>`;
-            msgs.scrollTop = msgs.scrollHeight;
-        }
-
-        async function sendChatMessage() {
-            const input = document.getElementById('chat-input');
-            const message = input.value.trim();
-            if (!message) return;
-            if (!chatAssistantId) { alert('Please select an assistant'); return; }
-
-            input.value = '';
-            appendChatMessage('user', message);
-
-            const sendBtn = document.getElementById('chat-send-btn');
-            sendBtn.disabled = true;
-            sendBtn.innerHTML = '<span style="display:inline-block;width:18px;height:18px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.6s linear infinite;"></span> ...';
-
-            // Add a typing indicator
-            const msgs = document.getElementById('chat-messages');
-            const typingId = 'typing-' + Date.now();
-            msgs.innerHTML += `<div id="${typingId}" style="display: flex; justify-content: flex-start; margin-bottom: 12px;">
-                <div style="background: var(--bg-tertiary); padding: 12px 16px; border-radius: 16px 16px 16px 4px; color: var(--text-tertiary); font-size: 14px;">
-                    Thinking...
-                </div>
-            </div>`;
-            msgs.scrollTop = msgs.scrollHeight;
-
-            try {
-                const res = await apiFetch(`/api/assistants/${chatAssistantId}/chat`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        message: message,
-                        conversation: chatConversation
-                    })
-                });
-
-                // Remove typing indicator
-                const typingEl = document.getElementById(typingId);
-                if (typingEl) typingEl.remove();
-
-                if (!res.ok) {
-                    const err = await res.json();
-                    appendChatMessage('assistant', 'Error: ' + (err.detail || 'Something went wrong'));
-                    return;
-                }
-
-                const data = await res.json();
-                chatConversation.push({ role: 'user', content: message });
-                chatConversation.push({ role: 'assistant', content: data.reply });
-                appendChatMessage('assistant', data.reply, data.sources);
-
-            } catch (err) {
-                const typingEl = document.getElementById(typingId);
-                if (typingEl) typingEl.remove();
-                appendChatMessage('assistant', 'Error: ' + err.message);
-            } finally {
-                sendBtn.disabled = false;
-                sendBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg> Send';
-            }
-        }
-
-        // Add CSS animation for spinner
-        if (!document.getElementById('spin-style')) {
-            const style = document.createElement('style');
-            style.id = 'spin-style';
-            style.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
-            document.head.appendChild(style);
-        }
 
     </script>
 </body>
