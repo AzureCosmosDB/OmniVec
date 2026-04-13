@@ -36,7 +36,6 @@ func main() {
 		newModelCmd(),
 		newTransformCmd(),
 		newSearchCmd(),
-		newAssistantCmd(),
 		newStatusCmd(),
 		newSettingsCmd(),
 		newConfigCmd(),
