@@ -410,6 +410,24 @@ azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
 azd env set OMNIVEC_GPU_NODE_VM_SIZE $GPU_SKU
 azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
 
+# -- Shared registry token (for importing pre-built images) --
+$ErrorActionPreference = "SilentlyContinue"
+$existingToken = azd env get-value OMNIVEC_SHARED_REGISTRY_TOKEN 2>$null
+$tokenExit = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if (-not ($tokenExit -eq 0 -and $existingToken -and "$existingToken" -notmatch "ERROR")) {
+    Write-Host ""
+    Write-Host "`e[33mShared registry token (omnivecregistry.azurecr.io):`e[0m"
+    Write-Host "  Required to import pre-built images. Without it, images will be built from source (slower)."
+    $token = (Read-Host "  Enter token (or press Enter to skip)").Trim()
+    if ($token) {
+        azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $token
+        Write-Host "  `e[32mToken saved.`e[0m"
+    } else {
+        Write-Host "  `e[33mNo token — will build images from source.`e[0m"
+    }
+}
+
 # -- Sanitize env values: strip BOM, tabs, carriage returns --
 Write-Host "`n`e[36mSanitizing environment values...`e[0m"
 $envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_ENABLE_BLOB_SOURCE", "OMNIVEC_METADATA_STORE")
