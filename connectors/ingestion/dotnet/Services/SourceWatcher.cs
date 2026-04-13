@@ -28,6 +28,7 @@ public class SourceWatcher : ISourceWatcher
     private ChangeFeedProcessor? _processor;
     private Container? _sourceContainer;
     private string _partitionKeyPath = "/id"; // Discovered from container properties
+    private string _vectorField = "embedding"; // Discovered from container's vector embedding policy
     private volatile bool _running;
 
     private const int MaxPatchRetries = 20; // Cap retries to prevent infinite loops on permanent errors
@@ -122,6 +123,14 @@ public class SourceWatcher : ISourceWatcher
             var pkPath = props.Resource.PartitionKeyPath; // e.g. "/partition_id"
             _partitionKeyPath = pkPath;
             _logger.LogInformation("Source {SourceId} container PK path: {PkPath}", _source.Id, pkPath);
+
+            // Discover vector embedding path from container's vector policy
+            var vecPolicy = props.Resource.VectorEmbeddingPolicy;
+            if (vecPolicy?.Embeddings?.Count > 0)
+            {
+                _vectorField = vecPolicy.Embeddings[0].Path?.TrimStart('/') ?? "embedding";
+                _logger.LogInformation("Source {SourceId} vector field: {VectorField}", _source.Id, _vectorField);
+            }
         }
         catch (Exception ex)
         {
@@ -568,7 +577,7 @@ public class SourceWatcher : ISourceWatcher
                     var floats = EmbeddingToFloatList(embedding);
                     var ops = new List<PatchOperation>
                     {
-                        PatchOperation.Set("/embedding", floats),
+                        PatchOperation.Set($"/{_vectorField}", floats),
                         PatchOperation.Set("/embedded_at", now),
                         PatchOperation.Set("/embedding_dims", floats.Count),
                         PatchOperation.Set("/pipeline_id", pipeline.Id),
@@ -660,7 +669,7 @@ public class SourceWatcher : ISourceWatcher
 
         var ops = new List<PatchOperation>
         {
-            PatchOperation.Set("/embedding", floats),
+            PatchOperation.Set($"/{_vectorField}", floats),
             PatchOperation.Set("/embedded_at", DateTime.UtcNow.ToString("O")),
             PatchOperation.Set("/embedding_dims", floats.Count),
             PatchOperation.Set("/pipeline_id", pipeline.Id),
