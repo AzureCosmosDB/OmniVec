@@ -347,11 +347,12 @@ public class SourceWatcher : ISourceWatcher
             {
                 // Legacy API job creation path
                 var jobEntries = new List<CreateJobEntry>();
-                foreach (var (docId, content, contentHash, pkValue, doc) in eligibleDocs)
+                foreach (var pipeline in queuePipelines)
                 {
-                    var etag = doc["_etag"]?.Value<string>();
-                    foreach (var pipeline in queuePipelines)
+                    if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
+                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields) in pipelineDocs)
                     {
+                        var etag = doc["_etag"]?.Value<string>();
                         jobEntries.Add(new CreateJobEntry
                         {
                             PipelineId = pipeline.Id,
@@ -383,7 +384,7 @@ public class SourceWatcher : ISourceWatcher
 
         // Report changefeed metrics after all processing
         _ = _apiClient.ReportChangeFeedMetricsAsync(
-            _source.Id, changes.Count, eligibleDocs.Count, skippedNoContent, skippedUnchanged,
+            _source.Id, changes.Count, totalEligible, skippedNoContent, skippedUnchanged,
             jobsCreated, context.LeaseToken, CancellationToken.None);
     }
 
