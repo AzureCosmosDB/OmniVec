@@ -48,6 +48,9 @@ public class PipelineSource
 
     [JsonPropertyName("content_type_field")]
     public string? ContentTypeField { get; set; }
+
+    [JsonPropertyName("file_types")]
+    public List<string> FileTypes { get; set; } = new() { "txt", "json", "pdf", "docx", "md", "csv" };
 }
 
 public class PipelinesResponse

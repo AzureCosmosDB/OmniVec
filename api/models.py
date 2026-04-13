@@ -94,10 +94,6 @@ class AzureBlobConfig(BaseModel):
     account_url: Optional[str] = None  # For managed identity
     container: str
     prefix: Optional[str] = ""
-    # Content types to process
-    file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv"]
-    # Legacy field for backward compatibility
-    extensions: Optional[List[str]] = None
 
 
 class CosmosDBSourceConfig(BaseModel):
@@ -128,7 +124,6 @@ class S3Config(BaseModel):
     bucket: str
     prefix: Optional[str] = ""
     region: str = "us-east-1"
-    extensions: List[str] = [".pdf", ".png", ".jpg", ".jpeg", ".txt", ".json"]
 
 
 class HTTPConfig(BaseModel):
@@ -224,6 +219,7 @@ class PipelineSource(BaseModel):
     content_mode: str = "field"  # "field" (direct value), "blob_url", "http_url"
     url_content_types: List[str] = ["txt", "json", "pdf"]  # For URL modes
     content_type_field: Optional[str] = None  # Optional: field containing content type hint
+    file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv"]  # For blob/S3 sources: which file types to process
 
 
 class Pipeline(BaseModel):
