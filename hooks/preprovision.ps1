@@ -154,60 +154,65 @@ if ($_vmExit -eq 0 -and $_existingVm -and "$_existingVm" -notmatch "ERROR") {
     exit 0
 }
 
-# -- Metadata storage selection --
-$ErrorActionPreference = "SilentlyContinue"
-$curMeta = azd env get-value OMNIVEC_METADATA_STORE 2>$null
-$metaExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-$defMeta = if ($metaExitCode -eq 0 -and $curMeta -and "$curMeta" -notmatch "ERROR") { "$curMeta".Trim() } else { "cosmosdb-serverless" }
-$defMetaNum = if ($defMeta -eq "cosmosdb-provisioned") { "2" } else { "1" }
-$mark1 = if ($defMetaNum -eq "1") { " (current)" } else { "" }
-$mark2 = if ($defMetaNum -eq "2") { " (current)" } else { "" }
-Write-Host ""
-Write-Host "`e[33mSelect metadata storage backend:`e[0m"
-Write-Host "  1) Azure CosmosDB (Serverless NoSQL)$mark1"
-Write-Host "  2) Azure CosmosDB (Provisioned throughput)$mark2"
-Write-Host ""
-$metaChoice = (Read-Host "Choice [$defMetaNum]").Trim()
-if (-not $metaChoice) { $metaChoice = $defMetaNum }
+# -- Helper: get azd env value safely --
+function Get-EnvValue {
+    param([string]$Key)
+    $ErrorActionPreference = "SilentlyContinue"
+    $val = azd env get-value $Key 2>$null
+    $ec = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($ec -eq 0 -and $val -and "$val" -notmatch "ERROR") { return "$val".Trim() }
+    return $null
+}
 
-switch ($metaChoice) {
-    "2" {
-        Write-Host "`e[32mUsing CosmosDB Provisioned for metadata storage.`e[0m"
-        azd env set OMNIVEC_METADATA_STORE "cosmosdb-provisioned"
-    }
-    default {
-        Write-Host "`e[32mUsing CosmosDB Serverless for metadata storage.`e[0m"
-        azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
+# -- Metadata storage selection --
+$curMeta = Get-EnvValue "OMNIVEC_METADATA_STORE"
+if ($curMeta) {
+    Write-Host "`n`e[32mMetadata store: $curMeta (already set)`e[0m"
+} else {
+    $defMetaNum = "1"
+    Write-Host ""
+    Write-Host "`e[33mSelect metadata storage backend:`e[0m"
+    Write-Host "  1) Azure CosmosDB (Serverless NoSQL)"
+    Write-Host "  2) Azure CosmosDB (Provisioned throughput)"
+    Write-Host ""
+    $metaChoice = (Read-Host "Choice [$defMetaNum]").Trim()
+    if (-not $metaChoice) { $metaChoice = $defMetaNum }
+    switch ($metaChoice) {
+        "2" {
+            Write-Host "`e[32mUsing CosmosDB Provisioned for metadata storage.`e[0m"
+            azd env set OMNIVEC_METADATA_STORE "cosmosdb-provisioned"
+        }
+        default {
+            Write-Host "`e[32mUsing CosmosDB Serverless for metadata storage.`e[0m"
+            azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
+        }
     }
 }
 
 # -- Blob storage source --
-$ErrorActionPreference = "SilentlyContinue"
-$curBlob = azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null
-$blobExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-$defBlob = if ($blobExitCode -eq 0 -and $curBlob -and "$curBlob" -notmatch "ERROR") { "$curBlob".Trim() } else { "true" }
-$defBlobNum = if ($defBlob -eq "false") { "2" } else { "1" }
-$bmark1 = if ($defBlobNum -eq "1") { " (current)" } else { "" }
-$bmark2 = if ($defBlobNum -eq "2") { " (current)" } else { "" }
-Write-Host ""
-Write-Host "`e[33mWill you use Azure Blob Storage as a document source?`e[0m"
-Write-Host "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
-Write-Host "  will be created alongside the Storage Account."
-Write-Host ""
-Write-Host "  1) Yes - enable blob source ingestion$bmark1"
-Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)$bmark2"
-Write-Host ""
-$blobChoice = (Read-Host "Choice [$defBlobNum]").Trim()
-if (-not $blobChoice) { $blobChoice = $defBlobNum }
-
-if ($blobChoice -eq "1") {
-    Write-Host "`e[32mBlob source enabled - will create Storage Account, Service Bus, and Event Grid.`e[0m"
-    azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
+$curBlob = Get-EnvValue "OMNIVEC_ENABLE_BLOB_SOURCE"
+if ($curBlob) {
+    Write-Host "`e[32mBlob source: $curBlob (already set)`e[0m"
 } else {
-    Write-Host "`e[32mBlob source disabled - skipping Service Bus and Event Grid.`e[0m"
-    azd env set OMNIVEC_ENABLE_BLOB_SOURCE "false"
+    $defBlobNum = "1"
+    Write-Host ""
+    Write-Host "`e[33mWill you use Azure Blob Storage as a document source?`e[0m"
+    Write-Host "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
+    Write-Host "  will be created alongside the Storage Account."
+    Write-Host ""
+    Write-Host "  1) Yes - enable blob source ingestion"
+    Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)"
+    Write-Host ""
+    $blobChoice = (Read-Host "Choice [$defBlobNum]").Trim()
+    if (-not $blobChoice) { $blobChoice = $defBlobNum }
+    if ($blobChoice -eq "1") {
+        Write-Host "`e[32mBlob source enabled.`e[0m"
+        azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
+    } else {
+        Write-Host "`e[32mBlob source disabled.`e[0m"
+        azd env set OMNIVEC_ENABLE_BLOB_SOURCE "false"
+    }
 }
 
 # -- Node provisioning --
@@ -226,17 +231,14 @@ function Test-SkuAvailable {
 }
 
 # -- System node pool --
-Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
-$ErrorActionPreference = "SilentlyContinue"
-$curSysSku = $null
-try { $curSysSku = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null } catch {}
-$sysSkuExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-if ($curSysSku -and $sysSkuExitCode -eq 0 -and "$curSysSku" -notmatch "ERROR") {
-    $curSysSku = $curSysSku.Trim()
+$curSysSku = Get-EnvValue "OMNIVEC_SYSTEM_NODE_VM_SIZE"
+$curSysCount = Get-EnvValue "OMNIVEC_SYSTEM_NODE_COUNT"
+
+if ($curSysSku) {
+    Write-Host "`e[32mSystem VM SKU: $curSysSku (already set)`e[0m"
+    $SYS_SKU = $curSysSku
 } else {
-    $curSysSku = ""
-}
+    Write-Host "`e[36mSystem node pool (API, controller, worker, changefeed):`e[0m"
 
 $sysCandidates = @(
     @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB" },
@@ -298,42 +300,37 @@ while (-not $SYS_SKU) {
     }
 }
 Write-Host "  `e[32mSystem VM SKU: $SYS_SKU`e[0m"
+} # end else (SKU not pre-set)
 
-$ErrorActionPreference = "SilentlyContinue"
-$curSysCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
-$sysExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-$defSysCount = if ($sysExitCode -eq 0 -and $curSysCount -and "$curSysCount".Trim()) { "$curSysCount".Trim() } else { "2" }
-$sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
-if (-not $sysCount) { $sysCount = $defSysCount }
-Write-Host "  `e[32mSystem nodes: $sysCount`e[0m"
+if ($curSysCount) {
+    Write-Host "`e[32mSystem nodes: $curSysCount (already set)`e[0m"
+    $sysCount = $curSysCount
+} else {
+    $defSysCount = "2"
+    $sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
+    if (-not $sysCount) { $sysCount = $defSysCount }
+    Write-Host "  `e[32mSystem nodes: $sysCount`e[0m"
+}
 
 Write-Host ""
 
 # -- GPU node pool --
-Write-Host "`e[36mGPU node pool (ML models - dse-qwen2, clip, bge, bge-small):`e[0m"
-Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
-$ErrorActionPreference = "SilentlyContinue"
-$curGpuSku = $null
-try { $curGpuSku = azd env get-value OMNIVEC_GPU_NODE_VM_SIZE 2>$null } catch {}
-$gpuSkuExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-if ($curGpuSku -and $gpuSkuExitCode -eq 0 -and "$curGpuSku" -notmatch "ERROR") {
-    $curGpuSku = $curGpuSku.Trim()
+$curGpuSku = Get-EnvValue "OMNIVEC_GPU_NODE_VM_SIZE"
+$curGpuCount = Get-EnvValue "OMNIVEC_GPU_NODE_COUNT"
+
+if ($curGpuCount) {
+    Write-Host "`e[32mGPU nodes: $curGpuCount (already set)`e[0m"
+    $gpuCount = $curGpuCount
+    $GPU_SKU = if ($curGpuSku) { $curGpuSku } else { "" }
 } else {
-    $curGpuSku = ""
-}
+    Write-Host "`e[36mGPU node pool (ML models - dse-qwen2, clip, bge, bge-small):`e[0m"
+    Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
 
-$ErrorActionPreference = "SilentlyContinue"
-$curGpuCount = azd env get-value OMNIVEC_GPU_NODE_COUNT 2>$null
-$gpuCountExitCode = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-$defGpuCount = if ($gpuCountExitCode -eq 0 -and $curGpuCount -and "$curGpuCount".Trim()) { "$curGpuCount".Trim() } else { "0" }
+    $defGpuCount = "0"
+    $gpuCount = (Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]").Trim()
+    if (-not $gpuCount) { $gpuCount = $defGpuCount }
 
-$gpuCount = (Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]").Trim()
-if (-not $gpuCount) { $gpuCount = $defGpuCount }
-
-if ($gpuCount -ne "0") {
+    if ($gpuCount -ne "0") {
     $gpuCandidates = @(
         @{ name = "Standard_NC4as_T4_v3";     desc = "4 vCPU, 28 GB, 1x T4 16GB" },
         @{ name = "Standard_NC6s_v3";          desc = "6 vCPU, 112 GB, 1x V100 16GB" },
@@ -397,6 +394,7 @@ if ($gpuCount -ne "0") {
     Write-Host "  `e[33mGPU pool disabled - using external embedding models only.`e[0m"
     $GPU_SKU = if ($curGpuSku) { $curGpuSku } else { "" }
 }
+} # end else (GPU not pre-set)
 
 # Validate before storing
 if (-not $SYS_SKU) {
