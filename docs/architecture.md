@@ -227,12 +227,14 @@ Sources define where documents come from.
 
 | Source Type | Description | Configuration |
 |-------------|-------------|---------------|
-| `cosmosdb` | Azure CosmosDB container | endpoint, database, container, content_field, content_mode |
-| `azure-blob` | Azure Blob Storage container | account_url, container, prefix, file_types |
-| `s3` | AWS S3 bucket | bucket, prefix, region, extensions |
+| `cosmosdb` | Azure CosmosDB container | endpoint, database, container |
+| `azure-blob` | Azure Blob Storage container | account_url, container, prefix |
+| `s3` | AWS S3 bucket | bucket, prefix, region |
 | `http` | HTTP/HTTPS endpoint | url, method, headers, auth_type |
 
-**CosmosDB Content Modes:**
+> **Note:** Content extraction config (`content_fields`, `content_mode`, `file_types`, `url_content_types`) is defined on **PipelineSource**, not on the source itself. This allows different pipelines to use different content strategies for the same source.
+
+**CosmosDB Content Modes** (configured per pipeline source):
 - `field` — Content is directly in a document field (default)
 - `blob_url` — Field contains an Azure Blob URL to download
 - `http_url` — Field contains an HTTP URL to fetch
@@ -261,7 +263,7 @@ Source ──▶ Content Extraction ──▶ DocGrok Model/Pipeline ──▶ D
 ```
 
 **Pipeline Configuration:**
-- `sources` — List of source IDs with optional filters
+- `sources` — List of source IDs with content extraction config (content_fields, content_mode, file_types)
 - `docgrok_pipeline` — Model ID (`mdl-*`) or transform pipeline (`trp-*`)
 - `destination_id` — Where to write vectors
 - `content_strategy` — `truncate` (one vector per doc) or `chunk` (split into chunks)

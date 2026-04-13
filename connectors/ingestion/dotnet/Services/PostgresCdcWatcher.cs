@@ -248,14 +248,18 @@ public class PostgresCdcWatcher : ISourceWatcher
         var inlinePipelines = relevantPipelines.Where(p => p.ProcessingMode == "inline").ToList();
         var queuePipelines = relevantPipelines.Where(p => p.ProcessingMode != "inline").ToList();
 
+        // Get content_fields from the first pipeline's source config
+        var pipelineSource = relevantPipelines[0].Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
+        var cfFields = pipelineSource?.ContentFields ?? new List<string> { "content" };
+
         // Filter eligible rows
         var eligible = new List<(string docId, string content, string contentHash, Dictionary<string, object?> row)>();
         int skippedNoContent = 0, skippedUnchanged = 0;
 
         foreach (var row in changes)
         {
-            if (!_source.RowHasContent(row)) { skippedNoContent++; continue; }
-            var content = _source.ExtractContentFromRow(row);
+            if (!Source.RowHasContent(row, cfFields)) { skippedNoContent++; continue; }
+            var content = Source.ExtractContentFromRow(row, cfFields);
             if (string.IsNullOrEmpty(content)) { skippedNoContent++; continue; }
 
             var contentHash = _hasher.ComputeHash(content);

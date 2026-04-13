@@ -11,6 +11,10 @@
 param(
     [int]$FromStep = 1,
     [switch]$Quiet,
+    [switch]$Existing,  # Use an existing deployment (skip provisioning)
+    [switch]$Cleanup,   # Delete test resources (OmniVec + Azure) after run
+    [string]$EnvName = $env:AZURE_ENV_NAME,
+    [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
     [string]$AoaiKey = $env:AOAI_KEY,
     [string]$AoaiDeployment = $(if ($env:AOAI_DEPLOYMENT) { $env:AOAI_DEPLOYMENT } else { "text-embedding-3-small" }),
@@ -163,6 +167,83 @@ function Normalize-CommandOutput {
     return "$Output"
 }
 
+# ─── Existing deployment mode ────────────────────────────────────────────────
+if ($Existing) {
+    if (-not $EnvName) {
+        $EnvName = Read-Host "  Enter environment name (e.g. fresh-start-6)"
+        if (-not $EnvName) { LogErr "Environment name required."; exit 1 }
+    }
+    if (-not $AdminToken) {
+        $AdminToken = Read-Host "  Enter admin token"
+        if (-not $AdminToken) { LogErr "Admin token required."; exit 1 }
+    }
+
+    Write-Host "`n`e[36mUsing existing deployment: $EnvName`e[0m"
+
+    $RESOURCE_GROUP = "rg-omnivec-$EnvName"
+    $rgExists = az group exists --name $RESOURCE_GROUP 2>$null
+    if ("$rgExists".Trim() -ne "true") {
+        LogErr "Resource group $RESOURCE_GROUP does not exist."
+        exit 1
+    }
+
+    # Discover AKS cluster from RG
+    $AKS_CLUSTER = az aks list --resource-group $RESOURCE_GROUP --query "[0].name" -o tsv 2>$null
+    if (-not $AKS_CLUSTER) { LogErr "No AKS cluster found in $RESOURCE_GROUP"; exit 1 }
+    $AKS_CLUSTER = "$AKS_CLUSTER".Trim()
+    $INSTANCE_TOKEN = $AKS_CLUSTER -replace 'omnivec-aks-',''
+    $TEST_COSMOS_ACCOUNT = "omnivec-test-$INSTANCE_TOKEN"
+
+    # Discover other resources
+    $IDENTITY_CLIENT_ID = az identity list --resource-group $RESOURCE_GROUP --query "[0].clientId" -o tsv 2>$null
+    $COSMOS_ENDPOINT = az cosmosdb list --resource-group $RESOURCE_GROUP --query "[?contains(name, 'omnivec-cosmos')].documentEndpoint" -o tsv 2>$null
+    $SUBSCRIPTION = az account show --query id -o tsv 2>$null
+    $LOCATION = az group show --name $RESOURCE_GROUP --query location -o tsv 2>$null
+    $ADMIN_TOKEN = $AdminToken
+
+    # Get AKS credentials
+    az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing 2>$null
+
+    # Get server IP
+    $SERVER = kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+    if (-not $SERVER) { LogErr "Failed to get external IP"; exit 1 }
+    $SERVER_URL = "http://$SERVER"
+
+    LogOk "AKS:    $AKS_CLUSTER"
+    LogOk "RG:     $RESOURCE_GROUP"
+    LogOk "Server: $SERVER_URL"
+    LogOk "Cosmos: $COSMOS_ENDPOINT"
+
+    # Validate admin token against API
+    Log "  Validating admin token..."
+    try {
+        $healthResp = Invoke-RestMethod -Uri "$SERVER_URL/health" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } -TimeoutSec 10 2>$null
+        if ($healthResp.status -eq "healthy") {
+            LogOk "Admin token valid — API healthy."
+        } else {
+            LogErr "API responded but status is: $($healthResp.status)"
+            exit 1
+        }
+    } catch {
+        $code = $_.Exception.Response.StatusCode.value__
+        if ($code -eq 401 -or $code -eq 403) {
+            LogErr "Admin token is invalid (HTTP $code). Check the token and try again."
+        } else {
+            LogErr "Failed to reach API at $SERVER_URL ($($_.Exception.Message))"
+        }
+        exit 1
+    }
+
+    # Auth headers
+    $apiHeaders = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+
+    # Skip to step 3 (steps 1-2 are provisioning)
+    $FromStep = [Math]::Max($FromStep, 3)
+    Save-Checkpoint 2
+
+    Write-Host ""
+}
+
 # =============================================================================
 # STEP 1: Create azd environment
 # =============================================================================
@@ -217,8 +298,10 @@ if ($FromStep -le 2) {
 if ($FromStep -le 3) {
     LogStep 3 "Retrieving connection details..."
 }
-# Always load azd values (needed by all subsequent steps)
-Load-AzdValues
+# Always load azd values (needed by all subsequent steps) — skip if already set by --Existing
+if (-not $Existing) {
+    Load-AzdValues
+}
 if (-not $AKS_CLUSTER -or -not $RESOURCE_GROUP -or -not $ADMIN_TOKEN) {
     LogErr "Missing required azd outputs (AKS cluster/resource group/admin token)."
     exit 1
@@ -261,7 +344,7 @@ LogOk "API healthy."
 Save-Checkpoint 3
 
 # Auth headers for all API calls
-$headers = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+$apiHeaders = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
 
 # =============================================================================
 # STEP 4: Configure CLI
@@ -400,12 +483,12 @@ if ($FromStep -le 6) {
         api_key = $AOAI_KEY; model = $AOAI_DEPLOYMENT; deployment = $AOAI_DEPLOYMENT
         dimensions = $AOAI_DIMS; api_version = "2024-06-01"
     } | ConvertTo-Json
-    $modelResult = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Method POST -Headers $headers -Body $modelBody
+    $modelResult = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Method POST -Headers $apiHeaders -Body $modelBody
     $MODEL_ID = $modelResult.id
     LogOk "Model: $MODEL_ID ($AOAI_DEPLOYMENT, ${AOAI_DIMS}d)"
     Save-Checkpoint 6
 } else {
-    $models = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Headers $headers
+    $models = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Headers $apiHeaders
     $model = $models.models | Where-Object { $_.name -eq $MODEL_NAME } | Select-Object -First 1
     if (-not $model) {
         LogErr "Required model '$MODEL_NAME' not found. Re-run from step 6."
@@ -421,18 +504,24 @@ if ($FromStep -le 7) {
     LogStep 7 "Creating source and destination..."
 
     # Clean up any existing resources from previous runs
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
-    foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
-    foreach ($s in $existing.sources) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
-    foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
+    try {
+        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+        foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
+    } catch {}
+    try {
+        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+        foreach ($s in $existing.sources) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
+    } catch {}
+    try {
+        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+        foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
+    } catch {}
 
     $srcBody = @{ name = $SOURCE_NAME; type = "cosmosdb"; config = @{
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "test-documents"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID
     }} | ConvertTo-Json -Depth 5
-    $srcResult = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Method POST -Headers $headers -Body $srcBody
+    $srcResult = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Method POST -Headers $apiHeaders -Body $srcBody
     $SOURCE_ID = $srcResult.source.id
     LogOk "Source: $SOURCE_ID"
 
@@ -440,19 +529,19 @@ if ($FromStep -le 7) {
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "vectors"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID; vector_dimensions = $AOAI_DIMS
     }} | ConvertTo-Json -Depth 5
-    $dstResult = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Method POST -Headers $headers -Body $dstBody
+    $dstResult = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Method POST -Headers $apiHeaders -Body $dstBody
     $DEST_ID = $dstResult.destination.id
     LogOk "Destination: $DEST_ID"
     Save-Checkpoint 7
 } else {
-    $srcs = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
+    $srcs = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $apiHeaders
     $src = $srcs.sources | Where-Object { $_.name -eq $SOURCE_NAME } | Select-Object -First 1
     if (-not $src) {
         LogErr "Required source '$SOURCE_NAME' not found. Re-run from step 7."
         exit 1
     }
     $SOURCE_ID = $src.id
-    $dsts = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
+    $dsts = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $apiHeaders
     $dst = $dsts.destinations | Where-Object { $_.name -eq $DEST_NAME } | Select-Object -First 1
     if (-not $dst) {
         LogErr "Required destination '$DEST_NAME' not found. Re-run from step 7."
@@ -469,20 +558,20 @@ if ($FromStep -le 8) {
 
     # Clean up an existing demo pipeline to make step-8 resume idempotent
     try {
-        $existingPipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
+        $existingPipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
         foreach ($p in $existingPipelines.pipelines) {
             if ($p.name -eq $PIPELINE_NAME) {
-                try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null | Out-Null } catch {}
+                try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $apiHeaders 2>$null | Out-Null } catch {}
             }
         }
     } catch {}
 
     $pipBody = @{
-        name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
+        name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{}; content_fields = @("content") })
         destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
         processing_mode = "queue"
     } | ConvertTo-Json -Depth 5
-    $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $headers -Body $pipBody
+    $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $apiHeaders -Body $pipBody
     $PIP_ID = $pipResult.pipeline.id
     LogOk "Pipeline created (queue mode): $PIP_ID"
 
@@ -542,13 +631,13 @@ print("DOCS_OK")
 
     # Resume pipeline
     Log "  Resuming pipeline..."
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Pipeline activated (queue mode). Waiting for processing..."
     $queueEmbedded = $false
     for ($i = 0; $i -lt 24; $i++) {
         try {
-            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
+            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $apiHeaders
             if ($poll.stats.embedded_count -gt 0) {
                 $queueEmbedded = $true
                 break
@@ -565,7 +654,7 @@ print("DOCS_OK")
     }
     Save-Checkpoint 8
 } else {
-    $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
+    $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
     $pipeline = $pips.pipelines | Where-Object { $_.name -eq $PIPELINE_NAME } | Select-Object -First 1
     if (-not $pipeline) {
         LogErr "Required pipeline '$PIPELINE_NAME' not found. Re-run from step 8."
@@ -581,7 +670,7 @@ if ($PIP_ID) {
     LogStep 9 "Verifying queue mode results..."
     if (-not $Quiet) { & $CLI pipeline show $PIP_ID }
 
-    $stats = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
+    $stats = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $apiHeaders
     Log "  Embedded:   $($stats.stats.embedded_count)"
     Log "  Completion: $($stats.stats.completion_pct)%"
 
@@ -604,19 +693,19 @@ if ($FromStep -le 10 -and $PIP_ID) {
     LogStep 10 "Switching pipeline to inline mode, resetting..."
 
     # Pause pipeline before switching mode
-    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $headers | Out-Null } catch {}
+    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $apiHeaders | Out-Null } catch {}
 
     # Switch processing mode to inline
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Switched to inline mode"
 
     # Reset pipeline — forces CFP to reprocess all docs from the beginning
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Pipeline reset — will reprocess all docs in inline mode"
 
     # Resume pipeline
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
 
     # Poll source container until embeddings appear or 120s timeout
@@ -723,3 +812,40 @@ Write-Host ""
 # Clean up checkpoint on successful completion
 Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
 Save-Checkpoint 11
+
+# =============================================================================
+# Cleanup (only when -Cleanup flag is passed)
+# =============================================================================
+if ($Cleanup) {
+    Write-Host "`n`e[33mCleaning up test resources...`e[0m"
+
+    # Delete OmniVec resources (pipeline → source → destination → model)
+    if ($PIP_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted pipeline: $PIP_ID" } catch { LogWarn "Failed to delete pipeline: $_" }
+    }
+    if ($SOURCE_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$SOURCE_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted source: $SOURCE_ID" } catch { LogWarn "Failed to delete source: $_" }
+    }
+    if ($DEST_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$DEST_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted destination: $DEST_ID" } catch { LogWarn "Failed to delete destination: $_" }
+    }
+    if ($MODEL_ID) {
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/models/$MODEL_ID" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null; LogOk "Deleted model: $MODEL_ID" } catch { LogWarn "Failed to delete model: $_" }
+    }
+
+    # Delete Azure test CosmosDB account
+    if ($TEST_COSMOS_ACCOUNT -and $RESOURCE_GROUP) {
+        Log "  Deleting test CosmosDB account: $TEST_COSMOS_ACCOUNT..."
+        az cosmosdb delete --name $TEST_COSMOS_ACCOUNT --resource-group $RESOURCE_GROUP --yes 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            LogOk "Deleted Azure CosmosDB: $TEST_COSMOS_ACCOUNT"
+        } else {
+            LogWarn "Failed to delete CosmosDB account (may not exist or already deleted)"
+        }
+    }
+
+    # Remove checkpoint file
+    Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
+
+    LogOk "Cleanup complete."
+}

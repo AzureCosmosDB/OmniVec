@@ -189,7 +189,7 @@ omnivec source create \
 omnivec source create \
   --name "My CosmosDB" \
   --type cosmosdb \
-  --config '{"endpoint":"https://myaccount.documents.azure.com","database":"mydb","container":"docs","content_mode":"field","content_field":"content"}'
+  --config '{"endpoint":"https://myaccount.documents.azure.com","database":"mydb","container":"docs"}'
 ```
 
 **From a JSON file:**
@@ -231,8 +231,8 @@ OK: Source created: src-2b3356ab
 | `endpoint` | Yes | CosmosDB account endpoint |
 | `database` | Yes | Database name |
 | `container` | Yes | Container name |
-| `content_mode` | No | How to read content: `field` (default), `blob_url`, `http_url` |
-| `content_field` | No | Field name containing text or URL (default: `content`) |
+
+> **Note:** Content extraction config (`content_mode`, `content_fields`) is now configured per-pipeline on the pipeline source entry, not on the source itself.
 
 ### Update a source
 
@@ -408,6 +408,7 @@ omnivec pipeline create \
   --source src-15ab4952 \
   --destination dst-1f872959 \
   --model text-azure \
+  --content-fields content \
   --process-existing
 ```
 
@@ -418,6 +419,7 @@ omnivec pipeline create \
 | `--destination` | Yes | Destination ID |
 | `--model` | Yes | DocGrok transform pipeline name (e.g., `text-azure`, `pdf-vision`) |
 | `--description` | No | Pipeline description |
+| `--content-fields` | No | Comma-separated field names to embed (default: `content`) |
 | `--process-existing` | No | Process existing documents on creation (default: true) |
 | `--no-process-existing` | No | Only process new documents going forward |
 

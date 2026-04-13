@@ -63,8 +63,7 @@ curl -X POST http://<external-ip>/api/sources \
     "config": {
       "account_url": "https://mystorageaccount.blob.core.windows.net",
       "container": "documents",
-      "prefix": "invoices/",
-      "file_types": ["pdf", "txt", "docx", "md", "json", "csv"]
+      "prefix": "invoices/"
     }
   }'
 ```
@@ -77,9 +76,10 @@ curl -X POST http://<external-ip>/api/sources \
 | `connection_string` | Yes* | — | Connection string (alternative to account_url) |
 | `container` | Yes | — | Blob container name |
 | `prefix` | No | `""` | Only process blobs under this prefix |
-| `file_types` | No | `["txt","json","pdf","md","csv"]` | File extensions to process |
 
 *One of `account_url` or `connection_string` is required.
+
+> **Note:** File type filtering (`file_types`) is now configured per-pipeline on the pipeline source entry, not on the source itself.
 
 **Processing modes:**
 - **Polling (controller):** The controller enumerates all blobs matching the prefix and file types every 10 seconds. For each new blob (not already processed), it creates a PENDING job.
@@ -99,9 +99,7 @@ curl -X POST http://<external-ip>/api/sources \
     "config": {
       "endpoint": "https://my-cosmos-account.documents.azure.com:443/",
       "database": "mydb",
-      "container": "documents",
-      "content_field": "content",
-      "content_mode": "field"
+      "container": "documents"
     }
   }'
 ```
@@ -113,10 +111,10 @@ curl -X POST http://<external-ip>/api/sources \
 | `endpoint` | Yes | — | CosmosDB account endpoint |
 | `database` | Yes | — | Database name |
 | `container` | Yes | — | Container name |
-| `content_field` | No | `"content"` | Document field containing text to embed |
-| `content_mode` | No | `"field"` | How to get content: `field`, `blob_url`, `http_url`, `s3_url` |
 | `query` | No | `"SELECT * FROM c"` | Custom query to filter documents |
 | `use_change_feed` | No | `true` | Use Change Feed for real-time detection |
+
+> **Note:** Content extraction config (`content_fields`, `content_mode`) is now configured per-pipeline on the pipeline source entry, not on the source itself.
 
 **How it works:** The controller subscribes to the container's Change Feed. When documents are created or updated, it checks whether embedding is needed (no existing embedding, or content has changed based on SHA256 hash). If so, it creates a PENDING job. The worker reads the document content, embeds it, and **patches the embedding directly into the original document** (no separate vector document is created).
 
@@ -294,7 +292,10 @@ curl -X POST http://<external-ip>/api/pipelines \
     "sources": [
       {
         "source_id": "src-abc12345",
-        "filters": {}
+        "filters": {},
+        "content_fields": ["content"],
+        "content_mode": "field",
+        "file_types": ["txt", "json", "pdf", "md", "csv", "docx"]
       }
     ],
     "docgrok_pipeline": "azure-openai-text-embedding-3-large-auto",
@@ -309,11 +310,22 @@ curl -X POST http://<external-ip>/api/pipelines \
 |-------|----------|---------|-------------|
 | `name` | Yes | — | Unique pipeline name |
 | `description` | No | `""` | Human-readable description |
-| `sources` | Yes | — | List of `{source_id, filters}` objects |
+| `sources` | Yes | — | List of pipeline source objects (see below) |
 | `docgrok_pipeline` | Yes | — | Name of the DocGrok pipeline to use |
 | `destination_id` | Yes | — | Destination ID for storing embeddings |
 | `process_existing` | No | `true` | Process existing documents immediately |
 | `metadata_mapping` | No | `{}` | Map source fields to destination fields |
+
+**Pipeline source fields:**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `source_id` | Yes | — | Source ID |
+| `filters` | No | `{}` | Additional filters |
+| `content_fields` | No | `["content"]` | Document field(s) to concatenate for embedding |
+| `content_mode` | No | `"field"` | How to get content: `field`, `blob_url`, `http_url` |
+| `file_types` | No | `["txt","json","pdf","docx","md","csv"]` | File extensions to process (blob/S3 sources) |
+| `url_content_types` | No | `["txt","json","pdf"]` | Content types for URL modes |
 
 **`process_existing` behavior:**
 - `true` (default): Pipeline starts as **ACTIVE**. The controller immediately begins enumerating the source and creating jobs for all existing documents.
@@ -493,8 +505,7 @@ curl -X POST http://<external-ip>/api/sources \
     "config": {
       "endpoint": "https://my-cosmos.documents.azure.com:443/",
       "database": "documents",
-      "container": "vectors",
-      "content_field": "content"
+      "container": "vectors"
     }
   }'
 

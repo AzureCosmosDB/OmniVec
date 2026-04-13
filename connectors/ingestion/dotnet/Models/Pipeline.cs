@@ -36,6 +36,21 @@ public class PipelineSource
 {
     [JsonPropertyName("source_id")]
     public string SourceId { get; set; } = "";
+
+    [JsonPropertyName("content_fields")]
+    public List<string> ContentFields { get; set; } = new() { "content" };
+
+    [JsonPropertyName("content_mode")]
+    public string ContentMode { get; set; } = "field";
+
+    [JsonPropertyName("url_content_types")]
+    public List<string> UrlContentTypes { get; set; } = new() { "txt", "json", "pdf" };
+
+    [JsonPropertyName("content_type_field")]
+    public string? ContentTypeField { get; set; }
+
+    [JsonPropertyName("file_types")]
+    public List<string> FileTypes { get; set; } = new() { "txt", "json", "pdf", "docx", "md", "csv" };
 }
 
 public class PipelinesResponse
