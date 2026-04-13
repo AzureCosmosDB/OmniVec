@@ -38,7 +38,14 @@ $ACR_NAME = Get-AzdValue "AZURE_ACR_NAME"
 $COSMOS_ENDPOINT = Get-AzdValue "AZURE_COSMOS_ENDPOINT"
 $IDENTITY_CLIENT_ID = Get-AzdValue "AZURE_IDENTITY_CLIENT_ID"
 $RESOURCE_GROUP = Get-AzdValue "AZURE_RESOURCE_GROUP"
-$BUILD_MODE = if (Get-AzdValue "OMNIVEC_BUILD_MODE") { Get-AzdValue "OMNIVEC_BUILD_MODE" } else { "acr" }
+$BUILD_MODE = Get-AzdValue "OMNIVEC_BUILD_MODE"
+if (-not $BUILD_MODE) {
+    # Auto-detect build mode
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        $dockerInfo = docker info 2>$null
+        if ($LASTEXITCODE -eq 0) { $BUILD_MODE = "docker" } else { $BUILD_MODE = "acr" }
+    } else { $BUILD_MODE = "acr" }
+}
 $ENABLE_BLOB_SOURCE = if (Get-AzdValue "AZURE_ENABLE_BLOB_SOURCE") { Get-AzdValue "AZURE_ENABLE_BLOB_SOURCE" } else { "false" }
 
 $STORAGE_ACCOUNT = Get-AzdValue "AZURE_STORAGE_ACCOUNT_NAME"

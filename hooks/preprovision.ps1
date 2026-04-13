@@ -143,6 +143,17 @@ if ("$rgExists".Trim() -eq "true") {
     exit 0
 }
 
+# -- Config already set (e.g. via azd env set before azd up) — skip prompts --
+$ErrorActionPreference = "SilentlyContinue"
+$_existingVm = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
+$_vmExit = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($_vmExit -eq 0 -and $_existingVm -and "$_existingVm" -notmatch "ERROR") {
+    Write-Host "`n`e[32mConfig already set. Skipping prompts.`e[0m"
+    Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
+    exit 0
+}
+
 # -- Metadata storage selection --
 $ErrorActionPreference = "SilentlyContinue"
 $curMeta = azd env get-value OMNIVEC_METADATA_STORE 2>$null
@@ -399,25 +410,9 @@ azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
 azd env set OMNIVEC_GPU_NODE_VM_SIZE $GPU_SKU
 azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
 
-# -- Check image build capability --
-Write-Host "`n`e[33mChecking image build capability...`e[0m"
-if (Get-Command docker -ErrorAction SilentlyContinue) {
-    $dockerInfo = docker info 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "`e[32mDocker daemon available - will use local builds.`e[0m"
-        azd env set OMNIVEC_BUILD_MODE "docker"
-    } else {
-        Write-Host "`e[33mNo Docker daemon - will use 'az acr build' for remote builds.`e[0m"
-        azd env set OMNIVEC_BUILD_MODE "acr"
-    }
-} else {
-    Write-Host "`e[33mNo Docker daemon - will use 'az acr build' for remote builds.`e[0m"
-    azd env set OMNIVEC_BUILD_MODE "acr"
-}
-
 # -- Sanitize env values: strip BOM, tabs, carriage returns --
 Write-Host "`n`e[36mSanitizing environment values...`e[0m"
-$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_ENABLE_BLOB_SOURCE", "OMNIVEC_METADATA_STORE", "OMNIVEC_BUILD_MODE")
+$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_ENABLE_BLOB_SOURCE", "OMNIVEC_METADATA_STORE")
 foreach ($key in $envKeys) {
     $ErrorActionPreference = "SilentlyContinue"
     $raw = azd env get-value $key 2>$null

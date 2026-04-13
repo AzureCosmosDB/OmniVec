@@ -172,6 +172,14 @@ if [ "$RG_EXISTS" = "true" ]; then
   exit 0
 fi
 
+# ── Config already set (e.g. via azd env set before azd up) — skip prompts ──
+_existing_vm=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
+if [ -n "$_existing_vm" ]; then
+  printf "\n${GREEN}Config already set. Skipping prompts.${NC}\n"
+  printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
+  exit 0
+fi
+
 # ── Metadata storage selection ──────────────────────────────────────────────
 
 cur_meta=$(azd_get OMNIVEC_METADATA_STORE)
@@ -371,25 +379,9 @@ azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count"
 azd env set OMNIVEC_GPU_NODE_VM_SIZE "$GPU_SKU"
 azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count"
 
-# ── Check image build capability ────────────────────────────────────────────
-
-printf "\n${YELLOW}Checking image build capability...${NC}\n"
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  printf "${GREEN}Docker daemon available — will use local builds.${NC}\n"
-  azd env set OMNIVEC_BUILD_MODE "docker"
-else
-  printf "${YELLOW}No Docker daemon — will use 'az acr build' for remote builds.${NC}\n"
-  azd env set OMNIVEC_BUILD_MODE "acr"
-fi
-
-# ── Check for soft-deleted Key Vault with the expected name ────────────────
-# The vault name uses the same prefix-resourceToken pattern as other resources.
-# We check if a soft-deleted vault with that name exists so Bicep can recover
-# it instead of failing with a "vault already exists in deleted state" error.
-
 # ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
 printf "\n${CYAN}Sanitizing environment values...${NC}\n"
-for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE OMNIVEC_BUILD_MODE; do
+for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE; do
   raw=$(azd_get "$key")
   if [ -n "$raw" ]; then
     clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')

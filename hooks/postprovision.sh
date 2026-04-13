@@ -42,7 +42,13 @@ COSMOS_ENDPOINT=$(get_azd_value "AZURE_COSMOS_ENDPOINT")
 IDENTITY_CLIENT_ID=$(get_azd_value "AZURE_IDENTITY_CLIENT_ID")
 RESOURCE_GROUP=$(get_azd_value "AZURE_RESOURCE_GROUP")
 BUILD_MODE=$(get_azd_value "OMNIVEC_BUILD_MODE")
-BUILD_MODE=${BUILD_MODE:-acr}
+if [ -z "$BUILD_MODE" ]; then
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    BUILD_MODE="docker"
+  else
+    BUILD_MODE="acr"
+  fi
+fi
 ENABLE_BLOB_SOURCE=$(get_azd_value "AZURE_ENABLE_BLOB_SOURCE")
 ENABLE_BLOB_SOURCE=${ENABLE_BLOB_SOURCE:-false}
 
