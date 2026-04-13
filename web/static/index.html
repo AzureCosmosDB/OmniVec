@@ -2825,18 +2825,9 @@
                 `;
             } else if (currentDetailTab === 'content') {
                 if (source.type === 'azure-blob') {
-                    const fileTypes = config.file_types || ['txt', 'json', 'pdf', 'md', 'csv'];
                     configPanel.innerHTML = `
                         <h4 style="margin: 0 0 20px 0; font-size: 16px;">File Types to Process</h4>
-                        <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">Select which file types should be processed from this blob storage source.</p>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                            ${['txt', 'json', 'pdf', 'md', 'csv', 'docx', 'html', 'xml', 'pptx', 'xlsx', 'png', 'jpg'].map(ft => `
-                                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-tertiary); border-radius: 8px;">
-                                    <input type="checkbox" name="detail-file-types" value="${ft}" ${fileTypes.includes(ft) ? 'checked' : ''}>
-                                    <span style="font-weight: 500;">.${ft}</span>
-                                </label>
-                            `).join('')}
-                        </div>
+                        <p style="font-size: 13px; color: var(--text-tertiary);">File type filtering is now configured per-pipeline in the pipeline source settings.</p>
                     `;
                 } else {
                     configPanel.innerHTML = `
@@ -2975,13 +2966,6 @@
                 if (urlEl) editedSourceData.account_url = urlEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
                 if (prefixEl) editedSourceData.prefix = prefixEl.value;
-
-                // File types from Content tab
-                const fileTypeEls = document.querySelectorAll('input[name="detail-file-types"]:checked');
-                if (fileTypeEls.length > 0 || document.querySelector('input[name="detail-file-types"]')) {
-                    editedSourceData.file_types = [];
-                    fileTypeEls.forEach(cb => editedSourceData.file_types.push(cb.value));
-                }
             } else if (source.type === 'cosmosdb') {
                 const endpointEl = document.getElementById('detail-endpoint');
                 const dbEl = document.getElementById('detail-database');
@@ -3011,7 +2995,6 @@
                 config.account_url = editedSourceData.account_url || source.config?.account_url || '';
                 config.container = editedSourceData.container || source.config?.container || '';
                 config.prefix = editedSourceData.prefix || source.config?.prefix || '';
-                config.file_types = editedSourceData.file_types || source.config?.file_types || ['txt', 'json', 'pdf', 'md', 'csv'];
             } else if (source.type === 'cosmosdb') {
                 config.endpoint = editedSourceData.endpoint || source.config?.endpoint || '';
                 config.database = editedSourceData.database || source.config?.database || '';
@@ -4962,22 +4945,16 @@
             const sourceType = document.getElementById(`${prefix}-type`).value;
             let config = {};
             if (sourceType === 'azure-blob') {
-                const fileTypes = [];
-                document.querySelectorAll(`.${prefix}-file-type:checked`).forEach(cb => fileTypes.push(cb.value));
                 config = {
                     account_url: document.getElementById(`${prefix}-account-url`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || '',
                     prefix: document.getElementById(`${prefix}-prefix`)?.value || '',
-                    file_types: fileTypes
                 };
             } else if (sourceType === 'cosmosdb') {
-                const urlContentTypes = [];
-                document.querySelectorAll(`.${prefix}-url-content-type:checked`).forEach(cb => urlContentTypes.push(cb.value));
                 config = {
                     endpoint: document.getElementById(`${prefix}-endpoint`)?.value || '',
                     database: document.getElementById(`${prefix}-database`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || '',
-                    url_content_types: urlContentTypes.length > 0 ? urlContentTypes : ['txt', 'json', 'pdf']
                 };
             }
             return { name: document.getElementById(`${prefix}-name`)?.value || '', type: sourceType, config };
@@ -5060,7 +5037,7 @@
             let sourceSpecificHtml = '';
 
             if (source.type === 'azure-blob') {
-                const fileTypes = source.config.file_types || ['txt', 'json', 'pdf', 'md', 'csv'];
+                const fileTypes = ['txt', 'json', 'pdf', 'md', 'csv', 'docx'];
                 sourceSpecificHtml = `
                     <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">File Types to Process</div>
                     <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; font-size: 13px;">
@@ -5077,7 +5054,7 @@
                     </div>
                 `;
             } else if (source.type === 'cosmosdb') {
-                const contentMode = source.config.content_mode || 'field';
+                const contentMode = 'field';
                 sourceSpecificHtml = `
                     <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Content Source</div>
                     <div class="form-group" style="margin-bottom: 12px;">
@@ -5135,7 +5112,7 @@
 
         function getCosmosConfigHtml(mode, config) {
             if (mode === 'field') {
-                const fields = Array.isArray(config.content_field) ? config.content_field : [config.content_field || 'content'];
+                const fields = ['content'];
                 return `
                     <div class="form-group" style="margin-bottom: 0;">
                         <label class="form-label" style="font-size: 12px;">Content Fields</label>
@@ -5152,7 +5129,7 @@
                 return `
                     <div class="form-group" style="margin-bottom: 8px;">
                         <label class="form-label" style="font-size: 12px;">URL Field</label>
-                        <input type="text" class="form-input" name="override_content_field" value="${Array.isArray(config.content_field) ? config.content_field[0] : (config.content_field || 'fileUrl')}" placeholder="fileUrl">
+                        <input type="text" class="form-input" name="override_content_field" value="fileUrl" placeholder="fileUrl">
                     </div>
                     <div style="font-size: 12px; font-weight: 500; margin-bottom: 8px;">Content Types</div>
                     <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 12px;">
@@ -5176,26 +5153,16 @@
             let config = {};
 
             if (sourceType === 'azure-blob') {
-                // Collect file types
-                const fileTypes = [];
-                form.querySelectorAll('input[name="file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
-
                 config = {
                     account_url: formData.get('account_url'),
                     container: formData.get('container'),
                     prefix: formData.get('prefix') || '',
-                    file_types: fileTypes
                 };
             } else if (sourceType === 'cosmosdb') {
-                // Collect URL content types if applicable
-                const urlContentTypes = [];
-                form.querySelectorAll('input[name="url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
-
                 config = {
                     endpoint: formData.get('endpoint'),
                     database: formData.get('database'),
                     container: formData.get('container'),
-                    url_content_types: urlContentTypes.length > 0 ? urlContentTypes : ['txt', 'json', 'pdf']
                 };
             } else if (sourceType === 'postgresql') {
                 config = {
@@ -5298,13 +5265,8 @@
                     showPipelineStep('source');
                     return;
                 }
-                // Collect file type overrides for blob storage
-                const fileTypes = [];
-                form.querySelectorAll('input[name="override_file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
-                if (fileTypes.length > 0) sourceConfig.file_types = fileTypes;
+                // File type overrides are collected below for the pipeline source entry
             } else {
-                // Create new source first
-                const srcData = collectInlineSourceData('pl-src');
                 // Create new source first
                 const srcData = collectInlineSourceData('pl-src');
                 if (!srcData.name) {
@@ -5409,6 +5371,10 @@
             const urlContentTypes = [];
             form.querySelectorAll('input[name="override_url_content_types"]:checked').forEach(cb => urlContentTypes.push(cb.value));
 
+            // Collect file_types for pipeline source (blob storage)
+            const fileTypes = [];
+            form.querySelectorAll('input[name="override_file_types"]:checked').forEach(cb => fileTypes.push(cb.value));
+
             // Build pipeline source entry
             const pipelineSourceEntry = {
                 source_id: sourceId,
@@ -5417,6 +5383,7 @@
                 content_mode: contentMode,
             };
             if (urlContentTypes.length > 0) pipelineSourceEntry.url_content_types = urlContentTypes;
+            if (fileTypes.length > 0) pipelineSourceEntry.file_types = fileTypes;
 
             const data = {
                 name: formData.get('name'),
@@ -5598,38 +5565,7 @@
                         <label class="form-label">Prefix (optional)</label>
                         <input type="text" class="form-input" name="prefix" placeholder="uploads/">
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">File Types to Process</label>
-                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 13px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="txt" checked> .txt
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="json" checked> .json
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="pdf" checked> .pdf
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="md" checked> .md
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="csv" checked> .csv
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="docx"> .docx
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="html"> .html
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="xml"> .xml
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                <input type="checkbox" name="file_types" value="pptx"> .pptx
-                            </label>
-                        </div>
-                    </div>
+                    <p style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">File type filtering is configured per-pipeline in the pipeline source settings.</p>
                 `;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `

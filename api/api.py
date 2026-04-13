@@ -2568,14 +2568,10 @@ async def process_event(event: dict):
         source_account = source.config.get("account_url", "")
         source_container = source.config.get("container", "")
         source_prefix = source.config.get("prefix", "")
-        allowed_types = source.config.get("file_types", ["txt", "json", "pdf", "md", "csv"])
 
         if account_name in source_account and container_name == source_container:
             if not source_prefix or blob_path.startswith(source_prefix):
-                if file_ext in allowed_types:
-                    matching_sources.append(source)
-                else:
-                    print(f"Skipping blob {blob_path}: file type '{file_ext}' not in allowed types {allowed_types}")
+                matching_sources.append(source)
 
     if not matching_sources:
         print(f"No matching sources for blob: {blob_url}")
@@ -2588,8 +2584,14 @@ async def process_event(event: dict):
             if pipeline.status != PipelineStatus.ACTIVE:
                 continue
 
-            source_in_pipeline = any(ps.source_id == source.id for ps in pipeline.sources)
-            if not source_in_pipeline:
+            pipeline_source = next((ps for ps in pipeline.sources if ps.source_id == source.id), None)
+            if not pipeline_source:
+                continue
+
+            # Check file_types from pipeline source config
+            allowed_types = pipeline_source.file_types
+            if file_ext not in allowed_types:
+                print(f"Skipping blob {blob_path}: file type '{file_ext}' not in allowed types {allowed_types} for pipeline {pipeline.name}")
                 continue
 
             if event_type == "blob_created":
