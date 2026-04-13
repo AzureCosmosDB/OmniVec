@@ -8,6 +8,7 @@ Supports:
 - Connection pooling for efficiency
 """
 
+import re
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple, AsyncGenerator
@@ -451,3 +452,148 @@ async def delete_vectors(
     count = int(result.split()[-1]) if result else 0
     logger.info("Deleted %d vectors from %s", count, table)
     return count
+
+
+# =============================================================================
+# VECTOR COLUMN DISCOVERY
+# =============================================================================
+
+async def _discover_vector_columns(conn, table: str) -> List[Dict[str, Any]]:
+    """Discover vector columns in a pgvector table using an existing connection.
+
+    Queries information_schema for columns with the ``vector`` user-defined type,
+    then resolves each column's dimension from ``pg_attribute``.  Returns a list
+    of descriptors in the same format as CosmosDB ``vector_indexes`` so the UI
+    dropdown and pipeline validation work identically.
+    """
+    rows = await conn.fetch(
+        """SELECT column_name, data_type, udt_name
+           FROM information_schema.columns
+           WHERE table_name = $1
+           ORDER BY ordinal_position""",
+        table,
+    )
+
+    vector_indexes: List[Dict[str, Any]] = []
+    for row in rows:
+        col_name = row["column_name"]
+        data_type = (row["data_type"] or "").lower()
+        udt_name = (row["udt_name"] or "").lower()
+
+        if "vector" not in data_type and udt_name != "vector":
+            continue
+
+        # Resolve dimensions from vector(N) type modifier
+        dimensions = None
+        type_str = await conn.fetchval(
+            """SELECT format_type(atttypid, atttypmod)
+               FROM pg_attribute
+               WHERE attrelid = $1::regclass AND attname = $2""",
+            table,
+            col_name,
+        )
+        if type_str:
+            m = re.search(r"vector\((\d+)\)", str(type_str))
+            if m:
+                dimensions = int(m.group(1))
+
+        # Check for a vector index on this column
+        idx_row = await conn.fetchrow(
+            "SELECT indexname, indexdef FROM pg_indexes "
+            "WHERE tablename = $1 AND indexdef LIKE '%' || $2 || '%'",
+            table,
+            col_name,
+        )
+        index_type = None
+        index_name = None
+        if idx_row:
+            index_name = idx_row["indexname"]
+            indexdef = idx_row["indexdef"]
+            if "ivfflat" in indexdef:
+                index_type = "ivfflat"
+            elif "hnsw" in indexdef:
+                index_type = "hnsw"
+            else:
+                index_type = "btree"
+
+        vector_indexes.append({
+            "path": col_name,
+            "dimensions": dimensions,
+            "dataType": "vector",
+            "indexType": index_type,
+            "indexName": index_name,
+        })
+
+    return vector_indexes
+
+
+async def probe_vector_columns(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Discover vector columns using a fresh connection (no pool required).
+
+    Returns ``vector_indexes`` in CosmosDB-compatible format so the UI and
+    pipeline validation treat pgvector destinations the same as CosmosDB.
+    """
+    try:
+        import asyncpg
+    except ImportError:
+        logger.warning("asyncpg not installed — cannot probe pgvector columns")
+        return []
+
+    dsn = (
+        f"postgresql://{config.get('user', '')}:{config.get('password', '')}"
+        f"@{config['host']}:{config.get('port', 5432)}/{config['database']}"
+    )
+    ssl_mode = config.get("ssl_mode", "require")
+    ssl = ssl_mode not in ("disable", "allow")
+
+    conn = await asyncpg.connect(dsn, ssl=ssl if ssl else None)
+    try:
+        return await _discover_vector_columns(conn, config["table"])
+    finally:
+        await conn.close()
+
+
+async def test_destination_connection(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Test pgvector destination connectivity and discover vector columns.
+
+    Called from ``create_destination`` and ``test_destination`` in the API layer,
+    mirroring ``cosmosdb_vector_connector.test_vector_connection``.
+    """
+    try:
+        import asyncpg
+    except ImportError:
+        raise ImportError("asyncpg required: pip install asyncpg")
+
+    dsn = (
+        f"postgresql://{config.get('user', '')}:{config.get('password', '')}"
+        f"@{config['host']}:{config.get('port', 5432)}/{config['database']}"
+    )
+    ssl_mode = config.get("ssl_mode", "require")
+    ssl = ssl_mode not in ("disable", "allow")
+
+    conn = await asyncpg.connect(dsn, ssl=ssl if ssl else None)
+    try:
+        table = config["table"]
+        row_count = await conn.fetchval(f'SELECT COUNT(*) FROM "{table}"')
+        ext = await conn.fetchval(
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+        )
+
+        vector_indexes = await _discover_vector_columns(conn, table)
+
+        # First discovered column becomes the default; fall back to config
+        vector_field = config.get("vector_column", "embedding")
+        if vector_indexes:
+            vector_field = vector_indexes[0]["path"]
+
+        return {
+            "status": "connected",
+            "table": table,
+            "row_count": row_count,
+            "pgvector_version": ext,
+            "vector_field": vector_field,
+            "vector_indexes": vector_indexes,
+            "has_vector_policy": len(vector_indexes) > 0,
+        }
+    finally:
+        await conn.close()

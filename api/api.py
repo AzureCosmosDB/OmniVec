@@ -240,6 +240,56 @@ def _build_mssql_odbc_conn_str(cfg: dict) -> str:
     return f"Driver={{ODBC Driver 18 for SQL Server}};Server={server};Database={database};Uid={user};Pwd={password};Encrypt=yes;TrustServerCertificate=yes;"
 
 
+def _discover_mssql_vector_columns(cursor, table: str, schema: str = "dbo", config: dict = None) -> list:
+    """Discover vector columns in an MSSQL table.
+
+    Probes INFORMATION_SCHEMA for native ``vector`` type columns (SQL Server 2025+).
+    Falls back to reporting the configured ``vector_column`` if it exists in the
+    table — older SQL Server stores vectors as JSON in NVARCHAR columns.
+
+    Returns ``vector_indexes`` in the same format as CosmosDB so the UI dropdown
+    and pipeline ``vector_index_path`` validation work identically.
+    """
+    import re as _re
+    cursor.execute(
+        """SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+           FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_NAME = ? AND TABLE_SCHEMA = ?
+           ORDER BY ORDINAL_POSITION""",
+        (table, schema),
+    )
+    columns = cursor.fetchall()
+
+    vector_indexes = []
+    all_col_names = set()
+    for col_name, data_type, max_length in columns:
+        all_col_names.add(col_name)
+        dt_lower = (data_type or "").lower()
+        # SQL Server 2025+ native vector type
+        if "vector" in dt_lower:
+            dimensions = None
+            if max_length and isinstance(max_length, int) and max_length > 0:
+                dimensions = max_length
+            vector_indexes.append({
+                "path": col_name,
+                "dimensions": dimensions,
+                "dataType": "vector",
+            })
+
+    # Fallback: if no native vector columns found, include the configured
+    # vector_column when it exists in the table (NVARCHAR storing JSON vectors)
+    if not vector_indexes and config:
+        vec_col = config.get("vector_column", config.get("vector_col", "embedding"))
+        if vec_col in all_col_names:
+            vector_indexes.append({
+                "path": vec_col,
+                "dimensions": config.get("vector_dimensions"),
+                "dataType": "float32",
+            })
+
+    return vector_indexes
+
+
 async def _test_with_timeout(fn, retries: int = TEST_CONN_RETRIES, timeout: int = TEST_CONN_TIMEOUT):
     """Run a test-connection function with timeout and retries.
     fn can be sync or async â€” sync calls run in a thread pool so timeout works.
@@ -1343,6 +1393,41 @@ async def create_destination(req: CreateDestinationRequest):
             warnings.append(f"Could not connect to destination: {str(e)}. "
                 "Check endpoint, database, container, and permissions.")
 
+    # Auto-probe pgvector table for vector columns
+    elif req.type == "pgvector":
+        try:
+            from connectors.postgres_connector import test_destination_connection as _test_pg
+            probe_result = await _test_pg(config)
+            if probe_result.get("vector_indexes"):
+                config["vector_indexes"] = probe_result["vector_indexes"]
+            if probe_result.get("vector_field"):
+                config["vector_field"] = probe_result["vector_field"]
+            if not probe_result.get("has_vector_policy"):
+                warnings.append("No vector columns found in table. "
+                    "Ensure the table has columns of type vector(N).")
+        except Exception as e:
+            warnings.append(f"Could not probe pgvector table: {str(e)}. "
+                "Vector column discovery skipped.")
+
+    # Auto-probe MSSQL table for vector columns
+    elif req.type == "mssql":
+        try:
+            import pyodbc
+            conn_str = _build_mssql_odbc_conn_str(config)
+            mssql_conn = pyodbc.connect(conn_str, timeout=10)
+            try:
+                table = config.get("table", "vectors")
+                schema = config.get("schema_name", config.get("schema", "dbo"))
+                cursor = mssql_conn.cursor()
+                vi = _discover_mssql_vector_columns(cursor, table, schema, config)
+                if vi:
+                    config["vector_indexes"] = vi
+            finally:
+                mssql_conn.close()
+        except Exception as e:
+            warnings.append(f"Could not probe MSSQL table: {str(e)}. "
+                "Vector column discovery skipped.")
+
     dest_id = f"dst-{str(uuid.uuid4())[:8]}"
     destination = Destination(
         id=dest_id,
@@ -1415,8 +1500,35 @@ async def test_destination(dest_id: str):
 
     destination = _destination_from_doc(doc)
 
-    from connectors.cosmosdb_vector_connector import test_vector_connection
-    ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
+    if destination.type == "pgvector":
+        from connectors.postgres_connector import test_destination_connection as _test_pg
+        ok, result = await _test_with_timeout(lambda: asyncio.run(_test_pg(destination.config)))
+    elif destination.type == "mssql":
+        def _test_mssql_dest():
+            import pyodbc
+            conn_str = _build_mssql_odbc_conn_str(destination.config)
+            conn = pyodbc.connect(conn_str, timeout=10)
+            try:
+                table = destination.config.get("table", "vectors")
+                schema = destination.config.get("schema_name", destination.config.get("schema", "dbo"))
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT COUNT(*) FROM [{schema}].[{table}]")
+                row_count = cursor.fetchone()[0]
+                vi = _discover_mssql_vector_columns(cursor, table, schema, destination.config)
+                return {
+                    "status": "connected",
+                    "table": f"{schema}.{table}",
+                    "row_count": row_count,
+                    "vector_indexes": vi,
+                    "has_vector_policy": len(vi) > 0,
+                }
+            finally:
+                conn.close()
+        ok, result = await _test_with_timeout(_test_mssql_dest)
+    else:
+        from connectors.cosmosdb_vector_connector import test_vector_connection
+        ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
+
     if ok:
         # Persist vector_indexes back into destination config so pipeline creation can use them
         vi = result.get("vector_indexes")
@@ -1516,35 +1628,26 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
 
         elif req.type == "pgvector":
             from health_checker import _connect_pg
+            from connectors.postgres_connector import _discover_vector_columns
             table = req.config.get("table", "vectors")
             conn = await _connect_pg(req.config)
             try:
                 row_count = await conn.fetchval(f'SELECT COUNT(*) FROM "{table}"')
 
                 ext = await conn.fetchval("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
-                vector_col = req.config.get("vector_column", req.config.get("vector_col", "embedding"))
-                col_exists = await conn.fetchval(
-                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
-                    table, vector_col)
 
                 details = []
                 details.append(f"Table: {table}, {row_count} rows")
                 if ext:
                     details.append(f"pgvector v{ext}")
-                if col_exists:
-                    details.append(f"Vector column '{vector_col}' exists")
 
-                vector_indexes = []
-                if ext and col_exists:
-                    idx_rows = await conn.fetch(
-                        "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = $1 AND indexdef LIKE '%vector%'",
-                        table)
-                    for row in idx_rows:
-                        vector_indexes.append({
-                            "path": vector_col,
-                            "indexType": "ivfflat" if "ivfflat" in row["indexdef"] else "hnsw" if "hnsw" in row["indexdef"] else "unknown",
-                            "indexName": row["indexname"],
-                        })
+                # Discover all vector columns from table schema
+                vector_indexes = await _discover_vector_columns(conn, table)
+
+                if vector_indexes:
+                    details.append(f"{len(vector_indexes)} vector column(s) found")
+                else:
+                    details.append("No vector columns found")
 
                 return {
                     "success": True,
@@ -1559,7 +1662,7 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             try:
                 import pyodbc
             except ImportError:
-                return {"success": False, "error": "pyodbc not installed â€” MSSQL destination tests handled by changefeed connector"}
+                return {"success": False, "error": "pyodbc not installed. MSSQL destination tests handled by changefeed connector"}
 
             conn_str = _build_mssql_odbc_conn_str(req.config)
 
@@ -1570,10 +1673,18 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
                 cursor = conn.cursor()
                 cursor.execute(f"SELECT COUNT(*) FROM [{schema}].[{table}]")
                 row_count = cursor.fetchone()[0]
+
+                vector_indexes = _discover_mssql_vector_columns(cursor, table, schema, req.config)
+
+                vec_msg = ""
+                if vector_indexes:
+                    vec_msg = f" {len(vector_indexes)} vector column(s) found."
+
                 return {
                     "success": True,
-                    "message": f"Connected to MS SQL. {row_count} rows in '{schema}.{table}'.",
-                    "details": f"Schema: {schema}, Table: {table}"
+                    "message": f"Connected to MS SQL. {row_count} rows in '{schema}.{table}'.{vec_msg}",
+                    "details": f"Schema: {schema}, Table: {table}",
+                    "vector_indexes": vector_indexes,
                 }
             finally:
                 conn.close()
