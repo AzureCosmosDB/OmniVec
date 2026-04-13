@@ -4,7 +4,9 @@
 $ErrorActionPreference = "Stop"
 
 # Refresh PATH (tools installed by preprovision may not be in current PATH)
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+# Preserve current PATH entries and add any new registry entries
+$registryPath = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+$env:Path = $env:Path + ";" + $registryPath
 
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 
@@ -70,6 +72,26 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
 }
 Write-Host "  Identity:        $IDENTITY_CLIENT_ID"
 Write-Host "  Build mode:      $BUILD_MODE"
+
+# -- Store config as RG tags (enables cross-machine config sync) --
+Write-Host "`n`e[36mSaving config to resource group tags...`e[0m"
+$sysVm = Get-AzdValue "OMNIVEC_SYSTEM_NODE_VM_SIZE"
+$sysCnt = Get-AzdValue "OMNIVEC_SYSTEM_NODE_COUNT"
+$gpuVm = Get-AzdValue "OMNIVEC_GPU_NODE_VM_SIZE"
+$gpuCnt = Get-AzdValue "OMNIVEC_GPU_NODE_COUNT"
+$meta = Get-AzdValue "OMNIVEC_METADATA_STORE"
+$blob = Get-AzdValue "OMNIVEC_ENABLE_BLOB_SOURCE"
+$build = Get-AzdValue "OMNIVEC_BUILD_MODE"
+az group update --name $RESOURCE_GROUP --tags `
+    "omnivec-sys-sku=$sysVm" `
+    "omnivec-sys-count=$sysCnt" `
+    "omnivec-gpu-sku=$gpuVm" `
+    "omnivec-gpu-count=$gpuCnt" `
+    "omnivec-metadata=$meta" `
+    "omnivec-blob=$blob" `
+    "omnivec-build=$build" `
+    "omnivec-instance=$INSTANCE_ID" 2>$null | Out-Null
+Write-Host "  `e[32mConfig saved to RG tags.`e[0m"
 
 # =============================================================================
 # PHASE 1: Import or Build images

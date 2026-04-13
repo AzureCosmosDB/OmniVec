@@ -80,6 +80,26 @@ fi
 echo "  Identity:        $IDENTITY_CLIENT_ID"
 echo "  Build mode:      $BUILD_MODE"
 
+# -- Store config as RG tags (enables cross-machine config sync) --
+printf "\n${CYAN}Saving config to resource group tags...${NC}\n"
+SYS_VM=$(get_azd_value "OMNIVEC_SYSTEM_NODE_VM_SIZE")
+SYS_CNT=$(get_azd_value "OMNIVEC_SYSTEM_NODE_COUNT")
+GPU_VM=$(get_azd_value "OMNIVEC_GPU_NODE_VM_SIZE")
+GPU_CNT=$(get_azd_value "OMNIVEC_GPU_NODE_COUNT")
+META=$(get_azd_value "OMNIVEC_METADATA_STORE")
+BLOB=$(get_azd_value "OMNIVEC_ENABLE_BLOB_SOURCE")
+BUILD=$(get_azd_value "OMNIVEC_BUILD_MODE")
+az group update --name "$RESOURCE_GROUP" --tags \
+    "omnivec-sys-sku=$SYS_VM" \
+    "omnivec-sys-count=$SYS_CNT" \
+    "omnivec-gpu-sku=$GPU_VM" \
+    "omnivec-gpu-count=$GPU_CNT" \
+    "omnivec-metadata=$META" \
+    "omnivec-blob=$BLOB" \
+    "omnivec-build=$BUILD" \
+    "omnivec-instance=$INSTANCE_ID" >/dev/null 2>&1 || true
+printf "  ${GREEN}Config saved to RG tags.${NC}\n"
+
 # =============================================================================
 # PHASE 1: Import or Build images
 # =============================================================================
@@ -380,7 +400,7 @@ if [ -n "$CURRENT_HASH" ] && [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
   printf "  ${GREEN}Helm dependencies up to date, skipping.${NC}\n"
 else
   printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
-  helm dependency build "$CHART_DIR" --quiet
+  helm dependency build "$CHART_DIR" 2>/dev/null
   if [ -n "$CURRENT_HASH" ]; then
     echo "$CURRENT_HASH" > "$LOCK_HASH_FILE"
   fi
