@@ -5135,17 +5135,6 @@
             } else if (source.type === 'cosmosdb') {
                 const contentMode = 'field';
                 sourceSpecificHtml = `
-                    <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Content Source</div>
-                    <div class="form-group" style="margin-bottom: 12px;">
-                        <select class="form-input" name="override_content_mode" onchange="updatePipelineCosmosMode(this.value, '${sourceId}')">
-                            <option value="field" ${contentMode === 'field' ? 'selected' : ''}>Field Value (content in document)</option>
-                            <option value="blob_url" ${contentMode === 'blob_url' ? 'selected' : ''}>Blob Storage URL</option>
-                            <option value="http_url" ${contentMode === 'http_url' ? 'selected' : ''}>HTTP URL</option>
-                        </select>
-                    </div>
-                    <div id="pipeline-cosmos-config">
-                        ${getCosmosConfigHtml(contentMode, source.config)}
-                    </div>
                     <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); font-size: 12px; color: var(--text-tertiary);">
                         <strong>Database:</strong> ${source.config.database || 'N/A'}<br>
                         <strong>Container:</strong> ${source.config.container || 'N/A'}
@@ -5181,46 +5170,6 @@
             `;
 
             configDiv.innerHTML = sourceSpecificHtml + contentFieldsHtml;
-        }
-
-        function updatePipelineCosmosMode(mode, sourceId) {
-            const source = sources.find(s => s.id === sourceId);
-            const container = document.getElementById('pipeline-cosmos-config');
-            container.innerHTML = getCosmosConfigHtml(mode, source ? source.config : {});
-        }
-
-        function getCosmosConfigHtml(mode, config) {
-            if (mode === 'field') {
-                const fields = ['content'];
-                return `
-                    <div class="form-group" style="margin-bottom: 0;">
-                        <label class="form-label" style="font-size: 12px;">Content Fields</label>
-                        <div class="content-field-tags" id="override-content-field-tags" style="display:flex;flex-wrap:wrap;gap:6px;padding:6px 8px;border:1px solid var(--border-default);border-radius:var(--radius-md);min-height:36px;background:var(--bg-tertiary);align-items:center;">
-                            ${fields.map(f => `<span class="content-field-tag" data-field="${f}" style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:16px;font-size:11px;color:var(--accent-secondary);">
-                                ${f} <span onclick="removeContentFieldTag(this.parentElement)" style="cursor:pointer;font-size:13px;line-height:1;opacity:0.7;">&times;</span>
-                            </span>`).join('')}
-                            <input type="text" class="content-field-input" placeholder="Add..." style="border:none;outline:none;background:transparent;color:var(--text-primary);font-size:12px;min-width:60px;flex:1;" onkeydown="handleContentFieldKey(event, this)">
-                        </div>
-                    </div>
-                `;
-            } else {
-                const urlTypes = config.url_content_types || ['txt', 'json', 'pdf'];
-                return `
-                    <div class="form-group" style="margin-bottom: 8px;">
-                        <label class="form-label" style="font-size: 12px;">URL Field</label>
-                        <input type="text" class="form-input" name="override_content_field" value="fileUrl" placeholder="fileUrl">
-                    </div>
-                    <div style="font-size: 12px; font-weight: 500; margin-bottom: 8px;">Content Types</div>
-                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 12px;">
-                        ${['txt', 'json', 'pdf', 'html', 'docx', 'csv'].map(ft => `
-                            <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-                                <input type="checkbox" name="override_url_content_types" value="${ft}" ${urlTypes.includes(ft) ? 'checked' : ''}>
-                                ${ft}
-                            </label>
-                        `).join('')}
-                    </div>
-                `;
-            }
         }
 
         // API calls
