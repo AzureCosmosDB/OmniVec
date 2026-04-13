@@ -568,8 +568,8 @@ if ($FromStep -le 8) {
 
     $pipBody = @{
         name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{}; content_fields = @("content") })
-        destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
-        processing_mode = "queue"
+        destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; vector_index_path = "embedding"
+        process_existing = $true; processing_mode = "queue"
     } | ConvertTo-Json -Depth 5
     $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $apiHeaders -Body $pipBody
     $PIP_ID = $pipResult.pipeline.id

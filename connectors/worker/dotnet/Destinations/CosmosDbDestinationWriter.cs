@@ -53,7 +53,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
             for (int i = 0; i < items.Count; i += 100)
             {
                 var chunk = items.Skip(i).Take(100).ToList();
-                tasks.Add(WriteBatchWithRetryAsync(container, group.Key, chunk, pkField, ct));
+                tasks.Add(WriteBatchWithRetryAsync(container, group.Key, chunk, pkField, vectorField, ct));
             }
         }
 
@@ -65,6 +65,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
         string pkValue,
         List<EmbeddingResult> docs,
         string pkField,
+        string vectorField,
         CancellationToken ct)
     {
         var pk = new PartitionKey(pkValue);
