@@ -234,7 +234,7 @@ if ($Existing) {
     }
 
     # Auth headers
-    $headers = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+    $apiHeaders = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
 
     # Skip to step 3 (steps 1-2 are provisioning)
     $FromStep = [Math]::Max($FromStep, 3)
@@ -343,7 +343,7 @@ LogOk "API healthy."
 Save-Checkpoint 3
 
 # Auth headers for all API calls
-$headers = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+$apiHeaders = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
 
 # =============================================================================
 # STEP 4: Configure CLI
@@ -482,12 +482,12 @@ if ($FromStep -le 6) {
         api_key = $AOAI_KEY; model = $AOAI_DEPLOYMENT; deployment = $AOAI_DEPLOYMENT
         dimensions = $AOAI_DIMS; api_version = "2024-06-01"
     } | ConvertTo-Json
-    $modelResult = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Method POST -Headers $headers -Body $modelBody
+    $modelResult = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Method POST -Headers $apiHeaders -Body $modelBody
     $MODEL_ID = $modelResult.id
     LogOk "Model: $MODEL_ID ($AOAI_DEPLOYMENT, ${AOAI_DIMS}d)"
     Save-Checkpoint 6
 } else {
-    $models = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Headers $headers
+    $models = Invoke-RestMethod -Uri "$SERVER_URL/api/models" -Headers $apiHeaders
     $model = $models.models | Where-Object { $_.name -eq $MODEL_NAME } | Select-Object -First 1
     if (-not $model) {
         LogErr "Required model '$MODEL_NAME' not found. Re-run from step 6."
@@ -503,18 +503,24 @@ if ($FromStep -le 7) {
     LogStep 7 "Creating source and destination..."
 
     # Clean up any existing resources from previous runs
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
-    foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
-    foreach ($s in $existing.sources) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
-    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
-    foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers $headers 2>$null } catch {} }
+    try {
+        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+        foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
+    } catch {}
+    try {
+        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+        foreach ($s in $existing.sources) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
+    } catch {}
+    try {
+        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+        foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
+    } catch {}
 
     $srcBody = @{ name = $SOURCE_NAME; type = "cosmosdb"; config = @{
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "test-documents"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID
     }} | ConvertTo-Json -Depth 5
-    $srcResult = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Method POST -Headers $headers -Body $srcBody
+    $srcResult = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Method POST -Headers $apiHeaders -Body $srcBody
     $SOURCE_ID = $srcResult.source.id
     LogOk "Source: $SOURCE_ID"
 
@@ -522,19 +528,19 @@ if ($FromStep -le 7) {
         endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "vectors"
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID; vector_dimensions = $AOAI_DIMS
     }} | ConvertTo-Json -Depth 5
-    $dstResult = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Method POST -Headers $headers -Body $dstBody
+    $dstResult = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Method POST -Headers $apiHeaders -Body $dstBody
     $DEST_ID = $dstResult.destination.id
     LogOk "Destination: $DEST_ID"
     Save-Checkpoint 7
 } else {
-    $srcs = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $headers
+    $srcs = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $apiHeaders
     $src = $srcs.sources | Where-Object { $_.name -eq $SOURCE_NAME } | Select-Object -First 1
     if (-not $src) {
         LogErr "Required source '$SOURCE_NAME' not found. Re-run from step 7."
         exit 1
     }
     $SOURCE_ID = $src.id
-    $dsts = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $headers
+    $dsts = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $apiHeaders
     $dst = $dsts.destinations | Where-Object { $_.name -eq $DEST_NAME } | Select-Object -First 1
     if (-not $dst) {
         LogErr "Required destination '$DEST_NAME' not found. Re-run from step 7."
@@ -551,10 +557,10 @@ if ($FromStep -le 8) {
 
     # Clean up an existing demo pipeline to make step-8 resume idempotent
     try {
-        $existingPipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
+        $existingPipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
         foreach ($p in $existingPipelines.pipelines) {
             if ($p.name -eq $PIPELINE_NAME) {
-                try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $headers 2>$null | Out-Null } catch {}
+                try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $apiHeaders 2>$null | Out-Null } catch {}
             }
         }
     } catch {}
@@ -564,7 +570,7 @@ if ($FromStep -le 8) {
         destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
         processing_mode = "queue"
     } | ConvertTo-Json -Depth 5
-    $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $headers -Body $pipBody
+    $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $apiHeaders -Body $pipBody
     $PIP_ID = $pipResult.pipeline.id
     LogOk "Pipeline created (queue mode): $PIP_ID"
 
@@ -624,13 +630,13 @@ print("DOCS_OK")
 
     # Resume pipeline
     Log "  Resuming pipeline..."
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Pipeline activated (queue mode). Waiting for processing..."
     $queueEmbedded = $false
     for ($i = 0; $i -lt 24; $i++) {
         try {
-            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
+            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $apiHeaders
             if ($poll.stats.embedded_count -gt 0) {
                 $queueEmbedded = $true
                 break
@@ -647,7 +653,7 @@ print("DOCS_OK")
     }
     Save-Checkpoint 8
 } else {
-    $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $headers
+    $pips = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
     $pipeline = $pips.pipelines | Where-Object { $_.name -eq $PIPELINE_NAME } | Select-Object -First 1
     if (-not $pipeline) {
         LogErr "Required pipeline '$PIPELINE_NAME' not found. Re-run from step 8."
@@ -663,7 +669,7 @@ if ($PIP_ID) {
     LogStep 9 "Verifying queue mode results..."
     if (-not $Quiet) { & $CLI pipeline show $PIP_ID }
 
-    $stats = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $headers
+    $stats = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $apiHeaders
     Log "  Embedded:   $($stats.stats.embedded_count)"
     Log "  Completion: $($stats.stats.completion_pct)%"
 
@@ -686,19 +692,19 @@ if ($FromStep -le 10 -and $PIP_ID) {
     LogStep 10 "Switching pipeline to inline mode, resetting..."
 
     # Pause pipeline before switching mode
-    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $headers | Out-Null } catch {}
+    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $apiHeaders | Out-Null } catch {}
 
     # Switch processing mode to inline
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Switched to inline mode"
 
     # Reset pipeline — forces CFP to reprocess all docs from the beginning
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Pipeline reset — will reprocess all docs in inline mode"
 
     # Resume pipeline
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $headers | Out-Null
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $headers | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
+    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
     LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
 
     # Poll source container until embeddings appear or 120s timeout
