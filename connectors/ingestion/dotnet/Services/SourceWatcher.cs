@@ -310,8 +310,8 @@ public class SourceWatcher : ISourceWatcher
                     {
                         var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
                         // Extract content fields from pipeline source config (not source)
-                        var pipelineSource = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
-                        var fieldNames = pipelineSource?.ContentFields ?? new List<string> { "content" };
+                        var pipSrc = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
+                        var fieldNames = pipSrc?.ContentFields ?? new List<string> { "content" };
                         var contentFields = new Dictionary<string, string>();
                         foreach (var field in fieldNames)
                         {
