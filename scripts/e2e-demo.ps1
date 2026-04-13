@@ -560,7 +560,7 @@ if ($FromStep -le 8) {
     } catch {}
 
     $pipBody = @{
-        name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{} })
+        name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{}; content_fields = @("content") })
         destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; process_existing = $true
         processing_mode = "queue"
     } | ConvertTo-Json -Depth 5
