@@ -2012,7 +2012,7 @@
                                 <div class="form-group">
                                     <label class="form-label">Vector Store</label>
                                     <div style="display: flex; gap: 8px;">
-                                        <select class="form-input" name="destination" id="pipeline-destination" style="flex: 1;"></select>
+                                        <select class="form-input" name="destination" id="pipeline-destination" style="flex: 1;" onchange="loadVectorPoliciesForDest()"></select>
                                         <button type="button" class="btn btn-secondary" onclick="testExistingPipelineDest()" style="white-space: nowrap;">
                                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                                             Test
@@ -2020,6 +2020,16 @@
                                     </div>
                                 </div>
                                 <div id="pl-dest-existing-test-result" style="margin-top: 8px;"></div>
+                                <div class="form-group" id="pl-dest-vector-policy-group" style="display: none; margin-top: 12px;">
+                                    <label class="form-label">Vector Index Policy</label>
+                                    <select class="form-input" id="pl-dest-vector-policy"></select>
+                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                        Select which vector embedding field to use for this pipeline
+                                    </small>
+                                    <div id="pl-dest-vector-policy-warning" style="display: none; margin-top: 8px; padding: 8px 12px; background: var(--warning-muted, rgba(255,204,0,0.1)); border: 1px solid var(--warning); border-radius: var(--radius-sm); font-size: 12px; color: var(--warning);">
+                                        ⚠ No vector policies found on destination. Test the connection or check vector indexing configuration.
+                                    </div>
+                                </div>
                                 <div class="form-group" style="margin-top: 12px;">
                                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                                         <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()">
@@ -3893,6 +3903,15 @@
                         </div>
                         <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>
                     </div>
+                    <div class="form-group" style="margin-top: 4px;">
+                        <label class="form-label">Vector Index Path</label>
+                        <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
+                            /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
+                        </div>
+                        <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                            The vector embedding field used by this pipeline
+                        </small>
+                    </div>
                 `;
             } else if (currentPipelineTab === 'model') {
                 configPanel.innerHTML = `
@@ -4388,6 +4407,7 @@
                         sources: pipeline.sources,
                         docgrok_pipeline: pipeline.docgrok_pipeline,
                         destination_id,
+                        vector_index_path: pipeline.vector_index_path || 'embedding',
                         process_existing: editedPipelineData.process_existing !== undefined ? editedPipelineData.process_existing : pipeline.process_existing,
                         metadata_mapping: pipeline.metadata_mapping || {},
                         content_strategy: editedPipelineData.content_strategy || pipeline.content_strategy || 'truncate',
@@ -4535,6 +4555,9 @@
             const destSelect = document.getElementById('pipeline-destination');
             destSelect.innerHTML = destinations.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
 
+            // Load vector policies for the initially-selected destination
+            loadVectorPoliciesForDest();
+
             const docgrokSelect = document.getElementById('pipeline-docgrok');
             // Filter out old auto-created pipelines (legacy - no longer created)
             const filteredPipelines = docgrokPipelines.filter(p => !p.name.endsWith('-auto'));
@@ -4618,11 +4641,62 @@
                 const data = await res.json();
                 if (data.success) {
                     resultDiv.innerHTML = `<span style="color: var(--success); font-size: 13px;">Connected</span>`;
+                    // Populate vector policies from test result
+                    const vi = data.result?.vector_indexes || [];
+                    populateVectorPolicyDropdown(vi);
                 } else {
                     resultDiv.innerHTML = `<span style="color: var(--error); font-size: 13px;">Failed: ${data.error}</span>`;
                 }
             } catch (err) {
                 resultDiv.innerHTML = `<span style="color: var(--error); font-size: 13px;">Error: ${err.message}</span>`;
+            }
+        }
+
+        function loadVectorPoliciesForDest() {
+            const destId = document.getElementById('pipeline-destination').value;
+            if (!destId) {
+                document.getElementById('pl-dest-vector-policy-group').style.display = 'none';
+                return;
+            }
+            // Try to load from destination's stored config first
+            const dest = destinations.find(d => d.id === destId);
+            const vi = dest?.config?.vector_indexes || [];
+            if (vi.length > 0) {
+                populateVectorPolicyDropdown(vi);
+            } else {
+                // No cached policies — show the dropdown prompting user to test
+                const group = document.getElementById('pl-dest-vector-policy-group');
+                group.style.display = 'block';
+                const select = document.getElementById('pl-dest-vector-policy');
+                select.innerHTML = '<option value="">— Test connection to load policies —</option>';
+                document.getElementById('pl-dest-vector-policy-warning').style.display = 'block';
+            }
+        }
+
+        function populateVectorPolicyDropdown(vectorIndexes) {
+            const group = document.getElementById('pl-dest-vector-policy-group');
+            const select = document.getElementById('pl-dest-vector-policy');
+            const warning = document.getElementById('pl-dest-vector-policy-warning');
+            group.style.display = 'block';
+
+            if (!vectorIndexes || vectorIndexes.length === 0) {
+                select.innerHTML = '<option value="">No vector policies found</option>';
+                warning.style.display = 'block';
+                return;
+            }
+
+            warning.style.display = 'none';
+            select.innerHTML = vectorIndexes.map(vi => {
+                const path = (vi.path || '').replace(/^\//, '');
+                const dims = vi.dimensions || '?';
+                const dist = vi.distanceFunction || '?';
+                const idx = vi.indexType || '?';
+                return `<option value="${path}">${path} — ${dims}d, ${dist}, ${idx}</option>`;
+            }).join('');
+
+            // Auto-select if only one policy
+            if (vectorIndexes.length === 1) {
+                select.selectedIndex = 0;
             }
         }
 
@@ -4648,6 +4722,7 @@
                         if (processingModeSelect) processingModeSelect.value = 'inline';
                         resultDiv.innerHTML =
                             `<span style="color: var(--success); font-size: 13px;">Matched: ${match.name} (using inline mode)</span>`;
+                        loadVectorPoliciesForDest();
                         return;
                     }
                     // No match found - create destination from source config
@@ -4931,6 +5006,10 @@
                 const data = await res.json();
                 if (data.success) {
                     resultDiv.innerHTML = `<div style="background:var(--success-muted);border:1px solid var(--success);padding:8px;border-radius:var(--radius-sm);color:var(--success);font-size:12px;">Connected: ${data.message || 'Success'}</div>`;
+                    // Populate vector policy dropdown when testing from pipeline wizard's new dest
+                    if (prefix === 'pl-dest' && data.vector_indexes) {
+                        populateVectorPolicyDropdown(data.vector_indexes);
+                    }
                 } else {
                     resultDiv.innerHTML = `<div style="background:var(--error-muted);border:1px solid var(--error);padding:8px;border-radius:var(--radius-sm);font-size:12px;"><div style="color:var(--error);font-weight:500;">Failed</div><div style="color:var(--text-secondary);margin-top:4px;">${data.error}</div></div>`;
                 }
@@ -5354,6 +5433,15 @@
                 docgrokPipelineName = modelId;
             }
 
+            // --- Resolve Vector Index Path ---
+            const vectorPolicySelect = document.getElementById('pl-dest-vector-policy');
+            const vectorIndexPath = vectorPolicySelect ? vectorPolicySelect.value : '';
+            if (!vectorIndexPath) {
+                alert('Please select a vector index policy. Test the destination connection if no policies are shown.');
+                showPipelineStep('destination');
+                return;
+            }
+
             // --- Create Pipeline ---
             const contentStrategy = formData.get('content_strategy') || 'truncate';
             const processingMode = formData.get('processing_mode') || 'queue';
@@ -5391,6 +5479,7 @@
                 sources: [pipelineSourceEntry],
                 docgrok_pipeline: docgrokPipelineName,
                 destination_id: destinationId,
+                vector_index_path: vectorIndexPath,
                 process_existing: form.querySelector('input[name="process_existing"]').checked,
                 content_strategy: contentStrategy,
                 processing_mode: processingMode,

@@ -451,7 +451,7 @@ func toInt(v any) int {
 }
 
 func newPipelineCreateCmd() *cobra.Command {
-	var name, description, source, destination, model, contentFields string
+	var name, description, source, destination, model, contentFields, vectorIndexPath string
 	var processExisting bool
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -486,9 +486,10 @@ func newPipelineCreateCmd() *cobra.Command {
 				"sources": []map[string]any{
 					{"source_id": srcID, "filters": map[string]any{}, "content_fields": fields},
 				},
-				"destination_id":   dstID,
-				"docgrok_pipeline": model,
-				"process_existing": processExisting,
+				"destination_id":     dstID,
+				"docgrok_pipeline":   model,
+				"vector_index_path":  vectorIndexPath,
+				"process_existing":   processExisting,
 			}
 			if description != "" {
 				body["description"] = description
@@ -516,6 +517,7 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&destination, "destination", "", "Destination ID")
 	cmd.Flags().StringVar(&model, "model", "", "DocGrok pipeline or model name")
 	cmd.Flags().StringVar(&contentFields, "content-fields", "", "Comma-separated content field names (default: content)")
+	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path from destination's vector policy (required)")
 	cmd.Flags().BoolVar(&processExisting, "process-existing", true, "Process existing documents on creation")
 	return cmd
 }

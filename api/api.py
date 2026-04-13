@@ -240,6 +240,56 @@ def _build_mssql_odbc_conn_str(cfg: dict) -> str:
     return f"Driver={{ODBC Driver 18 for SQL Server}};Server={server};Database={database};Uid={user};Pwd={password};Encrypt=yes;TrustServerCertificate=yes;"
 
 
+def _discover_mssql_vector_columns(cursor, table: str, schema: str = "dbo", config: dict = None) -> list:
+    """Discover vector columns in an MSSQL table.
+
+    Probes INFORMATION_SCHEMA for native ``vector`` type columns (SQL Server 2025+).
+    Falls back to reporting the configured ``vector_column`` if it exists in the
+    table — older SQL Server stores vectors as JSON in NVARCHAR columns.
+
+    Returns ``vector_indexes`` in the same format as CosmosDB so the UI dropdown
+    and pipeline ``vector_index_path`` validation work identically.
+    """
+    import re as _re
+    cursor.execute(
+        """SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+           FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_NAME = ? AND TABLE_SCHEMA = ?
+           ORDER BY ORDINAL_POSITION""",
+        (table, schema),
+    )
+    columns = cursor.fetchall()
+
+    vector_indexes = []
+    all_col_names = set()
+    for col_name, data_type, max_length in columns:
+        all_col_names.add(col_name)
+        dt_lower = (data_type or "").lower()
+        # SQL Server 2025+ native vector type
+        if "vector" in dt_lower:
+            dimensions = None
+            if max_length and isinstance(max_length, int) and max_length > 0:
+                dimensions = max_length
+            vector_indexes.append({
+                "path": col_name,
+                "dimensions": dimensions,
+                "dataType": "vector",
+            })
+
+    # Fallback: if no native vector columns found, include the configured
+    # vector_column when it exists in the table (NVARCHAR storing JSON vectors)
+    if not vector_indexes and config:
+        vec_col = config.get("vector_column", config.get("vector_col", "embedding"))
+        if vec_col in all_col_names:
+            vector_indexes.append({
+                "path": vec_col,
+                "dimensions": config.get("vector_dimensions"),
+                "dataType": "float32",
+            })
+
+    return vector_indexes
+
+
 async def _test_with_timeout(fn, retries: int = TEST_CONN_RETRIES, timeout: int = TEST_CONN_TIMEOUT):
     """Run a test-connection function with timeout and retries.
     fn can be sync or async â€” sync calls run in a thread pool so timeout works.
@@ -1324,6 +1374,9 @@ async def create_destination(req: CreateDestinationRequest):
             # Auto-set vector field
             if "vector_field" not in config and probe_result.get("vector_field"):
                 config["vector_field"] = probe_result["vector_field"]
+            # Store all vector indexes from probe
+            if probe_result.get("vector_indexes"):
+                config["vector_indexes"] = probe_result["vector_indexes"]
             # Check vector embedding policy
             if not probe_result.get("has_vector_policy"):
                 enabled = False
@@ -1339,6 +1392,41 @@ async def create_destination(req: CreateDestinationRequest):
             enabled = False
             warnings.append(f"Could not connect to destination: {str(e)}. "
                 "Check endpoint, database, container, and permissions.")
+
+    # Auto-probe pgvector table for vector columns
+    elif req.type == "pgvector":
+        try:
+            from connectors.postgres_connector import test_destination_connection as _test_pg
+            probe_result = await _test_pg(config)
+            if probe_result.get("vector_indexes"):
+                config["vector_indexes"] = probe_result["vector_indexes"]
+            if probe_result.get("vector_field"):
+                config["vector_field"] = probe_result["vector_field"]
+            if not probe_result.get("has_vector_policy"):
+                warnings.append("No vector columns found in table. "
+                    "Ensure the table has columns of type vector(N).")
+        except Exception as e:
+            warnings.append(f"Could not probe pgvector table: {str(e)}. "
+                "Vector column discovery skipped.")
+
+    # Auto-probe MSSQL table for vector columns
+    elif req.type == "mssql":
+        try:
+            import pyodbc
+            conn_str = _build_mssql_odbc_conn_str(config)
+            mssql_conn = pyodbc.connect(conn_str, timeout=10)
+            try:
+                table = config.get("table", "vectors")
+                schema = config.get("schema_name", config.get("schema", "dbo"))
+                cursor = mssql_conn.cursor()
+                vi = _discover_mssql_vector_columns(cursor, table, schema, config)
+                if vi:
+                    config["vector_indexes"] = vi
+            finally:
+                mssql_conn.close()
+        except Exception as e:
+            warnings.append(f"Could not probe MSSQL table: {str(e)}. "
+                "Vector column discovery skipped.")
 
     dest_id = f"dst-{str(uuid.uuid4())[:8]}"
     destination = Destination(
@@ -1412,9 +1500,43 @@ async def test_destination(dest_id: str):
 
     destination = _destination_from_doc(doc)
 
-    from connectors.cosmosdb_vector_connector import test_vector_connection
-    ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
+    if destination.type == "pgvector":
+        from connectors.postgres_connector import test_destination_connection as _test_pg
+        ok, result = await _test_with_timeout(lambda: asyncio.run(_test_pg(destination.config)))
+    elif destination.type == "mssql":
+        def _test_mssql_dest():
+            import pyodbc
+            conn_str = _build_mssql_odbc_conn_str(destination.config)
+            conn = pyodbc.connect(conn_str, timeout=10)
+            try:
+                table = destination.config.get("table", "vectors")
+                schema = destination.config.get("schema_name", destination.config.get("schema", "dbo"))
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT COUNT(*) FROM [{schema}].[{table}]")
+                row_count = cursor.fetchone()[0]
+                vi = _discover_mssql_vector_columns(cursor, table, schema, destination.config)
+                return {
+                    "status": "connected",
+                    "table": f"{schema}.{table}",
+                    "row_count": row_count,
+                    "vector_indexes": vi,
+                    "has_vector_policy": len(vi) > 0,
+                }
+            finally:
+                conn.close()
+        ok, result = await _test_with_timeout(_test_mssql_dest)
+    else:
+        from connectors.cosmosdb_vector_connector import test_vector_connection
+        ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
+
     if ok:
+        # Persist vector_indexes back into destination config so pipeline creation can use them
+        vi = result.get("vector_indexes")
+        if vi is not None:
+            config = dict(destination.config)
+            config["vector_indexes"] = vi
+            destination.config = config
+            store.upsert(_to_doc(destination, "destination"))
         return {"success": True, "result": result}
     return {"success": False, "error": result}
 
@@ -1506,35 +1628,26 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
 
         elif req.type == "pgvector":
             from health_checker import _connect_pg
+            from connectors.postgres_connector import _discover_vector_columns
             table = req.config.get("table", "vectors")
             conn = await _connect_pg(req.config)
             try:
                 row_count = await conn.fetchval(f'SELECT COUNT(*) FROM "{table}"')
 
                 ext = await conn.fetchval("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
-                vector_col = req.config.get("vector_column", req.config.get("vector_col", "embedding"))
-                col_exists = await conn.fetchval(
-                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
-                    table, vector_col)
 
                 details = []
                 details.append(f"Table: {table}, {row_count} rows")
                 if ext:
                     details.append(f"pgvector v{ext}")
-                if col_exists:
-                    details.append(f"Vector column '{vector_col}' exists")
 
-                vector_indexes = []
-                if ext and col_exists:
-                    idx_rows = await conn.fetch(
-                        "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = $1 AND indexdef LIKE '%vector%'",
-                        table)
-                    for row in idx_rows:
-                        vector_indexes.append({
-                            "path": vector_col,
-                            "indexType": "ivfflat" if "ivfflat" in row["indexdef"] else "hnsw" if "hnsw" in row["indexdef"] else "unknown",
-                            "indexName": row["indexname"],
-                        })
+                # Discover all vector columns from table schema
+                vector_indexes = await _discover_vector_columns(conn, table)
+
+                if vector_indexes:
+                    details.append(f"{len(vector_indexes)} vector column(s) found")
+                else:
+                    details.append("No vector columns found")
 
                 return {
                     "success": True,
@@ -1549,7 +1662,7 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             try:
                 import pyodbc
             except ImportError:
-                return {"success": False, "error": "pyodbc not installed â€” MSSQL destination tests handled by changefeed connector"}
+                return {"success": False, "error": "pyodbc not installed. MSSQL destination tests handled by changefeed connector"}
 
             conn_str = _build_mssql_odbc_conn_str(req.config)
 
@@ -1560,10 +1673,18 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
                 cursor = conn.cursor()
                 cursor.execute(f"SELECT COUNT(*) FROM [{schema}].[{table}]")
                 row_count = cursor.fetchone()[0]
+
+                vector_indexes = _discover_mssql_vector_columns(cursor, table, schema, req.config)
+
+                vec_msg = ""
+                if vector_indexes:
+                    vec_msg = f" {len(vector_indexes)} vector column(s) found."
+
                 return {
                     "success": True,
-                    "message": f"Connected to MS SQL. {row_count} rows in '{schema}.{table}'.",
-                    "details": f"Schema: {schema}, Table: {table}"
+                    "message": f"Connected to MS SQL. {row_count} rows in '{schema}.{table}'.{vec_msg}",
+                    "details": f"Schema: {schema}, Table: {table}",
+                    "vector_indexes": vector_indexes,
                 }
             finally:
                 conn.close()
@@ -1675,11 +1796,23 @@ async def create_pipeline(req: CreatePipelineRequest):
             )
 
     # Validate destination exists
-    if not store.get(req.destination_id, "destination"):
+    dest_doc = store.get(req.destination_id, "destination")
+    if not dest_doc:
         raise HTTPException(
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+
+    # Validate vector_index_path exists in destination's vector policies
+    dest_config = dest_doc.get("config", {})
+    vector_indexes = dest_config.get("vector_indexes", [])
+    if vector_indexes:
+        valid_paths = [vi.get("path", "").lstrip("/") for vi in vector_indexes]
+        if req.vector_index_path.lstrip("/") not in valid_paths:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Vector index path '/{req.vector_index_path}' not found in destination. Available: {[f'/{p}' for p in valid_paths]}"
+            )
 
     # Validate docgrok_pipeline (must be a valid model ID or transform pipeline)
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
@@ -1707,6 +1840,7 @@ async def create_pipeline(req: CreatePipelineRequest):
         sources=req.sources,
         docgrok_pipeline=resolved_pipeline,
         destination_id=req.destination_id,
+        vector_index_path=req.vector_index_path,
         status=initial_status,
         process_existing=req.process_existing,
         metadata_mapping=req.metadata_mapping,
@@ -1731,12 +1865,26 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
 
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
 
+    # Validate vector_index_path against destination if provided
+    dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    if dest_doc:
+        dest_config = dest_doc.get("config", {})
+        vector_indexes = dest_config.get("vector_indexes", [])
+        if vector_indexes:
+            valid_paths = [vi.get("path", "").lstrip("/") for vi in vector_indexes]
+            if req.vector_index_path.lstrip("/") not in valid_paths:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Vector index path '/{req.vector_index_path}' not found in destination. Available: {[f'/{p}' for p in valid_paths]}"
+                )
+
     pipeline = _pipeline_from_doc(doc)
     pipeline.name = req.name
     pipeline.description = req.description
     pipeline.sources = req.sources
     pipeline.docgrok_pipeline = resolved_pipeline
     pipeline.destination_id = req.destination_id
+    pipeline.vector_index_path = req.vector_index_path
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
@@ -2186,25 +2334,29 @@ def _extract_text_parts_from_doc(doc: dict, content_field) -> list:
     return parts
 
 
-def _search_single_index(destination, query_embedding: list, top_k: int, content_field="content") -> list:
+def _search_single_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
     """Synchronous vector search on a single destination (CosmosDB or pgvector)."""
     from models import DestinationType
 
     # Check destination type and route to appropriate search function
     if destination.type == DestinationType.PGVECTOR:
-        return _search_pgvector_index(destination, query_embedding, top_k, content_field)
+        return _search_pgvector_index(destination, query_embedding, top_k, content_field, vector_field)
     else:
-        return _search_cosmosdb_index(destination, query_embedding, top_k, content_field)
+        return _search_cosmosdb_index(destination, query_embedding, top_k, content_field, vector_field)
 
 
-def _search_pgvector_index(destination, query_embedding: list, top_k: int, content_field="content") -> list:
+def _search_pgvector_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
     """Synchronous vector search on a pgvector table."""
     import asyncio
     from connectors.postgres_connector import search_vectors
 
-    # Run async search synchronously using asyncio.run() which properly manages the event loop
+    # Override vector_column in config if pipeline specifies a vector_index_path
+    search_config = dict(destination.config)
+    if vector_field:
+        search_config["vector_column"] = vector_field
+
     raw_results = asyncio.run(
-        search_vectors(destination.config, query_embedding, top_k)
+        search_vectors(search_config, query_embedding, top_k)
     )
 
     results = []
@@ -2222,7 +2374,7 @@ def _search_pgvector_index(destination, query_embedding: list, top_k: int, conte
     return results
 
 
-def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, content_field="content") -> list:
+def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
     """Synchronous vector search on a single CosmosDB container."""
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
@@ -2232,14 +2384,17 @@ def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, conte
     database = client.get_database_client(destination.config["database"])
     container = database.get_container_client(destination.config["container"])
 
+    # Use pipeline's vector_index_path, fall back to destination config, then default
+    vf = vector_field or destination.config.get("vector_field", "embedding")
+
     validated = [float(x) for x in query_embedding]
     embedding_str = "[" + ",".join(str(x) for x in validated) + "]"
 
     query = f"""
         SELECT TOP @top_k
-            c, VectorDistance(c.embedding, {embedding_str}) as distance
+            c, VectorDistance(c.{vf}, {embedding_str}) as distance
         FROM c
-        ORDER BY VectorDistance(c.embedding, {embedding_str})
+        ORDER BY VectorDistance(c.{vf}, {embedding_str})
     """
 
     fields = _resolve_content_fields(content_field)
@@ -2255,7 +2410,8 @@ def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, conte
         text_parts = _extract_text_parts_from_doc(doc, content_field)
         # Build metadata from scalar fields
         skip_fields = {"id", "text", "content", "source", "source_ref",
-                       "embedding", "metadata", "_rid", "_self", "_etag", "_attachments", "_ts"}
+                       "embedding", "metadata", "_rid", "_self", "_etag", "_attachments", "_ts",
+                       vf}
         skip_fields.update(fields)
         metadata = doc.get("metadata", {})
         for k, v in doc.items():
@@ -2384,8 +2540,9 @@ async def playground_search(req: SearchRequest):
     # Search all indexes in parallel
     search_start = time.time()
 
-    # Resolve content_fields per destination from pipeline source config
+    # Resolve content_fields and vector_index_path per destination from pipeline config
     source_content_fields = {}  # dest_id -> content_fields
+    dest_vector_fields = {}  # dest_id -> vector_index_path
     for dest_id, dest, pip in dest_infos:
         cf = ["content"]
         if pip:
@@ -2393,14 +2550,18 @@ async def playground_search(req: SearchRequest):
             if sources:
                 src = sources[0] if isinstance(sources[0], dict) else sources[0].dict()
                 cf = src.get("content_fields", ["content"])
+            vip = pip.get("vector_index_path")
+            if vip:
+                dest_vector_fields[dest_id] = vip.lstrip("/")
         source_content_fields[dest_id] = cf
 
     async def search_one(dest_id, destination, model_ref):
         try:
             t0 = time.time()
             cf = source_content_fields.get(dest_id, ["content"])
+            vf = dest_vector_fields.get(dest_id)
             results = await asyncio.to_thread(
-                _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf
+                _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf, vf
             )
             search_ms = int((time.time() - t0) * 1000)
             for r in results:
@@ -3655,8 +3816,10 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
                 if sources:
                     src = sources[0] if isinstance(sources[0], dict) else sources[0]
                     cf = src.get("content_fields", ["content"]) if isinstance(src, dict) else getattr(src, "content_fields", ["content"])
+                # Use pipeline's vector_index_path for search
+                vf = matched_pip.get("vector_index_path", "").lstrip("/") or None
                 results = await asyncio.to_thread(
-                    _search_single_index, destination, query_embedding, assistant.top_k, cf
+                    _search_single_index, destination, query_embedding, assistant.top_k, cf, vf
                 )
                 search_results.extend(results)
             except Exception as e:

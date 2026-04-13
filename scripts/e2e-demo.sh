@@ -564,7 +564,7 @@ if [ "$FROM_STEP" -le 8 ]; then
   log_step 8 "Creating pipeline (queue mode), inserting docs, activating..."
 
   PIP_BODY=$(cat <<PEOF
-{"name":"demo-pipeline","sources":[{"source_id":"$SOURCE_ID","filters":{},"content_fields":["content"]}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","process_existing":true,"processing_mode":"queue"}
+{"name":"demo-pipeline","sources":[{"source_id":"$SOURCE_ID","filters":{},"content_fields":["content"]}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","vector_index_path":"embedding","process_existing":true,"processing_mode":"queue"}
 PEOF
   )
   PIP_RESULT=$(api_post "/api/pipelines" "$PIP_BODY")

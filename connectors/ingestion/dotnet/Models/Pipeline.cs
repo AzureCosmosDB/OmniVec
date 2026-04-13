@@ -30,6 +30,9 @@ public class Pipeline
 
     [JsonPropertyName("generation")]
     public string Generation { get; set; } = "1";
+
+    [JsonPropertyName("vector_index_path")]
+    public string VectorIndexPath { get; set; } = "embedding";
 }
 
 public class PipelineSource
