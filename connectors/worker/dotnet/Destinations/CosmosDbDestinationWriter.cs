@@ -29,6 +29,9 @@ public class CosmosDbDestinationWriter : IDestinationWriter
         var client = GetOrCreateClient(endpoint);
         var container = client.GetDatabase(database).GetContainer(containerName);
 
+        // Read vector path from destination config (set by API probe of container's vector policy)
+        var vectorField = config.ContainsKey("vector_field") ? config["vector_field"]?.ToString() ?? "embedding" : "embedding";
+
         // Resolve partition key path
         var cacheKey = $"{endpoint}/{database}/{containerName}";
         if (!_pkPathCache.TryGetValue(cacheKey, out var pkPath))
@@ -78,7 +81,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 {
                     var ops = new List<PatchOperation>
                     {
-                        PatchOperation.Set("/embedding", doc.Embedding.ToList()),
+                        PatchOperation.Set($"/{vectorField}", doc.Embedding.ToList()),
                         PatchOperation.Set("/embedded_at", now),
                         PatchOperation.Set("/embedding_dims", doc.Embedding.Length),
                         PatchOperation.Set("/pipeline_id", doc.PipelineId),
@@ -100,7 +103,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
                     _logger.LogInformation("Patch NotFound pk={PK}, falling back to upsert", pkValue);
-                    await UpsertBatchWithRetryAsync(container, pk, docs, pkField, now, ct);
+                    await UpsertBatchWithRetryAsync(container, pk, docs, pkField, vectorField, now, ct);
                     return;
                 }
 
@@ -146,6 +149,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
         PartitionKey pk,
         List<EmbeddingResult> docs,
         string pkField,
+        string vectorField,
         string now,
         CancellationToken ct)
     {
@@ -160,7 +164,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                     {
                         ["id"] = doc.DocId,
                         ["source_ref"] = doc.SourceRef,
-                        ["embedding"] = doc.Embedding.ToList(),
+                        [vectorField] = doc.Embedding.ToList(),
                         ["embedded_at"] = now,
                         ["embedding_dims"] = doc.Embedding.Length,
                         ["pipeline_id"] = doc.PipelineId,
