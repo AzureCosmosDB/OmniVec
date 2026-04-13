@@ -11,6 +11,9 @@
 param(
     [int]$FromStep = 1,
     [switch]$Quiet,
+    [switch]$Existing,  # Use an existing deployment (skip provisioning)
+    [string]$EnvName = $env:AZURE_ENV_NAME,
+    [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
     [string]$AoaiKey = $env:AOAI_KEY,
     [string]$AoaiDeployment = $(if ($env:AOAI_DEPLOYMENT) { $env:AOAI_DEPLOYMENT } else { "text-embedding-3-small" }),
@@ -163,6 +166,63 @@ function Normalize-CommandOutput {
     return "$Output"
 }
 
+# ─── Existing deployment mode ────────────────────────────────────────────────
+if ($Existing) {
+    if (-not $EnvName) {
+        $EnvName = Read-Host "  Enter environment name (e.g. fresh-start-6)"
+        if (-not $EnvName) { LogErr "Environment name required."; exit 1 }
+    }
+    if (-not $AdminToken) {
+        $AdminToken = Read-Host "  Enter admin token"
+        if (-not $AdminToken) { LogErr "Admin token required."; exit 1 }
+    }
+
+    Write-Host "`n`e[36mUsing existing deployment: $EnvName`e[0m"
+
+    $RESOURCE_GROUP = "rg-omnivec-$EnvName"
+    $rgExists = az group exists --name $RESOURCE_GROUP 2>$null
+    if ("$rgExists".Trim() -ne "true") {
+        LogErr "Resource group $RESOURCE_GROUP does not exist."
+        exit 1
+    }
+
+    # Discover AKS cluster from RG
+    $AKS_CLUSTER = az aks list --resource-group $RESOURCE_GROUP --query "[0].name" -o tsv 2>$null
+    if (-not $AKS_CLUSTER) { LogErr "No AKS cluster found in $RESOURCE_GROUP"; exit 1 }
+    $AKS_CLUSTER = "$AKS_CLUSTER".Trim()
+    $INSTANCE_TOKEN = $AKS_CLUSTER -replace 'omnivec-aks-',''
+    $TEST_COSMOS_ACCOUNT = "omnivec-test-$INSTANCE_TOKEN"
+
+    # Discover other resources
+    $IDENTITY_CLIENT_ID = az identity list --resource-group $RESOURCE_GROUP --query "[0].clientId" -o tsv 2>$null
+    $COSMOS_ENDPOINT = az cosmosdb list --resource-group $RESOURCE_GROUP --query "[?contains(name, 'omnivec-cosmos')].documentEndpoint" -o tsv 2>$null
+    $SUBSCRIPTION = az account show --query id -o tsv 2>$null
+    $LOCATION = az group show --name $RESOURCE_GROUP --query location -o tsv 2>$null
+    $ADMIN_TOKEN = $AdminToken
+
+    # Get AKS credentials
+    az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing 2>$null
+
+    # Get server IP
+    $SERVER = kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+    if (-not $SERVER) { LogErr "Failed to get external IP"; exit 1 }
+    $SERVER_URL = "http://$SERVER"
+
+    LogOk "AKS:    $AKS_CLUSTER"
+    LogOk "RG:     $RESOURCE_GROUP"
+    LogOk "Server: $SERVER_URL"
+    LogOk "Cosmos: $COSMOS_ENDPOINT"
+
+    # Auth headers
+    $headers = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
+
+    # Skip to step 3 (steps 1-2 are provisioning)
+    $FromStep = [Math]::Max($FromStep, 3)
+    Save-Checkpoint 2
+
+    Write-Host ""
+}
+
 # =============================================================================
 # STEP 1: Create azd environment
 # =============================================================================
@@ -217,8 +277,10 @@ if ($FromStep -le 2) {
 if ($FromStep -le 3) {
     LogStep 3 "Retrieving connection details..."
 }
-# Always load azd values (needed by all subsequent steps)
-Load-AzdValues
+# Always load azd values (needed by all subsequent steps) — skip if already set by --Existing
+if (-not $Existing) {
+    Load-AzdValues
+}
 if (-not $AKS_CLUSTER -or -not $RESOURCE_GROUP -or -not $ADMIN_TOKEN) {
     LogErr "Missing required azd outputs (AKS cluster/resource group/admin token)."
     exit 1
