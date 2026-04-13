@@ -213,6 +213,26 @@ if ($Existing) {
     LogOk "Server: $SERVER_URL"
     LogOk "Cosmos: $COSMOS_ENDPOINT"
 
+    # Validate admin token against API
+    Log "  Validating admin token..."
+    try {
+        $healthResp = Invoke-RestMethod -Uri "$SERVER_URL/health" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } -TimeoutSec 10 2>$null
+        if ($healthResp.status -eq "healthy") {
+            LogOk "Admin token valid — API healthy."
+        } else {
+            LogErr "API responded but status is: $($healthResp.status)"
+            exit 1
+        }
+    } catch {
+        $code = $_.Exception.Response.StatusCode.value__
+        if ($code -eq 401 -or $code -eq 403) {
+            LogErr "Admin token is invalid (HTTP $code). Check the token and try again."
+        } else {
+            LogErr "Failed to reach API at $SERVER_URL ($($_.Exception.Message))"
+        }
+        exit 1
+    }
+
     # Auth headers
     $headers = @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
 
