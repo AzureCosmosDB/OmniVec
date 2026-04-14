@@ -202,11 +202,10 @@ if ($KUBE_CONTEXT) {
     # Check FQDN DNS resolution
     $location = azd env get-value AZURE_LOCATION 2>$null
     if (-not $location) { $location = "eastus2" }
-    $instanceId = azd env get-value INSTANCE_ID 2>$null
-    if (-not $instanceId) {
-        $tags = az group show --name $RG --query "tags" -o json 2>$null | ConvertFrom-Json
-        if ($tags) { $instanceId = $tags.'omnivec-instance' }
-    }
+    $instanceId = $null
+    $tags = az group show --name $RG --query "tags" -o json 2>$null | ConvertFrom-Json
+    if ($tags -and $tags.'omnivec-instance') { $instanceId = $tags.'omnivec-instance' }
+    if (-not $instanceId) { $instanceId = azd env get-value INSTANCE_ID 2>$null }
     if ($instanceId) {
         $fqdn = "$instanceId.$location.cloudapp.azure.com"
         try {
