@@ -1879,12 +1879,18 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
                 )
 
     pipeline = _pipeline_from_doc(doc)
+
+    # Sources, destination, and vector_index_path are immutable after creation
+    if req.sources and [s.dict() for s in req.sources] != [s.dict() if hasattr(s, 'dict') else s for s in pipeline.sources]:
+        raise HTTPException(status_code=400, detail="Sources cannot be changed after pipeline creation. Create a new pipeline instead.")
+    if req.destination_id != pipeline.destination_id:
+        raise HTTPException(status_code=400, detail="Destination cannot be changed after pipeline creation. Create a new pipeline instead.")
+    if req.vector_index_path.lstrip("/") != pipeline.vector_index_path.lstrip("/"):
+        raise HTTPException(status_code=400, detail="Vector index path cannot be changed after pipeline creation. Create a new pipeline instead.")
+
     pipeline.name = req.name
     pipeline.description = req.description
-    pipeline.sources = req.sources
     pipeline.docgrok_pipeline = resolved_pipeline
-    pipeline.destination_id = req.destination_id
-    pipeline.vector_index_path = req.vector_index_path
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
