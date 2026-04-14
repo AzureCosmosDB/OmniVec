@@ -1,6 +1,8 @@
-# OmniVec — Universal Vector Ingestion Platform
+# OmniVec
 
-OmniVec connects your data sources (CosmosDB, Azure Blob Storage, PostgreSQL, S3, HTTP) to vector databases, automating the full pipeline: discover documents → extract content → generate embeddings → store vectors. It deploys on Azure Kubernetes Service with a web UI, CLI, and REST API.
+**Any data source → embeddings → vector search, deployed on Azure in one command.**
+
+OmniVec automates the full vector ingestion pipeline: connect a data source, extract content, generate embeddings, and store vectors in a searchable destination. It runs on Azure Kubernetes Service and comes with a web UI, CLI, and REST API.
 
 ```
 Sources                  Processing              Destinations
@@ -11,90 +13,275 @@ PostgreSQL         ─┤   (embed, OCR, chunk)   └→ MSSQL
 S3 / HTTP          ─┘
 ```
 
+This guide walks you through deploying OmniVec and running your first end-to-end pipeline.
+
 ---
 
-## Quick Start (5 minutes reading)
+## Prerequisites
 
-### Prerequisites
+Install these before you begin:
 
-- **Azure subscription** with permissions to create resource groups
-- **Azure CLI** (`az`) — [install](https://aka.ms/install-azure-cli), then run `az login`
-- **Azure Developer CLI** (`azd`) — [install](https://aka.ms/install-azd)
-- **PowerShell 7+** (`pwsh`) — [install](https://aka.ms/install-powershell) (Windows/macOS/Linux)
+| Tool | Install | Verify |
+|------|---------|--------|
+| **Azure CLI** (`az`) | [install](https://aka.ms/install-azure-cli) | `az version` |
+| **Azure Developer CLI** (`azd`) | [install](https://aka.ms/install-azd) | `azd version` |
+| **PowerShell 7+** (`pwsh`) | [install](https://aka.ms/install-powershell) | `pwsh --version` |
+| **Git** | [install](https://git-scm.com) | `git --version` |
+
+You also need:
+
+- An **Azure subscription** with permission to create resource groups, AKS clusters, and CosmosDB accounts.
+- An **Azure OpenAI resource** with an embedding model deployment. If you don't have one yet:
+  1. [Create an Azure OpenAI resource](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource)
+  2. [Deploy an embedding model](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource?pivots=web-portal#deploy-a-model) — choose `text-embedding-3-small` for a first run
+  3. Note these three values (you'll need them in Step 3a):
+     - **Endpoint URL** — Azure Portal → your OpenAI resource → Overview
+     - **API Key** — Azure Portal → Keys and Endpoint
+     - **Deployment Name** — Azure Portal → Deployments → the exact name you gave the deployment (this is **not** the model name)
 
 > `kubectl` and `helm` are installed automatically by the deployment hooks if not already present.
 
-### Deploy
+> **Cost estimate:** The default configuration (2× Standard_B4ms nodes, no GPU, CosmosDB serverless) costs roughly **$5–10/day**. Run `azd down --purge --force` when you're done to stop all charges.
+
+---
+
+## Step 1 — Deploy OmniVec
+
+> **Windows users:** Run these commands in PowerShell 7 (`pwsh`), not Command Prompt.
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/AzureCosmosDB/OmniVec
+# Clone the repo (includes submodules)
+git clone --recurse-submodules https://github.com/AzureCosmosDB/OmniVec
 cd OmniVec
 
-# 2. Create an azd environment
-azd init
-# Or: azd env new my-omnivec --location eastus2
+# Log in to Azure
+az login
+azd auth login
 
-# 3. Set required configuration (or let the hook prompt you interactively)
-azd env set AZURE_LOCATION                eastus2
-azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE   Standard_B4ms
-azd env set OMNIVEC_SYSTEM_NODE_COUNT     2
-azd env set OMNIVEC_GPU_NODE_VM_SIZE      ""           # empty = no GPU pool
-azd env set OMNIVEC_GPU_NODE_COUNT        0
-azd env set OMNIVEC_METADATA_STORE        cosmosdb-serverless
-azd env set OMNIVEC_ENABLE_BLOB_SOURCE    true
+# Create a named environment
+azd env new my-omnivec
 
-# 4. Deploy everything (infrastructure + application)
+# Set configuration (these are safe defaults for a first deployment)
+azd env set AZURE_LOCATION              eastus2
+azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms
+azd env set OMNIVEC_SYSTEM_NODE_COUNT   2
+azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
+azd env set OMNIVEC_GPU_NODE_COUNT      0
+azd env set OMNIVEC_METADATA_STORE      cosmosdb-serverless
+azd env set OMNIVEC_ENABLE_BLOB_SOURCE  true
+
+# Deploy everything — infrastructure + application (~15–25 minutes)
 azd up
 ```
 
-`azd up` runs two hooks automatically:
+What happens behind the scenes:
 
-1. **preprovision** — validates prerequisites, checks for existing deployments, collects any unset config values interactively
-2. **postprovision** — imports pre-built images (or builds from source), configures AKS, deploys via Helm
+1. **preprovision hook** — validates tools, checks for an existing deployment, collects any missing config interactively.
+2. **Bicep deployment** — provisions AKS, CosmosDB, ACR, Key Vault, Storage, Service Bus, and Event Grid.
+3. **postprovision hook** — imports pre-built container images (or builds from source), deploys all services via Helm.
 
-When complete, the console prints:
-- **OmniVec URL** — `http://<instance-id>.<region>.cloudapp.azure.com/ui`
-- **Admin Token** — for API/CLI authentication
+### Save these values
 
-### Environment Variables Reference
+When deployment finishes, the console prints two important values. **Copy them now:**
+
+| Value | What it is |
+|-------|-----------|
+| **OmniVec URL** | `http://<id>.<region>.cloudapp.azure.com/ui` — your web UI |
+| **Admin Token** | Bearer token for API and CLI authentication |
+
+If you missed them:
+
+```bash
+# Retrieve the admin token
+azd env get-value OMNIVEC_ADMIN_TOKEN
+
+# Check which environment is active
+azd env list
+```
+
+---
+
+## Step 2 — Open the UI
+
+Open the **OmniVec URL** in your browser. You should see the OmniVec dashboard.
+
+If the page doesn't load, wait 1–2 minutes for the load balancer to assign an external IP:
+
+```bash
+kubectl get svc omnivec-web -n omnivec
+```
+
+---
+
+## Step 3 — Your first pipeline
+
+This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/cli-guide.md).
+
+### 3a. Register an embedding model
+
+1. Go to **Models** in the sidebar.
+2. Click **Add Model**.
+3. Choose **Azure OpenAI (External)**.
+4. Fill in the three values from your Azure OpenAI resource:
+
+   | Field | Value | Where to find it |
+   |-------|-------|-------------------|
+   | Endpoint | `https://<resource>.openai.azure.com` | Azure Portal → your OpenAI resource → Overview |
+   | API Key | `xxxxxxxx` | Azure Portal → Keys and Endpoint |
+   | Deployment Name | e.g. `text-embedding-3-small` | Azure Portal → Deployments (the exact name, not the model name) |
+
+5. Click **Save**, then **Test** to confirm OmniVec can reach the model.
+
+> **Common mistake:** The deployment name must match exactly what's shown in the Azure Portal under "Deployments." If you named your deployment `my-embeddings`, use `my-embeddings` — not `text-embedding-3-small`.
+
+### 3b. Create a source
+
+A source is a connection to data you want to embed. For this first run, use **Azure Blob Storage** — `azd up` already provisioned a storage account in your resource group (`rg-omnivec-<your-env-name>`).
+
+1. Find your storage account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Storage account resource → **Properties** → copy the **Primary blob service endpoint** URL.
+2. In that storage account, create a container named `docs` (Azure Portal → Storage account → **Containers** → **+ Container**).
+3. Upload a sample file. Create a file called `hello.txt` with this content:
+   ```
+   OmniVec is a universal vector ingestion platform that processes documents
+   from Azure Blob Storage, CosmosDB, and PostgreSQL into vector embeddings
+   for semantic search.
+   ```
+   Upload it to the `docs` container (drag-and-drop in the Azure Portal works).
+4. In OmniVec, go to **Sources** → **New Source**.
+5. Choose **Azure Blob Storage**.
+6. Fill in:
+   - **Name**: `My First Source`
+   - **Account URL**: the blob endpoint URL you copied
+   - **Container**: `docs`
+7. Click **Save**, then **Test Connection** to verify access.
+
+### 3c. Create a destination
+
+A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` already created a CosmosDB account in your resource group (`rg-omnivec-<your-env-name>`).
+
+1. Find your CosmosDB account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Cosmos DB account → **Overview** → copy the **URI**.
+2. Create a database and container for vectors:
+   - Azure Portal → Cosmos DB account → **Data Explorer** → **New Container**
+   - **Database id**: `omnivec-vectors` (create new)
+   - **Container id**: `vectors`
+   - **Partition key**: `/id`
+   - Under **Container Vector Policy**, add a vector embedding:
+     - **Path**: `/embedding`
+     - **Data type**: `float32`
+     - **Dimensions**: `1536` (matches `text-embedding-3-small`)
+     - **Distance function**: `cosine`
+   - Click **OK** to create
+3. In OmniVec, go to **Destinations** → **New Destination**.
+4. Choose **CosmosDB Vector**.
+5. Fill in:
+   - **Name**: `My First Destination`
+   - **Endpoint**: the URI you copied
+   - **Database**: `omnivec-vectors`
+   - **Container**: `vectors`
+6. Click **Save**, then **Test Connection**.
+7. Click **Fetch Vector Index Details** — you should see `/embedding` with dimensions `1536` and distance function `cosine`.
+
+> **If Fetch Vector Index Details returns nothing:** your container doesn't have a vector indexing policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path. See the [Cosmos DB vector search docs](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search) for details.
+
+### 3d. Create a pipeline
+
+A pipeline ties source → model → destination together.
+
+1. Go to **Pipelines** → **New Pipeline**.
+2. Fill in:
+   - **Name**: `My First Pipeline`
+   - **Source**: select your blob source
+   - **Destination**: select your CosmosDB vector destination
+   - **Model**: select the Azure OpenAI model you registered
+   - **Vector Index Path**: select the path shown from your destination (e.g., `/embedding`)
+   - **Content Strategy**: `Truncate` (embeds full document text as a single vector — simplest for first run)
+   - **Processing Mode**: `Queue`
+   - **Process Existing**: ✅ enable this (so documents already in the source get processed)
+3. Click **Create**.
+
+The pipeline starts processing immediately. You can watch progress on the pipeline detail page.
+
+### 3e. Verify it worked
+
+Within a few minutes, check these signals:
+
+- [ ] **Pipeline health** shows green on the Pipelines page
+- [ ] **Jobs** tab shows completed jobs (one per document)
+- [ ] **Job count** increases from 0
+
+Then test vector search:
+
+1. Go to **Vector Search** in the sidebar.
+2. Select your destination index.
+3. Type: `vector ingestion platform`
+4. Click **Search** — you should see your `hello.txt` document returned as the top result.
+
+> **Expected result:** Since your sample document contains "universal vector ingestion platform," a search for "vector ingestion platform" should match it as the first or second result.
+
+**Congratulations — you've deployed OmniVec and run a full vector ingestion pipeline.** 🎉
+
+---
+
+## Cleanup
+
+To stop all charges, delete all Azure resources:
+
+```bash
+azd down --purge --force
+```
+
+This removes the resource group, all Azure services, and local environment config.
+
+---
+
+## Next steps
+
+| Want to... | Go to |
+|-----------|-------|
+| Manage pipelines via CLI | [CLI Guide](docs/cli-guide.md) |
+| Understand the architecture | [Architecture](docs/architecture.md) |
+| Use the web UI in depth | [User Guide](docs/user-guide.md) |
+| Run the automated E2E test suite | [E2E Demo](#automated-e2e-demo) below |
+| Add GPU-hosted models | [Models](#models) section below |
+
+---
+
+## Reference
+
+### Environment variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AZURE_LOCATION` | Yes | — | Azure region (e.g., `eastus2`, `westus3`) |
-| `OMNIVEC_SYSTEM_NODE_VM_SIZE` | Yes | prompted | VM SKU for the system node pool (e.g., `Standard_B4ms`, `Standard_D4s_v3`) |
+| `OMNIVEC_SYSTEM_NODE_VM_SIZE` | Yes | prompted | VM SKU for system nodes (e.g., `Standard_B4ms`) |
 | `OMNIVEC_SYSTEM_NODE_COUNT` | Yes | `2` | Number of system nodes |
-| `OMNIVEC_GPU_NODE_VM_SIZE` | No | `""` | GPU VM SKU (empty string to skip GPU pool) |
-| `OMNIVEC_GPU_NODE_COUNT` | No | `0` | Number of GPU nodes (0 = external models only) |
+| `OMNIVEC_GPU_NODE_VM_SIZE` | No | `""` | GPU VM SKU (empty = no GPU pool) |
+| `OMNIVEC_GPU_NODE_COUNT` | No | `0` | GPU nodes (0 = external models only) |
 | `OMNIVEC_METADATA_STORE` | Yes | prompted | `cosmosdb-serverless` or `cosmosdb-provisioned` |
-| `OMNIVEC_ENABLE_BLOB_SOURCE` | Yes | prompted | `true` = create Storage Account + Service Bus + Event Grid |
-| `OMNIVEC_SHARED_REGISTRY_TOKEN` | No | prompted | Token for importing pre-built images from `omnivecregistry.azurecr.io` (skip to build from source) |
+| `OMNIVEC_ENABLE_BLOB_SOURCE` | Yes | prompted | `true` = create Storage + Service Bus + Event Grid |
+| `OMNIVEC_SHARED_REGISTRY_TOKEN` | No | prompted | Token for pre-built images (skip = build from source) |
 | `OMNIVEC_BUILD_MODE` | No | auto-detect | `acr` (cloud build) or `docker` (local build) |
-| `OMNIVEC_BUILD` | No | `false` | Set to `true` to force building from source instead of importing |
-| `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API authentication |
+| `OMNIVEC_BUILD` | No | `false` | `true` = force building from source |
+| `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
 
-### What Gets Deployed?
+### What gets deployed
 
 | Resource | Azure Service | Purpose |
 |----------|---------------|---------|
-| AKS Cluster | Azure Kubernetes Service | Runs all OmniVec + DocGrok pods |
+| AKS Cluster | Azure Kubernetes Service | All OmniVec + DocGrok pods |
 | System Node Pool | configurable VM SKU | API, controller, worker, changefeed, web |
-| GPU Node Pool (optional) | NC-series VMs | Self-hosted embedding models (BGE, CLIP, DSE-Qwen2) |
-| Container Registry | Azure Container Registry | Docker images for all components |
-| CosmosDB Account | Azure Cosmos DB (NoSQL) | Metadata store (sources, pipelines, jobs) |
-| Key Vault | Azure Key Vault | Secure storage for model API keys |
-| Storage Account (optional) | Azure Blob Storage | Document source for blob ingestion |
+| GPU Node Pool (optional) | NC-series VMs | Self-hosted embedding models |
+| Container Registry | Azure Container Registry | Docker images |
+| CosmosDB Account | Azure Cosmos DB (NoSQL) | Metadata store |
+| Key Vault | Azure Key Vault | Model API keys |
+| Storage Account (optional) | Azure Blob Storage | Blob ingestion source |
 | Service Bus (optional) | Azure Service Bus | Job queue for blob events |
-| Event Grid (optional) | Azure Event Grid | Real-time blob change notifications |
-| Managed Identity | User-Assigned MI | Workload identity — no secrets in pods |
+| Event Grid (optional) | Azure Event Grid | Real-time blob notifications |
+| Managed Identity | User-Assigned MI | Workload identity (no secrets in pods) |
 
----
+### Concepts
 
-## Concepts
-
-### Sources
-
-A **source** is a connection to a data store that OmniVec reads documents from. Sources store **connection info only** — no content extraction config.
+**Sources** store connection info only — endpoint, credentials, container/table. Content extraction settings (which fields to embed, file type filters) belong to the **pipeline**, not the source. This lets multiple pipelines process the same source differently.
 
 | Source Type | Config |
 |-------------|--------|
@@ -105,44 +292,7 @@ A **source** is a connection to a data store that OmniVec reads documents from. 
 | `http` | url, method, headers, auth_type |
 | `mssql` | host, port, database, table |
 
-> Content extraction (which fields to embed, content mode, file type filters) is configured on the **pipeline source** entry — not on the source itself. This lets different pipelines use different content strategies for the same source.
-
-### Pipelines
-
-A **pipeline** is the processing definition that ties everything together.
-
-```
-Source(s) → Content Extraction → DocGrok Model/Pipeline → Destination
-```
-
-Pipeline configuration:
-
-| Field | Description |
-|-------|-------------|
-| `sources` | List of pipeline source entries (see below) |
-| `docgrok_pipeline` | Model ID (`mdl-*`) or transform pipeline name (`text-azure`, `pdf-vision`) |
-| `destination_id` | Where to write vectors |
-| `vector_index_path` | Selected from the destination's vector indexing policy (e.g., `/embedding`) |
-| `processing_mode` | `queue` (CFP → jobs → worker) or `inline` (CFP processes directly) |
-| `content_strategy` | `truncate` (one vector per doc) or `chunk` (split into chunks) |
-| `chunk_config` | Chunk size, overlap, unit, doc_id_pattern |
-| `doc_id_pattern` | Template for vector document IDs: `{source}`, `{source_ref}`, `{chunk}` |
-| `process_existing` | `true` = backfill existing documents on creation |
-
-Each **pipeline source** entry carries content extraction config:
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `source_id` | — | Source to read from |
-| `content_fields` | `["content"]` | Document field(s) to concatenate for embedding |
-| `content_mode` | `"field"` | `field` (direct value), `blob_url`, `http_url`, `s3_url` |
-| `file_types` | `["txt","json","pdf","docx","md","csv"]` | File extensions to process (blob/S3 sources) |
-| `url_content_types` | `["txt","json","pdf"]` | Content types for URL modes |
-| `filters` | `{}` | Additional filters |
-
-### Destinations
-
-A **destination** is where vectors are stored.
+**Destinations** are where vectors are stored. When you test a destination, OmniVec probes its vector indexing policy and returns available vector paths. You pick one when creating a pipeline.
 
 | Destination Type | Config |
 |------------------|--------|
@@ -150,114 +300,114 @@ A **destination** is where vectors are stored.
 | `pgvector` | host, port, database, table |
 | `mssql` | host, port, database, table |
 
-When you create or test a destination, OmniVec probes the container's **vector indexing policy** and returns available vector paths (with dimensions, distance function, and index type). You select one of these paths as `vector_index_path` when creating a pipeline.
+**Pipelines** define the full flow: source(s) → content extraction → embedding model → destination. Key settings include `content_strategy` (`truncate` or `chunk`), `processing_mode` (`queue` or `inline`), and `process_existing` (backfill on creation).
 
 ### Models
 
-Embedding models registered with OmniVec via DocGrok:
-
 | Type | Examples | ID Format |
 |------|----------|-----------|
+| **External** | Azure OpenAI `text-embedding-3-small` / `text-embedding-3-large` | `mdl-ext-{hash}` |
 | **Native (GPU)** | DSE-Qwen2, CLIP, BGE, BGE-Small | `mdl-{hash}` |
-| **External** | Azure OpenAI text-embedding-3-small/large | `mdl-ext-{hash}` |
 
-Models are configured via the UI, CLI (`omnivec model add`), or API (`POST /api/models`).
+External models (Azure OpenAI) are the easiest starting point — no GPU nodes needed. Native models require a GPU node pool.
+
+### Updating a deployment
+
+Running `azd up` on an existing environment is safe and idempotent:
+
+1. Preprovision detects the existing resource group, imports config from RG tags, skips prompts.
+2. Bicep runs — unchanged resources are not modified.
+3. Postprovision re-imports only images with updated digests.
+4. Updated images trigger automatic `kubectl rollout restart`.
+5. Config is saved as RG tags — another developer can `azd env refresh` + `azd up` from a different machine.
+
+Force a source build:
+```bash
+azd env set OMNIVEC_BUILD true
+azd up
+```
 
 ---
 
-## Running the E2E Demo
+## Automated E2E demo
 
-The automated demo creates a complete pipeline from scratch, including a test CosmosDB account, sample documents, inline and queue mode tests, and vector search verification.
+The scripted demo creates sources, destinations, pipelines, sample data, and validates vector search end-to-end. Use it after you're comfortable with the manual flow above.
 
 ```powershell
+# Against your existing deployment
+pwsh scripts/e2e-demo.ps1 -Existing -EnvName my-omnivec `
+  -AdminToken <token> `
+  -AoaiEndpoint https://<resource>.openai.azure.com `
+  -AoaiKey <key>
+
 # Full automated run (creates new infra)
 pwsh scripts/e2e-demo.ps1
-
-# Against existing deployment
-pwsh scripts/e2e-demo.ps1 -Existing -EnvName <azd-env-name> \
-  -AdminToken <token> \
-  -AoaiEndpoint https://<resource>.openai.azure.com \
-  -AoaiKey <key>
 
 # Resume from a specific step
 pwsh scripts/e2e-demo.ps1 -FromStep 5
 
-# Cleanup everything when done
-pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName <azd-env-name>
+# Cleanup
+pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName my-omnivec
 ```
 
 | Flag | Description |
 |------|-------------|
-| `-Existing` | Use an existing deployment instead of creating new infra |
-| `-EnvName` | azd environment name (maps to resource group `rg-omnivec-<name>`) |
-| `-AdminToken` | Admin bearer token (from `azd env get-value OMNIVEC_ADMIN_TOKEN`) |
+| `-Existing` | Use an existing deployment |
+| `-EnvName` | azd environment name |
+| `-AdminToken` | Admin token (`azd env get-value OMNIVEC_ADMIN_TOKEN`) |
 | `-AoaiEndpoint` | Azure OpenAI endpoint URL |
 | `-AoaiKey` | Azure OpenAI API key |
 | `-FromStep` | Resume from step N (1–9) |
-| `-Cleanup` | Delete all resources and local env config |
+| `-Cleanup` | Delete all resources |
 
 ---
 
-## CLI Reference
+## Troubleshooting
 
-The OmniVec CLI (`omnivec`) is a single standalone binary — download and run.
-
-### Install
-
-| Platform | Binary |
-|----------|--------|
-| Linux (amd64) | `cli/omnivec` or `omnivec-linux-amd64` |
-| macOS (Apple Silicon) | `cli/omnivec-darwin-arm64` |
-| Windows | `cli/omnivec-windows-amd64.exe` |
-
-Or build from source (requires Go 1.24+):
-```bash
-cd cli && go build -o ../bin/omnivec . && cd ..
-```
-
-### Configure
+### Missed the URL or admin token after deploy
 
 ```bash
-omnivec config set server http://<omnivec-url>
-omnivec config set token <admin-token>
-omnivec status   # verify connectivity
+azd env get-value OMNIVEC_ADMIN_TOKEN
+azd env list
+kubectl get svc omnivec-web -n omnivec    # shows the external IP
 ```
 
-### Key Commands
+### DeploymentNotFound from Azure OpenAI
+
+The `deployment` field must match the exact deployment name in the Azure Portal (under Deployments), not the model name.
+
+### readMetadata RBAC error
+
+**Symptom:** `principal does not have required RBAC permissions to perform action readMetadata`
+
+**Fix:** Grant both roles to the managed identity on every CosmosDB account OmniVec accesses:
+1. `Cosmos DB Built-in Data Contributor` (SQL RBAC)
+2. `Cosmos DB Account Reader Role` (ARM RBAC)
+
+### 401 Unauthorized from changefeed/controller
+
+Internal services call the API without a Bearer token. The API bypasses auth for `Host: omnivec-api` (K8s internal DNS). Ensure you're running the latest API image.
+
+### Pipeline shows 0% embedded
+
+The vector documents are missing `pipeline_id`/`embedded_at` fields. Use the latest API image.
+
+### Pods stuck in ImagePullBackOff
 
 ```bash
-# Sources
-omnivec source list
-omnivec source create --name "My Data" --type azure-blob --config '{"account_url":"...","container":"docs"}'
-omnivec source test <id>
-
-# Destinations
-omnivec dest list
-omnivec dest create --name "Vectors" --type cosmosdb-vector --config '{"endpoint":"...","database":"...","container":"..."}'
-omnivec dest test <id>
-
-# Pipelines
-omnivec pipeline list
-omnivec pipeline create --name "Embed Docs" --source <src-id> --destination <dst-id> \
-  --model text-azure --content-fields content --vector-index-path /embedding --process-existing
-omnivec pipeline pause <id>
-omnivec pipeline resume <id>
-omnivec pipeline reset <id>
-
-# Jobs
-omnivec job list --pipeline <id> --status completed
-omnivec job stats
-
-# Search
-omnivec search "your query" --index <dst-id> --top-k 5
-
-# Operations
-omnivec deployment list
-omnivec deployment scale omnivec-worker --replicas 5
-omnivec status
+az acr repository list --name <acr-name>          # verify images exist
+azd hooks run postprovision                         # re-import images
+# or force source build:
+azd env set OMNIVEC_BUILD true && azd hooks run postprovision
 ```
 
-See [docs/cli-guide.md](docs/cli-guide.md) for the full CLI reference.
+### External IP not assigned after 5 minutes
+
+Check AKS load balancer health and NSG rules:
+```bash
+kubectl get svc omnivec-web -n omnivec
+kubectl describe svc omnivec-web -n omnivec
+```
 
 ---
 
@@ -265,10 +415,10 @@ See [docs/cli-guide.md](docs/cli-guide.md) for the full CLI reference.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                           OmniVec Platform (AKS)                        │
+│                       OmniVec Platform (AKS)                            │
 │                                                                         │
 │  ┌──────────┐   ┌───────────┐   ┌───────────┐   ┌──────────────────┐   │
-│  │  Web UI   │──▶│ OmniVec   │──▶│  DocGrok  │──▶│ Embedding Models │   │
+│  │  Web UI   │──▶│  OmniVec  │──▶│  DocGrok  │──▶│ Embedding Models │   │
 │  │ (nginx)   │   │   API     │   │  Router   │   │ (GPU / External) │   │
 │  └──────────┘   └─────┬─────┘   └───────────┘   └──────────────────┘   │
 │                       │                                                 │
@@ -294,70 +444,7 @@ See [docs/cli-guide.md](docs/cli-guide.md) for the full CLI reference.
 | `docgrok-controller` | Rust | 1 | Model health monitoring, scale state |
 | `docgrok-pipeline-worker` | Python + PaddleOCR | 1 | Multi-step transforms (PDF → OCR → embed) |
 
-See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
-
----
-
-## Updating a Deployment
-
-Running `azd up` on an existing environment is safe and idempotent:
-
-1. The **preprovision** hook detects the existing resource group (`rg-omnivec-<env>`), imports config from RG tags, and skips all prompts.
-2. Bicep deployment runs with the same parameters — unchanged resources are not modified.
-3. The **postprovision** hook checks if images in the shared registry have updated digests. Only changed images are re-imported.
-4. If images were updated, all deployments are automatically restarted (`kubectl rollout restart`).
-5. Config is saved as RG tags — another developer on a different machine can `azd env refresh` and `azd up` with no extra setup.
-
-To force a source build instead of image import:
-```bash
-azd env set OMNIVEC_BUILD true
-azd up
-```
-
----
-
-## Troubleshooting
-
-### 401 Unauthorized from changefeed/controller
-
-Internal services call the API without a Bearer token. The API bypasses auth for requests with `Host: omnivec-api` (internal K8s DNS). Ensure you are running the latest API image.
-
-### readMetadata RBAC Error
-
-**Symptom:** `Request blocked by Auth: principal does not have required RBAC permissions to perform action readMetadata`
-
-**Fix:** Grant **both** roles to the managed identity on any CosmosDB account OmniVec accesses:
-1. `Cosmos DB Built-in Data Contributor` (SQL RBAC) — for data operations
-2. `Cosmos DB Account Reader Role` (ARM RBAC) — for SDK initialization
-
-### DeploymentNotFound from Azure OpenAI
-
-The `deployment` field in model registration must match the exact Azure OpenAI deployment name (as shown in the Azure Portal under Deployments), not the model name.
-
-### Pipeline shows 0% embedded
-
-The vector documents don't have `pipeline_id` / `embedded_at` fields. Use the latest API image which writes these fields via `_sync_write_vector`.
-
-### Pods stuck in ImagePullBackOff
-
-1. Verify images exist: `az acr repository list --name <acr-name>`
-2. If images are missing, re-run: `azd hooks run postprovision`
-3. Or force source build: `azd env set OMNIVEC_BUILD true && azd hooks run postprovision`
-
-### External IP not assigned
-
-```bash
-kubectl get svc omnivec-web -n omnivec
-```
-
-If the IP takes more than 5 minutes, check the AKS cluster's load balancer health and NSG rules.
-
-### Cleanup
-
-```bash
-# Delete all Azure resources and local config
-azd down --purge --force
-```
+See [docs/architecture.md](docs/architecture.md) for details.
 
 ---
 
