@@ -23,6 +23,46 @@ while [ $# -gt 0 ]; do
     --server)   SERVER_URL="$2"; shift 2 ;;
     --token)    ADMIN_TOKEN="$2"; shift 2 ;;
     --pipeline) PIPELINE="$2"; shift 2 ;;
+    --help|-h|help)
+      cat <<'EOF'
+OmniVec Deployment Diagnostics
+
+Usage:
+  ./scripts/diagnose.sh [options]
+
+Options:
+  --env <name>        azd environment name (e.g., my-omnivec)
+  --server <url>      OmniVec server URL (e.g., http://20.96.246.207)
+  --token <token>     Admin bearer token
+  --pipeline <id>     Deep-diagnose a single pipeline (e.g., pip-abc123)
+  --help, -h          Show this help
+
+Examples:
+  # Full deployment check (auto-detects from default azd env)
+  ./scripts/diagnose.sh --env my-omnivec
+
+  # With explicit server URL and token
+  ./scripts/diagnose.sh --server http://20.96.246.207 --token abc123
+
+  # Deep-diagnose why a pipeline is stuck
+  ./scripts/diagnose.sh --env my-omnivec --pipeline pip-06e7b338
+
+Checks performed:
+  1.  Infrastructure    — RG, AKS, CosmosDB, ACR, Key Vault, Storage, Service Bus
+  2.  Pod Health        — running/crash/pending, deployments, restart counts
+  3.  Helm Release      — deployed/stuck/failed state
+  4.  Networking & DNS  — external IP, FQDN, API /health
+  5.  Auth & RBAC       — admin token, Workload Identity, CosmosDB + Storage RBAC
+  6.  Container Images  — all 6 required images in ACR
+  7.  Node Capacity     — node readiness, memory/disk pressure, pending pods
+  8.  Models            — registration, status, endpoint reachability
+  9.  Pipelines         — active/paused/error, completion, failed jobs
+  10. Service Bus       — queue depth / backlog
+  11. Recent Errors     — ERROR/RBAC/auth patterns in pod logs
+  12. Pipeline Deep     — (with --pipeline) stuck analysis, source/dest/model checks
+EOF
+      exit 0
+      ;;
     *)          shift ;;
   esac
 done
