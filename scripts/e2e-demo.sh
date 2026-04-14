@@ -4,26 +4,35 @@
 # Tests both queue mode (CFP -> jobs -> worker -> destination) and inline mode (CFP embeds directly into source)
 #
 # Usage:
-#   ./scripts/e2e-demo.sh                    # Run all steps (1-11)
-#   ./scripts/e2e-demo.sh --from-step 5      # Skip infra, start from test account creation
-#   ./scripts/e2e-demo.sh --from-step 8      # Skip to pipeline + docs (assumes resources exist)
-#   ./scripts/e2e-demo.sh --quiet            # Minimal output (pass/fail per step)
+#   ./scripts/e2e-demo.sh                                    # Run all steps (1-11)
+#   ./scripts/e2e-demo.sh --from-step 5                      # Skip infra, start from test account creation
+#   ./scripts/e2e-demo.sh --existing --env my-omnivec        # Against existing deployment
+#   ./scripts/e2e-demo.sh --cleanup --env my-omnivec         # Delete test resources
+#   ./scripts/e2e-demo.sh --quiet                            # Minimal output
 
 set -eu
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 FROM_STEP=1
 QUIET=false
+EXISTING=false
+CLEANUP=false
 AOAI_ENDPOINT="${AOAI_ENDPOINT:-}"
 AOAI_KEY="${AOAI_KEY:-}"
 AOAI_DEPLOYMENT="${AOAI_DEPLOYMENT:-text-embedding-3-small}"
 AOAI_DIMS="${AOAI_DIMS:-1536}"
 SHARED_REGISTRY_TOKEN="${OMNIVEC_SHARED_REGISTRY_TOKEN:-}"
+USER_ENV_NAME=""
+USER_ADMIN_TOKEN=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-step) FROM_STEP="$2"; shift 2 ;;
     --quiet|-q) QUIET=true; shift ;;
+    --existing) EXISTING=true; shift ;;
+    --cleanup) CLEANUP=true; shift ;;
+    --env) USER_ENV_NAME="$2"; shift 2 ;;
+    --token) USER_ADMIN_TOKEN="$2"; shift 2 ;;
     --endpoint) AOAI_ENDPOINT="$2"; shift 2 ;;
     --key) AOAI_KEY="$2"; shift 2 ;;
     --deployment) AOAI_DEPLOYMENT="$2"; shift 2 ;;
@@ -215,9 +224,133 @@ if [ "$QUIET" = "false" ]; then
 fi
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-ENV_NAME="omnivec-e2e-demo"
+ENV_NAME="${USER_ENV_NAME:-omnivec-e2e-demo}"
 LOCATION="eastus2"
 SUBSCRIPTION="074d02eb-4d74-486a-b299-b262264d1536"
+
+# ─── Existing deployment mode ────────────────────────────────────────────────
+if [ "$EXISTING" = "true" ]; then
+  log "Using existing deployment: $ENV_NAME"
+  azd env select "$ENV_NAME" 2>/dev/null || true
+
+  # Discover resources from azd env
+  load_azd_values
+
+  RESOURCE_GROUP="${RESOURCE_GROUP:-rg-omnivec-$ENV_NAME}"
+  if [ -z "$AKS_CLUSTER" ]; then
+    AKS_CLUSTER=$(az aks list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r')
+  fi
+  if [ -z "$ADMIN_TOKEN" ] && [ -n "$USER_ADMIN_TOKEN" ]; then
+    ADMIN_TOKEN="$USER_ADMIN_TOKEN"
+  fi
+  if [ -z "$ADMIN_TOKEN" ]; then
+    printf "  Enter admin token: "
+    read -r ADMIN_TOKEN
+    if [ -z "$ADMIN_TOKEN" ]; then log_err "Admin token required."; exit 1; fi
+  fi
+
+  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
+  TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
+  KUBE_CONTEXT="$AKS_CLUSTER"
+
+  log_ok "AKS:    $AKS_CLUSTER"
+  log_ok "RG:     $RESOURCE_GROUP"
+
+  # Get credentials
+  ensure_kubeconfig
+  az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --context "$KUBE_CONTEXT" --overwrite-existing >/dev/null 2>&1 || true
+
+  # Get external IP
+  SERVER=""
+  for _i in 1 2 3 4 5 6; do
+    SERVER=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
+    if [ -n "$SERVER" ]; then break; fi
+    sleep 5
+  done
+  if [ -z "$SERVER" ]; then log_err "Failed to get external IP"; exit 1; fi
+  SERVER_URL="http://$SERVER"
+  log_ok "Server: $SERVER_URL"
+  log_ok "Cosmos: ${COSMOS_ENDPOINT:-unknown}"
+
+  # Validate admin token
+  log "  Validating admin token..."
+  _health=$(curl -sf --max-time 10 -H "Authorization: Bearer $ADMIN_TOKEN" "$SERVER_URL/health" 2>/dev/null || true)
+  if [ -z "$_health" ]; then
+    log_err "Admin token rejected or API unreachable."
+    exit 1
+  fi
+  log_ok "Admin token valid — API healthy."
+
+  # Skip provisioning steps
+  if [ "$FROM_STEP" -lt 3 ]; then FROM_STEP=3; fi
+fi
+
+# ─── Cleanup mode ────────────────────────────────────────────────────────────
+if [ "$CLEANUP" = "true" ]; then
+  log "Cleaning up test resources for: $ENV_NAME"
+
+  if [ -z "${ADMIN_TOKEN:-}" ]; then
+    ADMIN_TOKEN=$(azd_get OMNIVEC_ADMIN_TOKEN)
+  fi
+  if [ -z "${AKS_CLUSTER:-}" ]; then
+    load_azd_values
+  fi
+  RESOURCE_GROUP="${RESOURCE_GROUP:-rg-omnivec-$ENV_NAME}"
+  INSTANCE_TOKEN=$(echo "${AKS_CLUSTER:-}" | tr -d '\r' | sed 's/omnivec-aks-//')
+  TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
+  KUBE_CONTEXT="${AKS_CLUSTER:-omnivec}"
+
+  # Get server URL
+  ensure_kubeconfig
+  az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "${AKS_CLUSTER:-}" --context "$KUBE_CONTEXT" --overwrite-existing >/dev/null 2>&1 || true
+  SERVER=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
+  SERVER_URL="http://${SERVER:-localhost}"
+
+  # Delete pipeline, source, dest, model via API
+  if [ -n "$ADMIN_TOKEN" ] && [ -n "$SERVER" ]; then
+    log "  Deleting demo resources via API..."
+    # Find and delete demo pipeline
+    _pips=$(api_get "/api/pipelines" 2>/dev/null || true)
+    _demo_pip=$(echo "$_pips" | grep -o '"id":"pip-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    if [ -n "$_demo_pip" ]; then
+      api_delete "/api/pipelines/$_demo_pip"
+      log_ok "Deleted pipeline: $_demo_pip"
+    fi
+    # Find and delete demo source
+    _srcs=$(api_get "/api/sources" 2>/dev/null || true)
+    _demo_src=$(echo "$_srcs" | grep -o '"id":"src-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    if [ -n "$_demo_src" ]; then
+      api_delete "/api/sources/$_demo_src"
+      log_ok "Deleted source: $_demo_src"
+    fi
+    # Find and delete demo destination
+    _dsts=$(api_get "/api/destinations" 2>/dev/null || true)
+    _demo_dst=$(echo "$_dsts" | grep -o '"id":"dst-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    if [ -n "$_demo_dst" ]; then
+      api_delete "/api/destinations/$_demo_dst"
+      log_ok "Deleted destination: $_demo_dst"
+    fi
+    # Delete model
+    _models=$(api_get "/api/models" 2>/dev/null || true)
+    _demo_mdl=$(echo "$_models" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    if [ -n "$_demo_mdl" ]; then
+      api_delete "/api/models/$_demo_mdl"
+      log_ok "Deleted model: $_demo_mdl"
+    fi
+  fi
+
+  # Delete test Cosmos account
+  if [ -n "$TEST_COSMOS_ACCOUNT" ] && [ -n "$RESOURCE_GROUP" ]; then
+    log "  Deleting test Cosmos account: $TEST_COSMOS_ACCOUNT"
+    az cosmosdb delete --name "$TEST_COSMOS_ACCOUNT" --resource-group "$RESOURCE_GROUP" --yes 2>/dev/null || true
+    log_ok "Test Cosmos account deleted."
+  fi
+
+  # Remove checkpoint
+  rm -f "$CHECKPOINT_FILE"
+  log_ok "Cleanup complete."
+  exit 0
+fi
 
 if [ -z "$AOAI_ENDPOINT" ]; then
   log_warn "Azure OpenAI endpoint not set."
