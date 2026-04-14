@@ -64,7 +64,7 @@ func newDeploymentListCmd() *cobra.Command {
 					item["_pods"] = "0"
 				}
 			}
-			printTable(items, deploymentColumns)
+			outputList(items, deploymentColumns)
 			return nil
 		},
 	}

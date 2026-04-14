@@ -10,6 +10,42 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>
         :root {
+            /* Light theme (default) */
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8f9fa;
+            --bg-tertiary: #f0f1f3;
+            --bg-hover: #e9ecef;
+            --bg-active: #dee2e6;
+            --border-subtle: #e2e4e8;
+            --border-default: #ced4da;
+            --border: #ced4da;
+            --border-primary: #6366f1;
+            --text-primary: #1a1a2e;
+            --text-secondary: #6b7280;
+            --text-tertiary: #9ca3af;
+            --accent-primary: #6366f1;
+            --accent-secondary: #818cf8;
+            --accent-muted: rgba(99, 102, 241, 0.10);
+            --success: #16a34a;
+            --success-muted: rgba(22, 163, 74, 0.10);
+            --warning: #d97706;
+            --warning-muted: rgba(217, 119, 6, 0.10);
+            --error: #dc2626;
+            --error-muted: rgba(220, 38, 38, 0.10);
+            --info: #2563eb;
+            --info-muted: rgba(37, 99, 235, 0.10);
+            --gradient-accent: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+            --radius-xl: 24px;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        [data-theme="dark"] {
             --bg-primary: #0a0a0b;
             --bg-secondary: #141416;
             --bg-tertiary: #1c1c1f;
@@ -17,6 +53,8 @@
             --bg-active: #2d2d31;
             --border-subtle: #27272a;
             --border-default: #3f3f46;
+            --border: #3f3f46;
+            --border-primary: #818cf8;
             --text-primary: #fafafa;
             --text-secondary: #a1a1aa;
             --text-tertiary: #71717a;
@@ -31,14 +69,9 @@
             --error-muted: rgba(239, 68, 68, 0.15);
             --info: #3b82f6;
             --info-muted: rgba(59, 130, 246, 0.15);
-            --gradient-accent: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
             --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
             --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
             --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-            --radius-sm: 6px;
-            --radius-md: 10px;
-            --radius-lg: 16px;
-            --radius-xl: 24px;
         }
 
         * {
@@ -890,6 +923,10 @@
                         <span class="status-dot" id="api-status"></span>
                     </div>
                 </div>
+                <button onclick="toggleTheme()" id="theme-toggle-btn" style="width: 100%; margin-top: 12px; padding: 8px; background: transparent; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-tertiary); cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; gap: 6px;" onmouseover="this.style.borderColor='var(--accent-primary)'; this.style.color='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-subtle)'; this.style.color='var(--text-tertiary)'">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                    <span id="theme-toggle-label">Dark Mode</span>
+                </button>
                 <button onclick="doLogout()" style="width: 100%; margin-top: 12px; padding: 8px; background: transparent; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-tertiary); cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; gap: 6px;" onmouseover="this.style.borderColor='var(--error)'; this.style.color='var(--error)'" onmouseout="this.style.borderColor='var(--border-subtle)'; this.style.color='var(--text-tertiary)'">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                     Sign Out
@@ -1864,13 +1901,13 @@
                                     Queue mode: Change feed creates jobs, pipeline worker processes them. Inline mode: Change feed patches documents directly (faster for same source/destination).
                                 </small>
                             </div>
-                        </div>
-                        <div class="form-group" id="doc-id-pattern-group">
-                            <label class="form-label">Document ID Pattern</label>
-                            <input type="text" class="form-input" name="doc_id_pattern" value="{source}" placeholder="{source}">
-                            <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                Target doc name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
-                            </small>
+                            <div class="form-group" id="doc-id-pattern-group" style="display: none;">
+                                <label class="form-label">Document ID Pattern</label>
+                                <input type="text" class="form-input" name="doc_id_pattern" value="{source}" placeholder="{source}">
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    Target doc name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
+                                </small>
+                            </div>
                         </div>
 
                         <!-- Source Step -->
@@ -2395,6 +2432,30 @@
             showLoginScreen();
         }
 
+        function toggleTheme() {
+            const html = document.documentElement;
+            const isDark = html.getAttribute('data-theme') === 'dark';
+            if (isDark) {
+                html.removeAttribute('data-theme');
+                localStorage.setItem('omnivec-theme', 'light');
+                document.getElementById('theme-toggle-label').textContent = 'Dark Mode';
+            } else {
+                html.setAttribute('data-theme', 'dark');
+                localStorage.setItem('omnivec-theme', 'dark');
+                document.getElementById('theme-toggle-label').textContent = 'Light Mode';
+            }
+        }
+
+        function initTheme() {
+            const saved = localStorage.getItem('omnivec-theme');
+            if (saved === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                const label = document.getElementById('theme-toggle-label');
+                if (label) label.textContent = 'Light Mode';
+            }
+        }
+        initTheme();
+
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             const token = getAuthToken();
@@ -2745,27 +2806,27 @@
                     ` : source.type === 'postgresql' ? `
                         <div class="form-group">
                             <label class="form-label">Host</label>
-                            <input type="text" class="form-input" id="detail-pg-host" value="${config.host || ''}" placeholder="hostname.postgres.database.azure.com">
+                            <input type="text" class="form-input" id="detail-pg-host" value="${config.host || ''}" placeholder="hostname.postgres.database.azure.com" oninput="markSourceDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Port</label>
-                            <input type="number" class="form-input" id="detail-pg-port" value="${config.port || 5432}">
+                            <input type="number" class="form-input" id="detail-pg-port" value="${config.port || 5432}" oninput="markSourceDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Database</label>
-                            <input type="text" class="form-input" id="detail-pg-database" value="${config.database || ''}">
+                            <input type="text" class="form-input" id="detail-pg-database" value="${config.database || ''}" oninput="markSourceDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Table</label>
-                            <input type="text" class="form-input" id="detail-pg-table" value="${config.table || ''}">
+                            <input type="text" class="form-input" id="detail-pg-table" value="${config.table || ''}" oninput="markSourceDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">ID Column</label>
-                            <input type="text" class="form-input" id="detail-pg-id-column" value="${config.id_column || 'id'}">
+                            <input type="text" class="form-input" id="detail-pg-id-column" value="${config.id_column || 'id'}" oninput="markSourceDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Timestamp Column</label>
-                            <input type="text" class="form-input" id="detail-pg-ts-column" value="${config.timestamp_column || 'updated_at'}">
+                            <input type="text" class="form-input" id="detail-pg-ts-column" value="${config.timestamp_column || 'updated_at'}" oninput="markSourceDetailDirty()">
                         </div>
                     ` : `
                         <div class="form-group">
@@ -3216,31 +3277,31 @@
                     configFields = `
                         <div class="form-group">
                             <label class="form-label">Host</label>
-                            <input type="text" class="form-input" id="dest-detail-pg-host" value="${config.host || ''}" placeholder="hostname.postgres.database.azure.com">
+                            <input type="text" class="form-input" id="dest-detail-pg-host" value="${config.host || ''}" placeholder="hostname.postgres.database.azure.com" oninput="markDestDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Port</label>
-                            <input type="number" class="form-input" id="dest-detail-pg-port" value="${config.port || 5432}">
+                            <input type="number" class="form-input" id="dest-detail-pg-port" value="${config.port || 5432}" oninput="markDestDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Database</label>
-                            <input type="text" class="form-input" id="dest-detail-pg-database" value="${config.database || ''}">
+                            <input type="text" class="form-input" id="dest-detail-pg-database" value="${config.database || ''}" oninput="markDestDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Table</label>
-                            <input type="text" class="form-input" id="dest-detail-pg-table" value="${config.table || ''}">
+                            <input type="text" class="form-input" id="dest-detail-pg-table" value="${config.table || ''}" oninput="markDestDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Vector Column</label>
-                            <input type="text" class="form-input" id="dest-detail-pg-vector-col" value="${config.vector_column || 'embedding'}">
+                            <input type="text" class="form-input" id="dest-detail-pg-vector-col" value="${config.vector_column || 'embedding'}" oninput="markDestDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Content Column</label>
-                            <input type="text" class="form-input" id="dest-detail-pg-content-col" value="${config.content_column || 'content'}">
+                            <input type="text" class="form-input" id="dest-detail-pg-content-col" value="${config.content_column || 'content'}" oninput="markDestDetailDirty()">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Vector Dimensions</label>
-                            <input type="number" class="form-input" id="dest-detail-pg-dimensions" value="${config.vector_dimensions || 1536}">
+                            <input type="number" class="form-input" id="dest-detail-pg-dimensions" value="${config.vector_dimensions || 1536}" oninput="markDestDetailDirty()">
                         </div>
                     `;
                 } else {
@@ -3392,6 +3453,21 @@
                 const envEl = document.getElementById('dest-detail-environment');
                 if (indexEl) editedDestData.index = indexEl.value;
                 if (envEl) editedDestData.environment = envEl.value;
+            } else if (dest.type === 'pgvector') {
+                const hostEl = document.getElementById('dest-detail-pg-host');
+                const portEl = document.getElementById('dest-detail-pg-port');
+                const dbEl = document.getElementById('dest-detail-pg-database');
+                const tableEl = document.getElementById('dest-detail-pg-table');
+                const vecColEl = document.getElementById('dest-detail-pg-vector-col');
+                const contentColEl = document.getElementById('dest-detail-pg-content-col');
+                const dimsEl = document.getElementById('dest-detail-pg-dimensions');
+                if (hostEl) editedDestData.host = hostEl.value;
+                if (portEl) editedDestData.port = parseInt(portEl.value) || 5432;
+                if (dbEl) editedDestData.database = dbEl.value;
+                if (tableEl) editedDestData.table = tableEl.value;
+                if (vecColEl) editedDestData.vector_column = vecColEl.value;
+                if (contentColEl) editedDestData.content_column = contentColEl.value;
+                if (dimsEl) editedDestData.vector_dimensions = parseInt(dimsEl.value) || 1536;
             } else {
                 const hostEl = document.getElementById('dest-detail-host');
                 const collEl = document.getElementById('dest-detail-collection');
@@ -4791,6 +4867,12 @@
                 srcObj.config?.container === destObj.config?.container;
 
             indicator.style.display = sameContainer ? 'block' : 'none';
+
+            // Show doc-id-pattern only when source and destination are different (queue mode)
+            const docIdGroup = document.getElementById('doc-id-pattern-group');
+            if (docIdGroup) {
+                docIdGroup.style.display = sameContainer ? 'none' : 'block';
+            }
         }
 
         function togglePipelineTransformMode(mode) {
@@ -6964,7 +7046,7 @@
                     ? `${DOCGROK_API}/pipelines/${dgEditingPipeline}`
                     : `${DOCGROK_API}/pipelines`;
 
-                const res = await fetch(url, {
+                const res = await apiFetch(url, {
                     method,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)

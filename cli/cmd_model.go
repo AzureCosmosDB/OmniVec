@@ -20,11 +20,13 @@ func newModelCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "model",
 		Aliases: []string{"models"},
-		Short:   "Manage DocGrok embedding models",
+		Short:   "Manage embedding models",
 	}
 	cmd.AddCommand(
 		newModelListCmd(),
+		newModelShowCmd(),
 		newModelAddCmd(),
+		newModelTestCmd(),
 		newModelDeleteCmd(),
 		newModelStartCmd(),
 		newModelStopCmd(),
@@ -63,6 +65,49 @@ func newModelListCmd() *cobra.Command {
 			_, _, _, mdlH := fetchHealthMap(c)
 			enrichHealth(items, mdlH, "name")
 			outputList(items, modelColumns)
+			return nil
+		},
+	}
+}
+
+func newModelShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <model-name>",
+		Short: "Show details of a model",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := getClient()
+			data, err := c.Get(fmt.Sprintf("/api/docgrok/models/%s", args[0]), nil)
+			if err != nil {
+				exitErr("%v", err)
+			}
+			var raw any
+			json.Unmarshal(data, &raw)
+			outputResult(raw, modelColumns)
+			return nil
+		},
+	}
+}
+
+func newModelTestCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "test <model-name>",
+		Short: "Test connectivity to a model",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := getClient()
+			data, err := c.Post(fmt.Sprintf("/api/models/%s/test", args[0]), nil)
+			if err != nil {
+				exitErr("Model test failed: %v", err)
+			}
+			resp := parseJSONObject(data)
+			if status, ok := resp["status"].(string); ok && status == "ok" {
+				exitOK("Model '%s' is reachable", args[0])
+			} else if msg, ok := resp["detail"].(string); ok {
+				exitErr("Model test failed: %s", msg)
+			} else {
+				exitOK("Model test returned: %s", string(data))
+			}
 			return nil
 		},
 	}

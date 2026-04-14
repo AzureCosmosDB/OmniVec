@@ -452,6 +452,8 @@ func toInt(v any) int {
 
 func newPipelineCreateCmd() *cobra.Command {
 	var name, description, source, destination, model, contentFields, vectorIndexPath string
+	var contentMode, contentStrategy, fileTypes, docIdPattern string
+	var chunkSize, chunkOverlap int
 	var processExisting bool
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -481,11 +483,26 @@ func newPipelineCreateCmd() *cobra.Command {
 				}
 			}
 
+			// Build pipeline source entry
+			srcEntry := map[string]any{
+				"source_id":      srcID,
+				"filters":        map[string]any{},
+				"content_fields": fields,
+			}
+			if contentMode != "" {
+				srcEntry["content_mode"] = contentMode
+			}
+			if fileTypes != "" {
+				ft := strings.Split(fileTypes, ",")
+				for i := range ft {
+					ft[i] = strings.TrimSpace(ft[i])
+				}
+				srcEntry["file_types"] = ft
+			}
+
 			body := map[string]any{
 				"name": name,
-				"sources": []map[string]any{
-					{"source_id": srcID, "filters": map[string]any{}, "content_fields": fields},
-				},
+				"sources": []map[string]any{srcEntry},
 				"destination_id":     dstID,
 				"docgrok_pipeline":   model,
 				"vector_index_path":  vectorIndexPath,
@@ -493,6 +510,24 @@ func newPipelineCreateCmd() *cobra.Command {
 			}
 			if description != "" {
 				body["description"] = description
+			}
+			if contentStrategy != "" {
+				body["content_strategy"] = contentStrategy
+			}
+			if chunkSize > 0 {
+				if body["chunk_config"] == nil {
+					body["chunk_config"] = map[string]any{}
+				}
+				body["chunk_config"].(map[string]any)["chunk_size"] = chunkSize
+			}
+			if chunkOverlap > 0 {
+				if body["chunk_config"] == nil {
+					body["chunk_config"] = map[string]any{}
+				}
+				body["chunk_config"].(map[string]any)["chunk_overlap"] = chunkOverlap
+			}
+			if docIdPattern != "" {
+				body["doc_id_pattern"] = docIdPattern
 			}
 			c := getClient()
 			data, err := c.Post("/api/pipelines", body)
@@ -517,6 +552,12 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&destination, "destination", "", "Destination ID")
 	cmd.Flags().StringVar(&model, "model", "", "DocGrok pipeline or model name")
 	cmd.Flags().StringVar(&contentFields, "content-fields", "", "Comma-separated content field names (default: content)")
+	cmd.Flags().StringVar(&contentMode, "content-mode", "", "Content extraction mode: field, blob_url, http_url, s3_url")
+	cmd.Flags().StringVar(&fileTypes, "file-types", "", "Comma-separated file type filters (e.g., txt,pdf,md)")
+	cmd.Flags().StringVar(&contentStrategy, "content-strategy", "", "Content strategy: truncate or chunk")
+	cmd.Flags().IntVar(&chunkSize, "chunk-size", 0, "Chunk size in characters (used with --content-strategy=chunk)")
+	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 0, "Chunk overlap in characters")
+	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern (e.g., {source}-chunk-{chunk})")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path from destination's vector policy (required)")
 	cmd.Flags().BoolVar(&processExisting, "process-existing", true, "Process existing documents on creation")
 	return cmd
@@ -524,6 +565,8 @@ func newPipelineCreateCmd() *cobra.Command {
 
 func newPipelineUpdateCmd() *cobra.Command {
 	var name, description, destination, model string
+	var contentFields, contentStrategy, docIdPattern, vectorIndexPath string
+	var chunkSize, chunkOverlap int
 	cmd := &cobra.Command{
 		Use:   "update <pipeline-id>",
 		Short: "Update a pipeline",
@@ -553,6 +596,39 @@ func newPipelineUpdateCmd() *cobra.Command {
 			if model != "" {
 				body["docgrok_pipeline"] = model
 			}
+			if contentStrategy != "" {
+				body["content_strategy"] = contentStrategy
+			}
+			if vectorIndexPath != "" {
+				body["vector_index_path"] = vectorIndexPath
+			}
+			if docIdPattern != "" {
+				body["doc_id_pattern"] = docIdPattern
+			}
+			if contentFields != "" {
+				fields := strings.Split(contentFields, ",")
+				for i := range fields {
+					fields[i] = strings.TrimSpace(fields[i])
+				}
+				if srcs, ok := body["sources"].([]any); ok && len(srcs) > 0 {
+					if s, ok := srcs[0].(map[string]any); ok {
+						s["content_fields"] = fields
+					}
+				}
+			}
+			if chunkSize > 0 || chunkOverlap > 0 {
+				cc := map[string]any{}
+				if existing, ok := body["chunk_config"].(map[string]any); ok {
+					cc = existing
+				}
+				if chunkSize > 0 {
+					cc["chunk_size"] = chunkSize
+				}
+				if chunkOverlap > 0 {
+					cc["chunk_overlap"] = chunkOverlap
+				}
+				body["chunk_config"] = cc
+			}
 			data, err := c.Put(fmt.Sprintf("/api/pipelines/%s", id), body)
 			if err != nil {
 				exitErr("%v", err)
@@ -570,6 +646,12 @@ func newPipelineUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&description, "description", "", "Pipeline description")
 	cmd.Flags().StringVar(&destination, "destination", "", "Destination ID")
 	cmd.Flags().StringVar(&model, "model", "", "DocGrok pipeline name")
+	cmd.Flags().StringVar(&contentFields, "content-fields", "", "Comma-separated content field names")
+	cmd.Flags().StringVar(&contentStrategy, "content-strategy", "", "Content strategy: truncate or chunk")
+	cmd.Flags().IntVar(&chunkSize, "chunk-size", 0, "Chunk size in characters")
+	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 0, "Chunk overlap in characters")
+	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern")
+	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path")
 	return cmd
 }
 
