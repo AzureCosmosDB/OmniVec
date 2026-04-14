@@ -136,7 +136,7 @@ This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/
 
 ### 3b. Create a source
 
-A source is a connection to data you want to embed. For this first run, use **Azure Blob Storage** — `azd up` already provisioned a storage account in your resource group.
+A source is a connection to data you want to embed. For this first run, use **Azure Blob Storage** — `azd up` already provisioned a storage account in your resource group (`rg-omnivec-<your-env-name>`).
 
 1. Find your storage account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Storage account resource → **Properties** → copy the **Primary blob service endpoint** URL.
 2. In that storage account, create a container named `docs` (Azure Portal → Storage account → **Containers** → **+ Container**).
@@ -157,7 +157,7 @@ A source is a connection to data you want to embed. For this first run, use **Az
 
 ### 3c. Create a destination
 
-A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` already created a CosmosDB account in your resource group.
+A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` already created a CosmosDB account in your resource group (`rg-omnivec-<your-env-name>`).
 
 1. Find your CosmosDB account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Cosmos DB account → **Overview** → copy the **URI**.
 2. Create a database and container for vectors:
@@ -181,7 +181,7 @@ A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` 
 6. Click **Save**, then **Test Connection**.
 7. Click **Fetch Vector Index Details** — you should see `/embedding` with dimensions `1536` and distance function `cosine`.
 
-> **If Fetch Vector Index Details returns nothing:** your container doesn't have a vector indexing policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path.
+> **If Fetch Vector Index Details returns nothing:** your container doesn't have a vector indexing policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path. See the [Cosmos DB vector search docs](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search) for details.
 
 ### 3d. Create a pipeline
 
@@ -214,9 +214,9 @@ Then test vector search:
 1. Go to **Vector Search** in the sidebar.
 2. Select your destination index.
 3. Type: `vector ingestion platform`
-4. Click **Search** — you should see your `hello.txt` document returned with a high similarity score (>0.8).
+4. Click **Search** — you should see your `hello.txt` document returned as the top result.
 
-> **Expected result:** Since your sample document contains "universal vector ingestion platform," a search for "vector ingestion platform" should match it strongly.
+> **Expected result:** Since your sample document contains "universal vector ingestion platform," a search for "vector ingestion platform" should match it as the first or second result.
 
 **Congratulations — you've deployed OmniVec and run a full vector ingestion pipeline.** 🎉
 
