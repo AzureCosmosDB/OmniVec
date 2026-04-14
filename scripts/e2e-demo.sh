@@ -228,6 +228,34 @@ ENV_NAME="${USER_ENV_NAME:-omnivec-e2e-demo}"
 LOCATION="eastus2"
 SUBSCRIPTION="<AZURE_SUBSCRIPTION_ID>"
 
+# ─── Helper: load azd env values (must be defined before --existing block) ───
+load_azd_values() {
+  ADMIN_TOKEN=$(azd_get OMNIVEC_ADMIN_TOKEN)
+  AKS_CLUSTER=$(azd_get AZURE_AKS_CLUSTER_NAME)
+  RESOURCE_GROUP=$(azd_get AZURE_RESOURCE_GROUP)
+  IDENTITY_CLIENT_ID=$(azd_get AZURE_IDENTITY_CLIENT_ID)
+  COSMOS_ENDPOINT=$(azd_get AZURE_COSMOS_ENDPOINT)
+  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
+  TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
+}
+
+# ─── Helper: symlink kubeconfig from Windows home on WSL ─────────────────────
+ensure_kubeconfig() {
+  if [ -f "$HOME/.kube/config" ]; then return 0; fi
+  WIN_USER=$(cmd.exe /C "echo %USERNAME%" 2>/dev/null | tr -d '\r') || true
+  if [ -n "$WIN_USER" ] && [ -f "/mnt/c/Users/$WIN_USER/.kube/config" ]; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "/mnt/c/Users/$WIN_USER/.kube/config" "$HOME/.kube/config"
+    export KUBECONFIG="$HOME/.kube/config"
+    return 0
+  fi
+  if [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
+    mkdir -p "$HOME/.kube"
+    ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
+    export KUBECONFIG="$HOME/.kube/config"
+  fi
+}
+
 # ─── Existing deployment mode ────────────────────────────────────────────────
 if [ "$EXISTING" = "true" ]; then
   log "Using existing deployment: $ENV_NAME"
@@ -366,36 +394,6 @@ if [ -z "$AOAI_KEY" ]; then
   if [ -z "$AOAI_KEY" ]; then log_err "API key required."; exit 1; fi
 fi
 log_ok "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
-
-# ─── Helper: load azd env values ────────────────────────────────────────────
-load_azd_values() {
-  ADMIN_TOKEN=$(azd_get OMNIVEC_ADMIN_TOKEN)
-  AKS_CLUSTER=$(azd_get AZURE_AKS_CLUSTER_NAME)
-  RESOURCE_GROUP=$(azd_get AZURE_RESOURCE_GROUP)
-  IDENTITY_CLIENT_ID=$(azd_get AZURE_IDENTITY_CLIENT_ID)
-  COSMOS_ENDPOINT=$(azd_get AZURE_COSMOS_ENDPOINT)
-  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
-  TEST_COSMOS_ACCOUNT="omnivec-test-${INSTANCE_TOKEN}"
-}
-
-# ─── Helper: symlink kubeconfig from Windows home on WSL ─────────────────────
-ensure_kubeconfig() {
-  if [ -f "$HOME/.kube/config" ]; then return 0; fi
-  # Try common Windows home path
-  WIN_USER=$(cmd.exe /C "echo %USERNAME%" 2>/dev/null | tr -d '\r') || true
-  if [ -n "$WIN_USER" ] && [ -f "/mnt/c/Users/$WIN_USER/.kube/config" ]; then
-    mkdir -p "$HOME/.kube"
-    ln -sf "/mnt/c/Users/$WIN_USER/.kube/config" "$HOME/.kube/config"
-    export KUBECONFIG="$HOME/.kube/config"
-    return 0
-  fi
-  # Fallback: try whoami
-  if [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
-    mkdir -p "$HOME/.kube"
-    ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
-    export KUBECONFIG="$HOME/.kube/config"
-  fi
-}
 
 # =============================================================================
 # STEP 1: Create azd environment
