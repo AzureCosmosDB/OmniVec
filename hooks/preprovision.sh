@@ -180,6 +180,38 @@ if [ -n "$_existing_vm" ]; then
   exit 0
 fi
 
+# ── Fresh deploy: offer auto-defaults or interactive ─────────────────────────
+echo ""
+printf "${YELLOW}No configuration found. Choose setup mode:${NC}\n"
+echo "  1) Quick start — use recommended defaults (fastest, no GPU)"
+echo "  2) Custom     — choose VM sizes, GPU, metadata store"
+echo ""
+setup_mode=$(read_input "Choice [1]: ")
+setup_mode=${setup_mode:-1}
+
+if [ "$setup_mode" = "1" ]; then
+  printf "\n${GREEN}Applying recommended defaults:${NC}\n"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms"
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2"
+  azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
+  azd env set OMNIVEC_GPU_NODE_COUNT      "0"
+  azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless"
+  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true"
+  echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_B4ms"
+  echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
+  echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
+  echo "  OMNIVEC_GPU_NODE_COUNT      = 0"
+  echo "  OMNIVEC_METADATA_STORE      = cosmosdb-serverless"
+  echo "  OMNIVEC_ENABLE_BLOB_SOURCE  = true"
+  echo ""
+  echo "  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
+  echo "  GPU pool: none (use Azure OpenAI for embeddings)"
+  echo "  Metadata: CosmosDB Serverless"
+  echo "  Blob source: enabled"
+  printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
+  exit 0
+fi
+
 # ── Metadata storage selection ──────────────────────────────────────────────
 
 cur_meta=$(azd_get OMNIVEC_METADATA_STORE)
