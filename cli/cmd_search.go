@@ -12,7 +12,7 @@ func newSearchCmd() *cobra.Command {
 	var topK int
 	cmd := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Search vectors in the playground",
+		Short: "Search vectors in a destination index",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if index == "" {
