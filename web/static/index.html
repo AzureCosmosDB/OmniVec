@@ -2673,10 +2673,6 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                         Authentication
                     </button>
-                    <button class="detail-tab" data-tab="content" onclick="switchDetailTab('content')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                        ${source.type === 'azure-blob' ? 'File Types' : 'Content'}
-                    </button>
                     <button class="detail-tab" data-tab="health" onclick="switchDetailTab('health')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
                         Health
@@ -3858,58 +3854,61 @@
                     </div>
                 `;
             } else if (currentPipelineTab === 'sources') {
-                const sourceOptions = sources.map(s => `<option value="${s.id}">${s.name} (${s.type})</option>`).join('');
-                const destOptions = destinations.map(d => `<option value="${d.id}" ${d.id === pipeline.destination_id ? 'selected' : ''}>${d.name} (${d.type})</option>`).join('');
 
                 const currentSources = (pipeline.sources || []).map(ps => {
                     const src = sources.find(s => s.id === ps.source_id);
+                    const cf = ps.content_fields || ['content'];
                     return `
-                        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px; background: var(--bg-tertiary); border-radius: 8px;">
-                            <div style="display: flex; align-items: center; gap: 10px;">
+                        <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 8px;">
+                            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="18" height="18"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/></svg>
                                 <div>
                                     <div style="font-weight: 500;">${src ? src.name : ps.source_id}</div>
                                     <div style="font-size: 12px; color: var(--text-tertiary);">${src ? src.type : 'unknown'}</div>
                                 </div>
+                                <span style="margin-left: auto; font-size: 12px; color: var(--text-tertiary);">🔒 Locked</span>
                             </div>
-                            <button class="btn btn-ghost btn-sm" onclick="removePipelineSource('${ps.source_id}')" style="color: var(--error);">Remove</button>
+                            <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Content Fields</div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                                ${cf.map(f => `<span style="padding: 3px 10px; background: var(--accent-muted); border: 1px solid var(--accent-primary); border-radius: 16px; font-size: 11px; color: var(--accent-secondary);">${f}</span>`).join('')}
+                            </div>
+                            ${ps.content_mode && ps.content_mode !== 'field' ? `<div style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">Content Mode: <strong>${ps.content_mode}</strong></div>` : ''}
                         </div>
                     `;
                 }).join('');
 
+                const destObj = destinations.find(d => d.id === pipeline.destination_id);
+                const destName = destObj ? destObj.name : pipeline.destination_id;
+                const destType = destObj ? destObj.type : 'unknown';
+
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Sources</h4>
-                    <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px;">
+                    <div style="margin-bottom: 24px;">
                         ${currentSources || '<div style="color: var(--text-tertiary); padding: 12px;">No sources attached</div>'}
                     </div>
-                    <div style="display: flex; gap: 8px; margin-bottom: 32px;">
-                        <select class="form-input" id="pip-add-source-select" style="flex: 1;">
-                            <option value="">Select a source to add...</option>
-                            ${sourceOptions}
-                        </select>
-                        <button class="btn btn-secondary" onclick="addPipelineSource()">Add</button>
-                    </div>
+                    <small style="color: var(--text-tertiary); font-size: 12px; display: block; margin-bottom: 24px;">
+                        Sources cannot be changed after pipeline creation. Create a new pipeline to use different sources.
+                    </small>
 
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Destination</h4>
-                    <div class="form-group">
-                        <div style="display: flex; gap: 8px;">
-                            <select class="form-input" id="pip-detail-destination" style="flex: 1;" onchange="markPipelineDetailDirty()">
-                                ${destOptions}
-                            </select>
-                            <button type="button" class="btn btn-secondary" onclick="testPipelineDetailDest()" style="white-space: nowrap;">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                                Test
-                            </button>
+                    <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 8px;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            <div>
+                                <div style="font-weight: 500;">${destName}</div>
+                                <div style="font-size: 12px; color: var(--text-tertiary);">${destType}</div>
+                            </div>
+                            <span style="margin-left: auto; font-size: 12px; color: var(--text-tertiary);">🔒 Locked</span>
                         </div>
-                        <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>
                     </div>
-                    <div class="form-group" style="margin-top: 4px;">
+
+                    <div class="form-group" style="margin-top: 16px;">
                         <label class="form-label">Vector Index Path</label>
                         <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
                             /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
                         </div>
                         <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                            The vector embedding field used by this pipeline
+                            The vector embedding path in the destination container. Cannot be changed after creation.
                         </small>
                     </div>
                 `;
