@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -801,7 +801,7 @@
             <div class="logo">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
                     <h1>OmniVec</h1>
-                    <button onclick="toggleTheme()" id="theme-toggle" style="background:none;border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-secondary);font-size:16px;" title="Toggle theme">🌙</button>
+                    <button onclick="toggleTheme()" id="theme-toggle" style="background:none;border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-secondary);font-size:16px;" title="Toggle theme">☀️</button>
                 </div>
                 <span>Vector Ingestion Platform</span>
             </div>
@@ -8889,12 +8889,14 @@ az eventgrid event-subscription create \\
         }
         // Load saved theme
         (function() {
-            const saved = localStorage.getItem('omnivec-theme') || 'dark';
-            if (saved === 'light') {
+            const saved = localStorage.getItem('omnivec-theme') || 'light';
+            if (saved === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            } else {
                 document.documentElement.setAttribute('data-theme', 'light');
             }
             const btn = document.getElementById('theme-toggle');
-            if (btn) btn.textContent = saved === 'light' ? '🌙' : '☀️';
+            if (btn) btn.textContent = saved === 'dark' ? '☀️' : '🌙';
         })();
 
 
