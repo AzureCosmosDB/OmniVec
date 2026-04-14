@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -39,6 +39,34 @@
             --radius-md: 10px;
             --radius-lg: 16px;
             --radius-xl: 24px;
+        }
+
+        [data-theme="light"] {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8f9fa;
+            --bg-tertiary: #f1f3f5;
+            --bg-hover: #e9ecef;
+            --bg-active: #dee2e6;
+            --border-subtle: #e9ecef;
+            --border-default: #ced4da;
+            --text-primary: #212529;
+            --text-secondary: #495057;
+            --text-tertiary: #868e96;
+            --accent-primary: #4f46e5;
+            --accent-secondary: #6366f1;
+            --accent-muted: rgba(79, 70, 229, 0.1);
+            --success: #16a34a;
+            --success-muted: rgba(22, 163, 74, 0.1);
+            --warning: #d97706;
+            --warning-muted: rgba(217, 119, 6, 0.1);
+            --error: #dc2626;
+            --error-muted: rgba(220, 38, 38, 0.1);
+            --info: #2563eb;
+            --info-muted: rgba(37, 99, 235, 0.1);
+            --gradient-accent: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #9333ea 100%);
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
         }
 
         * {
@@ -764,9 +792,6 @@
             </div>
             <div id="login-error" style="display: none; color: var(--error); font-size: 13px; margin-bottom: 16px; padding: 10px; background: var(--error-muted); border-radius: var(--radius-sm);"></div>
             <button class="btn btn-primary" onclick="doLogin()" style="width: 100%; padding: 12px; font-size: 14px; margin-top: 8px;" id="login-btn">Sign In</button>
-            <div style="text-align: center; margin-top: 20px; color: var(--text-tertiary); font-size: 12px;">
-                Generate tokens via CLI: <code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;">curl -X POST /api/auth/tokens</code>
-            </div>
         </div>
     </div>
 
@@ -774,7 +799,10 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="logo">
-                <h1>OmniVec</h1>
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <h1>OmniVec</h1>
+                    <button onclick="toggleTheme()" id="theme-toggle" style="background:none;border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-secondary);font-size:16px;" title="Toggle theme">☀️</button>
+                </div>
                 <span>Vector Ingestion Platform</span>
             </div>
 
@@ -2833,6 +2861,18 @@
                         </div>
                     `}
                 `;
+            } else if (currentDetailTab === 'content') {
+                if (source.type === 'azure-blob') {
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">File Types to Process</h4>
+                        <p style="font-size: 13px; color: var(--text-tertiary);">File type filtering is now configured per-pipeline in the pipeline source settings.</p>
+                    `;
+                } else {
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Configuration</h4>
+                        <p style="font-size: 13px; color: var(--text-tertiary);">Content fields are now configured per-pipeline in the pipeline source settings.</p>
+                    `;
+                }
             } else if (currentDetailTab === 'health') {
                 const sh = getHealthFor('sources', source.id);
                 if (!sh) {
@@ -3846,6 +3886,7 @@
                     </div>
                 `;
             } else if (currentPipelineTab === 'sources') {
+                const isExisting = !!pipeline.id;
                 const sourceOptions = sources.map(s => `<option value="${s.id}">${s.name} (${s.type})</option>`).join('');
                 const destOptions = destinations.map(d => `<option value="${d.id}" ${d.id === pipeline.destination_id ? 'selected' : ''}>${d.name} (${d.type})</option>`).join('');
 
@@ -3860,27 +3901,36 @@
                                     <div style="font-size: 12px; color: var(--text-tertiary);">${src ? src.type : 'unknown'}</div>
                                 </div>
                             </div>
-                            <button class="btn btn-ghost btn-sm" onclick="removePipelineSource('${ps.source_id}')" style="color: var(--error);">Remove</button>
+                            ${isExisting ? '<span style="font-size: 12px; color: var(--text-tertiary);">🔒</span>' : `<button class="btn btn-ghost btn-sm" onclick="removePipelineSource('${ps.source_id}')" style="color: var(--error);">Remove</button>`}
                         </div>
                     `;
                 }).join('');
 
+                const destObj = destinations.find(d => d.id === pipeline.destination_id);
+                const destDisplay = destObj ? `${destObj.name} (${destObj.type})` : (pipeline.destination_id || 'Not set');
+
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Sources</h4>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Sources${isExisting ? ' <span style="font-size: 12px; color: var(--text-tertiary); font-weight: 400;">🔒 Locked after creation</span>' : ''}</h4>
                     <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px;">
                         ${currentSources || '<div style="color: var(--text-tertiary); padding: 12px;">No sources attached</div>'}
                     </div>
-                    <div style="display: flex; gap: 8px; margin-bottom: 32px;">
+                    ${isExisting ? '' : `<div style="display: flex; gap: 8px; margin-bottom: 32px;">
                         <select class="form-input" id="pip-add-source-select" style="flex: 1;">
                             <option value="">Select a source to add...</option>
                             ${sourceOptions}
                         </select>
                         <button class="btn btn-secondary" onclick="addPipelineSource()">Add</button>
-                    </div>
+                    </div>`}
 
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Destination</h4>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Destination${isExisting ? ' <span style="font-size: 12px; color: var(--text-tertiary); font-weight: 400;">🔒</span>' : ''}</h4>
                     <div class="form-group">
-                        <div style="display: flex; gap: 8px;">
+                        ${isExisting ? `
+                        <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-size: 14px; display: flex; align-items: center; gap: 8px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/></svg>
+                            ${destDisplay}
+                        </div>
+                        <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>
+                        ` : `<div style="display: flex; gap: 8px;">
                             <select class="form-input" id="pip-detail-destination" style="flex: 1;" onchange="markPipelineDetailDirty()">
                                 ${destOptions}
                             </select>
@@ -3889,15 +3939,15 @@
                                 Test
                             </button>
                         </div>
-                        <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>
+                        <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>`}
                     </div>
                     <div class="form-group" style="margin-top: 4px;">
-                        <label class="form-label">Vector Index Path</label>
+                        <label class="form-label">Vector Index Path${isExisting ? ' <span style="font-size: 12px; color: var(--text-tertiary); font-weight: 400;">🔒</span>' : ''}</label>
                         <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
                             /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
                         </div>
                         <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                            The vector embedding field used by this pipeline
+                            ${isExisting ? 'Cannot be changed after pipeline creation' : 'The vector embedding field used by this pipeline'}
                         </small>
                     </div>
                 `;
@@ -3973,18 +4023,18 @@
             } else if (currentPipelineTab === 'chunking') {
                 const cs = pipeline.content_strategy || 'truncate';
                 const cc = pipeline.chunk_config || {};
-                const pm = pipeline.processing_mode || 'queue';
-                const isChunk = cs === 'chunk';
-                const isQueue = pm === 'queue';
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Strategy</h4>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Chunking Settings</h4>
+                    <p style="color: var(--text-tertiary); font-size: 13px; margin-bottom: 20px;">
+                        Controls how document text is split before embedding. Each chunk becomes a separate vector document in the destination.
+                    </p>
                     <div class="form-group">
-                        <select class="form-input" id="pip-detail-content-strategy" onchange="markPipelineDetailDirty(); renderPipelineDetailTab(pipelines.find(p=>p.id===currentPipelineId));">
+                        <label class="form-label">Content Strategy</label>
+                        <select class="form-input" id="pip-detail-content-strategy" onchange="markPipelineDetailDirty()">
                             <option value="truncate" ${cs === 'truncate' ? 'selected' : ''}>Truncate — embed full text as single vector (default)</option>
                             <option value="chunk" ${cs === 'chunk' ? 'selected' : ''}>Chunk — split text into overlapping chunks, embed each</option>
                         </select>
                     </div>
-                    ${isChunk ? `
                     <div style="padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px;">
                         <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Chunk Configuration</div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
@@ -4004,7 +4054,7 @@
                                 <input type="checkbox" id="pip-detail-store-text" ${cc.store_text ? 'checked' : ''} style="width: 18px; height: 18px;" onchange="markPipelineDetailDirty()">
                                 <div>
                                     <div style="font-weight: 500; font-size: 14px;">Store Extracted Text</div>
-                                    <div style="font-size: 12px; color: var(--text-tertiary);">Each chunk includes the text alongside the embedding vector</div>
+                                    <div style="font-size: 12px; color: var(--text-tertiary);">Each chunk document will include the chunk text alongside the embedding vector</div>
                                 </div>
                             </label>
                         </div>
@@ -4016,20 +4066,21 @@
                             </small>
                         </div>
                     </div>
-                    ` : `
-                    <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px; color: var(--text-tertiary); font-size: 13px;">
-                        Full document text is embedded as a single vector. No chunking configuration needed.
-                    </div>
-                    `}
-                    ${isQueue ? `
                     <div class="form-group" style="margin-top: 16px;">
-                        <label class="form-label">Document ID Pattern</label>
+                        <label class="form-label">Document ID Pattern (non-chunk)</label>
                         <input type="text" class="form-input" id="pip-detail-doc-id-pattern" value="${pipeline.doc_id_pattern || '{source}'}" placeholder="{source}" oninput="markPipelineDetailDirty()">
                         <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Target document name in destination. Variables: <code>{source}</code>, <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
+                            Target document name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
                         </small>
                     </div>
-                    ` : ''}
+                    <div style="margin-top: 20px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
+                        <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 12px; font-weight: 600;">How It Works</div>
+                        <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                            <strong>Truncate:</strong> Full document text is embedded as a single vector. Doc ID defaults to <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{source}</code> (filename without extension).<br>
+                            <strong>Chunk:</strong> Text is split into overlapping segments. Each chunk gets its own embedding. Doc ID defaults to <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{source}-chunk-{chunk}</code>.<br>
+                            Re-processing automatically cleans up old chunks before writing new ones.
+                        </div>
+                    </div>
                 `;
             } else if (currentPipelineTab === 'processing') {
                 const pm = pipeline.processing_mode || 'queue';
@@ -8827,6 +8878,26 @@ az eventgrid event-subscription create \\
             // For now, use alert - could be a modal in future
             alert(message);
         }
+
+        function toggleTheme() {
+            const html = document.documentElement;
+            const current = html.getAttribute('data-theme');
+            const next = current === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('omnivec-theme', next);
+            document.getElementById('theme-toggle').textContent = next === 'light' ? '🌙' : '☀️';
+        }
+        // Load saved theme
+        (function() {
+            const saved = localStorage.getItem('omnivec-theme') || 'light';
+            if (saved === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            } else {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+            const btn = document.getElementById('theme-toggle');
+            if (btn) btn.textContent = saved === 'dark' ? '☀️' : '🌙';
+        })();
 
 
     </script>
