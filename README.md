@@ -246,6 +246,7 @@ This removes the resource group, all Azure services, and local environment confi
 | Understand the architecture | [Architecture](docs/architecture.md) |
 | Use the web UI in depth | [User Guide](docs/user-guide.md) |
 | Run the automated E2E test suite | [E2E Demo](#automated-e2e-demo) below |
+| Diagnose deployment or pipeline issues | [Diagnostics](#diagnostics) below |
 | Add GPU-hosted models | [Models](#models) section below |
 
 ---
@@ -335,6 +336,8 @@ azd up
 
 The scripted demo creates sources, destinations, pipelines, sample data, and validates vector search end-to-end. Use it after you're comfortable with the manual flow above.
 
+**PowerShell (Windows/macOS/Linux):**
+
 ```powershell
 # Against your existing deployment
 pwsh scripts/e2e-demo.ps1 -Existing -EnvName my-omnivec `
@@ -352,15 +355,63 @@ pwsh scripts/e2e-demo.ps1 -FromStep 5
 pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName my-omnivec
 ```
 
-| Flag | Description |
+**Bash (Linux/macOS):**
+
+```bash
+# Against your existing deployment
+./scripts/e2e-demo.sh --existing --env my-omnivec \
+  --token <token> \
+  --endpoint https://<resource>.openai.azure.com \
+  --key <key>
+
+# Full automated run (creates new infra)
+./scripts/e2e-demo.sh --endpoint <url> --key <key>
+
+# Resume from a specific step
+./scripts/e2e-demo.sh --from-step 5
+
+# Cleanup
+./scripts/e2e-demo.sh --cleanup --env my-omnivec
+```
+
+| Flag (PS1 / Bash) | Description |
 |------|-------------|
-| `-Existing` | Use an existing deployment |
-| `-EnvName` | azd environment name |
-| `-AdminToken` | Admin token (`azd env get-value OMNIVEC_ADMIN_TOKEN`) |
-| `-AoaiEndpoint` | Azure OpenAI endpoint URL |
-| `-AoaiKey` | Azure OpenAI API key |
-| `-FromStep` | Resume from step N (1–9) |
-| `-Cleanup` | Delete all resources |
+| `-Existing` / `--existing` | Use an existing deployment |
+| `-EnvName` / `--env` | azd environment name |
+| `-AdminToken` / `--token` | Admin token (`azd env get-value OMNIVEC_ADMIN_TOKEN`) |
+| `-AoaiEndpoint` / `--endpoint` | Azure OpenAI endpoint URL |
+| `-AoaiKey` / `--key` | Azure OpenAI API key |
+| `-FromStep` / `--from-step` | Resume from step N (1–11) |
+| `-Cleanup` / `--cleanup` | Delete test resources |
+
+---
+
+## Diagnostics
+
+Run the diagnostics script to check deployment health and find common issues:
+
+**PowerShell:**
+```powershell
+pwsh scripts/diagnose.ps1 -EnvName my-omnivec
+```
+
+**Bash:**
+```bash
+./scripts/diagnose.sh --env my-omnivec
+```
+
+It checks 11 areas: infrastructure, pods, Helm release, networking, auth/RBAC, images, node capacity, models, pipelines, Service Bus, and recent error logs. Every failure includes a copy-paste fix command.
+
+**Deep-diagnose a single pipeline** (finds why it's stuck or not running):
+
+```powershell
+pwsh scripts/diagnose.ps1 -EnvName my-omnivec -Pipeline pip-abc123
+```
+```bash
+./scripts/diagnose.sh --env my-omnivec --pipeline pip-abc123
+```
+
+Pipeline diagnostics detects: paused, error state, 0 source docs, changefeed not triggering, workers down, all jobs failing, stalled mid-progress, dimension mismatch, and more.
 
 ---
 
@@ -463,7 +514,7 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `infra/` | Azure Bicep infrastructure-as-code |
 | `helm/` | Kubernetes Helm charts |
 | `hooks/` | azd lifecycle hooks (preprovision/postprovision) |
-| `scripts/` | Automation scripts (E2E demo, etc.) |
+| `scripts/` | Automation scripts (E2E demo, diagnostics) |
 
 ## License
 
