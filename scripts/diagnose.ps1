@@ -9,11 +9,53 @@
 #   pwsh scripts/diagnose.ps1 -ServerUrl http://1.2.3.4 -AdminToken <token> -Pipeline pip-abc123
 
 param(
+    [switch]$Help,
     [string]$EnvName,
     [string]$ServerUrl,
     [string]$AdminToken,
     [string]$Pipeline   # Optional: diagnose a single pipeline in depth
 )
+
+if ($Help) {
+    Write-Host @"
+OmniVec Deployment Diagnostics
+
+Usage:
+  pwsh scripts/diagnose.ps1 [options]
+
+Options:
+  -EnvName <name>      azd environment name (e.g., my-omnivec)
+  -ServerUrl <url>     OmniVec server URL (e.g., http://20.96.246.207)
+  -AdminToken <token>  Admin bearer token
+  -Pipeline <id>       Deep-diagnose a single pipeline (e.g., pip-abc123)
+  -Help                Show this help
+
+Examples:
+  # Full deployment check (auto-detects from default azd env)
+  pwsh scripts/diagnose.ps1 -EnvName my-omnivec
+
+  # With explicit server URL and token
+  pwsh scripts/diagnose.ps1 -ServerUrl http://20.96.246.207 -AdminToken abc123
+
+  # Deep-diagnose why a pipeline is stuck
+  pwsh scripts/diagnose.ps1 -EnvName my-omnivec -Pipeline pip-06e7b338
+
+Checks performed:
+  1.  Infrastructure    - RG, AKS, CosmosDB, ACR, Key Vault, Storage, Service Bus
+  2.  Pod Health        - running/crash/pending, deployments, restart counts
+  3.  Helm Release      - deployed/stuck/failed state
+  4.  Networking & DNS  - external IP, FQDN, API /health
+  5.  Auth & RBAC       - admin token, Workload Identity, CosmosDB + Storage RBAC
+  6.  Container Images  - all 6 required images in ACR
+  7.  Node Capacity     - node readiness, memory/disk pressure, pending pods
+  8.  Models            - registration, status, endpoint reachability
+  9.  Pipelines         - active/paused/error, completion, failed jobs
+  10. Service Bus       - queue depth / backlog
+  11. Recent Errors     - ERROR/RBAC/auth patterns in pod logs
+  12. Pipeline Deep     - (with -Pipeline) stuck analysis, source/dest/model checks
+"@
+    exit 0
+}
 
 $ErrorActionPreference = "SilentlyContinue"
 
