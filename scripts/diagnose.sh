@@ -4,9 +4,10 @@
 # images, pipelines, models, and common failure modes.
 #
 # Usage:
-#   ./scripts/diagnose.sh
-#   ./scripts/diagnose.sh --env my-omnivec
-#   ./scripts/diagnose.sh --server http://1.2.3.4 --token <token>
+#   ./scripts/diagnose.sh                                        # full deployment check
+#   ./scripts/diagnose.sh --env my-omnivec                       # specific environment
+#   ./scripts/diagnose.sh --pipeline pip-abc123                  # deep-diagnose one pipeline
+#   ./scripts/diagnose.sh --server http://1.2.3.4 --token <token> --pipeline pip-abc123
 
 set +e  # Don't exit on errors — we handle them
 
@@ -14,12 +15,14 @@ set +e  # Don't exit on errors — we handle them
 ENV_NAME=""
 SERVER_URL=""
 ADMIN_TOKEN=""
+PIPELINE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --env)      ENV_NAME="$2"; shift 2 ;;
     --server)   SERVER_URL="$2"; shift 2 ;;
     --token)    ADMIN_TOKEN="$2"; shift 2 ;;
+    --pipeline) PIPELINE="$2"; shift 2 ;;
     *)          shift ;;
   esac
 done
@@ -463,6 +466,285 @@ if [ -n "$KUBE_CONTEXT" ]; then
   done
 else
   warn "Skipping log checks (no AKS context)"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 12. SINGLE PIPELINE DEEP DIAGNOSTICS (when --pipeline is specified)
+# ═════════════════════════════════════════════════════════════════════════════
+
+if [ -n "$PIPELINE" ] && [ -n "$SERVER_URL" ] && [ -n "$ADMIN_TOKEN" ]; then
+  header "12. Pipeline Deep Diagnostics: $PIPELINE"
+
+  # Normalize pipeline ID
+  case "$PIPELINE" in pip-*) ;; *) PIPELINE="pip-$PIPELINE" ;; esac
+
+  # Fetch pipeline detail
+  _pip_detail=$(api_get "/api/pipelines/$PIPELINE")
+  if [ -z "$_pip_detail" ]; then
+    fail "Pipeline $PIPELINE not found" "Check ID with: omnivec pipeline list"
+  else
+    _pname=$(json_val "$_pip_detail" "name")
+    _pstatus=$(json_val "$_pip_detail" "status")
+    _pmode=$(json_val "$_pip_detail" "processing_mode")
+    _pstrategy=$(json_val "$_pip_detail" "content_strategy")
+    _dest_id=$(json_val "$_pip_detail" "destination_id")
+    _model_id=$(json_val "$_pip_detail" "docgrok_pipeline")
+    _vec_path=$(json_val "$_pip_detail" "vector_index_path")
+    _proc_existing=$(json_val "$_pip_detail" "process_existing")
+    _updated_at=$(json_val "$_pip_detail" "updated_at")
+
+    echo "  Name:              $_pname"
+    echo "  Status:            $_pstatus"
+    echo "  Mode:              $_pmode"
+    echo "  Content Strategy:  $_pstrategy"
+    echo "  Model:             $_model_id"
+    echo "  Destination:       $_dest_id"
+    echo "  Vector Path:       $_vec_path"
+    echo ""
+
+    # Status check
+    case "$_pstatus" in
+      active) pass "Pipeline is active" ;;
+      paused) fail "Pipeline is PAUSED — will not process any documents" "omnivec pipeline resume $PIPELINE" ;;
+      error)  fail "Pipeline is in ERROR state — processing halted" "omnivec pipeline show $PIPELINE then reset: omnivec pipeline reset $PIPELINE" ;;
+      *)      warn "Pipeline status: $_pstatus" ;;
+    esac
+
+    # Parse stats
+    _doc_count=$(echo "$_pip_detail" | grep -o '"source_doc_count":[0-9]*' | head -1 | cut -d: -f2)
+    _embedded=$(echo "$_pip_detail" | grep -o '"embedded_count":[0-9]*' | head -1 | cut -d: -f2)
+    _processed=$(echo "$_pip_detail" | grep -o '"documents_processed":[0-9]*' | head -1 | cut -d: -f2)
+    _pct=$(echo "$_pip_detail" | grep -o '"completion_pct":[0-9.]*' | head -1 | cut -d: -f2)
+    _doc_count=${_doc_count:-0}; _embedded=${_embedded:-0}; _processed=${_processed:-0}; _pct=${_pct:-0}
+
+    # Parse job stats
+    _jobs_total=$(echo "$_pip_detail" | grep -o '"total":[0-9]*' | head -1 | cut -d: -f2)
+    _jobs_pending=$(echo "$_pip_detail" | grep -o '"pending":[0-9]*' | head -1 | cut -d: -f2)
+    _jobs_processing=$(echo "$_pip_detail" | grep -o '"processing":[0-9]*' | head -1 | cut -d: -f2)
+    _jobs_completed=$(echo "$_pip_detail" | grep -o '"completed":[0-9]*' | head -1 | cut -d: -f2)
+    _jobs_failed=$(echo "$_pip_detail" | grep -o '"failed":[0-9]*' | head -1 | cut -d: -f2)
+    _jobs_total=${_jobs_total:-0}; _jobs_pending=${_jobs_pending:-0}; _jobs_processing=${_jobs_processing:-0}
+    _jobs_completed=${_jobs_completed:-0}; _jobs_failed=${_jobs_failed:-0}
+
+    echo "  Source docs:       $_doc_count"
+    echo "  Embedded:          $_embedded ($_pct%)"
+    echo "  Jobs:              $_jobs_total total ($_jobs_completed done, $_jobs_failed failed, $_jobs_pending pending, $_jobs_processing in-progress)"
+    echo ""
+
+    # ── Stuck / Not Running Analysis ──
+    printf "  ${YELLOW}── Stuck / Not Running Analysis ──${NC}\n"
+    _stuck_count=0
+
+    # 1. Pipeline paused
+    if [ "$_pstatus" = "paused" ]; then
+      _stuck_count=$((_stuck_count + 1))
+      fail "Pipeline is PAUSED" "omnivec pipeline resume $PIPELINE"
+    fi
+
+    # 2. Pipeline error
+    if [ "$_pstatus" = "error" ]; then
+      _stuck_count=$((_stuck_count + 1))
+      fail "Pipeline is in ERROR state" "omnivec pipeline show $PIPELINE; omnivec pipeline reset $PIPELINE"
+    fi
+
+    # 3. Source has 0 documents
+    if [ "$_pstatus" = "active" ] && [ "$_doc_count" -eq 0 ] 2>/dev/null; then
+      _stuck_count=$((_stuck_count + 1))
+      if [ "$_proc_existing" = "false" ]; then
+        warn "Source has 0 docs AND process_existing is OFF" "Insert documents, or: omnivec pipeline update $PIPELINE --process-existing"
+      else
+        warn "Source has 0 documents — nothing to process yet" "Add documents to the source container"
+      fi
+    fi
+
+    # 4. process_existing OFF with existing docs
+    if [ "$_pstatus" = "active" ] && [ "$_proc_existing" = "false" ] && [ "$_doc_count" -gt 0 ] 2>/dev/null && [ "$_embedded" -eq 0 ] 2>/dev/null && [ "$_jobs_total" -eq 0 ] 2>/dev/null; then
+      _stuck_count=$((_stuck_count + 1))
+      fail "process_existing is OFF — existing documents will NOT be processed" "omnivec pipeline update $PIPELINE --process-existing"
+    fi
+
+    # 5. Docs exist but 0 jobs created (changefeed not triggering)
+    if [ "$_pstatus" = "active" ] && [ "$_doc_count" -gt 0 ] 2>/dev/null && [ "$_embedded" -eq 0 ] 2>/dev/null && [ "$_jobs_total" -eq 0 ] 2>/dev/null; then
+      _stuck_count=$((_stuck_count + 1))
+      fail "Source has $_doc_count docs but 0 jobs — changefeed not triggering" "kubectl logs -l app=omnivec-cosmos-changefeed -n omnivec --tail=100"
+    fi
+
+    # 6. Jobs pending but none processing (workers down)
+    if [ "$_pstatus" = "active" ] && [ "$_jobs_pending" -gt 0 ] 2>/dev/null && [ "$_jobs_processing" -eq 0 ] 2>/dev/null; then
+      _stuck_count=$((_stuck_count + 1))
+      fail "$_jobs_pending jobs PENDING but 0 processing — workers down or scaled to 0" "kubectl get pods -n omnivec -l app=omnivec-dotnet-worker; kubectl scale deployment omnivec-dotnet-worker -n omnivec --replicas=2"
+    fi
+
+    # 7. All jobs failing
+    if [ "$_jobs_failed" -gt 0 ] 2>/dev/null && [ "$_jobs_completed" -eq 0 ] 2>/dev/null; then
+      _stuck_count=$((_stuck_count + 1))
+      fail "ALL $_jobs_failed jobs FAILED — systemic problem" "omnivec job list --pipeline $PIPELINE --status failed"
+    fi
+
+    # 8. Partial failure
+    if [ "$_jobs_failed" -gt 0 ] 2>/dev/null && [ "$_jobs_completed" -gt 0 ] 2>/dev/null; then
+      _total_done=$((_jobs_failed + _jobs_completed))
+      if [ "$_total_done" -gt 0 ]; then
+        _fail_rate=$((_jobs_failed * 100 / _total_done))
+        if [ "$_fail_rate" -gt 50 ]; then
+          warn "High failure rate: ${_fail_rate}% ($_jobs_failed/$_total_done failed)" "omnivec job list --pipeline $PIPELINE --status failed"
+        else
+          warn "$_jobs_failed jobs failed (${_fail_rate}% failure rate)" "omnivec job list --pipeline $PIPELINE --status failed"
+        fi
+      fi
+    fi
+
+    # 9. Stalled mid-progress
+    if [ "$_pstatus" = "active" ] && [ "$_doc_count" -gt 0 ] 2>/dev/null && [ "$_embedded" -gt 0 ] 2>/dev/null && [ "$_embedded" -lt "$_doc_count" ] 2>/dev/null && [ "$_jobs_pending" -eq 0 ] 2>/dev/null && [ "$_jobs_processing" -eq 0 ] 2>/dev/null; then
+      _remaining=$((_doc_count - _embedded))
+      _stuck_count=$((_stuck_count + 1))
+      warn "Pipeline stalled at $_pct% — $_embedded/$_doc_count embedded, $_remaining remaining, 0 jobs in flight" "Force rescan: omnivec pipeline run $PIPELINE; Restart changefeed: kubectl rollout restart deployment omnivec-cosmos-changefeed -n omnivec"
+    fi
+
+    # 10. Summary of stuck analysis
+    if [ "$_stuck_count" -eq 0 ] && [ "$_pstatus" = "active" ]; then
+      if [ "$_embedded" -gt 0 ] 2>/dev/null && [ "$_pct" != "0" ]; then
+        pass "Pipeline looks healthy — $_embedded documents embedded ($_pct%)"
+      else
+        pass "Pipeline is active — waiting for documents or first changefeed trigger"
+      fi
+    elif [ "$_stuck_count" -gt 0 ]; then
+      echo ""
+      printf "  ${RED}Pipeline is stuck. Root causes found: $_stuck_count${NC}\n"
+    fi
+
+    # ── Source checks via health API ──
+    _health_raw=$(api_get "/api/health/checks")
+
+    _src_ids=$(echo "$_pip_detail" | grep -o '"source_id":"[^"]*"' | sed 's/"source_id":"//;s/"//')
+    if [ -n "$_src_ids" ]; then
+      echo "$_src_ids" | while read -r _sid; do
+        echo "  Checking source: $_sid"
+        _src_detail=$(api_get "/api/sources/$_sid")
+        if [ -z "$_src_detail" ]; then
+          fail "Source $_sid not found — pipeline references a deleted source"
+        else
+          _s_name=$(json_val "$_src_detail" "name")
+          _s_enabled=$(json_val "$_src_detail" "enabled")
+          if [ "$_s_enabled" = "false" ]; then
+            fail "Source '$_s_name' ($_sid) is DISABLED" "Enable it in the UI or API"
+          else
+            pass "Source '$_s_name' ($_sid) — enabled"
+          fi
+
+          # Check source health from health API
+          if [ -n "$_health_raw" ]; then
+            _src_status=$(echo "$_health_raw" | grep -o "\"id\":\"$_sid\"[^}]*\"status\":\"[^\"]*\"" | grep -o '"status":"[^"]*"' | head -1 | sed 's/"status":"//;s/"//')
+            if [ "$_src_status" = "healthy" ]; then
+              pass "Source connectivity — healthy"
+            elif [ -n "$_src_status" ]; then
+              fail "Source connectivity — $_src_status" "Check source config and RBAC"
+            fi
+          fi
+        fi
+
+        # Content fields
+        _cfields=$(echo "$_pip_detail" | grep -o '"content_fields":\[[^]]*\]' | head -1 | sed 's/"content_fields":\[//;s/\]//;s/"//g')
+        if [ -n "$_cfields" ]; then
+          pass "Content fields: $_cfields"
+        else
+          warn "No content_fields configured" "Set content_fields on the pipeline source entry"
+        fi
+      done
+    else
+      fail "Pipeline has no source entries"
+    fi
+
+    # ── Destination checks ──
+    echo "  Checking destination: $_dest_id"
+    _dst_detail=$(api_get "/api/destinations/$_dest_id")
+    if [ -z "$_dst_detail" ]; then
+      fail "Destination $_dest_id not found — references a deleted destination"
+    else
+      _d_name=$(json_val "$_dst_detail" "name")
+      _d_enabled=$(json_val "$_dst_detail" "enabled")
+      if [ "$_d_enabled" = "false" ]; then
+        fail "Destination '$_d_name' ($_dest_id) is DISABLED" "Enable it in the UI or API"
+      else
+        pass "Destination '$_d_name' ($_dest_id) — enabled"
+      fi
+
+      # Vector path check
+      if [ -n "$_health_raw" ]; then
+        _dst_status=$(echo "$_health_raw" | grep -o "\"id\":\"$_dest_id\"[^}]*\"status\":\"[^\"]*\"" | grep -o '"status":"[^"]*"' | head -1 | sed 's/"status":"//;s/"//')
+        if [ "$_dst_status" = "healthy" ]; then
+          pass "Destination connectivity — healthy"
+        elif [ -n "$_dst_status" ]; then
+          fail "Destination connectivity — $_dst_status"
+        fi
+      fi
+
+      # Check vector dimensions match
+      _dest_dims=$(echo "$_dst_detail" | grep -o '"vector_dimensions":[0-9]*' | head -1 | cut -d: -f2)
+      if [ -n "$_dest_dims" ]; then
+        echo "  Destination expects ${_dest_dims}d vectors"
+      fi
+    fi
+
+    # ── Model checks ──
+    echo "  Checking model: $_model_id"
+    if [ -n "$_health_raw" ]; then
+      _mdl_status=$(echo "$_health_raw" | grep -o "\"id\":\"$_model_id\"[^}]*\"status\":\"[^\"]*\"" | grep -o '"status":"[^"]*"' | head -1 | sed 's/"status":"//;s/"//')
+      _mdl_name=$(echo "$_health_raw" | grep -o "\"id\":\"$_model_id\"[^}]*\"name\":\"[^\"]*\"" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+      if [ "$_mdl_status" = "healthy" ]; then
+        pass "Model '$_mdl_name' — healthy"
+      elif [ -n "$_mdl_status" ]; then
+        fail "Model '$_mdl_name' — $_mdl_status" "Check model config and endpoint"
+      else
+        fail "Model $_model_id not found in health checks" "omnivec model add ..."
+      fi
+    fi
+
+    # ── Changefeed / worker pod checks ──
+    if [ -n "$KUBE_CONTEXT" ]; then
+      if [ "$_pmode" = "queue" ]; then
+        _worker_running=$(kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l "app=omnivec-dotnet-worker" --no-headers 2>/dev/null | grep -c Running || true)
+        if [ "$_worker_running" -gt 0 ]; then
+          pass "Worker pods: $_worker_running running (queue mode)"
+        else
+          fail "No worker pods running — queue jobs cannot be processed" "kubectl scale deployment omnivec-dotnet-worker -n omnivec --replicas=1"
+        fi
+      fi
+
+      _cf_running=$(kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l "app=omnivec-cosmos-changefeed" --no-headers 2>/dev/null | grep -c Running || true)
+      if [ "$_cf_running" -gt 0 ]; then
+        pass "Changefeed pods: $_cf_running running"
+      else
+        fail "No changefeed pods running — new documents will not be detected" "kubectl scale deployment omnivec-cosmos-changefeed -n omnivec --replicas=1"
+      fi
+    fi
+
+    # ── Recent failed job errors ──
+    if [ "$_jobs_failed" -gt 0 ] 2>/dev/null; then
+      echo ""
+      printf "  ${YELLOW}Recent failed job errors:${NC}\n"
+      _failed_raw=$(api_get "/api/jobs?pipeline_id=$PIPELINE&status=failed&limit=5")
+      if [ -n "$_failed_raw" ]; then
+        echo "$_failed_raw" | grep -o '"error":"[^"]*"' | sed 's/"error":"//;s/"//' | while read -r _err; do
+          printf "    %.120s\n" "$_err"
+          case "$_err" in
+            *readMetadata*|*RBAC*)
+              printf "    ${CYAN}→ Missing 'Cosmos DB Account Reader Role' on managed identity${NC}\n" ;;
+            *DeploymentNotFound*|*deployment*not*found*)
+              printf "    ${CYAN}→ Azure OpenAI deployment name doesn't match (check portal)${NC}\n" ;;
+            *401*|*Unauthorized*|*InvalidApiKey*)
+              printf "    ${CYAN}→ Model API key is invalid or expired${NC}\n" ;;
+            *429*|*rate*limit*|*throttl*)
+              printf "    ${CYAN}→ Rate limited — reduce workers or increase quota${NC}\n" ;;
+            *timeout*|*Timeout*|*timed*out*)
+              printf "    ${CYAN}→ Endpoint slow or unreachable — check network${NC}\n" ;;
+            *dimension*|*Dimensions*)
+              printf "    ${CYAN}→ Embedding dimension mismatch between model and destination${NC}\n" ;;
+          esac
+        done
+      fi
+    fi
+  fi
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
