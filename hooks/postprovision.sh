@@ -488,44 +488,85 @@ fi
 
 IMAGE_TAG="latest"
 
-# Build helm command (POSIX-compatible — no bash arrays)
-HELM_CMD="helm upgrade --install omnivec ${ROOT_DIR}/helm/omnivec \
-  --kube-context ${KUBE_CONTEXT} \
-  --namespace omnivec \
-  --set global.imageRegistry=${ACR_LOGIN_SERVER} \
-  --set azure.workloadIdentity.clientId=${IDENTITY_CLIENT_ID} \
-  --set azure.cosmos.endpoint=${COSMOS_ENDPOINT} \
-  --set api.image.tag=${IMAGE_TAG} \
-  --set controller.image.tag=${IMAGE_TAG} \
-  --set web.image.tag=${IMAGE_TAG} \
-  --set changefeed.image.tag=${IMAGE_TAG} \
-  --set docgrok.global.imageRegistry=${ACR_LOGIN_SERVER} \
-  --set docgrok.azure.workloadIdentity.clientId=${IDENTITY_CLIENT_ID} \
-  --set docgrok.azure.cosmos.endpoint=${COSMOS_ENDPOINT} \
-  --set docgrok.azure.cosmos.database=omnivec \
-  --set docgrok.azure.cosmos.container=metadata \
-  --set docgrok.docgrok.image.tag=${IMAGE_TAG} \
-  --set api.adminToken=${ADMIN_TOKEN} \
-  --set dotnetWorker.enabled=true \
-  --set web.service.dnsLabel=${INSTANCE_ID}"
+# Write helm values to a temp file (avoids fragile eval + string concatenation)
+HELM_VALUES_FILE=$(mktemp /tmp/omnivec-helm-values.XXXXXX.yaml)
+cat > "$HELM_VALUES_FILE" <<EOF
+global:
+  imageRegistry: "${ACR_LOGIN_SERVER}"
+azure:
+  workloadIdentity:
+    clientId: "${IDENTITY_CLIENT_ID}"
+  cosmos:
+    endpoint: "${COSMOS_ENDPOINT}"
+api:
+  image:
+    tag: "${IMAGE_TAG}"
+  adminToken: "${ADMIN_TOKEN}"
+controller:
+  image:
+    tag: "${IMAGE_TAG}"
+web:
+  image:
+    tag: "${IMAGE_TAG}"
+  service:
+    dnsLabel: "${INSTANCE_ID}"
+changefeed:
+  image:
+    tag: "${IMAGE_TAG}"
+dotnetWorker:
+  enabled: true
+docgrok:
+  global:
+    imageRegistry: "${ACR_LOGIN_SERVER}"
+  azure:
+    workloadIdentity:
+      clientId: "${IDENTITY_CLIENT_ID}"
+    cosmos:
+      endpoint: "${COSMOS_ENDPOINT}"
+      database: "omnivec"
+      container: "metadata"
+  docgrok:
+    image:
+      tag: "${IMAGE_TAG}"
+EOF
 
 if [ -n "$KEYVAULT_URI" ]; then
-  HELM_CMD="$HELM_CMD \
-  --set azure.keyVault.uri=${KEYVAULT_URI}"
+  cat >> "$HELM_VALUES_FILE" <<EOF
+  keyVault:
+    uri: "${KEYVAULT_URI}"
+EOF
 fi
 
+# Add optional values via yq-style append (plain echo since YAML is simple)
 if [ -n "$SB_ENDPOINT" ]; then
-  HELM_CMD="$HELM_CMD \
-  --set azure.serviceBus.namespace=${SB_ENDPOINT}"
+  # Append under azure: (already exists in the file, so use separate --set for these)
+  :
 fi
 
-if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
-  HELM_CMD="$HELM_CMD \
-  --set azure.storage.accountName=${STORAGE_ACCOUNT} \
-  --set azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}"
-fi
+# Build helm command as a proper argument list using a function
+run_helm_deploy() {
+  set -- helm upgrade --install omnivec "${ROOT_DIR}/helm/omnivec" \
+    --kube-context "$KUBE_CONTEXT" \
+    --namespace omnivec \
+    --values "$HELM_VALUES_FILE"
 
-HELM_CMD="$HELM_CMD --wait --timeout 10m --atomic"
+  if [ -n "$KEYVAULT_URI" ]; then
+    set -- "$@" --set "azure.keyVault.uri=${KEYVAULT_URI}"
+  fi
+
+  if [ -n "$SB_ENDPOINT" ]; then
+    set -- "$@" --set "azure.serviceBus.namespace=${SB_ENDPOINT}"
+  fi
+
+  if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
+    set -- "$@" --set "azure.storage.accountName=${STORAGE_ACCOUNT}" \
+                --set "azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}"
+  fi
+
+  set -- "$@" --wait --timeout 10m --atomic
+
+  "$@"
+}
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
 set +e
@@ -547,9 +588,12 @@ fi
 
 # Execute
 set +e
-eval $HELM_CMD
+run_helm_deploy
 helm_rc=$?
 set -e
+
+# Clean up temp values file
+rm -f "$HELM_VALUES_FILE"
 
 if [ "$helm_rc" -ne 0 ]; then
   printf "${RED}Helm deploy failed. Collecting pod diagnostics...${NC}\n"
