@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -39,34 +39,6 @@
             --radius-md: 10px;
             --radius-lg: 16px;
             --radius-xl: 24px;
-        }
-
-        [data-theme="light"] {
-            --bg-primary: #ffffff;
-            --bg-secondary: #f8f9fa;
-            --bg-tertiary: #f1f3f5;
-            --bg-hover: #e9ecef;
-            --bg-active: #dee2e6;
-            --border-subtle: #e9ecef;
-            --border-default: #ced4da;
-            --text-primary: #212529;
-            --text-secondary: #495057;
-            --text-tertiary: #868e96;
-            --accent-primary: #4f46e5;
-            --accent-secondary: #6366f1;
-            --accent-muted: rgba(79, 70, 229, 0.1);
-            --success: #16a34a;
-            --success-muted: rgba(22, 163, 74, 0.1);
-            --warning: #d97706;
-            --warning-muted: rgba(217, 119, 6, 0.1);
-            --error: #dc2626;
-            --error-muted: rgba(220, 38, 38, 0.1);
-            --info: #2563eb;
-            --info-muted: rgba(37, 99, 235, 0.1);
-            --gradient-accent: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #9333ea 100%);
-            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
         }
 
         * {
@@ -792,6 +764,9 @@
             </div>
             <div id="login-error" style="display: none; color: var(--error); font-size: 13px; margin-bottom: 16px; padding: 10px; background: var(--error-muted); border-radius: var(--radius-sm);"></div>
             <button class="btn btn-primary" onclick="doLogin()" style="width: 100%; padding: 12px; font-size: 14px; margin-top: 8px;" id="login-btn">Sign In</button>
+            <div style="text-align: center; margin-top: 20px; color: var(--text-tertiary); font-size: 12px;">
+                Generate tokens via CLI: <code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;">curl -X POST /api/auth/tokens</code>
+            </div>
         </div>
     </div>
 
@@ -799,10 +774,7 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="logo">
-                <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <h1>OmniVec</h1>
-                    <button onclick="toggleTheme()" id="theme-toggle" style="background:none;border:1px solid var(--border-default);border-radius:var(--radius-sm);padding:6px 10px;cursor:pointer;color:var(--text-secondary);font-size:16px;" title="Toggle theme">☀️</button>
-                </div>
+                <h1>OmniVec</h1>
                 <span>Vector Ingestion Platform</span>
             </div>
 
@@ -2040,7 +2012,7 @@
                                 <div class="form-group">
                                     <label class="form-label">Vector Store</label>
                                     <div style="display: flex; gap: 8px;">
-                                        <select class="form-input" name="destination" id="pipeline-destination" style="flex: 1;" onchange="loadVectorPoliciesForDest()"></select>
+                                        <select class="form-input" name="destination" id="pipeline-destination" style="flex: 1;" onchange="loadVectorPoliciesForDest(); updateSameContainerIndicator()"></select>
                                         <button type="button" class="btn btn-secondary" onclick="testExistingPipelineDest()" style="white-space: nowrap;">
                                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                                             Test
@@ -2063,6 +2035,9 @@
                                         <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()">
                                         <span style="font-size: 13px; color: var(--text-secondary);">Same as source (write vectors to the source container)</span>
                                     </label>
+                                </div>
+                                <div id="pl-dest-same-container-indicator" style="display: none; margin-top: 12px; padding: 10px 14px; background: rgba(34,197,94,0.08); border: 1px solid var(--success); border-radius: var(--radius-sm); font-size: 13px; color: var(--success);">
+                                    ✓ Source and destination are the same container (inline mode recommended)
                                 </div>
                             </div>
 
@@ -2701,10 +2676,6 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                         Authentication
                     </button>
-                    <button class="detail-tab" data-tab="content" onclick="switchDetailTab('content')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                        ${source.type === 'azure-blob' ? 'File Types' : 'Content'}
-                    </button>
                     <button class="detail-tab" data-tab="health" onclick="switchDetailTab('health')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
                         Health
@@ -2861,18 +2832,6 @@
                         </div>
                     `}
                 `;
-            } else if (currentDetailTab === 'content') {
-                if (source.type === 'azure-blob') {
-                    configPanel.innerHTML = `
-                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">File Types to Process</h4>
-                        <p style="font-size: 13px; color: var(--text-tertiary);">File type filtering is now configured per-pipeline in the pipeline source settings.</p>
-                    `;
-                } else {
-                    configPanel.innerHTML = `
-                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Configuration</h4>
-                        <p style="font-size: 13px; color: var(--text-tertiary);">Content fields are now configured per-pipeline in the pipeline source settings.</p>
-                    `;
-                }
             } else if (currentDetailTab === 'health') {
                 const sh = getHealthFor('sources', source.id);
                 if (!sh) {
@@ -3886,68 +3845,61 @@
                     </div>
                 `;
             } else if (currentPipelineTab === 'sources') {
-                const isExisting = !!pipeline.id;
-                const sourceOptions = sources.map(s => `<option value="${s.id}">${s.name} (${s.type})</option>`).join('');
-                const destOptions = destinations.map(d => `<option value="${d.id}" ${d.id === pipeline.destination_id ? 'selected' : ''}>${d.name} (${d.type})</option>`).join('');
 
                 const currentSources = (pipeline.sources || []).map(ps => {
                     const src = sources.find(s => s.id === ps.source_id);
+                    const cf = ps.content_fields || ['content'];
                     return `
-                        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px; background: var(--bg-tertiary); border-radius: 8px;">
-                            <div style="display: flex; align-items: center; gap: 10px;">
+                        <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 8px;">
+                            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="18" height="18"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/></svg>
                                 <div>
                                     <div style="font-weight: 500;">${src ? src.name : ps.source_id}</div>
                                     <div style="font-size: 12px; color: var(--text-tertiary);">${src ? src.type : 'unknown'}</div>
                                 </div>
+                                <span style="margin-left: auto; font-size: 12px; color: var(--text-tertiary);">🔒 Locked</span>
                             </div>
-                            ${isExisting ? '<span style="font-size: 12px; color: var(--text-tertiary);">🔒</span>' : `<button class="btn btn-ghost btn-sm" onclick="removePipelineSource('${ps.source_id}')" style="color: var(--error);">Remove</button>`}
+                            <div style="font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px;">Content Fields</div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                                ${cf.map(f => `<span style="padding: 3px 10px; background: var(--accent-muted); border: 1px solid var(--accent-primary); border-radius: 16px; font-size: 11px; color: var(--accent-secondary);">${f}</span>`).join('')}
+                            </div>
+                            ${ps.content_mode && ps.content_mode !== 'field' ? `<div style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">Content Mode: <strong>${ps.content_mode}</strong></div>` : ''}
                         </div>
                     `;
                 }).join('');
 
                 const destObj = destinations.find(d => d.id === pipeline.destination_id);
-                const destDisplay = destObj ? `${destObj.name} (${destObj.type})` : (pipeline.destination_id || 'Not set');
+                const destName = destObj ? destObj.name : pipeline.destination_id;
+                const destType = destObj ? destObj.type : 'unknown';
 
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Sources${isExisting ? ' <span style="font-size: 12px; color: var(--text-tertiary); font-weight: 400;">🔒 Locked after creation</span>' : ''}</h4>
-                    <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px;">
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Sources</h4>
+                    <div style="margin-bottom: 24px;">
                         ${currentSources || '<div style="color: var(--text-tertiary); padding: 12px;">No sources attached</div>'}
                     </div>
-                    ${isExisting ? '' : `<div style="display: flex; gap: 8px; margin-bottom: 32px;">
-                        <select class="form-input" id="pip-add-source-select" style="flex: 1;">
-                            <option value="">Select a source to add...</option>
-                            ${sourceOptions}
-                        </select>
-                        <button class="btn btn-secondary" onclick="addPipelineSource()">Add</button>
-                    </div>`}
+                    <small style="color: var(--text-tertiary); font-size: 12px; display: block; margin-bottom: 24px;">
+                        Sources cannot be changed after pipeline creation. Create a new pipeline to use different sources.
+                    </small>
 
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Destination${isExisting ? ' <span style="font-size: 12px; color: var(--text-tertiary); font-weight: 400;">🔒</span>' : ''}</h4>
-                    <div class="form-group">
-                        ${isExisting ? `
-                        <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-size: 14px; display: flex; align-items: center; gap: 8px;">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/></svg>
-                            ${destDisplay}
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Destination</h4>
+                    <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 8px;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            <div>
+                                <div style="font-weight: 500;">${destName}</div>
+                                <div style="font-size: 12px; color: var(--text-tertiary);">${destType}</div>
+                            </div>
+                            <span style="margin-left: auto; font-size: 12px; color: var(--text-tertiary);">🔒 Locked</span>
                         </div>
-                        <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>
-                        ` : `<div style="display: flex; gap: 8px;">
-                            <select class="form-input" id="pip-detail-destination" style="flex: 1;" onchange="markPipelineDetailDirty()">
-                                ${destOptions}
-                            </select>
-                            <button type="button" class="btn btn-secondary" onclick="testPipelineDetailDest()" style="white-space: nowrap;">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                                Test
-                            </button>
-                        </div>
-                        <div id="pip-detail-dest-test-result" style="margin-top: 8px;"></div>`}
                     </div>
-                    <div class="form-group" style="margin-top: 4px;">
-                        <label class="form-label">Vector Index Path${isExisting ? ' <span style="font-size: 12px; color: var(--text-tertiary); font-weight: 400;">🔒</span>' : ''}</label>
+
+                    <div class="form-group" style="margin-top: 16px;">
+                        <label class="form-label">Vector Index Path</label>
                         <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
                             /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
                         </div>
                         <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                            ${isExisting ? 'Cannot be changed after pipeline creation' : 'The vector embedding field used by this pipeline'}
+                            The vector embedding path in the destination container. Cannot be changed after creation.
                         </small>
                     </div>
                 `;
@@ -4023,18 +3975,27 @@
             } else if (currentPipelineTab === 'chunking') {
                 const cs = pipeline.content_strategy || 'truncate';
                 const cc = pipeline.chunk_config || {};
+                const isChunk = cs === 'chunk';
+
+                // Check if source and destination are the same container
+                const pipSrc = pipeline.sources?.[0];
+                const srcObj = sources.find(s => s.id === pipSrc?.source_id);
+                const destObj = destinations.find(d => d.id === pipeline.destination_id);
+                const sameContainer = srcObj && destObj &&
+                    srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
+                    srcObj.config?.endpoint === destObj.config?.endpoint &&
+                    srcObj.config?.database === destObj.config?.database &&
+                    srcObj.config?.container === destObj.config?.container;
+
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Chunking Settings</h4>
-                    <p style="color: var(--text-tertiary); font-size: 13px; margin-bottom: 20px;">
-                        Controls how document text is split before embedding. Each chunk becomes a separate vector document in the destination.
-                    </p>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Strategy</h4>
                     <div class="form-group">
-                        <label class="form-label">Content Strategy</label>
-                        <select class="form-input" id="pip-detail-content-strategy" onchange="markPipelineDetailDirty()">
+                        <select class="form-input" id="pip-detail-content-strategy" onchange="markPipelineDetailDirty(); renderPipelineDetailTab(pipelines.find(p=>p.id===currentPipelineId));">
                             <option value="truncate" ${cs === 'truncate' ? 'selected' : ''}>Truncate — embed full text as single vector (default)</option>
                             <option value="chunk" ${cs === 'chunk' ? 'selected' : ''}>Chunk — split text into overlapping chunks, embed each</option>
                         </select>
                     </div>
+                    ${isChunk ? `
                     <div style="padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px;">
                         <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Chunk Configuration</div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
@@ -4054,7 +4015,7 @@
                                 <input type="checkbox" id="pip-detail-store-text" ${cc.store_text ? 'checked' : ''} style="width: 18px; height: 18px;" onchange="markPipelineDetailDirty()">
                                 <div>
                                     <div style="font-weight: 500; font-size: 14px;">Store Extracted Text</div>
-                                    <div style="font-size: 12px; color: var(--text-tertiary);">Each chunk document will include the chunk text alongside the embedding vector</div>
+                                    <div style="font-size: 12px; color: var(--text-tertiary);">Each chunk includes the text alongside the embedding vector</div>
                                 </div>
                             </label>
                         </div>
@@ -4066,21 +4027,20 @@
                             </small>
                         </div>
                     </div>
+                    ` : `
+                    <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px; color: var(--text-tertiary); font-size: 13px;">
+                        Full document text is embedded as a single vector. No chunking configuration needed.
+                    </div>
+                    `}
+                    ${!sameContainer ? `
                     <div class="form-group" style="margin-top: 16px;">
-                        <label class="form-label">Document ID Pattern (non-chunk)</label>
+                        <label class="form-label">Document ID Pattern</label>
                         <input type="text" class="form-input" id="pip-detail-doc-id-pattern" value="${pipeline.doc_id_pattern || '{source}'}" placeholder="{source}" oninput="markPipelineDetailDirty()">
                         <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Target document name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
+                            Target document name in destination. Variables: <code>{source}</code>, <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
                         </small>
                     </div>
-                    <div style="margin-top: 20px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
-                        <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 12px; font-weight: 600;">How It Works</div>
-                        <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
-                            <strong>Truncate:</strong> Full document text is embedded as a single vector. Doc ID defaults to <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{source}</code> (filename without extension).<br>
-                            <strong>Chunk:</strong> Text is split into overlapping segments. Each chunk gets its own embedding. Doc ID defaults to <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{source}-chunk-{chunk}</code>.<br>
-                            Re-processing automatically cleans up old chunks before writing new ones.
-                        </div>
-                    </div>
+                    ` : ''}
                 `;
             } else if (currentPipelineTab === 'processing') {
                 const pm = pipeline.processing_mode || 'queue';
@@ -4761,6 +4721,7 @@
                         resultDiv.innerHTML =
                             `<span style="color: var(--success); font-size: 13px;">Matched: ${match.name} (using inline mode)</span>`;
                         loadVectorPoliciesForDest();
+                        updateSameContainerIndicator();
                         return;
                     }
                     // No match found - create destination from source config
@@ -4794,6 +4755,7 @@
                             if (processingModeSelect) processingModeSelect.value = 'inline';
                             resultDiv.innerHTML =
                                 `<span style="color: var(--success); font-size: 13px;">Created: ${newDest.destination.name} (using inline mode)</span>`;
+                            updateSameContainerIndicator();
                         } else {
                             const err = await res.json();
                             resultDiv.innerHTML =
@@ -4806,7 +4768,29 @@
                 }
             } else {
                 resultDiv.innerHTML = '';
+                updateSameContainerIndicator();
             }
+        }
+
+        function updateSameContainerIndicator() {
+            const indicator = document.getElementById('pl-dest-same-container-indicator');
+            if (!indicator) return;
+
+            // Get selected source config
+            const sourceId = document.getElementById('pipeline-source-select')?.value;
+            const srcObj = sources.find(s => s.id === sourceId);
+
+            // Get selected destination config
+            const destId = document.getElementById('pipeline-destination')?.value;
+            const destObj = destinations.find(d => d.id === destId);
+
+            const sameContainer = srcObj && destObj &&
+                srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
+                srcObj.config?.endpoint === destObj.config?.endpoint &&
+                srcObj.config?.database === destObj.config?.database &&
+                srcObj.config?.container === destObj.config?.container;
+
+            indicator.style.display = sameContainer ? 'block' : 'none';
         }
 
         function togglePipelineTransformMode(mode) {
@@ -5124,8 +5108,29 @@
 
         function nextPipelineStep() {
             if (currentPipelineStep === 'general') showPipelineStep('source');
-            else if (currentPipelineStep === 'source') showPipelineStep('transform');
-            else if (currentPipelineStep === 'transform') showPipelineStep('destination');
+            else if (currentPipelineStep === 'source') {
+                // Validate: source must be selected or being created
+                if (pipelineSourceMode === 'existing') {
+                    const srcVal = document.getElementById('pipeline-source-select').value;
+                    if (!srcVal) {
+                        alert('Please select a source before proceeding.');
+                        return;
+                    }
+                } else {
+                    const srcName = document.getElementById('pl-src-name')?.value?.trim();
+                    if (!srcName) {
+                        alert('Please fill in the new source name before proceeding.');
+                        return;
+                    }
+                }
+                showPipelineStep('transform');
+            }
+            else if (currentPipelineStep === 'transform') {
+                // Validate: destination must be available (check after reaching destination step)
+                showPipelineStep('destination');
+                // After showing destination step, check for same container indicator
+                updateSameContainerIndicator();
+            }
         }
 
         function prevPipelineStep() {
@@ -8878,26 +8883,6 @@ az eventgrid event-subscription create \\
             // For now, use alert - could be a modal in future
             alert(message);
         }
-
-        function toggleTheme() {
-            const html = document.documentElement;
-            const current = html.getAttribute('data-theme');
-            const next = current === 'light' ? 'dark' : 'light';
-            html.setAttribute('data-theme', next);
-            localStorage.setItem('omnivec-theme', next);
-            document.getElementById('theme-toggle').textContent = next === 'light' ? '🌙' : '☀️';
-        }
-        // Load saved theme
-        (function() {
-            const saved = localStorage.getItem('omnivec-theme') || 'light';
-            if (saved === 'dark') {
-                document.documentElement.setAttribute('data-theme', 'dark');
-            } else {
-                document.documentElement.setAttribute('data-theme', 'light');
-            }
-            const btn = document.getElementById('theme-toggle');
-            if (btn) btn.textContent = saved === 'dark' ? '☀️' : '🌙';
-        })();
 
 
     </script>
