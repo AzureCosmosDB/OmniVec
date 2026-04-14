@@ -61,7 +61,13 @@ azd auth login
 # Create a named environment
 azd env new my-omnivec
 
-# Set configuration (these are safe defaults for a first deployment)
+# Deploy everything — infrastructure + application (~15–25 minutes)
+azd up
+```
+
+When prompted, choose **1) Quick start** to use recommended defaults (no GPU, CosmosDB serverless, blob source enabled). Or pre-set config to skip all prompts:
+
+```bash
 azd env set AZURE_LOCATION              eastus2
 azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms
 azd env set OMNIVEC_SYSTEM_NODE_COUNT   2
@@ -69,8 +75,6 @@ azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
 azd env set OMNIVEC_GPU_NODE_COUNT      0
 azd env set OMNIVEC_METADATA_STORE      cosmosdb-serverless
 azd env set OMNIVEC_ENABLE_BLOB_SOURCE  true
-
-# Deploy everything — infrastructure + application (~15–25 minutes)
 azd up
 ```
 

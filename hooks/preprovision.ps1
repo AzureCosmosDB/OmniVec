@@ -154,6 +154,37 @@ if ($_vmExit -eq 0 -and $_existingVm -and "$_existingVm" -notmatch "ERROR") {
     exit 0
 }
 
+# -- Fresh deploy: offer auto-defaults or interactive --
+Write-Host ""
+Write-Host "`e[33mNo configuration found. Choose setup mode:`e[0m"
+Write-Host "  1) Quick start — use recommended defaults (fastest, no GPU)"
+Write-Host "  2) Custom     — choose VM sizes, GPU, metadata store"
+Write-Host ""
+$setupMode = (Read-Host "Choice [1]").Trim()
+if (-not $setupMode) { $setupMode = "1" }
+
+if ($setupMode -eq "1") {
+    Write-Host "`n`e[32mApplying recommended defaults:`e[0m"
+    $defaults = @{
+        "OMNIVEC_SYSTEM_NODE_VM_SIZE" = "Standard_B4ms"
+        "OMNIVEC_SYSTEM_NODE_COUNT"   = "2"
+        "OMNIVEC_GPU_NODE_VM_SIZE"    = ""
+        "OMNIVEC_GPU_NODE_COUNT"      = "0"
+        "OMNIVEC_METADATA_STORE"      = "cosmosdb-serverless"
+        "OMNIVEC_ENABLE_BLOB_SOURCE"  = "true"
+    }
+    foreach ($kv in $defaults.GetEnumerator()) {
+        azd env set $kv.Key $kv.Value
+        Write-Host "  $($kv.Key) = $($kv.Value)"
+    }
+    Write-Host "`n  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
+    Write-Host "  GPU pool: none (use Azure OpenAI for embeddings)"
+    Write-Host "  Metadata: CosmosDB Serverless"
+    Write-Host "  Blob source: enabled"
+    Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
+    exit 0
+}
+
 # -- Helper: get azd env value safely --
 function Get-EnvValue {
     param([string]$Key)
@@ -221,7 +252,7 @@ Write-Host "`e[33mConfigure AKS node pools:`e[0m"
 Write-Host ""
 
 $location = $env:AZURE_LOCATION
-if (-not $location) { $location = "centralus" }
+if (-not $location) { $location = "eastus2" }
 
 # Helper: validate a single SKU in the location
 function Test-SkuAvailable {

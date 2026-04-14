@@ -151,7 +151,6 @@ RG_EXISTS=$(printf '%s' "$RG_EXISTS" | tr -d '\r\n ')
 
 if [ "$RG_EXISTS" = "true" ]; then
   printf "\n${GREEN}Existing deployment detected (RG: ${RG_NAME}). Importing config from tags...${NC}\n"
-  _tags=$(az group show --name "$RG_NAME" --query "tags" -o json 2>/dev/null || echo "{}")
   for _pair in \
     "omnivec-sys-sku:OMNIVEC_SYSTEM_NODE_VM_SIZE" \
     "omnivec-sys-count:OMNIVEC_SYSTEM_NODE_COUNT" \
@@ -162,7 +161,8 @@ if [ "$RG_EXISTS" = "true" ]; then
     "omnivec-build:OMNIVEC_BUILD_MODE"; do
     _tag=$(echo "$_pair" | cut -d: -f1)
     _env=$(echo "$_pair" | cut -d: -f2)
-    _val=$(echo "$_tags" | python3 -c "import sys,json; t=json.load(sys.stdin); print(t.get('$_tag',''))" 2>/dev/null || true)
+    _val=$(az group show --name "$RG_NAME" --query "tags.\"$_tag\"" -o tsv 2>/dev/null || true)
+    _val=$(printf '%s' "$_val" | tr -d '\r\n')
     if [ -n "$_val" ]; then
       azd env set "$_env" "$_val" 2>/dev/null
       printf "  ${_env} = ${_val}\n"
@@ -176,6 +176,38 @@ fi
 _existing_vm=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
 if [ -n "$_existing_vm" ]; then
   printf "\n${GREEN}Config already set. Skipping prompts.${NC}\n"
+  printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
+  exit 0
+fi
+
+# ── Fresh deploy: offer auto-defaults or interactive ─────────────────────────
+echo ""
+printf "${YELLOW}No configuration found. Choose setup mode:${NC}\n"
+echo "  1) Quick start — use recommended defaults (fastest, no GPU)"
+echo "  2) Custom     — choose VM sizes, GPU, metadata store"
+echo ""
+setup_mode=$(read_input "Choice [1]: ")
+setup_mode=${setup_mode:-1}
+
+if [ "$setup_mode" = "1" ]; then
+  printf "\n${GREEN}Applying recommended defaults:${NC}\n"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms"
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2"
+  azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
+  azd env set OMNIVEC_GPU_NODE_COUNT      "0"
+  azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless"
+  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true"
+  echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_B4ms"
+  echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
+  echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
+  echo "  OMNIVEC_GPU_NODE_COUNT      = 0"
+  echo "  OMNIVEC_METADATA_STORE      = cosmosdb-serverless"
+  echo "  OMNIVEC_ENABLE_BLOB_SOURCE  = true"
+  echo ""
+  echo "  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
+  echo "  GPU pool: none (use Azure OpenAI for embeddings)"
+  echo "  Metadata: CosmosDB Serverless"
+  echo "  Blob source: enabled"
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
 fi
@@ -258,42 +290,42 @@ if [ -n "$cur_sys_sku" ]; then
   printf "${GREEN}System VM SKU: ${cur_sys_sku} (already set)${NC}\n"
   SYS_SKU="$cur_sys_sku"
 else
-  printf "${CYAN}System node pool (API, controller, worker, changefeed):${NC}\n"
-  printf "  Common options:\n"
-  printf "    1) Standard_D4s_v3 - 4 vCPU, 16 GB\n"
-  printf "    2) Standard_D4ds_v5 - 4 vCPU, 16 GB (v5)\n"
-  printf "    3) Standard_D8s_v3 - 8 vCPU, 32 GB\n"
-  printf "    4) Standard_B4ms - 4 vCPU, 16 GB (burstable)\n"
-  printf "    5) Standard_D2s_v3 - 2 vCPU, 8 GB (dev)\n"
-  printf "    6) Enter custom SKU\n"
-  echo ""
-  printf "  System VM SKU [4]: " >/dev/tty 2>/dev/null || printf "  System VM SKU [4]: " >&2
-  sys_pick=""
-  if [ -t 0 ]; then read -r sys_pick || true; elif [ -e /dev/tty ]; then read -r sys_pick </dev/tty || true; fi
-  sys_pick=$(printf '%s' "${sys_pick:-4}" | tr -d ' \r\n')
+  SYS_SKU=""
+  while [ -z "$SYS_SKU" ]; do
+    printf "${CYAN}System node pool (API, controller, worker, changefeed):${NC}\n"
+    printf "  Common options:\n"
+    printf "    1) Standard_D4s_v3 - 4 vCPU, 16 GB\n"
+    printf "    2) Standard_D4ds_v5 - 4 vCPU, 16 GB (v5)\n"
+    printf "    3) Standard_D8s_v3 - 8 vCPU, 32 GB\n"
+    printf "    4) Standard_B4ms - 4 vCPU, 16 GB (burstable)\n"
+    printf "    5) Standard_D2s_v3 - 2 vCPU, 8 GB (dev)\n"
+    printf "    6) Enter custom SKU\n"
+    echo ""
+    sys_pick=$(read_input "  System VM SKU [4]: ")
+    sys_pick=$(printf '%s' "${sys_pick:-4}" | tr -d ' \r\n')
 
-  case "$sys_pick" in
-    1) SYS_SKU="Standard_D4s_v3" ;;
-    2) SYS_SKU="Standard_D4ds_v5" ;;
-    3) SYS_SKU="Standard_D8s_v3" ;;
-    4) SYS_SKU="Standard_B4ms" ;;
-    5) SYS_SKU="Standard_D2s_v3" ;;
-    6)
-      def_manual=${cur_sys_sku:-Standard_B4ms}
-      printf "  Enter SKU name [${def_manual}]: " >/dev/tty 2>/dev/null || printf "  Enter SKU name [${def_manual}]: " >&2
-      custom_sku=""
-      if [ -t 0 ]; then read -r custom_sku || true; elif [ -e /dev/tty ]; then read -r custom_sku </dev/tty || true; fi
-      SYS_SKU=$(printf '%s' "${custom_sku:-$def_manual}" | tr -d ' \r\n')
-      ;;
-    *) SYS_SKU="Standard_B4ms" ;;
-  esac
+    case "$sys_pick" in
+      1) _candidate="Standard_D4s_v3" ;;
+      2) _candidate="Standard_D4ds_v5" ;;
+      3) _candidate="Standard_D8s_v3" ;;
+      4) _candidate="Standard_B4ms" ;;
+      5) _candidate="Standard_D2s_v3" ;;
+      6)
+        def_manual=${cur_sys_sku:-Standard_B4ms}
+        custom_sku=$(read_input "  Enter SKU name [${def_manual}]: ")
+        _candidate=$(printf '%s' "${custom_sku:-$def_manual}" | tr -d ' \r\n')
+        ;;
+      *) _candidate="Standard_B4ms" ;;
+    esac
 
-  printf "  ${CYAN}Validating ${SYS_SKU} in ${LOCATION}...${NC}"
-  if validate_sku "$SYS_SKU"; then
-    printf " ${GREEN}✓ available${NC}\n"
-  else
-    printf " ${YELLOW}⚠ could not confirm availability (proceeding anyway)${NC}\n"
-  fi
+    printf "  ${CYAN}Validating ${_candidate} in ${LOCATION}...${NC}"
+    if validate_sku "$_candidate"; then
+      printf " ${GREEN}✓ available${NC}\n"
+      SYS_SKU="$_candidate"
+    else
+      printf " ${RED}✗ not available in ${LOCATION}. Pick another.${NC}\n"
+    fi
+  done
   printf "  ${GREEN}System VM SKU: ${SYS_SKU}${NC}\n"
 fi
 

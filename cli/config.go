@@ -94,7 +94,11 @@ func printConfigView() {
 	fmt.Printf("Server:  %s\n", server)
 	fmt.Printf("Source:  %s\n", source)
 	if token != "" {
-		fmt.Printf("Token:   %s...%s\n", token[:4], token[len(token)-4:])
+		if len(token) >= 8 {
+			fmt.Printf("Token:   %s...%s\n", token[:4], token[len(token)-4:])
+		} else {
+			fmt.Printf("Token:   ****\n")
+		}
 		fmt.Printf("Token source: %s\n", tokenSource)
 	} else {
 		fmt.Printf("Token:   %s\n", dim("not configured"))

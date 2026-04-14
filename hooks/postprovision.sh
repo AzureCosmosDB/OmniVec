@@ -16,6 +16,27 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Helper: read user input (handles non-TTY contexts)
+read_input() {
+  prompt="$1"
+  if [ -t 0 ]; then
+    printf "%s" "$prompt"
+    read -r _ri_val
+  else
+    printf "%s" "$prompt" > /dev/tty
+    read -r _ri_val < /dev/tty
+  fi
+  echo "$_ri_val"
+}
+
+# -- Deployment lock: prevent concurrent postprovision runs --
+_lock_dir="$HOME/.omnivec/locks"
+mkdir -p "$_lock_dir"
+_post_lock="$_lock_dir/${AZURE_ENV_NAME:-omnivec}.post.lock"
+echo "$$" > "$_post_lock"
+cleanup_post_lock() { rm -f "$_post_lock"; }
+trap cleanup_post_lock EXIT
+
 printf "${GREEN}╔══════════════════════════════════════════╗${NC}\n"
 printf "${GREEN}║    OmniVec — Post-provision Setup        ║${NC}\n"
 printf "${GREEN}╚══════════════════════════════════════════╝${NC}\n"
@@ -95,7 +116,8 @@ GPU_CNT=$(get_azd_value "OMNIVEC_GPU_NODE_COUNT")
 META=$(get_azd_value "OMNIVEC_METADATA_STORE")
 BLOB=$(get_azd_value "OMNIVEC_ENABLE_BLOB_SOURCE")
 BUILD=$(get_azd_value "OMNIVEC_BUILD_MODE")
-az group update --name "$RESOURCE_GROUP" --tags \
+_RG_ID=$(az group show --name "$RESOURCE_GROUP" --query "id" -o tsv 2>/dev/null)
+az tag update --resource-id "$_RG_ID" --operation merge --tags \
     "omnivec-sys-sku=$SYS_VM" \
     "omnivec-sys-count=$SYS_CNT" \
     "omnivec-gpu-sku=$GPU_VM" \
@@ -505,6 +527,24 @@ fi
 
 HELM_CMD="$HELM_CMD --wait --timeout 10m --atomic"
 
+# Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
+set +e
+_helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" -o json 2>/dev/null)
+_helm_phase=$(echo "$_helm_status" | grep -o '"status":"pending-[^"]*"' | head -1 | cut -d'"' -f4)
+set -e
+if [ -n "$_helm_phase" ]; then
+  printf "${YELLOW}Detected stuck Helm release (status: ${_helm_phase}). Rolling back...${NC}\n"
+  set +e
+  helm rollback omnivec -n omnivec --kube-context "$KUBE_CONTEXT" 2>/dev/null
+  _rb_rc=$?
+  set -e
+  if [ "$_rb_rc" -ne 0 ]; then
+    printf "${YELLOW}Rollback failed — uninstalling stuck release...${NC}\n"
+    helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" 2>/dev/null || true
+  fi
+  printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
+fi
+
 # Execute
 set +e
 eval $HELM_CMD
@@ -582,7 +622,9 @@ printf "  CosmosDB:      ${CYAN}${COSMOS_ENDPOINT}${NC}\n"
 
 printf "  Admin Token:   ${CYAN}${ADMIN_TOKEN}${NC}\n"
 
-LOCATION="${AZURE_LOCATION:-eastus2}"
+LOCATION="${AZURE_LOCATION:-}"
+if [ -z "$LOCATION" ]; then LOCATION=$(get_azd_value "AZURE_LOCATION"); fi
+if [ -z "$LOCATION" ]; then LOCATION="eastus2"; fi
 FQDN="${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
 
 if [ -n "${EXTERNAL_IP}" ]; then
