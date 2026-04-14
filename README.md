@@ -31,7 +31,13 @@ Install these before you begin:
 You also need:
 
 - An **Azure subscription** with permission to create resource groups, AKS clusters, and CosmosDB accounts.
-- An **Azure OpenAI resource** with an embedding model deployed (e.g., `text-embedding-3-small`). If you don't have one yet, [create one in the Azure Portal](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource). Note the **endpoint URL**, **API key**, and the exact **deployment name** (found under Deployments in the portal — this is not the model name).
+- An **Azure OpenAI resource** with an embedding model deployment. If you don't have one yet:
+  1. [Create an Azure OpenAI resource](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource)
+  2. [Deploy an embedding model](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource?pivots=web-portal#deploy-a-model) — choose `text-embedding-3-small` for a first run
+  3. Note these three values (you'll need them in Step 3a):
+     - **Endpoint URL** — Azure Portal → your OpenAI resource → Overview
+     - **API Key** — Azure Portal → Keys and Endpoint
+     - **Deployment Name** — Azure Portal → Deployments → the exact name you gave the deployment (this is **not** the model name)
 
 > `kubectl` and `helm` are installed automatically by the deployment hooks if not already present.
 
@@ -97,7 +103,7 @@ azd env list
 
 ## Step 2 — Open the UI
 
-Open the **OmniVec URL** in your browser. You should see the OmniVec dashboard with a light theme.
+Open the **OmniVec URL** in your browser. You should see the OmniVec dashboard.
 
 If the page doesn't load, wait 1–2 minutes for the load balancer to assign an external IP:
 
@@ -130,31 +136,52 @@ This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/
 
 ### 3b. Create a source
 
-A source is a connection to data you want to embed. For this first run, use **Azure Blob Storage** (the storage account was already created by `azd up`).
+A source is a connection to data you want to embed. For this first run, use **Azure Blob Storage** — `azd up` already provisioned a storage account in your resource group.
 
-1. Go to **Sources** → **New Source**.
-2. Choose **Azure Blob Storage**.
-3. Fill in:
+1. Find your storage account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Storage account resource → **Properties** → copy the **Primary blob service endpoint** URL.
+2. In that storage account, create a container named `docs` (Azure Portal → Storage account → **Containers** → **+ Container**).
+3. Upload a sample file. Create a file called `hello.txt` with this content:
+   ```
+   OmniVec is a universal vector ingestion platform that processes documents
+   from Azure Blob Storage, CosmosDB, and PostgreSQL into vector embeddings
+   for semantic search.
+   ```
+   Upload it to the `docs` container (drag-and-drop in the Azure Portal works).
+4. In OmniVec, go to **Sources** → **New Source**.
+5. Choose **Azure Blob Storage**.
+6. Fill in:
    - **Name**: `My First Source`
-   - **Account URL**: the storage account URL from your deployment (find it in Azure Portal → resource group `rg-omnivec-my-omnivec` → Storage account → Properties)
-   - **Container**: create a container (e.g., `docs`) and upload 2–3 sample files (`.txt`, `.pdf`, or `.md`)
-4. Click **Save**, then **Test Connection** to verify access.
-
-> **What sample documents?** Any text files work. For a quick test, create a file `hello.txt` with a few sentences about a topic you'll search for later.
+   - **Account URL**: the blob endpoint URL you copied
+   - **Container**: `docs`
+7. Click **Save**, then **Test Connection** to verify access.
 
 ### 3c. Create a destination
 
-A destination is where vectors are stored. Use **CosmosDB Vector** — the deployment already created a CosmosDB account with vector indexing.
+A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` already created a CosmosDB account in your resource group.
 
-1. Go to **Destinations** → **New Destination**.
-2. Choose **CosmosDB Vector**.
-3. Fill in:
+1. Find your CosmosDB account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Cosmos DB account → **Overview** → copy the **URI**.
+2. Create a database and container for vectors:
+   - Azure Portal → Cosmos DB account → **Data Explorer** → **New Container**
+   - **Database id**: `omnivec-vectors` (create new)
+   - **Container id**: `vectors`
+   - **Partition key**: `/id`
+   - Under **Container Vector Policy**, add a vector embedding:
+     - **Path**: `/embedding`
+     - **Data type**: `float32`
+     - **Dimensions**: `1536` (matches `text-embedding-3-small`)
+     - **Distance function**: `cosine`
+   - Click **OK** to create
+3. In OmniVec, go to **Destinations** → **New Destination**.
+4. Choose **CosmosDB Vector**.
+5. Fill in:
    - **Name**: `My First Destination`
-   - **Endpoint**: your CosmosDB account endpoint (Azure Portal → resource group → Cosmos DB account → Overview → URI)
-   - **Database**: create a new database or use an existing one
-   - **Container**: create a container with a vector indexing policy, or use one that already has `/embedding` indexed
-4. Click **Save**, then **Test Connection**.
-5. Click **Fetch Vector Index Details** — you should see the available vector paths (e.g., `/embedding` with dimensions and distance function).
+   - **Endpoint**: the URI you copied
+   - **Database**: `omnivec-vectors`
+   - **Container**: `vectors`
+6. Click **Save**, then **Test Connection**.
+7. Click **Fetch Vector Index Details** — you should see `/embedding` with dimensions `1536` and distance function `cosine`.
+
+> **If Fetch Vector Index Details returns nothing:** your container doesn't have a vector indexing policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path.
 
 ### 3d. Create a pipeline
 
@@ -186,8 +213,10 @@ Then test vector search:
 
 1. Go to **Vector Search** in the sidebar.
 2. Select your destination index.
-3. Type a search query related to your sample documents.
-4. Click **Search** — you should see matching results with similarity scores.
+3. Type: `vector ingestion platform`
+4. Click **Search** — you should see your `hello.txt` document returned with a high similarity score (>0.8).
+
+> **Expected result:** Since your sample document contains "universal vector ingestion platform," a search for "vector ingestion platform" should match it strongly.
 
 **Congratulations — you've deployed OmniVec and run a full vector ingestion pipeline.** 🎉
 
