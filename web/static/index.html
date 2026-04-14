@@ -2829,18 +2829,6 @@
                         </div>
                     `}
                 `;
-            } else if (currentDetailTab === 'content') {
-                if (source.type === 'azure-blob') {
-                    configPanel.innerHTML = `
-                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">File Types to Process</h4>
-                        <p style="font-size: 13px; color: var(--text-tertiary);">File type filtering is now configured per-pipeline in the pipeline source settings.</p>
-                    `;
-                } else {
-                    configPanel.innerHTML = `
-                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Configuration</h4>
-                        <p style="font-size: 13px; color: var(--text-tertiary);">Content fields are now configured per-pipeline in the pipeline source settings.</p>
-                    `;
-                }
             } else if (currentDetailTab === 'health') {
                 const sh = getHealthFor('sources', source.id);
                 if (!sh) {
@@ -3984,18 +3972,18 @@
             } else if (currentPipelineTab === 'chunking') {
                 const cs = pipeline.content_strategy || 'truncate';
                 const cc = pipeline.chunk_config || {};
+                const pm = pipeline.processing_mode || 'queue';
+                const isChunk = cs === 'chunk';
+                const isQueue = pm === 'queue';
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Chunking Settings</h4>
-                    <p style="color: var(--text-tertiary); font-size: 13px; margin-bottom: 20px;">
-                        Controls how document text is split before embedding. Each chunk becomes a separate vector document in the destination.
-                    </p>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Strategy</h4>
                     <div class="form-group">
-                        <label class="form-label">Content Strategy</label>
-                        <select class="form-input" id="pip-detail-content-strategy" onchange="markPipelineDetailDirty()">
+                        <select class="form-input" id="pip-detail-content-strategy" onchange="markPipelineDetailDirty(); renderPipelineDetailTab(pipelines.find(p=>p.id===currentPipelineId));">
                             <option value="truncate" ${cs === 'truncate' ? 'selected' : ''}>Truncate — embed full text as single vector (default)</option>
                             <option value="chunk" ${cs === 'chunk' ? 'selected' : ''}>Chunk — split text into overlapping chunks, embed each</option>
                         </select>
                     </div>
+                    ${isChunk ? `
                     <div style="padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px;">
                         <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Chunk Configuration</div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
@@ -4015,7 +4003,7 @@
                                 <input type="checkbox" id="pip-detail-store-text" ${cc.store_text ? 'checked' : ''} style="width: 18px; height: 18px;" onchange="markPipelineDetailDirty()">
                                 <div>
                                     <div style="font-weight: 500; font-size: 14px;">Store Extracted Text</div>
-                                    <div style="font-size: 12px; color: var(--text-tertiary);">Each chunk document will include the chunk text alongside the embedding vector</div>
+                                    <div style="font-size: 12px; color: var(--text-tertiary);">Each chunk includes the text alongside the embedding vector</div>
                                 </div>
                             </label>
                         </div>
@@ -4027,21 +4015,20 @@
                             </small>
                         </div>
                     </div>
+                    ` : `
+                    <div style="padding: 16px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px; color: var(--text-tertiary); font-size: 13px;">
+                        Full document text is embedded as a single vector. No chunking configuration needed.
+                    </div>
+                    `}
+                    ${isQueue ? `
                     <div class="form-group" style="margin-top: 16px;">
-                        <label class="form-label">Document ID Pattern (non-chunk)</label>
+                        <label class="form-label">Document ID Pattern</label>
                         <input type="text" class="form-input" id="pip-detail-doc-id-pattern" value="${pipeline.doc_id_pattern || '{source}'}" placeholder="{source}" oninput="markPipelineDetailDirty()">
                         <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                            Target document name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
+                            Target document name in destination. Variables: <code>{source}</code>, <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
                         </small>
                     </div>
-                    <div style="margin-top: 20px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
-                        <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 12px; font-weight: 600;">How It Works</div>
-                        <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
-                            <strong>Truncate:</strong> Full document text is embedded as a single vector. Doc ID defaults to <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{source}</code> (filename without extension).<br>
-                            <strong>Chunk:</strong> Text is split into overlapping segments. Each chunk gets its own embedding. Doc ID defaults to <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{source}-chunk-{chunk}</code>.<br>
-                            Re-processing automatically cleans up old chunks before writing new ones.
-                        </div>
-                    </div>
+                    ` : ''}
                 `;
             } else if (currentPipelineTab === 'processing') {
                 const pm = pipeline.processing_mode || 'queue';
