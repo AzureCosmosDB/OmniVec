@@ -60,7 +60,7 @@ resource metadataContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
   }
 }
 
-// Built-in "Cosmos DB Built-in Data Contributor" role
+// Built-in "Cosmos DB Built-in Data Contributor" role (SQL RBAC — data operations)
 var dataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
 resource sqlRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
@@ -70,6 +70,19 @@ resource sqlRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignm
     roleDefinitionId: '${account.id}/sqlRoleDefinitions/${dataContributorRoleId}'
     principalId: identityPrincipalId
     scope: account.id
+  }
+}
+
+// "Cosmos DB Account Reader Role" (ARM RBAC — required for SDK initialization / readMetadata)
+var accountReaderRoleId = 'fbdf93bf-df7d-467e-a4d2-9458aa1360c8'
+
+resource cosmosAccountReaderRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(account.id, identityPrincipalId, accountReaderRoleId)
+  scope: account
+  properties: {
+    principalId: identityPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', accountReaderRoleId)
+    principalType: 'ServicePrincipal'
   }
 }
 
