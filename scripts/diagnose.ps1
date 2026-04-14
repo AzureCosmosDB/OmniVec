@@ -3,14 +3,16 @@
 # images, pipelines, models, and common failure modes.
 #
 # Usage:
-#   pwsh scripts/diagnose.ps1
-#   pwsh scripts/diagnose.ps1 -EnvName my-omnivec
-#   pwsh scripts/diagnose.ps1 -ServerUrl http://1.2.3.4 -AdminToken <token>
+#   pwsh scripts/diagnose.ps1                                    # full deployment check
+#   pwsh scripts/diagnose.ps1 -EnvName my-omnivec                # specific environment
+#   pwsh scripts/diagnose.ps1 -Pipeline pip-abc123               # deep-diagnose one pipeline
+#   pwsh scripts/diagnose.ps1 -ServerUrl http://1.2.3.4 -AdminToken <token> -Pipeline pip-abc123
 
 param(
     [string]$EnvName,
     [string]$ServerUrl,
-    [string]$AdminToken
+    [string]$AdminToken,
+    [string]$Pipeline   # Optional: diagnose a single pipeline in depth
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -526,6 +528,375 @@ if ($KUBE_CONTEXT) {
     }
 } else {
     Warn "Skipping log checks (no AKS context)"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 12. SINGLE PIPELINE DEEP DIAGNOSTICS (when -Pipeline is specified)
+# ═════════════════════════════════════════════════════════════════════════════
+
+if ($Pipeline -and $ServerUrl -and $AdminToken) {
+    Header "12. Pipeline Deep Diagnostics: $Pipeline"
+
+    # Normalize pipeline ID
+    if ($Pipeline -notmatch "^pip-") { $Pipeline = "pip-$Pipeline" }
+
+    # Fetch pipeline detail
+    $pip = ApiGet "/api/pipelines/$Pipeline"
+    if (-not $pip) {
+        Fail "Pipeline $Pipeline not found" "Check ID with: omnivec pipeline list"
+    } else {
+        $pname = $pip.name
+        $pstatus = $pip.status
+        $pmode = $pip.processing_mode
+        $pstrategy = $pip.content_strategy
+        $destId = $pip.destination_id
+        $modelId = $pip.docgrok_pipeline
+        $vectorPath = $pip.vector_index_path
+
+        Write-Host "  Name:              $pname"
+        Write-Host "  Status:            $pstatus"
+        Write-Host "  Mode:              $pmode"
+        Write-Host "  Content Strategy:  $pstrategy"
+        Write-Host "  Model:             $modelId"
+        Write-Host "  Destination:       $destId"
+        Write-Host "  Vector Path:       $vectorPath"
+        Write-Host ""
+
+        # ── Status check ──
+        if ($pstatus -eq "active") {
+            Pass "Pipeline is active"
+        } elseif ($pstatus -eq "paused") {
+            Fail "Pipeline is PAUSED — it will not process any documents" "omnivec pipeline resume $Pipeline"
+        } elseif ($pstatus -eq "error") {
+            Fail "Pipeline is in ERROR state" "omnivec pipeline show $Pipeline"
+        } else {
+            Warn "Pipeline status is '$pstatus'"
+        }
+
+        # ── Stats analysis ──
+        $stats = $pip.stats
+        $docCount = if ($stats.source_doc_count) { [int]$stats.source_doc_count } else { 0 }
+        $embedded = if ($stats.embedded_count) { [int]$stats.embedded_count } else { 0 }
+        $processed = if ($stats.documents_processed) { [int]$stats.documents_processed } else { 0 }
+        $pct = if ($stats.completion_pct) { [math]::Round($stats.completion_pct, 1) } else { 0 }
+
+        $jobsTotal = 0; $jobsPending = 0; $jobsProcessing = 0; $jobsCompleted = 0; $jobsFailed = 0
+        if ($stats.jobs) {
+            $jobsTotal = if ($stats.jobs.total) { [int]$stats.jobs.total } else { 0 }
+            $jobsPending = if ($stats.jobs.pending) { [int]$stats.jobs.pending } else { 0 }
+            $jobsProcessing = if ($stats.jobs.processing) { [int]$stats.jobs.processing } else { 0 }
+            $jobsCompleted = if ($stats.jobs.completed) { [int]$stats.jobs.completed } else { 0 }
+            $jobsFailed = if ($stats.jobs.failed) { [int]$stats.jobs.failed } else { 0 }
+        }
+
+        Write-Host "  Source docs:       $docCount"
+        Write-Host "  Embedded:          $embedded ($pct%)"
+        Write-Host "  Jobs:              $jobsTotal total ($jobsCompleted done, $jobsFailed failed, $jobsPending pending, $jobsProcessing in-progress)"
+        Write-Host ""
+
+        # ── Why is it stuck? Comprehensive stuck-pipeline detection ──
+        Write-Host ""
+        Write-Host "  `e[33m── Stuck / Not Running Analysis ──`e[0m"
+
+        $stuckReasons = @()
+
+        # 1. Pipeline paused
+        if ($pstatus -eq "paused") {
+            $stuckReasons += "Pipeline is PAUSED"
+            Fail "Pipeline is PAUSED — will not process any documents" "omnivec pipeline resume $Pipeline"
+        }
+
+        # 2. Pipeline in error state
+        if ($pstatus -eq "error") {
+            $stuckReasons += "Pipeline is in ERROR state"
+            Fail "Pipeline is in ERROR state — processing is halted" "omnivec pipeline show $Pipeline — check for config errors, then reset: omnivec pipeline reset $Pipeline"
+        }
+
+        # 3. Source has 0 documents
+        if ($pstatus -eq "active" -and $docCount -eq 0) {
+            $stuckReasons += "Source has 0 documents"
+            if ($pip.process_existing -eq $false) {
+                Warn "Source has 0 documents AND process_existing is OFF — only new documents will trigger" "Insert documents into the source, or update pipeline: omnivec pipeline update $Pipeline --process-existing"
+            } else {
+                Warn "Source has 0 documents — nothing to process yet" "Add documents to the source container"
+            }
+        }
+
+        # 4. Documents exist but 0 jobs created (changefeed not triggering)
+        if ($pstatus -eq "active" -and $docCount -gt 0 -and $embedded -eq 0 -and $jobsTotal -eq 0) {
+            $stuckReasons += "Changefeed not creating jobs"
+            Fail "Source has $docCount docs but 0 jobs created — changefeed is not triggering" "Possible causes:`n          - Changefeed pods not running`n          - Pipeline generation mismatch`n          - Source container has no change feed lease`n          Fix: kubectl logs -l app=omnivec-cosmos-changefeed -n omnivec --tail=100"
+        }
+
+        # 5. Jobs pending but none processing (workers down)
+        if ($pstatus -eq "active" -and $jobsPending -gt 0 -and $jobsProcessing -eq 0) {
+            $stuckReasons += "Workers not picking up jobs"
+            Fail "$jobsPending jobs PENDING but 0 processing — workers are down or scaled to 0" "Check workers: kubectl get pods -n omnivec -l app=omnivec-dotnet-worker`n          Scale up: kubectl scale deployment omnivec-dotnet-worker -n omnivec --replicas=2"
+        }
+
+        # 6. Jobs stuck in processing (worker crash loop)
+        if ($jobsProcessing -gt 0) {
+            # Check if any jobs have been processing for too long
+            $staleJobs = ApiGet "/api/jobs?pipeline_id=$Pipeline&status=processing&limit=5"
+            if ($staleJobs.jobs) {
+                foreach ($j in $staleJobs.jobs) {
+                    $createdAt = $j.created_at
+                    if ($createdAt) {
+                        try {
+                            $jobAge = (Get-Date) - [DateTime]::Parse($createdAt)
+                            if ($jobAge.TotalMinutes -gt 10) {
+                                $stuckReasons += "Jobs stuck in processing"
+                                Fail "Job $($j.id) has been 'processing' for $([math]::Round($jobAge.TotalMinutes))min — likely stuck" "Worker may be crashing mid-job. Check: kubectl logs -l app=omnivec-dotnet-worker -n omnivec --tail=100"
+                            }
+                        } catch {}
+                    }
+                }
+            }
+        }
+
+        # 7. All jobs failing
+        if ($jobsFailed -gt 0 -and $jobsCompleted -eq 0) {
+            $stuckReasons += "All jobs failing"
+            Fail "ALL $jobsFailed jobs have FAILED — systemic problem (0 completed)" "omnivec job list --pipeline $Pipeline --status failed"
+        }
+
+        # 8. Partial failure
+        if ($jobsFailed -gt 0 -and $jobsCompleted -gt 0) {
+            $failRate = [math]::Round(($jobsFailed / ($jobsFailed + $jobsCompleted)) * 100)
+            if ($failRate -gt 50) {
+                Warn "High failure rate: $failRate% ($jobsFailed/$($jobsFailed + $jobsCompleted) failed)" "omnivec job list --pipeline $Pipeline --status failed"
+            } else {
+                Warn "$jobsFailed jobs failed ($failRate% failure rate)" "omnivec job list --pipeline $Pipeline --status failed"
+            }
+        }
+
+        # 9. Stalled mid-progress (embedded < source count, no recent activity)
+        if ($pstatus -eq "active" -and $docCount -gt 0 -and $embedded -gt 0 -and $embedded -lt $docCount -and $jobsPending -eq 0 -and $jobsProcessing -eq 0) {
+            $remaining = $docCount - $embedded
+            $stuckReasons += "Stalled at $pct% ($remaining docs remaining)"
+            Warn "Pipeline stalled at $pct% — $embedded/$docCount embedded, $remaining remaining, but no jobs pending or processing" "Possible causes:`n          - New documents added after initial scan — run: omnivec pipeline run $Pipeline`n          - Changefeed lease expired — restart: kubectl rollout restart deployment omnivec-cosmos-changefeed -n omnivec`n          - Controller not scheduling — check: kubectl logs -l app=omnivec-controller -n omnivec --tail=50"
+
+            # Check updated_at freshness
+            if ($pip.updated_at) {
+                try {
+                    $lastUpdate = [DateTime]::Parse($pip.updated_at)
+                    $staleness = (Get-Date) - $lastUpdate
+                    if ($staleness.TotalMinutes -gt 30) {
+                        Fail "Pipeline last updated $([math]::Round($staleness.TotalHours, 1)) hours ago — no recent activity" "Force rescan: omnivec pipeline run $Pipeline"
+                    } elseif ($staleness.TotalMinutes -gt 10) {
+                        Warn "Pipeline last updated $([math]::Round($staleness.TotalMinutes))min ago"
+                    }
+                } catch {}
+            }
+        }
+
+        # 10. process_existing is false and pipeline is new
+        if ($pstatus -eq "active" -and $pip.process_existing -eq $false -and $docCount -gt 0 -and $embedded -eq 0 -and $jobsTotal -eq 0) {
+            $stuckReasons += "process_existing is OFF"
+            Fail "process_existing is OFF — existing documents will NOT be processed" "Update: omnivec pipeline update $Pipeline --process-existing"
+        }
+
+        # 11. Summary of stuck analysis
+        if ($stuckReasons.Count -eq 0 -and $pstatus -eq "active") {
+            if ($embedded -gt 0 -and $pct -ge 99) {
+                Pass "Pipeline looks healthy — $embedded documents embedded ($pct%)"
+            } elseif ($embedded -gt 0) {
+                Pass "Pipeline is actively processing — $embedded embedded so far ($pct%)"
+            } else {
+                Pass "Pipeline is active — waiting for documents or first changefeed trigger"
+            }
+        } elseif ($stuckReasons.Count -gt 0) {
+            Write-Host ""
+            Write-Host "  `e[31mPipeline is stuck. Root causes found: $($stuckReasons.Count)`e[0m"
+            $i = 1
+            foreach ($r in $stuckReasons) {
+                Write-Host "    $i. $r"
+                $i++
+            }
+        }
+
+        # ── Source checks ──
+        $srcEntries = $pip.sources
+        if ($srcEntries -and $srcEntries.Count -gt 0) {
+            foreach ($se in $srcEntries) {
+                $srcId = $se.source_id
+                Write-Host "  Checking source: $srcId"
+                $src = ApiGet "/api/sources/$srcId"
+                if (-not $src) {
+                    Fail "Source $srcId not found — pipeline references a deleted source" "Create a new source or update the pipeline"
+                } else {
+                    if ($src.enabled -eq $false) {
+                        Fail "Source '$($src.name)' ($srcId) is DISABLED" "Enable it in the UI or API"
+                    } else {
+                        Pass "Source '$($src.name)' ($srcId) — enabled"
+                    }
+
+                    # Test source connectivity via health checks
+                    if ($healthResp -and $healthResp.sources) {
+                        $srcHealth = $healthResp.sources | Where-Object { $_.id -eq $srcId }
+                        if ($srcHealth) {
+                            if ($srcHealth.status -eq "healthy") {
+                                Pass "Source connectivity — healthy"
+                                foreach ($c in $srcHealth.checks) {
+                                    if ($c.status -eq "pass") { Pass "  $($c.check): $($c.detail)" }
+                                    elseif ($c.status -eq "warn") { Warn "  $($c.check): $($c.detail)" }
+                                    else { Fail "  $($c.check): $($c.detail)" }
+                                }
+                            } else {
+                                Fail "Source connectivity — $($srcHealth.status)"
+                                foreach ($c in $srcHealth.checks) {
+                                    if ($c.status -ne "pass") {
+                                        Fail "  $($c.check): $($c.detail)"
+                                        if ($c.detail -match "readMetadata|RBAC") {
+                                            Write-Host "          `e[36m→ Grant 'Cosmos DB Account Reader Role' to managed identity`e[0m"
+                                        }
+                                        if ($c.detail -match "Forbidden|403|unauthorized") {
+                                            Write-Host "          `e[36m→ Grant 'Cosmos DB Built-in Data Contributor' (SQL RBAC)`e[0m"
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Warn "Source $srcId not in health checks — run health check from UI first"
+                        }
+                    }
+
+                    # Check content fields
+                    $cfields = $se.content_fields
+                    if ($cfields -and $cfields.Count -gt 0) {
+                        Pass "Content fields: $($cfields -join ', ')"
+                    } else {
+                        Warn "No content_fields configured — pipeline may not know what to embed" "Set content_fields on the pipeline source entry"
+                    }
+                }
+            }
+        } else {
+            Fail "Pipeline has no source entries" "Pipeline must have at least one source"
+        }
+
+        # ── Destination checks ──
+        Write-Host "  Checking destination: $destId"
+        $dst = ApiGet "/api/destinations/$destId"
+        if (-not $dst) {
+            Fail "Destination $destId not found — pipeline references a deleted destination"
+        } else {
+            if ($dst.enabled -eq $false) {
+                Fail "Destination '$($dst.name)' ($destId) is DISABLED" "Enable it in the UI or API"
+            } else {
+                Pass "Destination '$($dst.name)' ($destId) — enabled"
+            }
+
+            # Check vector index path matches destination policy
+            $vectorIndexes = $dst.config.vector_indexes
+            if ($vectorIndexes -and $vectorIndexes.Count -gt 0) {
+                $pathMatch = $vectorIndexes | Where-Object { $_.path -eq "/$vectorPath" -or $_.path -eq $vectorPath }
+                if ($pathMatch) {
+                    Pass "Vector path '/$vectorPath' found in destination policy (${($pathMatch.dimensions)}d, $($pathMatch.distanceFunction))"
+                } else {
+                    $availPaths = ($vectorIndexes | ForEach-Object { $_.path }) -join ", "
+                    Fail "Vector path '/$vectorPath' NOT in destination policy. Available: $availPaths" "Update pipeline vector_index_path or add the path to the container's vector policy"
+                }
+            } else {
+                Warn "Destination has no vector indexes — Fetch Vector Index Details may not have been run"
+            }
+        }
+
+        # ── Model checks ──
+        Write-Host "  Checking model: $modelId"
+        $healthResp = ApiGet "/api/health/checks"
+        if ($healthResp -and $healthResp.models) {
+            $modelHealth = $healthResp.models | Where-Object { $_.id -eq $modelId }
+            if ($modelHealth) {
+                if ($modelHealth.status -eq "healthy") {
+                    Pass "Model '$($modelHealth.name)' — healthy"
+                    foreach ($c in $modelHealth.checks) {
+                        if ($c.status -eq "pass") { Pass "  $($c.check): $($c.detail)" }
+                        elseif ($c.status -eq "warn") { Warn "  $($c.check): $($c.detail)" }
+                        else { Fail "  $($c.check): $($c.detail)" }
+                    }
+                } else {
+                    Fail "Model '$($modelHealth.name)' — $($modelHealth.status)"
+                    foreach ($c in $modelHealth.checks) {
+                        if ($c.status -ne "pass") { Fail "  $($c.check): $($c.detail)" }
+                    }
+                }
+            } else {
+                Fail "Model $modelId not found in health checks" "Register the model: omnivec model add ..."
+            }
+        }
+
+        # ── Dimension mismatch check ──
+        if ($dst -and $dst.config.vector_dimensions -and $healthResp.models) {
+            $modelObj = $healthResp.models | Where-Object { $_.id -eq $modelId }
+            if ($modelObj) {
+                $modelDims = $null
+                foreach ($c in $modelObj.checks) {
+                    if ($c.detail -match "(\d+)\s*dim") { $modelDims = [int]$Matches[1] }
+                }
+                $destDims = [int]$dst.config.vector_dimensions
+                if ($modelDims -and $destDims -and $modelDims -ne $destDims) {
+                    Fail "DIMENSION MISMATCH: Model outputs ${modelDims}d but destination expects ${destDims}d" "Either change the model or recreate the destination container with matching dimensions"
+                } elseif ($modelDims -and $destDims) {
+                    Pass "Dimensions match: model ${modelDims}d = destination ${destDims}d"
+                }
+            }
+        }
+
+        # ── Changefeed / worker pod check for this pipeline ──
+        if ($KUBE_CONTEXT) {
+            if ($pmode -eq "queue") {
+                $workerPods = kubectl --context $KUBE_CONTEXT get pods -n omnivec -l "app=omnivec-dotnet-worker" --no-headers 2>$null
+                if ($workerPods -and ($workerPods | Where-Object { $_ -match "Running" })) {
+                    $runningWorkers = ($workerPods | Where-Object { $_ -match "Running" }).Count
+                    Pass "Worker pods: $runningWorkers running (queue mode)"
+                } else {
+                    Fail "No worker pods running — queue mode jobs cannot be processed" "kubectl scale deployment omnivec-dotnet-worker -n omnivec --replicas=1"
+                }
+            }
+
+            $cfPods = kubectl --context $KUBE_CONTEXT get pods -n omnivec -l "app=omnivec-cosmos-changefeed" --no-headers 2>$null
+            if ($cfPods -and ($cfPods | Where-Object { $_ -match "Running" })) {
+                $runningCf = ($cfPods | Where-Object { $_ -match "Running" }).Count
+                Pass "Changefeed pods: $runningCf running"
+            } else {
+                Fail "No changefeed pods running — new documents will not be detected" "kubectl scale deployment omnivec-cosmos-changefeed -n omnivec --replicas=1"
+            }
+
+            # Check recent failed job errors
+            if ($jobsFailed -gt 0) {
+                Write-Host ""
+                Write-Host "  `e[33mRecent failed job errors:`e[0m"
+                $failedJobs = ApiGet "/api/jobs?pipeline_id=$Pipeline&status=failed&limit=5"
+                if ($failedJobs.jobs) {
+                    foreach ($j in $failedJobs.jobs) {
+                        $errMsg = if ($j.error) { $j.error } else { "no error message" }
+                        if ($errMsg.Length -gt 120) { $errMsg = $errMsg.Substring(0, 120) + "..." }
+                        Write-Host "    Job $($j.id): $errMsg"
+
+                        # Pattern-match common errors
+                        if ($errMsg -match "readMetadata|RBAC") {
+                            Write-Host "    `e[36m→ Missing Cosmos DB Account Reader Role on managed identity`e[0m"
+                        }
+                        if ($errMsg -match "dimension|Dimensions") {
+                            Write-Host "    `e[36m→ Embedding dimension mismatch between model and destination`e[0m"
+                        }
+                        if ($errMsg -match "DeploymentNotFound|deployment.*not found") {
+                            Write-Host "    `e[36m→ Azure OpenAI deployment name doesn't match (check exact name in portal)`e[0m"
+                        }
+                        if ($errMsg -match "401|Unauthorized|InvalidApiKey") {
+                            Write-Host "    `e[36m→ Model API key is invalid or expired`e[0m"
+                        }
+                        if ($errMsg -match "timeout|Timeout|timed out") {
+                            Write-Host "    `e[36m→ Model endpoint is slow or unreachable — check network and endpoint health`e[0m"
+                        }
+                        if ($errMsg -match "rate.*limit|429|throttl") {
+                            Write-Host "    `e[36m→ Model endpoint is rate-limiting — reduce worker replicas or increase quota`e[0m"
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
