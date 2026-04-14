@@ -2012,7 +2012,7 @@
                                 <div class="form-group">
                                     <label class="form-label">Vector Store</label>
                                     <div style="display: flex; gap: 8px;">
-                                        <select class="form-input" name="destination" id="pipeline-destination" style="flex: 1;" onchange="loadVectorPoliciesForDest()"></select>
+                                        <select class="form-input" name="destination" id="pipeline-destination" style="flex: 1;" onchange="loadVectorPoliciesForDest(); updateSameContainerIndicator()"></select>
                                         <button type="button" class="btn btn-secondary" onclick="testExistingPipelineDest()" style="white-space: nowrap;">
                                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                                             Test
@@ -2035,6 +2035,9 @@
                                         <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()">
                                         <span style="font-size: 13px; color: var(--text-secondary);">Same as source (write vectors to the source container)</span>
                                     </label>
+                                </div>
+                                <div id="pl-dest-same-container-indicator" style="display: none; margin-top: 12px; padding: 10px 14px; background: rgba(34,197,94,0.08); border: 1px solid var(--success); border-radius: var(--radius-sm); font-size: 13px; color: var(--success);">
+                                    ✓ Source and destination are the same container (inline mode recommended)
                                 </div>
                             </div>
 
@@ -3972,9 +3975,18 @@
             } else if (currentPipelineTab === 'chunking') {
                 const cs = pipeline.content_strategy || 'truncate';
                 const cc = pipeline.chunk_config || {};
-                const pm = pipeline.processing_mode || 'queue';
                 const isChunk = cs === 'chunk';
-                const isQueue = pm === 'queue';
+
+                // Check if source and destination are the same container
+                const pipSrc = pipeline.sources?.[0];
+                const srcObj = sources.find(s => s.id === pipSrc?.source_id);
+                const destObj = destinations.find(d => d.id === pipeline.destination_id);
+                const sameContainer = srcObj && destObj &&
+                    srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
+                    srcObj.config?.endpoint === destObj.config?.endpoint &&
+                    srcObj.config?.database === destObj.config?.database &&
+                    srcObj.config?.container === destObj.config?.container;
+
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Content Strategy</h4>
                     <div class="form-group">
@@ -4020,7 +4032,7 @@
                         Full document text is embedded as a single vector. No chunking configuration needed.
                     </div>
                     `}
-                    ${isQueue ? `
+                    ${!sameContainer ? `
                     <div class="form-group" style="margin-top: 16px;">
                         <label class="form-label">Document ID Pattern</label>
                         <input type="text" class="form-input" id="pip-detail-doc-id-pattern" value="${pipeline.doc_id_pattern || '{source}'}" placeholder="{source}" oninput="markPipelineDetailDirty()">
@@ -4709,6 +4721,7 @@
                         resultDiv.innerHTML =
                             `<span style="color: var(--success); font-size: 13px;">Matched: ${match.name} (using inline mode)</span>`;
                         loadVectorPoliciesForDest();
+                        updateSameContainerIndicator();
                         return;
                     }
                     // No match found - create destination from source config
@@ -4742,6 +4755,7 @@
                             if (processingModeSelect) processingModeSelect.value = 'inline';
                             resultDiv.innerHTML =
                                 `<span style="color: var(--success); font-size: 13px;">Created: ${newDest.destination.name} (using inline mode)</span>`;
+                            updateSameContainerIndicator();
                         } else {
                             const err = await res.json();
                             resultDiv.innerHTML =
@@ -4754,7 +4768,29 @@
                 }
             } else {
                 resultDiv.innerHTML = '';
+                updateSameContainerIndicator();
             }
+        }
+
+        function updateSameContainerIndicator() {
+            const indicator = document.getElementById('pl-dest-same-container-indicator');
+            if (!indicator) return;
+
+            // Get selected source config
+            const sourceId = document.getElementById('pipeline-source-select')?.value;
+            const srcObj = sources.find(s => s.id === sourceId);
+
+            // Get selected destination config
+            const destId = document.getElementById('pipeline-destination')?.value;
+            const destObj = destinations.find(d => d.id === destId);
+
+            const sameContainer = srcObj && destObj &&
+                srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
+                srcObj.config?.endpoint === destObj.config?.endpoint &&
+                srcObj.config?.database === destObj.config?.database &&
+                srcObj.config?.container === destObj.config?.container;
+
+            indicator.style.display = sameContainer ? 'block' : 'none';
         }
 
         function togglePipelineTransformMode(mode) {
@@ -5072,8 +5108,29 @@
 
         function nextPipelineStep() {
             if (currentPipelineStep === 'general') showPipelineStep('source');
-            else if (currentPipelineStep === 'source') showPipelineStep('transform');
-            else if (currentPipelineStep === 'transform') showPipelineStep('destination');
+            else if (currentPipelineStep === 'source') {
+                // Validate: source must be selected or being created
+                if (pipelineSourceMode === 'existing') {
+                    const srcVal = document.getElementById('pipeline-source-select').value;
+                    if (!srcVal) {
+                        alert('Please select a source before proceeding.');
+                        return;
+                    }
+                } else {
+                    const srcName = document.getElementById('pl-src-name')?.value?.trim();
+                    if (!srcName) {
+                        alert('Please fill in the new source name before proceeding.');
+                        return;
+                    }
+                }
+                showPipelineStep('transform');
+            }
+            else if (currentPipelineStep === 'transform') {
+                // Validate: destination must be available (check after reaching destination step)
+                showPipelineStep('destination');
+                // After showing destination step, check for same container indicator
+                updateSameContainerIndicator();
+            }
         }
 
         function prevPipelineStep() {
