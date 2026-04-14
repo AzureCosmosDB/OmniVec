@@ -252,7 +252,7 @@ Write-Host "`e[33mConfigure AKS node pools:`e[0m"
 Write-Host ""
 
 $location = $env:AZURE_LOCATION
-if (-not $location) { $location = "centralus" }
+if (-not $location) { $location = "eastus2" }
 
 # Helper: validate a single SKU in the location
 function Test-SkuAvailable {

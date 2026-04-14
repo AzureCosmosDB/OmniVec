@@ -10,6 +10,15 @@ $env:Path = $env:Path + ";" + $registryPath
 
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 
+# -- Deployment lock: prevent concurrent postprovision runs --
+$lockDir = Join-Path $HOME ".omnivec" "locks"
+if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
+$lockFile = Join-Path $lockDir "$env:AZURE_ENV_NAME.post.lock"
+@($PID, (hostname)) | Set-Content $lockFile
+function Release-PostLock { if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue } }
+
+try {
+
 Write-Host "`n`e[32m+==========================================+`e[0m"
 Write-Host "`e[32m|    OmniVec - Post-provision Setup        |`e[0m"
 Write-Host "`e[32m+==========================================+`e[0m"
@@ -89,7 +98,7 @@ $gpuCnt = Get-AzdValue "OMNIVEC_GPU_NODE_COUNT"
 $meta = Get-AzdValue "OMNIVEC_METADATA_STORE"
 $blob = Get-AzdValue "OMNIVEC_ENABLE_BLOB_SOURCE"
 $build = Get-AzdValue "OMNIVEC_BUILD_MODE"
-az group update --name $RESOURCE_GROUP --tags `
+az tag update --resource-id (az group show --name $RESOURCE_GROUP --query "id" -o tsv) --operation merge --tags `
     "omnivec-sys-sku=$sysVm" `
     "omnivec-sys-count=$sysCnt" `
     "omnivec-gpu-sku=$gpuVm" `
@@ -482,6 +491,18 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
 
 $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m", "--atomic")
 
+# Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
+$helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pending-") {
+    Write-Host "`e[33mDetected stuck Helm release (status: $($helmStatus.info.status)). Rolling back...`e[0m"
+    helm rollback omnivec -n omnivec --kube-context $KUBE_CONTEXT 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "`e[33mRollback failed — uninstalling stuck release...`e[0m"
+        helm uninstall omnivec -n omnivec --kube-context $KUBE_CONTEXT 2>$null
+    }
+    Write-Host "`e[32mStuck release cleared. Proceeding with fresh deploy.`e[0m"
+}
+
 & helm @helmArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
@@ -554,6 +575,7 @@ Write-Host "  CosmosDB:      `e[36m$COSMOS_ENDPOINT`e[0m"
 Write-Host "  Admin Token:   `e[36m$ADMIN_TOKEN`e[0m"
 
 $LOCATION = $env:AZURE_LOCATION
+if (-not $LOCATION) { $LOCATION = Get-AzdValue "AZURE_LOCATION" }
 if (-not $LOCATION) { $LOCATION = "eastus2" }
 $FQDN = "${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
 
@@ -568,3 +590,7 @@ if ($externalIp) {
     Write-Host "  kubectl get svc omnivec-web -n omnivec"
 }
 Write-Host ""
+
+} finally {
+    Release-PostLock
+}
