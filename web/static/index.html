@@ -3135,7 +3135,7 @@
                         ${dh && dh.status !== 'healthy' ? `<div style="font-size: 11px; color: ${dh.status === 'warning' ? 'var(--warning)' : 'var(--error)'}; padding-left: 16px;">${dh.checks?.find(c => c.status === 'fail' || c.status === 'warn')?.detail?.substring(0, 80) || dh.status}</div>` : ''}
                         ${pkPath ? `<div style="font-size: 11px; color: var(--text-tertiary); padding-left: 16px;">PK: ${pkPath}${vecField ? ' | Vector: /' + vecField : ''}</div>` : ''}
                     </td>
-                    <td><span class="badge badge-success">${d.type === 'cosmosdb-vector' ? 'CosmosDB Vector' : d.type === 'pgvector' ? 'pgvector' : d.type === 'pinecone' ? 'Pinecone' : d.type === 'milvus' ? 'Milvus' : d.type === 'qdrant' ? 'Qdrant' : d.type}</span></td>
+                    <td><span class="badge badge-success">${d.type === 'cosmosdb-vector' ? 'CosmosDB Vector' : d.type === 'pgvector' ? 'pgvector' : d.type === 'mssql' ? 'MSSQL' : d.type}</span></td>
                     <td class="mono">${d.config?.endpoint || '-'}</td>
                     <td>${statusBadge}</td>
                     <td>${healthBadge}</td>
@@ -3179,9 +3179,8 @@
             const config = dest.config || {};
 
             const destTypeDisplay = dest.type === 'cosmosdb-vector' ? 'CosmosDB Vector' :
-                                    dest.type === 'pinecone' ? 'Pinecone' :
-                                    dest.type === 'milvus' ? 'Milvus' :
-                                    dest.type === 'qdrant' ? 'Qdrant' : dest.type;
+                                    dest.type === 'pgvector' ? 'pgvector' :
+                                    dest.type === 'mssql' ? 'MSSQL' : dest.type;
 
             const destIcon = dest.type === 'cosmosdb-vector'
                 ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" width="32" height="32"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>'
@@ -3262,17 +3261,6 @@
                             <input type="text" class="form-input" id="dest-detail-container" value="${config.container || ''}" oninput="markDestDetailDirty()">
                         </div>
                     `;
-                } else if (dest.type === 'pinecone') {
-                    configFields = `
-                        <div class="form-group">
-                            <label class="form-label">Index Name</label>
-                            <input type="text" class="form-input" id="dest-detail-index" value="${config.index || ''}">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Environment</label>
-                            <input type="text" class="form-input" id="dest-detail-environment" value="${config.environment || ''}">
-                        </div>
-                    `;
                 } else if (dest.type === 'pgvector') {
                     configFields = `
                         <div class="form-group">
@@ -3302,17 +3290,6 @@
                         <div class="form-group">
                             <label class="form-label">Vector Dimensions</label>
                             <input type="number" class="form-input" id="dest-detail-pg-dimensions" value="${config.vector_dimensions || 1536}" oninput="markDestDetailDirty()">
-                        </div>
-                    `;
-                } else {
-                    configFields = `
-                        <div class="form-group">
-                            <label class="form-label">Host</label>
-                            <input type="text" class="form-input" id="dest-detail-host" value="${config.host || ''}" placeholder="localhost:19530">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Collection</label>
-                            <input type="text" class="form-input" id="dest-detail-collection" value="${config.collection || ''}">
                         </div>
                     `;
                 }
@@ -3468,11 +3445,6 @@
                 if (vecColEl) editedDestData.vector_column = vecColEl.value;
                 if (contentColEl) editedDestData.content_column = contentColEl.value;
                 if (dimsEl) editedDestData.vector_dimensions = parseInt(dimsEl.value) || 1536;
-            } else {
-                const hostEl = document.getElementById('dest-detail-host');
-                const collEl = document.getElementById('dest-detail-collection');
-                if (hostEl) editedDestData.host = hostEl.value;
-                if (collEl) editedDestData.collection = collEl.value;
             }
         }
 
@@ -4998,12 +4970,6 @@
                         <input type="text" class="form-input" id="${prefix}-database" placeholder="vectors"></div>
                     <div class="form-group"><label class="form-label">Container</label>
                         <input type="text" class="form-input" id="${prefix}-container" placeholder="embeddings"></div>`;
-            } else if (type === 'pinecone') {
-                container.innerHTML = `
-                    <div class="form-group"><label class="form-label">Index</label>
-                        <input type="text" class="form-input" id="${prefix}-index" placeholder="my-index"></div>
-                    <div class="form-group"><label class="form-label">Namespace (optional)</label>
-                        <input type="text" class="form-input" id="${prefix}-namespace" placeholder="default"></div>`;
             } else if (type === 'pgvector') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Host</label>
@@ -5022,12 +4988,6 @@
                         <select class="form-input" id="${prefix}-index-type">
                             <option value="ivfflat">IVFFlat</option><option value="hnsw">HNSW</option>
                         </select></div>`;
-            } else if (type === 'milvus' || type === 'qdrant') {
-                container.innerHTML = `
-                    <div class="form-group"><label class="form-label">Endpoint</label>
-                        <input type="text" class="form-input" id="${prefix}-endpoint" placeholder="https://${type}-host:${type === 'milvus' ? '19530' : '6333'}"></div>
-                    <div class="form-group"><label class="form-label">Collection</label>
-                        <input type="text" class="form-input" id="${prefix}-collection" placeholder="embeddings"></div>`;
             }
             document.getElementById(`${prefix}-test-result`).innerHTML = '';
         }
@@ -5152,10 +5112,6 @@
                     database: document.getElementById(`${prefix}-database`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || ''
                 };
-            } else if (destType === 'pinecone') {
-                config = { index: document.getElementById(`${prefix}-index`)?.value || '', namespace: document.getElementById(`${prefix}-namespace`)?.value || '' };
-            } else if (destType === 'milvus' || destType === 'qdrant') {
-                config = { endpoint: document.getElementById(`${prefix}-endpoint`)?.value || '', collection: document.getElementById(`${prefix}-collection`)?.value || '' };
             }
             return { name: document.getElementById(`${prefix}-name`)?.value || '', type: destType, config };
         }

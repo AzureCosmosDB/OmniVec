@@ -104,8 +104,7 @@ omnivec source delete <id> -y
 | `azure-blob` | `account_url`, `container` | `prefix` |
 | `cosmosdb` | `endpoint`, `database`, `container` | `query` |
 | `postgresql` | `host`, `database`, `table` | `port`, `user`, `password`, `ssl_mode` |
-| `s3` | `bucket` | `prefix`, `region` |
-| `http` | `url` | `method`, `headers`, `auth_type` |
+| `mssql` | `host`, `database`, `table` | `port`, `user`, `password` |
 
 > **Note:** Content extraction config (`content_fields`, `content_mode`, `file_types`) is configured per-pipeline on the pipeline source entry, not on the source itself.
 
@@ -158,10 +157,13 @@ omnivec pipeline create \
   --destination <dst-id> \
   --model text-azure \
   --content-fields content \
+  --content-strategy truncate \
   --vector-index-path /embedding \
   --process-existing
 
-# Update a pipeline
+# Update a pipeline (content config, strategy, chunking)
+omnivec pipeline update <id> --content-strategy chunk --chunk-size 1000 --chunk-overlap 200
+omnivec pipeline update <id> --content-fields "title,content" --doc-id-pattern "{source}-chunk-{chunk}"
 omnivec pipeline update <id> --name "Renamed" --description "Updated"
 
 # Pause / Resume / Run / Reset / Delete
@@ -181,6 +183,12 @@ omnivec pipeline delete <id> -y
 | `--destination` | Yes | — | Destination ID |
 | `--model` | Yes | — | DocGrok pipeline name (e.g., `text-azure`, `pdf-vision`) |
 | `--content-fields` | No | `content` | Comma-separated field names to embed |
+| `--content-mode` | No | `field` | Content extraction mode: `field`, `blob_url`, `http_url`, `s3_url` |
+| `--file-types` | No | — | Comma-separated file type filters (e.g., `txt,pdf,md`) |
+| `--content-strategy` | No | `truncate` | Content strategy: `truncate` or `chunk` |
+| `--chunk-size` | No | `1000` | Chunk size in characters (used with `--content-strategy=chunk`) |
+| `--chunk-overlap` | No | `200` | Chunk overlap in characters |
+| `--doc-id-pattern` | No | `{source}` | Document ID pattern (e.g., `{source}-chunk-{chunk}`) |
 | `--vector-index-path` | No | — | Vector index path from destination's vector policy (e.g., `/embedding`) |
 | `--description` | No | — | Pipeline description |
 | `--process-existing` | No | true | Process existing documents on creation |
@@ -244,6 +252,12 @@ Manage embedding models in DocGrok.
 ```bash
 # List models
 omnivec model list
+
+# Show model details
+omnivec model show <name>
+
+# Test model connectivity
+omnivec model test <name>
 
 # Add an Azure OpenAI model
 omnivec model add \

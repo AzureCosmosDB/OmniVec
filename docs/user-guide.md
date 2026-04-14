@@ -32,11 +32,12 @@ A source is a connection to a data store. Sources store **connection info only**
 ### Creating a Source
 
 1. Navigate to **Sources** and click **+ New Source**.
-2. Enter a **name** and select the **source type** (Azure Blob, CosmosDB, PostgreSQL, S3, HTTP).
+2. Enter a **name** and select the **source type** (Azure Blob, CosmosDB, PostgreSQL, MSSQL).
 3. Fill in the connection config:
    - **Azure Blob:** `account_url`, `container`, optional `prefix`
    - **CosmosDB:** `endpoint`, `database`, `container`
    - **PostgreSQL:** `host`, `port`, `database`, `table`
+   - **MSSQL:** `host`, `port`, `database`, `table`
 4. Click **Test Connection** to verify connectivity before saving.
 5. Click **Create**.
 
@@ -61,6 +62,8 @@ A destination is where vector embeddings are stored.
 2. Enter a **name** and select the type (CosmosDB Vector, pgvector, MSSQL).
 3. Fill in connection config:
    - **CosmosDB Vector:** `endpoint`, `database`, `container`
+   - **pgvector:** `host`, `port`, `database`, `table`, `vector_column`, `dimensions`
+   - **MSSQL:** `host`, `port`, `database`, `table`
 4. Click **Test Connection** — this probes the container and returns the **vector indexing policy** (available embedding paths with dimensions, distance function, and index type).
 5. Click **Create**.
 

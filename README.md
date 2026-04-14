@@ -10,7 +10,7 @@ Sources                  Processing              Destinations
 Azure Blob Storage ─┐                         ┌→ CosmosDB Vector
 CosmosDB           ─┼─→ DocGrok Pipelines ───┤→ pgvector
 PostgreSQL         ─┤   (embed, OCR, chunk)   └→ MSSQL
-S3 / HTTP          ─┘
+MSSQL              ─┘
 ```
 
 This guide walks you through deploying OmniVec and running your first end-to-end pipeline.
@@ -292,8 +292,6 @@ This removes the resource group, all Azure services, and local environment confi
 | `cosmosdb` | endpoint, database, container |
 | `azure-blob` | account_url, container, prefix |
 | `postgresql` | host, port, database, table |
-| `s3` | bucket, prefix, region |
-| `http` | url, method, headers, auth_type |
 | `mssql` | host, port, database, table |
 
 **Destinations** are where vectors are stored. When you test a destination, OmniVec probes its vector indexing policy and returns available vector paths. You pick one when creating a pipeline.
