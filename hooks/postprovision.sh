@@ -16,6 +16,19 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Helper: read user input (handles non-TTY contexts)
+read_input() {
+  prompt="$1"
+  if [ -t 0 ]; then
+    printf "%s" "$prompt"
+    read -r _ri_val
+  else
+    printf "%s" "$prompt" > /dev/tty
+    read -r _ri_val < /dev/tty
+  fi
+  echo "$_ri_val"
+}
+
 printf "${GREEN}╔══════════════════════════════════════════╗${NC}\n"
 printf "${GREEN}║    OmniVec — Post-provision Setup        ║${NC}\n"
 printf "${GREEN}╚══════════════════════════════════════════╝${NC}\n"
