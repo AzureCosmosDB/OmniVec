@@ -378,13 +378,8 @@ function Test-Scenario1 {
     Write-MockScript -Dir $mockBin -Name "git"     -Body (Get-NoopMockBody)
 
     $hookPath = Join-Path $testDir "hooks" "preprovision.ps1"
-    # Provide stdin answers for every Read-Host prompt:
-    #   Metadata: 1 (cosmosdb-serverless)
-    #   Blob: 1 (yes)
-    #   System SKU: 1
-    #   System count: 2
-    #   GPU count: 0
-    $stdin = "1`n1`n1`n2`n0`n"
+    # Provide stdin: "1" for quick start mode
+    $stdin = "1`n"
 
     $r = Invoke-HookTest -HookPath $hookPath -MockBinDir $mockBin -WorkDir $testDir -StdinText $stdin -EnvVars @{
         AZURE_ENV_NAME  = $envName
@@ -392,9 +387,9 @@ function Test-Scenario1 {
         HOME            = $HOME
     }
 
-    $showsPrompts = ($r.Output -match "Select metadata storage backend" -or $r.Output -match "metadata storage")
-    Assert-Test "Scenario 1: Fresh deploy — shows config prompts" $showsPrompts `
-        "Expected prompt text in output. Exit=$($r.ExitCode). Output tail: $($r.Output.Substring([Math]::Max(0,$r.Output.Length-300)))"
+    $showsPrompts = ($r.Output -match "Quick start" -or $r.Output -match "recommended defaults" -or $r.Output -match "Choose setup mode")
+    Assert-Test "Scenario 1: Fresh deploy — quick start applies defaults" $showsPrompts `
+        "Expected quick start text in output. Exit=$($r.ExitCode). Output tail: $($r.Output.Substring([Math]::Max(0,$r.Output.Length-300)))"
 
     Remove-TestDir $testDir
 }

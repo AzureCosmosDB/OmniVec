@@ -19,12 +19,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Helper: read user input (handles non-TTY contexts)
 read_input() {
   prompt="$1"
+  _ri_val=""
   if [ -t 0 ]; then
     printf "%s" "$prompt"
-    read -r _ri_val
-  else
+    read -r _ri_val || true
+  elif [ -e /dev/tty ]; then
     printf "%s" "$prompt" > /dev/tty
-    read -r _ri_val < /dev/tty
+    read -r _ri_val < /dev/tty || true
+  else
+    # No TTY available (non-interactive hook context) — return empty
+    printf "%s" "$prompt"
+    printf " ${YELLOW}(no interactive input available — skipping)${NC}\n"
   fi
   echo "$_ri_val"
 }
@@ -236,8 +241,8 @@ if [ "$OMNIVEC_BUILD" != "true" ]; then
   printf "  ${CYAN}Source: $SHARED_REGISTRY${NC}\n"
 
   # Try anonymous pull first
-  printf "  ${CYAN}Testing anonymous pull...${NC}"
-  if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
+  printf "  ${CYAN}Testing anonymous pull (this may take 30-60s)...${NC}"
+  if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
     printf " ${GREEN}✓ anonymous pull works${NC}\n"
     ANON_OK=true
   else
@@ -400,10 +405,15 @@ fi
 
 printf "\n${YELLOW}Phase 2: Getting AKS credentials...${NC}\n"
 KUBE_CONTEXT="${AKS_CLUSTER}"
+
+# Use a separate kubeconfig to avoid overwriting user's default context
+OMNIVEC_KUBECONFIG="$HOME/.kube/omnivec-${AZURE_ENV_NAME:-omnivec}"
+export KUBECONFIG="$OMNIVEC_KUBECONFIG"
+
 az aks get-credentials \
   --resource-group "$RESOURCE_GROUP" \
   --name "$AKS_CLUSTER" \
-  --context "$KUBE_CONTEXT" \
+  --file "$OMNIVEC_KUBECONFIG" \
   --overwrite-existing >/dev/null
 
 # WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl

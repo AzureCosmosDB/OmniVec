@@ -382,7 +382,12 @@ if ($missingImages.Count -gt 0) {
 
 Write-Host "`n`e[33mPhase 2: Getting AKS credentials...`e[0m"
 $KUBE_CONTEXT = $AKS_CLUSTER
-az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --context $KUBE_CONTEXT --overwrite-existing
+
+# Use a separate kubeconfig to avoid overwriting user's default context
+$OMNIVEC_KUBECONFIG = Join-Path $HOME ".kube" "omnivec-$env:AZURE_ENV_NAME"
+$env:KUBECONFIG = $OMNIVEC_KUBECONFIG
+
+az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --file $OMNIVEC_KUBECONFIG --overwrite-existing
 Write-Host "`e[32mConnected to AKS cluster: $AKS_CLUSTER`e[0m"
 
 # =============================================================================
