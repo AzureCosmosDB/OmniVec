@@ -140,8 +140,17 @@ if [ -n "$ENV_NAME" ]; then
     [ -n "$IDENTITY_NAME" ] && pass "Managed Identity: $IDENTITY_NAME" || warn "No Managed Identity found"
 
     if [ -n "$AKS_NAME" ]; then
-      az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing 2>/dev/null
+      # Get credentials — show error if it fails (common: kubelogin not installed)
+      if az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing 2>&1 | grep -qi "error\|fail"; then
+        # Retry without admin (default uses kubelogin)
+        az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing --admin 2>/dev/null || true
+      fi
       KUBE_CONTEXT="$AKS_NAME"
+      # Verify kubectl works
+      if ! kubectl --context "$KUBE_CONTEXT" cluster-info >/dev/null 2>&1; then
+        warn "kubectl cannot connect to AKS (credentials may need kubelogin)" "az aks install-cli && az aks get-credentials --resource-group $RG --name $AKS_NAME --overwrite-existing"
+        KUBE_CONTEXT=""
+      fi
     fi
   else
     fail "Resource group $RG does not exist" "azd up"
@@ -302,17 +311,17 @@ fi
 
 # CosmosDB RBAC
 if [ -n "$IDENTITY_NAME" ] && [ -n "$COSMOS_NAME" ] && [ -n "$RG" ]; then
-  _principal=$(az identity show --name "$IDENTITY_NAME" --resource-group "$RG" --query "principalId" -o tsv 2>/dev/null)
-  _cosmos_id=$(az cosmosdb show --name "$COSMOS_NAME" --resource-group "$RG" --query "id" -o tsv 2>/dev/null)
+  _principal=$(az identity show --name "$IDENTITY_NAME" --resource-group "$RG" --query "principalId" -o tsv 2>/dev/null | tr -d '\r\n')
+  _cosmos_id=$(az cosmosdb show --name "$COSMOS_NAME" --resource-group "$RG" --query "id" -o tsv 2>/dev/null | tr -d '\r\n')
   if [ -n "$_principal" ] && [ -n "$_cosmos_id" ]; then
-    _arm_roles=$(az role assignment list --assignee "$_principal" --scope "$_cosmos_id" --query "[].roleDefinitionName" -o tsv 2>/dev/null)
+    _arm_roles=$(az role assignment list --assignee "$_principal" --scope "$_cosmos_id" --query "[].roleDefinitionName" -o tsv 2>/dev/null | tr -d '\r')
     if echo "$_arm_roles" | grep -qi "reader"; then
       pass "CosmosDB ARM RBAC — Account Reader assigned"
     else
       fail "CosmosDB ARM RBAC — missing Account Reader" "az role assignment create --assignee $_principal --role 'Cosmos DB Account Reader Role' --scope $_cosmos_id"
     fi
 
-    _sql_roles=$(az cosmosdb sql role assignment list --account-name "$COSMOS_NAME" --resource-group "$RG" --query "[?principalId=='$_principal'].roleDefinitionId" -o tsv 2>/dev/null)
+    _sql_roles=$(az cosmosdb sql role assignment list --account-name "$COSMOS_NAME" --resource-group "$RG" --query "[?principalId=='$_principal'].roleDefinitionId" -o tsv 2>/dev/null | tr -d '\r')
     if [ -n "$_sql_roles" ]; then
       pass "CosmosDB SQL RBAC — Data role assigned"
     else
@@ -328,7 +337,12 @@ fi
 header "6. Container Images"
 
 if [ -n "$ACR_NAME" ]; then
-  _repos=$(az acr repository list --name "$ACR_NAME" -o tsv 2>/dev/null)
+  _repos=$(az acr repository list --name "$ACR_NAME" -o tsv 2>/dev/null | tr -d '\r')
+  if [ -z "$_repos" ]; then
+    # May need login first
+    az acr login --name "$ACR_NAME" --expose-token >/dev/null 2>&1 || true
+    _repos=$(az acr repository list --name "$ACR_NAME" -o tsv 2>/dev/null | tr -d '\r')
+  fi
   for _img in omnivec-api omnivec-web omnivec-changefeed omnivec-dotnet-worker docgrok-router docgrok-pipeline-worker; do
     if echo "$_repos" | grep -qx "$_img"; then
       pass "$_img — present"
@@ -463,9 +477,12 @@ fi
 header "10. Service Bus"
 
 if [ -n "$_SB_NAME" ] && [ -n "$RG" ]; then
-  _queues=$(az servicebus queue list --namespace-name "$_SB_NAME" --resource-group "$RG" --query "[].{name:name,messageCount:messageCount}" -o tsv 2>/dev/null)
+  _queues=$(az servicebus queue list --namespace-name "$_SB_NAME" --resource-group "$RG" --query "[].{name:name,messageCount:messageCount}" -o tsv 2>/dev/null | tr -d '\r')
   if [ -n "$_queues" ]; then
-    echo "$_queues" | while IFS=$'\t' read -r _qn _qc; do
+    echo "$_queues" | while read -r _line; do
+      _qn=$(echo "$_line" | awk '{print $1}' | tr -d '\r')
+      _qc=$(echo "$_line" | awk '{print $2}' | tr -d '\r')
+      _qc=${_qc:-0}
       if [ "$_qc" -gt 1000 ] 2>/dev/null; then
         warn "Queue '$_qn' — $_qc messages backed up" "Scale workers: kubectl scale deployment omnivec-dotnet-worker -n omnivec --replicas=3"
       else
