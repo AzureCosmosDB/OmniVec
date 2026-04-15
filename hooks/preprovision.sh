@@ -66,12 +66,16 @@ azd_get() {
 # Helper: read user input from TTY (works in hook context where stdin may be redirected)
 read_input() {
   _prompt=$1
-  printf '%b' "$_prompt" >/dev/tty 2>/dev/null || printf '%b' "$_prompt" >&2
   _input=""
   if [ -t 0 ]; then
+    printf '%b' "$_prompt"
     read -r _input || true
-  elif [ -e /dev/tty ]; then
-    read -r _input </dev/tty || true
+  elif [ -w /dev/tty ] 2>/dev/null && printf "" > /dev/tty 2>/dev/null; then
+    printf '%b' "$_prompt" > /dev/tty
+    read -r _input < /dev/tty || true
+  else
+    # No TTY — try reading from stdin directly
+    read -r _input 2>/dev/null || _input=""
   fi
   printf '%s' "$_input"
 }
