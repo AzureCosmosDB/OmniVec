@@ -140,33 +140,64 @@ This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/
 
 ### 3b. Create a source
 
-A source is a connection to data you want to embed. For this first run, use **Azure Blob Storage** — `azd up` already provisioned a storage account in your resource group (`rg-omnivec-<your-env-name>`).
+A source is a connection to data you want to embed. For this first run, use **CosmosDB** — create a new CosmosDB account for your data (separate from the OmniVec metadata account).
 
-1. Find your storage account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Storage account resource → **Properties** → copy the **Primary blob service endpoint** URL.
-2. In that storage account, create a container named `docs` (Azure Portal → Storage account → **Containers** → **+ Container**).
-3. Upload a sample file. Create a file called `hello.txt` with this content:
+1. Create a new CosmosDB account in the Azure Portal:
+   - Azure Portal → **Create a resource** → **Azure Cosmos DB** → **NoSQL**
+   - **Account name**: e.g., `my-omnivec-data`
+   - **Capacity mode**: Serverless
+   - Enable **Vector Search** under Features
+   - Click **Create** (takes ~3–5 minutes)
+2. Create a database and source container:
+   - Go to your new Cosmos DB account → **Data Explorer** → **New Container**
+   - **Database id**: `demo` (create new)
+   - **Container id**: `documents`
+   - **Partition key**: `/id`
+   - Click **OK**
+3. Insert a few sample documents via Data Explorer → `documents` container → **New Item**:
+   ```json
+   { "id": "doc-001", "content": "OmniVec is a universal vector ingestion platform that processes documents from Azure CosmosDB into vector embeddings for semantic search.", "title": "About OmniVec" }
    ```
-   OmniVec is a universal vector ingestion platform that processes documents
-   from Azure Blob Storage, CosmosDB, and PostgreSQL into vector embeddings
-   for semantic search.
+   ```json
+   { "id": "doc-002", "content": "Azure Kubernetes Service simplifies deploying managed Kubernetes clusters in Azure by offloading operational overhead.", "title": "About AKS" }
    ```
-   Upload it to the `docs` container (drag-and-drop in the Azure Portal works).
-4. In OmniVec, go to **Sources** → **New Source**.
-5. Choose **Azure Blob Storage**.
-6. Fill in:
+4. Grant the OmniVec managed identity access to this account:
+
+   **Bash / Linux:**
+   ```bash
+   az cosmosdb sql role assignment create \
+     --account-name "my-omnivec-data" \
+     --resource-group "<your-rg>" \
+     --role-definition-id "00000000-0000-0000-0000-000000000002" \
+     --principal-id "<omnivec-identity-principal-id>" \
+     --scope "/dbs"
+   ```
+   **PowerShell / Windows:**
+   ```powershell
+   az cosmosdb sql role assignment create `
+     --account-name "my-omnivec-data" `
+     --resource-group "<your-rg>" `
+     --role-definition-id "00000000-0000-0000-0000-000000000002" `
+     --principal-id "<omnivec-identity-principal-id>" `
+     --scope "/dbs"
+   ```
+   Also grant **Cosmos DB Account Reader Role** via Access Control (IAM).
+
+5. In OmniVec, go to **Sources** → **New Source**.
+6. Choose **CosmosDB**.
+7. Fill in:
    - **Name**: `My First Source`
-   - **Account URL**: the blob endpoint URL you copied
-   - **Container**: `docs`
-7. Click **Save**, then **Test Connection** to verify access.
+   - **Endpoint**: your new Cosmos DB account URI
+   - **Database**: `demo`
+   - **Container**: `documents`
+8. Click **Save**, then **Test Connection** to verify access.
 
 ### 3c. Create a destination
 
-A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` already created a CosmosDB account in your resource group (`rg-omnivec-<your-env-name>`).
+A destination is where vectors are stored. Use the **same CosmosDB account** with a separate container that has a vector embedding policy.
 
-1. Find your CosmosDB account: Azure Portal → resource group `rg-omnivec-<your-env-name>` → the Cosmos DB account → **Overview** → copy the **URI**.
-2. Create a database and container for vectors:
-   - Azure Portal → Cosmos DB account → **Data Explorer** → **New Container**
-   - **Database id**: `omnivec-vectors` (create new)
+1. In your Cosmos DB account → **Data Explorer** → **New Container**:
+   - **Database id**: `demo` (use existing)
    - **Container id**: `vectors`
    - **Partition key**: `/id`
    - Under **Container Vector Policy**, add a vector embedding:
@@ -175,17 +206,17 @@ A destination is where vectors are stored. Use **CosmosDB Vector** — `azd up` 
      - **Dimensions**: `1536` (matches `text-embedding-3-small`)
      - **Distance function**: `cosine`
    - Click **OK** to create
-3. In OmniVec, go to **Destinations** → **New Destination**.
-4. Choose **CosmosDB Vector**.
-5. Fill in:
+2. In OmniVec, go to **Destinations** → **New Destination**.
+3. Choose **CosmosDB Vector**.
+4. Fill in:
    - **Name**: `My First Destination`
-   - **Endpoint**: the URI you copied
-   - **Database**: `omnivec-vectors`
+   - **Endpoint**: same Cosmos DB account URI
+   - **Database**: `demo`
    - **Container**: `vectors`
-6. Click **Save**, then **Test Connection**.
-7. Click **Fetch Vector Index Details** — you should see `/embedding` with dimensions `1536` and distance function `cosine`.
+5. Click **Save**, then **Test Connection**.
+6. Click **Fetch Embedding Policies** — you should see `/embedding` with dimensions `1536` and distance function `cosine`.
 
-> **If Fetch Vector Index Details returns nothing:** your container doesn't have a vector indexing policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path. See the [Cosmos DB vector search docs](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search) for details.
+> **If Fetch Embedding Policies returns nothing:** your container doesn't have a vector embedding policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path. See the [Cosmos DB vector search docs](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search) for details.
 
 ### 3d. Create a pipeline
 
@@ -194,12 +225,11 @@ A pipeline ties source → model → destination together.
 1. Go to **Pipelines** → **New Pipeline**.
 2. Fill in:
    - **Name**: `My First Pipeline`
-   - **Source**: select your blob source
+   - **Source**: select your CosmosDB source
    - **Destination**: select your CosmosDB vector destination
    - **Model**: select the Azure OpenAI model you registered
-   - **Vector Index Path**: select the path shown from your destination (e.g., `/embedding`)
+   - **Embedding Policy Path**: select the path from your destination (e.g., `/embedding`)
    - **Content Strategy**: `Truncate` (embeds full document text as a single vector — simplest for first run)
-   - **Processing Mode**: `Queue`
    - **Process Existing**: ✅ enable this (so documents already in the source get processed)
 3. Click **Create**.
 
@@ -210,17 +240,17 @@ The pipeline starts processing immediately. You can watch progress on the pipeli
 Within a few minutes, check these signals:
 
 - [ ] **Pipeline health** shows green on the Pipelines page
-- [ ] **Jobs** tab shows completed jobs (one per document)
-- [ ] **Job count** increases from 0
+- [ ] **Embedded count** increases to match your source document count
+- [ ] **Completion** reaches 100%
 
 Then test vector search:
 
 1. Go to **Vector Search** in the sidebar.
 2. Select your destination index.
 3. Type: `vector ingestion platform`
-4. Click **Search** — you should see your `hello.txt` document returned as the top result.
+4. Click **Search** — you should see your documents returned with similarity scores.
 
-> **Expected result:** Since your sample document contains "universal vector ingestion platform," a search for "vector ingestion platform" should match it as the first or second result.
+> **Expected result:** Your sample document about OmniVec should appear as the top result for "vector ingestion platform."
 
 **Congratulations — you've deployed OmniVec and run a full vector ingestion pipeline.** 🎉
 
