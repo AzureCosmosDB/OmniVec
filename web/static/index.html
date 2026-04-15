@@ -3498,7 +3498,8 @@
                 let html = '';
                 if (data.success) {
                     let details = '';
-                    if (data.result?.vector_indexes?.length) {
+                    const vi = data.vector_indexes || data.result?.vector_indexes || [];
+                    if (vi.length) {
                         details = `<table style="width:100%; margin-top:12px; font-size:12px; border-collapse:collapse;">
                             <tr style="border-bottom:1px solid var(--border-primary);">
                                 <th style="text-align:left; padding:6px;">Path</th>
@@ -3507,12 +3508,12 @@
                                 <th style="text-align:left; padding:6px;">Distance</th>
                                 <th style="text-align:left; padding:6px;">Index Type</th>
                             </tr>
-                            ${data.result.vector_indexes.map(vi => `<tr style="border-bottom:1px solid var(--border-subtle);">
-                                <td style="padding:6px;" class="mono">${vi.path || '-'}</td>
-                                <td style="padding:6px;">${vi.dimensions || '-'}</td>
-                                <td style="padding:6px;">${vi.dataType || '-'}</td>
-                                <td style="padding:6px;">${vi.distanceFunction || '-'}</td>
-                                <td style="padding:6px;">${vi.indexType || '-'}</td>
+                            ${vi.map(v => `<tr style="border-bottom:1px solid var(--border-subtle);">
+                                <td style="padding:6px;" class="mono">${v.path || '-'}</td>
+                                <td style="padding:6px;">${v.dimensions || '-'}</td>
+                                <td style="padding:6px;">${v.dataType || '-'}</td>
+                                <td style="padding:6px;">${v.distanceFunction || '-'}</td>
+                                <td style="padding:6px;">${v.indexType || '-'}</td>
                             </tr>`).join('')}
                         </table>`;
                     }
