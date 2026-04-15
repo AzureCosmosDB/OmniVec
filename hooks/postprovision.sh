@@ -241,8 +241,8 @@ if [ "$OMNIVEC_BUILD" != "true" ]; then
   printf "  ${CYAN}Source: $SHARED_REGISTRY${NC}\n"
 
   # Try anonymous pull first
-  printf "  ${CYAN}Testing anonymous pull...${NC}"
-  if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
+  printf "  ${CYAN}Testing anonymous pull (this may take 30-60s)...${NC}"
+  if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
     printf " ${GREEN}✓ anonymous pull works${NC}\n"
     ANON_OK=true
   else

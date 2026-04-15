@@ -17,7 +17,9 @@ This guide walks you through deploying OmniVec and running your first end-to-end
 
 ---
 
-## Prerequisites
+## Part 1 — Deploy OmniVec
+
+### Prerequisites
 
 Install these before you begin:
 
@@ -31,21 +33,12 @@ Install these before you begin:
 You also need:
 
 - An **Azure subscription** with permission to create resource groups, AKS clusters, and CosmosDB accounts.
-- An **Azure OpenAI resource** with an embedding model deployment. If you don't have one yet:
-  1. [Create an Azure OpenAI resource](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource)
-  2. [Deploy an embedding model](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource?pivots=web-portal#deploy-a-model) — choose `text-embedding-3-small` for a first run
-  3. Note these three values (you'll need them in Step 3a):
-     - **Endpoint URL** — Azure Portal → your OpenAI resource → Overview
-     - **API Key** — Azure Portal → Keys and Endpoint
-     - **Deployment Name** — Azure Portal → Deployments → the exact name you gave the deployment (this is **not** the model name)
 
 > `kubectl` and `helm` are installed automatically by the deployment hooks if not already present.
 
 > **Cost estimate:** The default configuration (2× Standard_B4ms nodes, no GPU, CosmosDB serverless) costs roughly **$5–10/day**. Run `azd down --purge --force` when you're done to stop all charges.
 
----
-
-## Step 1 — Deploy OmniVec
+### Deploy
 
 > **Windows users:** Run these commands in PowerShell 7 (`pwsh`), not Command Prompt.
 
@@ -105,7 +98,7 @@ azd env list
 
 ---
 
-## Step 2 — Open the UI
+### Open the UI
 
 Open the **OmniVec URL** in your browser. You should see the OmniVec dashboard.
 
@@ -115,13 +108,24 @@ If the page doesn't load, wait 1–2 minutes for the load balancer to assign an 
 kubectl get svc omnivec-web -n omnivec
 ```
 
+**Deployment is complete.** OmniVec is running. The next part walks through creating your first pipeline.
+
 ---
 
-## Step 3 — Your first pipeline
+## Part 2 — Your first pipeline
+
+This section requires an **Azure OpenAI resource** with an embedding model deployed. If you don't have one yet:
+
+1. [Create an Azure OpenAI resource](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource)
+2. [Deploy an embedding model](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource?pivots=web-portal#deploy-a-model) — choose `text-embedding-3-small` for a first run
+3. Note these three values:
+   - **Endpoint URL** — Azure Portal → your OpenAI resource → Overview
+   - **API Key** — Azure Portal → Keys and Endpoint
+   - **Deployment Name** — Azure Portal → Deployments → the exact name you gave the deployment (this is **not** the model name)
 
 This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/cli-guide.md).
 
-### 3a. Register an embedding model
+### Register an embedding model
 
 1. Go to **Models** in the sidebar.
 2. Click **Add Model**.
@@ -138,7 +142,7 @@ This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/
 
 > **Common mistake:** The deployment name must match exactly what's shown in the Azure Portal under "Deployments." If you named your deployment `my-embeddings`, use `my-embeddings` — not `text-embedding-3-small`.
 
-### 3b. Create a source
+### Create a source
 
 A source is a connection to data you want to embed. For this first run, use **CosmosDB** — create a new CosmosDB account for your data (separate from the OmniVec metadata account).
 
@@ -192,7 +196,7 @@ A source is a connection to data you want to embed. For this first run, use **Co
    - **Container**: `documents`
 8. Click **Save**, then **Test Connection** to verify access.
 
-### 3c. Create a destination
+### Create a destination
 
 A destination is where vectors are stored. Use the **same CosmosDB account** with a separate container that has a vector embedding policy.
 
@@ -218,7 +222,7 @@ A destination is where vectors are stored. Use the **same CosmosDB account** wit
 
 > **If Fetch Embedding Policies returns nothing:** your container doesn't have a vector embedding policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path. See the [Cosmos DB vector search docs](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search) for details.
 
-### 3d. Create a pipeline
+### Create a pipeline
 
 A pipeline ties source → model → destination together.
 
@@ -235,7 +239,7 @@ A pipeline ties source → model → destination together.
 
 The pipeline starts processing immediately. You can watch progress on the pipeline detail page.
 
-### 3e. Verify it worked
+### Verify it worked
 
 Within a few minutes, check these signals:
 
