@@ -44,11 +44,11 @@ run_hook() {
   cp "$_hook" "$_workdir/hooks/"
   chmod +x "$_workdir/hooks/$(basename "$_hook")"
 
-  # Create wrapper that locks PATH before running the hook
+  # Create wrapper that locks PATH and detaches from tty
   _wrapper="$_workdir/_run_test.sh"
   cat > "$_wrapper" <<WRAPPER_EOF
 #!/bin/sh
-# Force mock PATH first — even if hook prepends more paths, mocks stay first
+# Force mock PATH first
 export PATH="$_mockbin:\$PATH"
 export HOME="$_workdir"
 WRAPPER_EOF
@@ -65,11 +65,9 @@ exec sh "$_workdir/hooks/$(basename "$_hook")"
 WRAPPER_EOF
   chmod +x "$_wrapper"
 
-  # Run with stdin
-  _output=$(sh "$_wrapper" <<STDIN_EOF 2>&1
-$_stdin
-STDIN_EOF
-  )
+  # Run with stdin piped AND no controlling tty (setsid detaches from tty
+  # so /dev/tty is unavailable — forces read_input to use stdin or skip)
+  _output=$(printf '%s\n' "$_stdin" | setsid sh "$_wrapper" 2>&1)
   _exit=$?
   echo "$_output"
   return $_exit
@@ -402,18 +400,19 @@ test_read_input() {
     return
   fi
 
-  # Test with stdin pipe — note: read_input prefers /dev/tty over stdin pipe
-  # on Linux. We verify it doesn't crash, not the exact value.
-  _result=$(printf "test-val\n" | timeout 3 sh -c "set -eu; YELLOW='' NC=''; $_src; read_input 'prompt: ' >/dev/null" 2>&1)
+  # Test with stdin pipe — use setsid so /dev/tty is unavailable, forcing stdin read
+  _result=$(printf "test-val\n" | setsid sh -c "set -eu; YELLOW='' NC=''; $_src; val=\$(read_input 'prompt: '); echo GOT:\$val" 2>&1)
   _rc=$?
-  if [ "$_rc" -eq 0 ] || [ "$_rc" -eq 124 ]; then
-    pass "read_input: stdin pipe — no crash"
+  if [ "$_rc" -eq 0 ] && echo "$_result" | grep -q "GOT:test-val"; then
+    pass "read_input: stdin pipe returns correct value"
+  elif [ "$_rc" -eq 0 ]; then
+    pass "read_input: stdin pipe — no crash (value: $(echo "$_result" | grep GOT | head -1))"
   else
     fail "read_input: stdin pipe crashed (exit=$_rc)"
   fi
 
-  # Test with empty stdin
-  _result=$(echo "" | sh -c "set -eu; YELLOW='' NC=''; $_src; read_input 'prompt: '" 2>&1)
+  # Test with empty stdin — setsid ensures no tty fallback
+  _result=$(printf "\n" | setsid sh -c "set -eu; YELLOW='' NC=''; $_src; read_input 'prompt: '" 2>&1)
   _rc=$?
   if [ "$_rc" -eq 0 ]; then
     pass "read_input: empty stdin — no crash"
@@ -421,11 +420,11 @@ test_read_input() {
     fail "read_input: empty stdin (exit=$_rc)"
   fi
 
-  # Test with /dev/null — timeout to prevent hang on /dev/tty
-  _result=$(timeout 3 sh -c "set -eu; YELLOW='' NC=''; $_src; read_input 'prompt: '" </dev/null 2>&1)
+  # Test with /dev/null — setsid + /dev/null = no stdin, no tty
+  _result=$(setsid sh -c "set -eu; YELLOW='' NC=''; $_src; read_input 'prompt: '" </dev/null 2>&1)
   _rc=$?
-  if [ "$_rc" -eq 0 ] || [ "$_rc" -eq 124 ]; then
-    pass "read_input: /dev/null — no crash (exit=$_rc)"
+  if [ "$_rc" -eq 0 ]; then
+    pass "read_input: /dev/null + no tty — no crash"
   else
     fail "read_input: /dev/null crashed (exit=$_rc)"
   fi
