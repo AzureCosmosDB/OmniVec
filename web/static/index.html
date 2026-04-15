@@ -1929,7 +1929,7 @@
                                 <div class="form-group">
                                     <label class="form-label">Source</label>
                                     <div style="display: flex; gap: 8px;">
-                                        <select class="form-input" name="source_id" id="pipeline-source-select" onchange="updatePipelineSourceConfig()" style="flex: 1;">
+                                        <select class="form-input" name="source_id" id="pipeline-source-select" onchange="updatePipelineSourceConfig(); updateSameContainerIndicator()" style="flex: 1;">
                                             <option value="">Select a source...</option>
                                         </select>
                                         <button type="button" class="btn btn-secondary" onclick="testExistingPipelineSource()" style="white-space: nowrap;">
@@ -4848,7 +4848,10 @@
             const destId = document.getElementById('pipeline-destination')?.value;
             const destObj = destinations.find(d => d.id === destId);
 
-            const sameContainer = srcObj && destObj &&
+            // Both must be selected to evaluate
+            const bothSelected = srcObj && destObj;
+
+            const sameContainer = bothSelected &&
                 srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
                 srcObj.config?.endpoint === destObj.config?.endpoint &&
                 srcObj.config?.database === destObj.config?.database &&
@@ -4856,10 +4859,14 @@
 
             indicator.style.display = sameContainer ? 'block' : 'none';
 
-            // Show doc-id-pattern only when source and destination are different (queue mode)
+            // Show doc-id-pattern only when both are selected AND they are different
             const docIdGroup = document.getElementById('doc-id-pattern-group');
             if (docIdGroup) {
-                docIdGroup.style.display = sameContainer ? 'none' : 'block';
+                if (!bothSelected) {
+                    docIdGroup.style.display = 'none';  // Hide until both selected
+                } else {
+                    docIdGroup.style.display = sameContainer ? 'none' : 'block';
+                }
             }
         }
 
