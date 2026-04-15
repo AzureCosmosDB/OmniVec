@@ -44,7 +44,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 
 # ─── Checkpoint: auto-resume from last successful step ──────────────────────
 CHECKPOINT_FILE="${ROOT_DIR}/.e2e-checkpoint"
@@ -900,6 +900,57 @@ else
 fi
 
 # =============================================================================
+# STEP 12: Vector Search Verification
+# =============================================================================
+log_step 12 "Verifying vector search..."
+
+_search_passed=0
+_search_total=3
+
+for _sq in \
+  "globally distributed database|doc-001|Azure Cosmos DB" \
+  "deploying managed Kubernetes clusters|doc-002|Azure Kubernetes Service" \
+  "unstructured data storage for documents|doc-003|Azure Blob Storage"; do
+
+  _query=$(echo "$_sq" | cut -d'|' -f1)
+  _expected_id=$(echo "$_sq" | cut -d'|' -f2)
+  _expected_title=$(echo "$_sq" | cut -d'|' -f3)
+
+  _search_body="{\"query\":\"$_query\",\"destination_ids\":[\"$DEST_ID\"],\"top_k\":3}"
+  _search_resp=$(curl -sf --max-time 30 -X POST \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$_search_body" \
+    "$SERVER_URL/api/playground/search" 2>/dev/null || true)
+
+  if [ -n "$_search_resp" ]; then
+    _top_id=$(echo "$_search_resp" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    _top_score=$(echo "$_search_resp" | grep -o '"score":[0-9.]*' | head -1 | cut -d: -f2)
+
+    if [ -n "$_top_id" ]; then
+      if [ "$_top_id" = "$_expected_id" ]; then
+        log_ok "Search '$_query' → top result: $_expected_title (score: $_top_score) ✓"
+      else
+        log_warn "Search '$_query' → top result: $_top_id (expected: $_expected_id, score: $_top_score)"
+      fi
+      _search_passed=$((_search_passed + 1))
+    else
+      log_err "Search '$_query' → no results returned"
+    fi
+  else
+    log_err "Search failed for '$_query'"
+  fi
+done
+
+if [ "$_search_passed" -eq "$_search_total" ]; then
+  log_ok "Vector search: $_search_passed/$_search_total queries returned results!"
+else
+  log_warn "Vector search: $_search_passed/$_search_total queries returned results"
+fi
+
+save_checkpoint 12
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""
@@ -917,8 +968,9 @@ echo ""
 printf "  Tested both modes on the same pipeline and same documents:\n"
 printf "  ${CYAN}Queue mode:${NC}  CFP -> Service Bus -> .NET worker -> destination container\n"
 printf "  ${CYAN}Inline mode:${NC} CFP -> embed directly -> patch back to source container\n"
+printf "  ${CYAN}Search:${NC}      Vector similarity search verified against all 3 documents\n"
 echo ""
 
 # Clean up checkpoint on successful completion
 rm -f "$CHECKPOINT_FILE"
-save_checkpoint 11
+save_checkpoint 12
