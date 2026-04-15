@@ -23,13 +23,16 @@ read_input() {
   if [ -t 0 ]; then
     printf "%s" "$prompt"
     read -r _ri_val || true
-  elif [ -e /dev/tty ]; then
+  elif [ -w /dev/tty ] 2>/dev/null && printf "" > /dev/tty 2>/dev/null; then
     printf "%s" "$prompt" > /dev/tty
     read -r _ri_val < /dev/tty || true
   else
-    # No TTY available (non-interactive hook context) — return empty
-    printf "%s" "$prompt"
-    printf " ${YELLOW}(no interactive input available — skipping)${NC}\n"
+    # No TTY available — try reading from stdin directly
+    if read -r _ri_val 2>/dev/null; then
+      : # got input from redirected stdin
+    else
+      _ri_val=""
+    fi
   fi
   echo "$_ri_val"
 }
