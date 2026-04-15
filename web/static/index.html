@@ -5937,7 +5937,7 @@
                 return `
                     <div style="background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px;">
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access via Azure CLI:</div>
-                        <pre style="background: #0d1117; padding: 12px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create \\
+                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 12px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create \\
   --role "Storage Blob Data Reader" \\
   --assignee-object-id "${identityId}" \\
   --assignee-principal-type ServicePrincipal \\
@@ -5957,16 +5957,16 @@
                     <div style="background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px;">
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access — Bash / Linux:</div>
                         <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 6px;">First, find the resource group:</div>
-                        <pre style="background: #0d1117; padding: 8px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb list --query "[?name=='${accountName}'].resourceGroup" -o tsv</code></pre>
+                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 8px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb list --query "[?name=='${accountName}'].resourceGroup" -o tsv</code></pre>
                         <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 6px;">Then run (replace RG_NAME with result above):</div>
-                        <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
+                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
   --account-name "${accountName}" \\
   --resource-group "RG_NAME" \\
   --role-definition-id "00000000-0000-0000-0000-000000000002" \\
   --principal-id "${identityId}" \\
   --scope "/dbs"</code></pre>
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">PowerShell / Windows:</div>
-                        <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
+                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
   --account-name "${accountName}" \`
   --resource-group "RG_NAME" \`
   --role-definition-id "00000000-0000-0000-0000-000000000002" \`
@@ -6002,11 +6002,11 @@
                                 <summary style="cursor: pointer; color: var(--accent-primary); margin-bottom: 8px;">How to grant access to another identity</summary>
                                 <div style="margin-top: 8px;">
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">Bash / Linux:</div>
-                                    <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create --role "Storage Blob Data Reader" \\
+                                    <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create --role "Storage Blob Data Reader" \\
   --assignee-object-id "YOUR_IDENTITY_ID" \\
   --scope "/subscriptions/SUB_ID/resourceGroups/RG/providers/Microsoft.Storage/storageAccounts/${accountName}"</code></pre>
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">PowerShell / Windows:</div>
-                                    <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create --role "Storage Blob Data Reader" \`
+                                    <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create --role "Storage Blob Data Reader" \`
   --assignee-object-id "YOUR_IDENTITY_ID" \`
   --scope "/subscriptions/SUB_ID/resourceGroups/RG/providers/Microsoft.Storage/storageAccounts/${accountName}"</code></pre>
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">Azure Portal:</div>
@@ -6034,12 +6034,12 @@
                                 <summary style="cursor: pointer; color: var(--accent-primary); margin-bottom: 8px;">How to grant access to another identity</summary>
                                 <div style="margin-top: 8px;">
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">Bash / Linux:</div>
-                                    <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
+                                    <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
   --account-name ${accountName} --resource-group RG \\
   --role-definition-id "00000000-0000-0000-0000-000000000002" \\
   --principal-id "YOUR_IDENTITY_ID" --scope "/"</code></pre>
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">PowerShell / Windows:</div>
-                                    <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
+                                    <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
   --account-name ${accountName} --resource-group RG \`
   --role-definition-id "00000000-0000-0000-0000-000000000002" \`
   --principal-id "YOUR_IDENTITY_ID" --scope "/"</code></pre>
@@ -6296,16 +6296,16 @@
                 return `
                     <div style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px; font-size: 12px;">
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access:</div>
-                        <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 4px;">Find RG: <code style="background:#0d1117;padding:2px 6px;border-radius:3px;">az cosmosdb list --query "[?name=='${accountName}'].resourceGroup" -o tsv</code></div>
+                        <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 4px;">Find RG: <code style="background:var(--bg-secondary); color:var(--text-primary);padding:2px 6px;border-radius:3px;">az cosmosdb list --query "[?name=='${accountName}'].resourceGroup" -o tsv</code></div>
                         <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 2px;">Bash / Linux:</div>
-                        <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0 0 8px 0;"><code>az cosmosdb sql role assignment create \\
+                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0 0 8px 0;"><code>az cosmosdb sql role assignment create \\
   --account-name "${accountName}" \\
   --resource-group "RG_NAME" \\
   --role-definition-id "00000000-0000-0000-0000-000000000002" \\
   --principal-id "${identityId}" \\
   --scope "/dbs"</code></pre>
                         <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 2px;">PowerShell / Windows:</div>
-                        <pre style="background: #0d1117; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0;"><code>az cosmosdb sql role assignment create \`
+                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0;"><code>az cosmosdb sql role assignment create \`
   --account-name "${accountName}" \`
   --resource-group "RG_NAME" \`
   --role-definition-id "00000000-0000-0000-0000-000000000002" \`
