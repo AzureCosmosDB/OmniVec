@@ -19,12 +19,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Helper: read user input (handles non-TTY contexts)
 read_input() {
   prompt="$1"
+  _ri_val=""
   if [ -t 0 ]; then
     printf "%s" "$prompt"
-    read -r _ri_val
-  else
+    read -r _ri_val || true
+  elif [ -e /dev/tty ]; then
     printf "%s" "$prompt" > /dev/tty
-    read -r _ri_val < /dev/tty
+    read -r _ri_val < /dev/tty || true
+  else
+    # No TTY available (non-interactive hook context) — return empty
+    printf "%s" "$prompt"
+    printf " ${YELLOW}(no interactive input available — skipping)${NC}\n"
   fi
   echo "$_ri_val"
 }
