@@ -5964,8 +5964,8 @@
   --scope "/dbs"</code></pre>
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Or via Azure Portal:</div>
                         <ol style="font-size: 12px; padding-left: 20px; color: var(--text-secondary);">
-                            <li>Go to CosmosDB Account <strong>${accountName}</strong> → Settings → Keys</li>
-                            <li>Click "Role assignments" tab</li>
+                            <li>Go to CosmosDB Account <strong>${accountName}</strong> → Access Control (IAM)</li>
+                            <li>Click "Add role assignment"</li>
                             <li>Add: <strong>Cosmos DB Built-in Data Contributor</strong></li>
                             <li>Assign to managed identity with principal ID: <strong>${identityId}</strong></li>
                         </ol>
@@ -6035,7 +6035,7 @@
   --principal-id "YOUR_IDENTITY_ID" --scope "/"</code></pre>
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">Azure Portal:</div>
                                     <ol style="padding-left: 16px; color: var(--text-secondary); margin: 0;">
-                                        <li>CosmosDB → Settings → Keys → Role assignments</li>
+                                        <li>CosmosDB → Access Control (IAM) → Add role assignment</li>
                                         <li>Add Cosmos DB Built-in Data Contributor</li>
                                         <li>Select your Managed Identity</li>
                                     </ol>
