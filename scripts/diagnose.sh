@@ -123,15 +123,13 @@ if [ -n "$ENV_NAME" ]; then
   if [ "$_rg_exists" = "true" ]; then
     pass "Resource group $RG exists"
 
-    _resources=$(az resource list --resource-group "$RG" --query "[].{type:type,name:name}" -o json 2>/dev/null)
-
-    AKS_NAME=$(echo "$_resources" | grep -i "containerService/managedClusters" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
-    COSMOS_NAME=$(echo "$_resources" | grep -i "documentDB/databaseAccounts" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
-    ACR_NAME=$(echo "$_resources" | grep -i "containerRegistry/registries" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
-    _KV_NAME=$(echo "$_resources" | grep -i "keyVault/vaults" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
-    _STOR_NAME=$(echo "$_resources" | grep -i "storage/storageAccounts" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
-    _SB_NAME=$(echo "$_resources" | grep -i "serviceBus/namespaces" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
-    IDENTITY_NAME=$(echo "$_resources" | grep -i "managedIdentity/userAssignedIdentities" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    AKS_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.ContainerService/managedClusters" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
+    COSMOS_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.DocumentDB/databaseAccounts" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
+    ACR_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.ContainerRegistry/registries" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
+    _KV_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.KeyVault/vaults" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
+    _STOR_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.Storage/storageAccounts" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
+    _SB_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.ServiceBus/namespaces" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
+    IDENTITY_NAME=$(az resource list --resource-group "$RG" --resource-type "Microsoft.ManagedIdentity/userAssignedIdentities" --query "[0].name" -o tsv 2>/dev/null | tr -d '\r\n')
 
     [ -n "$AKS_NAME" ]    && pass "AKS: $AKS_NAME"           || fail "No AKS cluster found" "azd up"
     [ -n "$COSMOS_NAME" ]  && pass "CosmosDB: $COSMOS_NAME"    || fail "No CosmosDB account found"
