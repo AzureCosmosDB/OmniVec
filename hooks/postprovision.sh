@@ -405,10 +405,15 @@ fi
 
 printf "\n${YELLOW}Phase 2: Getting AKS credentials...${NC}\n"
 KUBE_CONTEXT="${AKS_CLUSTER}"
+
+# Use a separate kubeconfig to avoid overwriting user's default context
+OMNIVEC_KUBECONFIG="$HOME/.kube/omnivec-${AZURE_ENV_NAME:-omnivec}"
+export KUBECONFIG="$OMNIVEC_KUBECONFIG"
+
 az aks get-credentials \
   --resource-group "$RESOURCE_GROUP" \
   --name "$AKS_CLUSTER" \
-  --context "$KUBE_CONTEXT" \
+  --file "$OMNIVEC_KUBECONFIG" \
   --overwrite-existing >/dev/null
 
 # WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
