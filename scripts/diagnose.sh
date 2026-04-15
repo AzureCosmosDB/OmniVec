@@ -140,16 +140,35 @@ if [ -n "$ENV_NAME" ]; then
     [ -n "$IDENTITY_NAME" ] && pass "Managed Identity: $IDENTITY_NAME" || warn "No Managed Identity found"
 
     if [ -n "$AKS_NAME" ]; then
-      # Get credentials — show error if it fails (common: kubelogin not installed)
-      if az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing 2>&1 | grep -qi "error\|fail"; then
-        # Retry without admin (default uses kubelogin)
-        az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing --admin 2>/dev/null || true
+      # Ensure kubectl and kubelogin are installed
+      if ! command -v kubectl >/dev/null 2>&1; then
+        printf "  ${YELLOW}kubectl not found — installing...${NC}\n"
+        mkdir -p "$HOME/.azure-kubectl"
+        az aks install-cli --install-location "$HOME/.azure-kubectl/kubectl" --kubelogin-install-location "$HOME/.azure-kubectl/kubelogin" 2>/dev/null || true
+        chmod +x "$HOME/.azure-kubectl/kubectl" "$HOME/.azure-kubectl/kubelogin" 2>/dev/null || true
+        export PATH="$HOME/.azure-kubectl:$PATH"
       fi
+      if ! command -v kubelogin >/dev/null 2>&1; then
+        printf "  ${YELLOW}kubelogin not found — installing...${NC}\n"
+        mkdir -p "$HOME/.azure-kubectl"
+        az aks install-cli --install-location "$HOME/.azure-kubectl/kubectl" --kubelogin-install-location "$HOME/.azure-kubectl/kubelogin" 2>/dev/null || true
+        chmod +x "$HOME/.azure-kubectl/kubectl" "$HOME/.azure-kubectl/kubelogin" 2>/dev/null || true
+        export PATH="$HOME/.azure-kubectl:$PATH"
+      fi
+
+      # Get credentials — try normal first, fall back to --admin
+      az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing 2>/dev/null || \
+        az aks get-credentials --resource-group "$RG" --name "$AKS_NAME" --overwrite-existing --admin 2>/dev/null || true
+
       KUBE_CONTEXT="$AKS_NAME"
       # Verify kubectl works
       if ! kubectl --context "$KUBE_CONTEXT" cluster-info >/dev/null 2>&1; then
-        warn "kubectl cannot connect to AKS (credentials may need kubelogin)" "az aks install-cli && az aks get-credentials --resource-group $RG --name $AKS_NAME --overwrite-existing"
-        KUBE_CONTEXT=""
+        # One more try: convert kubelogin
+        kubelogin convert-kubeconfig -l azurecli 2>/dev/null || true
+        if ! kubectl --context "$KUBE_CONTEXT" cluster-info >/dev/null 2>&1; then
+          warn "kubectl cannot connect to AKS" "Check az login and network connectivity"
+          KUBE_CONTEXT=""
+        fi
       fi
     fi
   else
