@@ -123,15 +123,15 @@ if [ -n "$ENV_NAME" ]; then
   if [ "$_rg_exists" = "true" ]; then
     pass "Resource group $RG exists"
 
-    _resources=$(az resource list --resource-group "$RG" --query "[].{type:type,name:name}" -o tsv 2>/dev/null)
+    _resources=$(az resource list --resource-group "$RG" --query "[].{type:type,name:name}" -o json 2>/dev/null)
 
-    AKS_NAME=$(echo "$_resources" | grep "containerService/managedClusters" | head -1 | awk '{print $2}')
-    COSMOS_NAME=$(echo "$_resources" | grep "documentDB/databaseAccounts" | head -1 | awk '{print $2}')
-    ACR_NAME=$(echo "$_resources" | grep "containerRegistry" | head -1 | awk '{print $2}')
-    _KV_NAME=$(echo "$_resources" | grep "vaults" | head -1 | awk '{print $2}')
-    _STOR_NAME=$(echo "$_resources" | grep "storageAccounts" | head -1 | awk '{print $2}')
-    _SB_NAME=$(echo "$_resources" | grep "servicebus" | head -1 | awk '{print $2}')
-    IDENTITY_NAME=$(echo "$_resources" | grep "userAssignedIdentities" | head -1 | awk '{print $2}')
+    AKS_NAME=$(echo "$_resources" | grep -i "containerService/managedClusters" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    COSMOS_NAME=$(echo "$_resources" | grep -i "documentDB/databaseAccounts" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    ACR_NAME=$(echo "$_resources" | grep -i "containerRegistry/registries" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    _KV_NAME=$(echo "$_resources" | grep -i "keyVault/vaults" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    _STOR_NAME=$(echo "$_resources" | grep -i "storage/storageAccounts" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    _SB_NAME=$(echo "$_resources" | grep -i "serviceBus/namespaces" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
+    IDENTITY_NAME=$(echo "$_resources" | grep -i "managedIdentity/userAssignedIdentities" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')
 
     [ -n "$AKS_NAME" ]    && pass "AKS: $AKS_NAME"           || fail "No AKS cluster found" "azd up"
     [ -n "$COSMOS_NAME" ]  && pass "CosmosDB: $COSMOS_NAME"    || fail "No CosmosDB account found"
