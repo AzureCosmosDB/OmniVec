@@ -135,7 +135,7 @@ omnivec dest update <id> --name "Renamed"
 omnivec dest delete <id> -y
 ```
 
-When you test a destination, it returns the container's **vector indexing policy** — the available embedding paths with dimensions, distance function, and index type. Use one of these paths as `--vector-index-path` when creating a pipeline.
+When you test a destination, it returns the container's **vector embedding policy** — the available embedding paths with dimensions, distance function, and index type. Use one of these paths as `--vector-index-path` when creating a pipeline.
 
 ---
 
@@ -161,10 +161,11 @@ omnivec pipeline create \
   --vector-index-path /embedding \
   --process-existing
 
-# Update a pipeline (content config, strategy, chunking)
-omnivec pipeline update <id> --content-strategy chunk --chunk-size 1000 --chunk-overlap 200
-omnivec pipeline update <id> --content-fields "title,content" --doc-id-pattern "{source}-chunk-{chunk}"
+# Update a pipeline
 omnivec pipeline update <id> --name "Renamed" --description "Updated"
+
+# Note: content strategy, chunking config, and processing mode are
+# locked after creation and cannot be changed via update.
 
 # Pause / Resume / Run / Reset / Delete
 omnivec pipeline pause <id>
@@ -183,13 +184,13 @@ omnivec pipeline delete <id> -y
 | `--destination` | Yes | — | Destination ID |
 | `--model` | Yes | — | DocGrok pipeline name (e.g., `text-azure`, `pdf-vision`) |
 | `--content-fields` | No | `content` | Comma-separated field names to embed |
-| `--content-mode` | No | `field` | Content extraction mode: `field`, `blob_url`, `http_url`, `s3_url` |
+| `--content-mode` | No | `field` | Content extraction mode: `field`, `blob_url`, `http_url` |
 | `--file-types` | No | — | Comma-separated file type filters (e.g., `txt,pdf,md`) |
 | `--content-strategy` | No | `truncate` | Content strategy: `truncate` or `chunk` |
 | `--chunk-size` | No | `1000` | Chunk size in characters (used with `--content-strategy=chunk`) |
 | `--chunk-overlap` | No | `200` | Chunk overlap in characters |
 | `--doc-id-pattern` | No | `{source}` | Document ID pattern (e.g., `{source}-chunk-{chunk}`) |
-| `--vector-index-path` | No | — | Vector index path from destination's vector policy (e.g., `/embedding`) |
+| `--vector-index-path` | No | — | Embedding policy path from destination (e.g., `/embedding`) |
 | `--description` | No | — | Pipeline description |
 | `--process-existing` | No | true | Process existing documents on creation |
 | `--no-process-existing` | No | — | Only process new documents going forward |
@@ -247,7 +248,7 @@ omnivec deployment restart omnivec-worker -y
 
 ## Models
 
-Manage embedding models in DocGrok.
+Manage embedding models.
 
 ```bash
 # List models
@@ -382,20 +383,20 @@ omnivec status
 # 2. Add an external embedding model
 omnivec model add --provider azure-openai-prod --type azure-openai \
   --endpoint https://myresource.openai.azure.com --api-key YOUR_KEY \
-  --api-version 2024-06-01 --model text-embedding-3-large --dimensions 3072
+  --api-version 2024-06-01 --model text-embedding-3-small --dimensions 1536
 
-# 3. Create a source
-omnivec source create --name "Product Docs" --type azure-blob \
-  --config '{"account_url":"https://mystore.blob.core.windows.net","container":"docs"}'
+# 3. Create a CosmosDB source
+omnivec source create --name "My Documents" --type cosmosdb \
+  --config '{"endpoint":"https://myaccount.documents.azure.com","database":"demo","container":"documents"}'
 omnivec source test src-abc12345
 
-# 4. Create a destination
+# 4. Create a CosmosDB vector destination
 omnivec dest create --name "Vectors" --type cosmosdb-vector \
-  --config '{"endpoint":"https://myvectors.documents.azure.com","database":"vectors","container":"embeddings"}'
+  --config '{"endpoint":"https://myaccount.documents.azure.com","database":"demo","container":"vectors"}'
 omnivec dest test dst-def67890
 
-# 5. Create a pipeline (with content-fields and vector-index-path)
-omnivec pipeline create --name "Product Pipeline" --source src-abc12345 \
+# 5. Create a pipeline
+omnivec pipeline create --name "My Pipeline" --source src-abc12345 \
   --destination dst-def67890 --model text-azure \
   --content-fields content --vector-index-path /embedding --process-existing
 
@@ -403,11 +404,8 @@ omnivec pipeline create --name "Product Pipeline" --source src-abc12345 \
 omnivec job list --pipeline pip-ghi11111
 omnivec job stats
 
-# 7. Scale workers if needed
-omnivec deployment scale omnivec-worker --replicas 5
-
-# 8. Search
-omnivec search "product features" --index dst-def67890 --top-k 5
+# 7. Search
+omnivec search "my query" --index dst-def67890 --top-k 5
 ```
 
 ---
