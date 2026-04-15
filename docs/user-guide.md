@@ -113,6 +113,27 @@ ACTIVE  ──pause──→  PAUSED  ──resume──→  ACTIVE
 Any     ──reset──→  Reprocess all documents from the beginning
 ```
 
+### Important: One pipeline per source + destination + embedding path
+
+If you create two pipelines with the **same source, same destination, and same embedding path**, the second pipeline may not process documents. This is because the changefeed processor uses lease-based ownership — only one pipeline's changefeed can process a given source container at a time.
+
+**If you need multiple embedding models on the same data:**
+- Use different **embedding policy paths** in the destination (e.g., `/embedding_small` and `/embedding_large`)
+- Each pipeline selects a different embedding path, so they write to different vector fields
+- Both pipelines can share the same source and destination containers
+
+**If you need the same model but different content strategies:**
+- Create separate destination containers (one per strategy)
+- Each pipeline targets a different destination
+
+### Locked settings after creation
+
+Once a pipeline is created, the following settings become **read-only**:
+- **Source** and **Destination** — cannot be changed
+- **Content Strategy** (truncate/chunk) — changing would invalidate existing vectors
+- **Chunk Configuration** (size, overlap, doc ID pattern) — must be consistent with existing chunks
+- **Processing Mode** (inline/queue) — tied to changefeed lease setup
+
 ---
 
 ## 4. Jobs
