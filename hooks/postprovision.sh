@@ -88,6 +88,7 @@ STORAGE_QUEUE_ENDPOINT=$(get_azd_value "AZURE_STORAGE_QUEUE_ENDPOINT")
 SB_ENDPOINT=$(get_azd_value "AZURE_SERVICEBUS_ENDPOINT")
 KEYVAULT_URI=$(get_azd_value "AZURE_KEYVAULT_URI")
 APPINSIGHTS_CS=$(get_azd_value "AZURE_APPINSIGHTS_CONNECTION_STRING")
+LOG_ANALYTICS_WS=$(get_azd_value "AZURE_LOG_ANALYTICS_WORKSPACE_ID")
 
 # Validate required vars
 for var in INSTANCE_ID AKS_CLUSTER ACR_LOGIN_SERVER ACR_NAME COSMOS_ENDPOINT IDENTITY_CLIENT_ID RESOURCE_GROUP; do
@@ -570,6 +571,9 @@ run_helm_deploy() {
 
   if [ -n "$APPINSIGHTS_CS" ]; then
     set -- "$@" --set "azure.appInsights.connectionString=${APPINSIGHTS_CS}"
+  fi
+  if [ -n "$LOG_ANALYTICS_WS" ]; then
+    set -- "$@" --set "azure.appInsights.workspaceId=${LOG_ANALYTICS_WS}"
   fi
 
   if [ -n "$SB_ENDPOINT" ]; then

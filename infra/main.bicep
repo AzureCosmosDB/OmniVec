@@ -222,4 +222,5 @@ output AZURE_SERVICEBUS_ENDPOINT string = enableBlobSource ? servicebus!.outputs
 output AZURE_IDENTITY_CLIENT_ID string = identity.outputs.clientId
 output AZURE_KEYVAULT_URI string = keyvault.outputs.vaultUri
 output AZURE_APPINSIGHTS_CONNECTION_STRING string = appinsights.outputs.connectionString
+output AZURE_LOG_ANALYTICS_WORKSPACE_ID string = appinsights.outputs.workspaceId
 output AZURE_RESOURCE_GROUP string = rg.name

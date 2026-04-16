@@ -807,16 +807,16 @@ def _upsert_ts_bucket(pipeline_id: str, processed: int, failed: int, processing_
 
 
 @app.get("/api/metrics/timeseries")
-def get_metrics_timeseries(
+async def get_metrics_timeseries(
     granularity: str = "hour",
     start: str | None = None,
     end: str | None = None,
     pipeline_id: str | None = None,
 ):
-    """Get time-series metrics from in-memory store."""
-    if not metrics_store:
-        return {"granularity": granularity, "buckets": []}
+    """Get time-series metrics from Azure App Insights (Log Analytics).
 
+    Falls back to in-memory store if App Insights is not configured.
+    """
     now = datetime.utcnow()
     if granularity not in ("minute", "hour", "day"):
         raise HTTPException(status_code=400, detail="granularity must be minute, hour, or day")
@@ -830,15 +830,86 @@ def get_metrics_timeseries(
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:00")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:00")
 
-    buckets = metrics_store.get_timeseries(start_iso, end_iso, granularity)
+    workspace_id = os.environ.get("LOG_ANALYTICS_WORKSPACE_ID", "")
+
+    # Try App Insights first (persistent, survives restarts)
+    if workspace_id:
+        try:
+            buckets = await asyncio.to_thread(
+                _query_app_insights_timeseries, workspace_id, start_dt, end_dt, granularity, pipeline_id
+            )
+            if buckets is not None:
+                return {
+                    "granularity": granularity,
+                    "start": start_iso,
+                    "end": end_iso,
+                    "pipeline_id": pipeline_id,
+                    "source": "app_insights",
+                    "buckets": buckets,
+                }
+        except Exception as e:
+            logger.warning(f"App Insights query failed, falling back to in-memory: {e}")
+
+    # Fallback: in-memory store
+    if metrics_store:
+        buckets = metrics_store.get_timeseries(start_iso, end_iso, granularity)
+    else:
+        buckets = []
 
     return {
         "granularity": granularity,
         "start": start_iso,
         "end": end_iso,
         "pipeline_id": pipeline_id,
+        "source": "in_memory",
         "buckets": buckets,
     }
+
+
+def _query_app_insights_timeseries(workspace_id, start_dt, end_dt, granularity, pipeline_id=None):
+    """Query Log Analytics for custom metrics timeseries."""
+    try:
+        from azure.monitor.query import LogsQueryClient, LogsQueryStatus
+        from azure.identity import DefaultAzureCredential
+
+        gran_bin = {"minute": "1m", "hour": "1h", "day": "1d"}.get(granularity, "1h")
+        gran_seconds = {"minute": 60, "hour": 3600, "day": 86400}.get(granularity, 3600)
+
+        # Query customMetrics for documents.embedded (processed) and documents.failed
+        kql = f"""
+        customMetrics
+        | where timestamp between (datetime('{start_dt.isoformat()}Z') .. datetime('{end_dt.isoformat()}Z'))
+        | where name in ('omnivec.documents.embedded', 'omnivec.documents.failed')
+        | summarize
+            processed = sumif(value, name == 'omnivec.documents.embedded'),
+            failed = sumif(value, name == 'omnivec.documents.failed')
+            by bin(timestamp, {gran_bin})
+        | order by timestamp asc
+        """
+
+        client = LogsQueryClient(DefaultAzureCredential())
+        response = client.query_workspace(workspace_id, kql, timespan=(start_dt, end_dt))
+
+        if response.status != LogsQueryStatus.SUCCESS:
+            return None
+
+        buckets = []
+        for row in response.tables[0].rows:
+            ts = row[0]  # timestamp
+            processed = int(row[1] or 0)
+            failed = int(row[2] or 0)
+            t_str = ts.strftime("%Y-%m-%dT%H:%M:00") if hasattr(ts, 'strftime') else str(ts)[:16] + ":00"
+            buckets.append({
+                "t": t_str,
+                "processed": processed,
+                "failed": failed,
+                "throughput": round(processed / gran_seconds, 1) if processed > 0 else 0.0,
+                "avg_latency_ms": None,  # TODO: add latency query
+            })
+        return buckets
+    except ImportError:
+        logger.info("azure-monitor-query not installed — App Insights queries disabled")
+        return None
 
 
 

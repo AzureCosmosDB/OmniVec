@@ -232,6 +232,7 @@ azure:
   # Application Insights
   appInsights:
     connectionString: ""
+    workspaceId: ""
 
 # =============================================================================
 # DOCGROK (Submodule)
