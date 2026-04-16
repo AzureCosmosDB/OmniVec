@@ -10,7 +10,7 @@
 #
 # Requires: az, azd, kubectl, psql (PostgreSQL client), curl
 
-set -eu
+set +e  # Don't exit on errors — we handle them explicitly
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 FROM_STEP=1
@@ -57,6 +57,7 @@ log_step() { printf "${YELLOW}[Step %s/%s] %s${NC}\n" "$1" "$TOTAL_STEPS" "$2"; 
 log_ok()   { printf "  ${GREEN}%s${NC}\n" "$1"; }
 log_warn() { printf "  ${YELLOW}%s${NC}\n" "$1"; }
 log_err()  { printf "  ${RED}%s${NC}\n" "$1"; }
+die()      { log_err "$1"; exit 1; }
 
 save_checkpoint() { echo "$1" > "$CHECKPOINT_FILE"; }
 
@@ -199,32 +200,41 @@ if [ "$FROM_STEP" -le 3 ]; then
   if az postgres flexible-server show --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
     log_ok "PostgreSQL server already exists: $PG_SERVER"
   else
-    log "  Creating server: $PG_SERVER (this takes ~3-5 minutes)..."
-    set +e
-    az postgres flexible-server create \
-      --name "$PG_SERVER" \
-      --resource-group "$RESOURCE_GROUP" \
-      --location eastus2 \
-      --admin-user "$PG_ADMIN" \
-      --admin-password "$PG_ADMIN_PASSWORD" \
-      --sku-name Standard_B1ms \
-      --tier Burstable \
-      --storage-size 32 \
-      --version 16 \
-      --public-access 0.0.0.0 \
-      --yes 2>&1 | tail -3
-    _pg_rc=$?
-    set -e
-    if [ "$_pg_rc" -ne 0 ]; then
-      # Check if it was actually created despite error
+    # Try deployment location first, then fallback regions
+    PG_LOCATION="${AZURE_LOCATION:-$(azd_get AZURE_LOCATION)}"
+    PG_LOCATION="${PG_LOCATION:-eastus2}"
+    PG_CREATED=false
+
+    for _region in "$PG_LOCATION" "eastus" "westus2" "centralus" "northeurope"; do
+      log "  Creating server: $PG_SERVER in $_region (this takes ~3-5 minutes)..."
+      set +e
+      az postgres flexible-server create \
+        --name "$PG_SERVER" \
+        --resource-group "$RESOURCE_GROUP" \
+        --location "$_region" \
+        --admin-user "$PG_ADMIN" \
+        --admin-password "$PG_ADMIN_PASSWORD" \
+        --sku-name Standard_B1ms \
+        --tier Burstable \
+        --storage-size 32 \
+        --version 16 \
+        --public-access 0.0.0.0 \
+        --yes 2>&1 | tail -3
+      _pg_rc=$?
+      set -e
+
+      # Verify it actually exists
       if az postgres flexible-server show --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
-        log_ok "PostgreSQL server created (with warnings): $PG_SERVER"
-      else
-        log_err "Failed to create PostgreSQL server (exit=$_pg_rc)"
-        exit 1
+        log_ok "PostgreSQL server created in $_region: $PG_SERVER"
+        PG_CREATED=true
+        break
       fi
-    else
-      log_ok "PostgreSQL server created: $PG_SERVER"
+      log_warn "Region $_region not available, trying next..."
+    done
+
+    if [ "$PG_CREATED" = "false" ]; then
+      log_err "Failed to create PostgreSQL server in any region."
+      exit 1
     fi
   fi
 
@@ -274,7 +284,7 @@ if [ "$FROM_STEP" -le 4 ]; then
   log_ok "Database created."
 
   log "  Creating tables..."
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
+  if ! psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -294,17 +304,21 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 
 CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
-" 2>/dev/null
+" 2>&1; then
+    die "Failed to create tables. Check that PostgreSQL server $PG_HOST is reachable and psql is installed."
+  fi
   log_ok "Tables created: documents (source), embeddings (destination)"
 
   log "  Inserting sample documents..."
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
+  if ! psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
 INSERT INTO documents (id, title, content, category) VALUES
   ('doc-001', 'Azure Cosmos DB', 'Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling.', 'database'),
   ('doc-002', 'Azure Kubernetes Service', 'AKS simplifies deploying managed Kubernetes clusters in Azure by offloading operational overhead.', 'compute'),
   ('doc-003', 'Azure Blob Storage', 'Azure Blob Storage stores massive amounts of unstructured data like documents and images optimized for cloud scale.', 'storage')
 ON CONFLICT (id) DO NOTHING;
-" 2>/dev/null
+" 2>&1; then
+    die "Failed to insert documents."
+  fi
   log_ok "Inserted 3 sample documents."
 
   unset PGPASSWORD
