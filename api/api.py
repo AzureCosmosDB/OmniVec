@@ -967,13 +967,14 @@ def delete_source(source_id: str):
 
     # Check if source is used by any pipeline
     pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
-    for p in pipelines:
-        for ps in p.sources:
-            if ps.source_id == source_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Source is used by pipeline '{p.name}'"
-                )
+    using = [p.name for p in pipelines for ps in p.sources if ps.source_id == source_id]
+    if using:
+        names = ", ".join(f"'{n}'" for n in using)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete — source is used by {len(using)} pipeline(s): {names}. "
+                   f"Delete or update those pipelines first."
+        )
 
     store.delete(source_id, "source")
     return {"success": True}
@@ -1374,12 +1375,14 @@ def delete_destination(dest_id: str):
 
     # Check if destination is used by any pipeline
     pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
-    for p in pipelines:
-        if p.destination_id == dest_id:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Destination is used by pipeline '{p.name}'"
-            )
+    using = [p.name for p in pipelines if p.destination_id == dest_id]
+    if using:
+        names = ", ".join(f"'{n}'" for n in using)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete — destination is used by {len(using)} pipeline(s): {names}. "
+                   f"Delete or update those pipelines first."
+        )
 
     store.delete(dest_id, "destination")
     return {"success": True}
