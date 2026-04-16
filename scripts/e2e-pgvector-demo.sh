@@ -327,7 +327,7 @@ CREATE TABLE IF NOT EXISTS documents (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     category TEXT,
-    updated_at TIMESTAMP DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -335,7 +335,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
     content TEXT,
     embedding vector($AOAI_DIMS),
     metadata JSONB,
-    created_at TIMESTAMP DEFAULT NOW()
+    pipeline_id TEXT,
+    embedded_at TIMESTAMPTZ,
+    source_ref TEXT,
+    content_hash TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
