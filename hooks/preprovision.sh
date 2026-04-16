@@ -355,9 +355,7 @@ if [ -n "$cur_gpu_count" ]; then
 else
   printf "${CYAN}GPU node pool (ML models — dse-qwen2, clip, bge, bge-small):${NC}\n"
   echo "  Enter 0 nodes to skip GPU pool (use external models only)."
-  printf "  GPU node count (0 = no GPU pool) [0]: " >/dev/tty 2>/dev/null || printf "  GPU node count (0 = no GPU pool) [0]: " >&2
-  gpu_count=""
-  if [ -t 0 ]; then read -r gpu_count || true; elif [ -e /dev/tty ]; then read -r gpu_count </dev/tty || true; fi
+  gpu_count=$(read_input "  GPU node count (0 = no GPU pool) [0]: ")
   gpu_count=$(printf '%s' "${gpu_count:-0}" | tr -d ' \r\n')
 
   if [ "$gpu_count" != "0" ]; then
@@ -369,9 +367,7 @@ else
     printf "    5) Standard_NC24ads_A100_v4 - 24 vCPU, 220 GB, 1x A100 80GB\n"
     printf "    6) Enter custom SKU\n"
     echo ""
-    printf "  GPU VM SKU [1]: " >/dev/tty 2>/dev/null || printf "  GPU VM SKU [1]: " >&2
-    gpu_pick=""
-    if [ -t 0 ]; then read -r gpu_pick || true; elif [ -e /dev/tty ]; then read -r gpu_pick </dev/tty || true; fi
+    gpu_pick=$(read_input "  GPU VM SKU [1]: ")
     gpu_pick=$(printf '%s' "${gpu_pick:-1}" | tr -d ' \r\n')
 
     case "$gpu_pick" in
@@ -382,9 +378,7 @@ else
       5) GPU_SKU="Standard_NC24ads_A100_v4" ;;
       6)
         def_gpu_manual=${cur_gpu_sku:-Standard_NC4as_T4_v3}
-        printf "  Enter SKU name [${def_gpu_manual}]: " >/dev/tty 2>/dev/null || printf "  Enter SKU name [${def_gpu_manual}]: " >&2
-        custom_gpu=""
-        if [ -t 0 ]; then read -r custom_gpu || true; elif [ -e /dev/tty ]; then read -r custom_gpu </dev/tty || true; fi
+        custom_gpu=$(read_input "  Enter SKU name [${def_gpu_manual}]: ")
         GPU_SKU=$(printf '%s' "${custom_gpu:-$def_gpu_manual}" | tr -d ' \r\n')
         ;;
       *) GPU_SKU="Standard_NC4as_T4_v3" ;;
