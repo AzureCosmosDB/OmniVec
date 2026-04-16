@@ -7991,7 +7991,7 @@
             let url = `/api/metrics/timeseries?granularity=${metricsGranularity}&start=${start}&end=${end}`;
             if (metricsPipelineFilter) url += `&pipeline_id=${metricsPipelineFilter}`;
             try {
-                const resp = await fetch(url);
+                const resp = await apiFetch(url);
                 const data = await resp.json();
                 renderMetricsSection(data);
             } catch (e) {
