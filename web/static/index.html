@@ -2046,6 +2046,18 @@
 
                             <!-- Mode: Select Existing -->
                             <div id="pl-dest-existing-section">
+                                <div class="form-group" style="margin-bottom: 12px;">
+                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); border: 2px solid transparent;" id="pl-dest-same-as-source-label">
+                                        <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()" style="width: 18px; height: 18px;">
+                                        <div>
+                                            <div style="font-weight: 500; font-size: 13px;">Write vectors back to source container</div>
+                                            <div style="font-size: 12px; color: var(--text-tertiary);">Embeds vectors directly into source documents (inline mode). No separate destination needed.</div>
+                                        </div>
+                                    </label>
+                                </div>
+                                <div id="pl-dest-same-as-source-info" style="display: none; margin-bottom: 12px; padding: 10px 14px; background: var(--info-muted); border: 1px solid var(--info); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary);">
+                                    <strong>Note:</strong> The managed identity needs <strong>Cosmos DB Built-in Data Contributor</strong> role (read + write) on the source container.
+                                </div>
                                 <div class="form-group">
                                     <label class="form-label">Vector Store</label>
                                     <div style="display: flex; gap: 8px;">
@@ -2066,18 +2078,6 @@
                                     <div id="pl-dest-vector-policy-warning" style="display: none; margin-top: 8px; padding: 8px 12px; background: var(--warning-muted, rgba(255,204,0,0.1)); border: 1px solid var(--warning); border-radius: var(--radius-sm); font-size: 12px; color: var(--warning);">
                                         ⚠ No vector policies found on destination. Test the connection or check vector indexing configuration.
                                     </div>
-                                </div>
-                                <div class="form-group" style="margin-top: 12px; margin-bottom: 12px;">
-                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); border: 2px solid transparent;" id="pl-dest-same-as-source-label">
-                                        <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()" style="width: 18px; height: 18px;">
-                                        <div>
-                                            <div style="font-weight: 500; font-size: 13px;">Write vectors back to source container</div>
-                                            <div style="font-size: 12px; color: var(--text-tertiary);">Embeds vectors directly into source documents (inline mode). No separate destination needed.</div>
-                                        </div>
-                                    </label>
-                                </div>
-                                <div id="pl-dest-same-as-source-info" style="display: none; margin-bottom: 12px; padding: 10px 14px; background: var(--info-muted); border: 1px solid var(--info); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary);">
-                                    <strong>Note:</strong> The managed identity needs <strong>Cosmos DB Built-in Data Contributor</strong> role (read + write) on the source container.
                                 </div>
                                 <div id="pl-dest-same-container-indicator" style="display: none; margin-top: 12px; padding: 10px 14px; background: rgba(34,197,94,0.08); border: 1px solid var(--success); border-radius: var(--radius-sm); font-size: 13px; color: var(--success);">
                                     ✓ Source and destination are the same container (inline mode recommended)
@@ -4740,33 +4740,36 @@
                 document.getElementById('pl-dest-vector-policy-group').style.display = 'none';
                 return;
             }
-            // Try cached policies first
+
             const dest = destinations.find(d => d.id === destId);
-            const vi = dest?.config?.vector_indexes || [];
-            if (vi.length > 0) {
-                populateVectorPolicyDropdown(vi);
+            const cachedVi = dest?.config?.vector_indexes || [];
+            const group = document.getElementById('pl-dest-vector-policy-group');
+            const select = document.getElementById('pl-dest-vector-policy');
+            group.style.display = 'block';
+
+            // Show cached while fetching live
+            if (cachedVi.length > 0) {
+                populateVectorPolicyDropdown(cachedVi);
             } else {
-                // No cached policies — try live fetch via test-connection
-                const group = document.getElementById('pl-dest-vector-policy-group');
-                group.style.display = 'block';
-                const select = document.getElementById('pl-dest-vector-policy');
-                select.innerHTML = '<option value="">Loading policies...</option>';
+                select.innerHTML = '<option value="">Loading embedding policies...</option>';
+            }
 
-                try {
-                    const res = await apiFetch(`/api/destinations/${destId}/test`, { method: 'POST' });
-                    if (res.ok) {
-                        const data = await res.json();
-                        const policies = data.vector_indexes || data.result?.vector_indexes || [];
-                        if (policies.length > 0) {
-                            // Cache them back
-                            if (dest && dest.config) dest.config.vector_indexes = policies;
-                            populateVectorPolicyDropdown(policies);
-                            return;
-                        }
+            // Always fetch live to get latest policies
+            try {
+                const res = await apiFetch(`/api/destinations/${destId}/test`, { method: 'POST' });
+                if (res.ok) {
+                    const data = await res.json();
+                    const policies = data.vector_indexes || data.result?.vector_indexes || [];
+                    if (policies.length > 0) {
+                        if (dest && dest.config) dest.config.vector_indexes = policies;
+                        populateVectorPolicyDropdown(policies);
+                        return;
                     }
-                } catch (_) {}
+                }
+            } catch (_) {}
 
-                // Fallback: prompt user to test
+            // If live fetch failed and no cache, show warning
+            if (cachedVi.length === 0) {
                 select.innerHTML = '<option value="">— Test connection to load policies —</option>';
                 document.getElementById('pl-dest-vector-policy-warning').style.display = 'block';
             }
