@@ -4652,6 +4652,14 @@
             if (plDestName) plDestName.value = '';
             const sameAsSource = document.getElementById('pl-dest-same-as-source');
             if (sameAsSource) sameAsSource.checked = false;
+            // Reset same-as-source visual state
+            const sameLabel = document.getElementById('pl-dest-same-as-source-label');
+            if (sameLabel) { sameLabel.style.borderColor = 'transparent'; sameLabel.style.background = 'var(--bg-tertiary)'; }
+            const sameInfo = document.getElementById('pl-dest-same-as-source-info');
+            if (sameInfo) sameInfo.style.display = 'none';
+            // Restore destination dropdown visibility
+            const destDropdownGroup = document.getElementById('pipeline-destination')?.closest('.form-group');
+            if (destDropdownGroup) destDropdownGroup.style.display = '';
         }
 
         // ── Inline Source/Destination Creation in Pipeline Modal ──
@@ -4711,7 +4719,12 @@
                 if (data.success) {
                     resultDiv.innerHTML = `<span style="color: var(--success); font-size: 13px;">Connected</span>`;
                     // Populate vector policies from test result
-                    const vi = data.result?.vector_indexes || [];
+                    const vi = data.vector_indexes || data.result?.vector_indexes || [];
+                    if (vi.length > 0) {
+                        // Update cached policies on the destination object
+                        const dest = destinations.find(d => d.id === destId);
+                        if (dest && dest.config) dest.config.vector_indexes = vi;
+                    }
                     populateVectorPolicyDropdown(vi);
                 } else {
                     resultDiv.innerHTML = `<span style="color: var(--error); font-size: 13px;">Failed: ${data.error}</span>`;
@@ -4721,22 +4734,39 @@
             }
         }
 
-        function loadVectorPoliciesForDest() {
+        async function loadVectorPoliciesForDest() {
             const destId = document.getElementById('pipeline-destination').value;
             if (!destId) {
                 document.getElementById('pl-dest-vector-policy-group').style.display = 'none';
                 return;
             }
-            // Try to load from destination's stored config first
+            // Try cached policies first
             const dest = destinations.find(d => d.id === destId);
             const vi = dest?.config?.vector_indexes || [];
             if (vi.length > 0) {
                 populateVectorPolicyDropdown(vi);
             } else {
-                // No cached policies — show the dropdown prompting user to test
+                // No cached policies — try live fetch via test-connection
                 const group = document.getElementById('pl-dest-vector-policy-group');
                 group.style.display = 'block';
                 const select = document.getElementById('pl-dest-vector-policy');
+                select.innerHTML = '<option value="">Loading policies...</option>';
+
+                try {
+                    const res = await apiFetch(`/api/destinations/${destId}/test`, { method: 'POST' });
+                    if (res.ok) {
+                        const data = await res.json();
+                        const policies = data.vector_indexes || data.result?.vector_indexes || [];
+                        if (policies.length > 0) {
+                            // Cache them back
+                            if (dest && dest.config) dest.config.vector_indexes = policies;
+                            populateVectorPolicyDropdown(policies);
+                            return;
+                        }
+                    }
+                } catch (_) {}
+
+                // Fallback: prompt user to test
                 select.innerHTML = '<option value="">— Test connection to load policies —</option>';
                 document.getElementById('pl-dest-vector-policy-warning').style.display = 'block';
             }
