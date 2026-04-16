@@ -649,55 +649,133 @@ async def run_health_checks_now(section: str | None = None):
 
 
 # =============================================================================
-# METRICS — powered by in-memory MetricsStore + App Insights (no CosmosDB)
+# METRICS — powered by Azure App Insights (Log Analytics)
 # =============================================================================
 
+def _get_logs_client():
+    """Get a LogsQueryClient for querying App Insights."""
+    workspace_id = os.environ.get("LOG_ANALYTICS_WORKSPACE_ID", "")
+    if not workspace_id:
+        return None, None
+    try:
+        from azure.monitor.query import LogsQueryClient
+        from azure.identity import DefaultAzureCredential
+        return LogsQueryClient(DefaultAzureCredential()), workspace_id
+    except Exception as e:
+        logger.warning(f"Failed to create LogsQueryClient: {e}")
+        return None, None
+
+
+def _run_kql(kql: str, timespan=None):
+    """Run a KQL query against Log Analytics. Returns rows or None."""
+    client, ws_id = _get_logs_client()
+    if not client:
+        return None
+    try:
+        from azure.monitor.query import LogsQueryStatus
+        resp = client.query_workspace(ws_id, kql, timespan=timespan)
+        if resp.status == LogsQueryStatus.SUCCESS and resp.tables:
+            return resp.tables[0].rows
+        return []
+    except Exception as e:
+        logger.warning(f"KQL query failed: {e}")
+        return None
+
+
 @app.get("/api/metrics")
-def get_metrics():
-    """Get live processing metrics from in-memory store.
+async def get_metrics():
+    """Get processing metrics from App Insights.
 
-    Primary dashboard endpoint. Returns throughput, latency, progress,
-    token usage, failure breakdown, per-pipeline stats.
-    No CosmosDB queries — reads from MetricsStore singleton.
+    Queries customMetrics for totals, latency, throughput.
+    Returns empty data if App Insights not configured.
     """
-    if not metrics_store:
-        return {"error": "Metrics not available"}
+    kql = """
+    let embedded = customMetrics
+        | where name == 'omnivec.documents.embedded'
+        | summarize total = sum(value);
+    let failed = customMetrics
+        | where name == 'omnivec.documents.failed'
+        | summarize total = sum(value);
+    let skipped = customMetrics
+        | where name == 'omnivec.documents.skipped'
+        | summarize total = sum(value);
+    let searches = customMetrics
+        | where name == 'omnivec.search.queries'
+        | summarize total = sum(value);
+    let tokens = customMetrics
+        | where name == 'omnivec.tokens.used'
+        | summarize total = sum(value);
+    let errors = customMetrics
+        | where name == 'omnivec.api.errors'
+        | summarize total = sum(value);
+    let embed_lat = customMetrics
+        | where name == 'omnivec.embedding.latency'
+        | summarize avg_ms = avg(value), p95_ms = percentile(value, 95), cnt = count();
+    let search_lat = customMetrics
+        | where name == 'omnivec.search.latency'
+        | summarize avg_ms = avg(value), p95_ms = percentile(value, 95), cnt = count();
+    let req_lat = customMetrics
+        | where name == 'omnivec.request.latency'
+        | summarize avg_ms = avg(value), p95_ms = percentile(value, 95), cnt = count();
+    let throughput = customMetrics
+        | where name == 'omnivec.documents.embedded' and timestamp > ago(1m)
+        | summarize docs = sum(value);
+    embedded | project metric='embedded', val=total
+    | union (failed | project metric='failed', val=total)
+    | union (skipped | project metric='skipped', val=total)
+    | union (searches | project metric='searches', val=total)
+    | union (tokens | project metric='tokens', val=total)
+    | union (errors | project metric='errors', val=total)
+    | union (embed_lat | project metric='embed_lat_avg', val=avg_ms)
+    | union (embed_lat | project metric='embed_lat_p95', val=p95_ms)
+    | union (embed_lat | project metric='embed_lat_cnt', val=cnt)
+    | union (search_lat | project metric='search_lat_avg', val=avg_ms)
+    | union (search_lat | project metric='search_lat_p95', val=p95_ms)
+    | union (req_lat | project metric='req_lat_avg', val=avg_ms)
+    | union (req_lat | project metric='req_lat_p95', val=p95_ms)
+    | union (throughput | project metric='throughput_1m', val=docs)
+    """
 
-    snap = metrics_store.snapshot()
+    rows = await asyncio.to_thread(_run_kql, kql, timedelta(days=7))
 
-    # Backward-compatible shape for existing dashboard
+    if rows is None:
+        # App Insights not configured
+        return {
+            "events_processed": 0,
+            "events_failed": 0,
+            "avg_processing_time_ms": None,
+            "throughput_docs_per_sec": 0,
+            "search_queries": 0,
+            "latency": {"embedding": {}, "search": {}, "request": {}},
+            "tokens": {"total": 0},
+            "skipped": {"total": 0},
+            "errors": {"total": 0},
+            "source": "unavailable",
+            "message": "App Insights not configured. Deploy with azd up to enable metrics.",
+        }
+
+    m = {}
+    for row in rows:
+        m[row[0]] = row[1] or 0
+
+    throughput_1m = m.get("throughput_1m", 0)
+
     return {
-        "events_processed": snap["documents_embedded"],
-        "events_failed": snap["documents_failed"],
-        "avg_processing_time_ms": snap["embedding_latency"]["avg"],
-        "throughput_docs_per_sec": snap["throughput_docs_per_sec"],
-        "search_queries": snap["search_queries"],
-        "jobs_created": snap["jobs_created"],
-        "changefeed_batches": snap["changefeed_batches"],
-        # Latency distributions (5-min sliding window)
+        "events_processed": int(m.get("embedded", 0)),
+        "events_failed": int(m.get("failed", 0)),
+        "avg_processing_time_ms": round(m.get("embed_lat_avg", 0), 1) if m.get("embed_lat_cnt", 0) > 0 else None,
+        "throughput_docs_per_sec": round(throughput_1m / 60, 2) if throughput_1m > 0 else 0,
+        "search_queries": int(m.get("searches", 0)),
         "latency": {
-            "embedding": snap["embedding_latency"],
-            "search": snap["search_latency"],
-            "request": snap["request_latency"],
+            "embedding": {"avg": round(m.get("embed_lat_avg", 0), 1) if m.get("embed_lat_cnt", 0) > 0 else None, "p95": round(m.get("embed_lat_p95", 0), 1) if m.get("embed_lat_cnt", 0) > 0 else None},
+            "search": {"avg": round(m.get("search_lat_avg", 0), 1) if m.get("search_lat_avg") else None, "p95": round(m.get("search_lat_p95", 0), 1) if m.get("search_lat_p95") else None},
+            "request": {"avg": round(m.get("req_lat_avg", 0), 1) if m.get("req_lat_avg") else None, "p95": round(m.get("req_lat_p95", 0), 1) if m.get("req_lat_p95") else None},
         },
-        # Token usage
-        "tokens": snap["tokens"],
-        # Skipped documents
-        "skipped": snap["skipped"],
-        # Error breakdown
-        "errors": snap["errors"],
-        # Per-pipeline breakdown
-        "pipelines": snap["pipelines"],
-        # Meta
-        "started_at": snap["started_at"],
-        "uptime_seconds": snap["uptime_seconds"],
+        "tokens": {"total": int(m.get("tokens", 0))},
+        "skipped": {"total": int(m.get("skipped", 0))},
+        "errors": {"total": int(m.get("errors", 0))},
+        "source": "app_insights",
     }
-
-
-@app.get("/api/metrics/live")
-def get_live_metrics():
-    """Full metrics snapshot — same as /api/metrics but explicit name."""
-    return get_metrics()
 
 
 @app.get("/api/metrics/insights")
@@ -705,30 +783,21 @@ def get_insights_metrics():
     """App Insights status + portal link."""
     conn_str = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
     if not conn_str:
-        return {
-            "enabled": False,
-            "message": "Application Insights not configured. "
-                       "In-memory metrics are still active via /api/metrics.",
-        }
+        return {"enabled": False, "message": "Application Insights not configured. Deploy with azd up to enable."}
 
     parts = dict(p.split("=", 1) for p in conn_str.split(";") if "=" in p)
     ikey = parts.get("InstrumentationKey", "")
-
     return {
         "enabled": True,
         "instrumentation_key": ikey[:8] + "..." if len(ikey) > 8 else ikey,
         "portal_url": f"https://portal.azure.com/#blade/AppInsightsExtension/OverviewBlade/InstrumentationKey/{ikey}" if ikey else None,
-        "metrics_endpoint": "/api/metrics",
-        "note": "All metrics are dual-written to App Insights (persistent) and in-memory (real-time).",
     }
 
 
 @app.delete("/api/metrics")
 def clear_metrics():
-    """Reset all in-memory metrics counters."""
-    if metrics_store:
-        metrics_store.reset()
-    return {"success": True, "message": "In-memory metrics reset"}
+    """Clear is not applicable — metrics are in App Insights."""
+    return {"success": False, "message": "Metrics are stored in App Insights and cannot be cleared from here. Use Azure Portal to manage retention."}
 
 
 @app.post("/api/metrics/changefeed")
@@ -761,50 +830,31 @@ def report_changefeed_metrics(payload: dict):
 
 
 @app.get("/api/metrics/changefeed")
-def get_changefeed_metrics():
-    """Get changefeed metrics from in-memory store."""
-    if not metrics_store:
-        return {"error": "Metrics not available"}
-    snap = metrics_store.snapshot()
+async def get_changefeed_metrics():
+    """Get changefeed metrics from App Insights."""
+    kql = """
+    customMetrics
+    | where name in ('omnivec.documents.embedded', 'omnivec.documents.failed', 'omnivec.documents.skipped', 'omnivec.pipeline.jobs_created')
+    | summarize
+        embedded = sumif(value, name == 'omnivec.documents.embedded'),
+        failed = sumif(value, name == 'omnivec.documents.failed'),
+        skipped = sumif(value, name == 'omnivec.documents.skipped'),
+        jobs = sumif(value, name == 'omnivec.pipeline.jobs_created')
+    """
+    rows = await asyncio.to_thread(_run_kql, kql, timedelta(days=7))
+    if rows is None or not rows:
+        return {"total_eligible": 0, "total_failed": 0, "total_skipped": 0, "total_jobs_created": 0, "source": "unavailable"}
+    row = rows[0]
     return {
-        "total_batches": snap["changefeed_batches"],
-        "total_eligible": snap["documents_embedded"],
-        "total_skipped_no_content": snap["skipped"]["no_content"],
-        "total_skipped_unchanged": snap["skipped"]["unchanged"],
-        "total_jobs_created": snap["jobs_created"],
-        "pipelines": snap["pipelines"],
+        "total_eligible": int(row[0] or 0),
+        "total_failed": int(row[1] or 0),
+        "total_skipped": int(row[2] or 0),
+        "total_jobs_created": int(row[3] or 0),
+        "source": "app_insights",
     }
 
 
 # â”€â”€ timeseries metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _upsert_ts_bucket(pipeline_id: str, processed: int, failed: int, processing_time_ms: float):
-    """Upsert a minute-level timeseries bucket for the given pipeline."""
-    if processed == 0 and failed == 0:
-        return
-    store = get_store()
-    now = datetime.utcnow()
-    bucket_key = now.strftime("%Y%m%dT%H%M")
-    bucket_iso = now.strftime("%Y-%m-%dT%H:%M:00")
-    doc_id = f"mts-{pipeline_id}-{bucket_key}"
-
-    existing = store.get(doc_id, "metric_ts")
-    if existing:
-        existing["processed"] = existing.get("processed", 0) + processed
-        existing["failed"] = existing.get("failed", 0) + failed
-        existing["processing_time_ms"] = existing.get("processing_time_ms", 0.0) + processing_time_ms
-        store.upsert(existing)
-    else:
-        store.upsert({
-            "id": doc_id,
-            "doc_type": "metric_ts",
-            "pipeline_id": pipeline_id,
-            "bucket": bucket_iso,
-            "processed": processed,
-            "failed": failed,
-            "processing_time_ms": processing_time_ms,
-        })
-
 
 @app.get("/api/metrics/timeseries")
 async def get_metrics_timeseries(
@@ -813,10 +863,7 @@ async def get_metrics_timeseries(
     end: str | None = None,
     pipeline_id: str | None = None,
 ):
-    """Get time-series metrics from Azure App Insights (Log Analytics).
-
-    Falls back to in-memory store if App Insights is not configured.
-    """
+    """Get time-series metrics from Azure App Insights (Log Analytics)."""
     now = datetime.utcnow()
     if granularity not in ("minute", "hour", "day"):
         raise HTTPException(status_code=400, detail="granularity must be minute, hour, or day")
@@ -830,86 +877,56 @@ async def get_metrics_timeseries(
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:00")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:00")
 
-    workspace_id = os.environ.get("LOG_ANALYTICS_WORKSPACE_ID", "")
+    gran_bin = {"minute": "1m", "hour": "1h", "day": "1d"}.get(granularity, "1h")
+    gran_seconds = {"minute": 60, "hour": 3600, "day": 86400}.get(granularity, 3600)
 
-    # Try App Insights first (persistent, survives restarts)
-    if workspace_id:
-        try:
-            buckets = await asyncio.to_thread(
-                _query_app_insights_timeseries, workspace_id, start_dt, end_dt, granularity, pipeline_id
-            )
-            if buckets is not None:
-                return {
-                    "granularity": granularity,
-                    "start": start_iso,
-                    "end": end_iso,
-                    "pipeline_id": pipeline_id,
-                    "source": "app_insights",
-                    "buckets": buckets,
-                }
-        except Exception as e:
-            logger.warning(f"App Insights query failed, falling back to in-memory: {e}")
+    kql = f"""
+    customMetrics
+    | where name in ('omnivec.documents.embedded', 'omnivec.documents.failed', 'omnivec.embedding.latency')
+    | summarize
+        processed = sumif(value, name == 'omnivec.documents.embedded'),
+        failed = sumif(value, name == 'omnivec.documents.failed'),
+        avg_latency = avgif(value, name == 'omnivec.embedding.latency')
+        by bin(timestamp, {gran_bin})
+    | order by timestamp asc
+    """
 
-    # Fallback: in-memory store
-    if metrics_store:
-        buckets = metrics_store.get_timeseries(start_iso, end_iso, granularity)
-    else:
-        buckets = []
+    rows = await asyncio.to_thread(_run_kql, kql, (start_dt, end_dt))
+
+    if rows is None:
+        return {
+            "granularity": granularity,
+            "start": start_iso,
+            "end": end_iso,
+            "pipeline_id": pipeline_id,
+            "source": "unavailable",
+            "buckets": [],
+            "message": "App Insights not configured. Deploy with azd up to enable metrics.",
+        }
+
+    buckets = []
+    for row in rows:
+        ts = row[0]
+        processed = int(row[1] or 0)
+        failed = int(row[2] or 0)
+        avg_lat = round(row[3], 1) if row[3] else None
+        t_str = ts.strftime("%Y-%m-%dT%H:%M:00") if hasattr(ts, 'strftime') else str(ts)[:16] + ":00"
+        buckets.append({
+            "t": t_str,
+            "processed": processed,
+            "failed": failed,
+            "throughput": round(processed / gran_seconds, 1) if processed > 0 else 0.0,
+            "avg_latency_ms": avg_lat,
+        })
 
     return {
         "granularity": granularity,
         "start": start_iso,
         "end": end_iso,
         "pipeline_id": pipeline_id,
-        "source": "in_memory",
+        "source": "app_insights",
         "buckets": buckets,
     }
-
-
-def _query_app_insights_timeseries(workspace_id, start_dt, end_dt, granularity, pipeline_id=None):
-    """Query Log Analytics for custom metrics timeseries."""
-    try:
-        from azure.monitor.query import LogsQueryClient, LogsQueryStatus
-        from azure.identity import DefaultAzureCredential
-
-        gran_bin = {"minute": "1m", "hour": "1h", "day": "1d"}.get(granularity, "1h")
-        gran_seconds = {"minute": 60, "hour": 3600, "day": 86400}.get(granularity, 3600)
-
-        # Query customMetrics for documents.embedded (processed) and documents.failed
-        kql = f"""
-        customMetrics
-        | where timestamp between (datetime('{start_dt.isoformat()}Z') .. datetime('{end_dt.isoformat()}Z'))
-        | where name in ('omnivec.documents.embedded', 'omnivec.documents.failed')
-        | summarize
-            processed = sumif(value, name == 'omnivec.documents.embedded'),
-            failed = sumif(value, name == 'omnivec.documents.failed')
-            by bin(timestamp, {gran_bin})
-        | order by timestamp asc
-        """
-
-        client = LogsQueryClient(DefaultAzureCredential())
-        response = client.query_workspace(workspace_id, kql, timespan=(start_dt, end_dt))
-
-        if response.status != LogsQueryStatus.SUCCESS:
-            return None
-
-        buckets = []
-        for row in response.tables[0].rows:
-            ts = row[0]  # timestamp
-            processed = int(row[1] or 0)
-            failed = int(row[2] or 0)
-            t_str = ts.strftime("%Y-%m-%dT%H:%M:00") if hasattr(ts, 'strftime') else str(ts)[:16] + ":00"
-            buckets.append({
-                "t": t_str,
-                "processed": processed,
-                "failed": failed,
-                "throughput": round(processed / gran_seconds, 1) if processed > 0 else 0.0,
-                "avg_latency_ms": None,  # TODO: add latency query
-            })
-        return buckets
-    except ImportError:
-        logger.info("azure-monitor-query not installed — App Insights queries disabled")
-        return None
 
 
 
@@ -2074,9 +2091,6 @@ def report_inline_metrics(pipeline_id: str, payload: dict):
     pip["recent"] = recent
 
     store.upsert(doc)
-
-    # Write minute-level timeseries bucket
-    _upsert_ts_bucket(pipeline_id, processed, failed, processing_time_ms)
 
     return {"ok": True}
 
