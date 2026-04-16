@@ -229,10 +229,25 @@ if [ "$FROM_STEP" -le 3 ]; then
 
   if az postgres flexible-server show --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
     log_ok "PostgreSQL server already exists: $PG_SERVER"
-    # Ensure password is current — reset to our known password
-    log "  Resetting admin password to match current config..."
+    # Reset password to our current value
+    log "  Resetting admin password..."
     az postgres flexible-server update --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" \
-      --admin-password "$PG_ADMIN_PASSWORD" >/dev/null 2>&1 || true
+      --admin-password "$PG_ADMIN_PASSWORD" 2>&1 | tail -2
+    # Wait for password to propagate
+    sleep 5
+    # Verify connection works
+    export PGPASSWORD="$PG_ADMIN_PASSWORD"
+    export PGSSLMODE="require"
+    if psql -h "$PG_SERVER.postgres.database.azure.com" -p 5432 -U "$PG_ADMIN" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+      log_ok "Password reset verified — connection works."
+    else
+      log_warn "Password reset may need more time. Waiting 15s..."
+      sleep 15
+      if ! psql -h "$PG_SERVER.postgres.database.azure.com" -p 5432 -U "$PG_ADMIN" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+        die "Cannot connect to PostgreSQL after password reset. Try running with --pg-password <original-password>"
+      fi
+    fi
+    unset PGPASSWORD PGSSLMODE
   else
     # Try deployment location first, then fallback regions
     PG_LOCATION="${AZURE_LOCATION:-$(azd_get AZURE_LOCATION)}"
