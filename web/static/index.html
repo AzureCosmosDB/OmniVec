@@ -6683,6 +6683,24 @@
                                 <span class="mono">${extModel.embedding_dim || '-'}</span>
                             </div>
                         </div>
+
+                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Update API Key</h4>
+                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px;">
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <input type="password" class="form-input" id="model-update-key-${extModel.id}" placeholder="Enter new API key" style="flex: 1;">
+                                <button class="btn btn-primary" onclick="updateModelKey('${extModel.id}')">Update Key</button>
+                            </div>
+                            <div id="model-update-key-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
+                        </div>
+
+                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Quick Health Check</h4>
+                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;">
+                            <button class="btn btn-secondary" onclick="testModelHealth('${extModel.id}')" id="model-test-btn-${extModel.id}">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align: middle; margin-right: 6px;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                                Test Connection
+                            </button>
+                            <div id="model-health-result-${extModel.id}" style="margin-top: 12px;"></div>
+                        </div>
                     `;
                 }
             } else if (currentModelDetailTab === 'health') {
@@ -6791,6 +6809,63 @@
                 loadDgModels();
             } catch (err) {
                 alert('Error: ' + err.message);
+            }
+        }
+
+        async function updateModelKey(modelId) {
+            const input = document.getElementById(`model-update-key-${modelId}`);
+            const status = document.getElementById(`model-update-key-status-${modelId}`);
+            const key = input?.value?.trim();
+            if (!key) { status.innerHTML = '<span style="color:var(--error);">Please enter an API key</span>'; return; }
+            status.innerHTML = '<span style="color:var(--text-tertiary);">Updating...</span>';
+            try {
+                const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ api_key: key }),
+                });
+                if (resp.ok) {
+                    status.innerHTML = '<span style="color:var(--success);">✓ API key updated. Run Test Connection to verify.</span>';
+                    input.value = '';
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    status.innerHTML = `<span style="color:var(--error);">Failed: ${err.detail || resp.statusText}</span>`;
+                }
+            } catch (e) {
+                status.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
+            }
+        }
+
+        async function testModelHealth(modelId) {
+            const btn = document.getElementById(`model-test-btn-${modelId}`);
+            const result = document.getElementById(`model-health-result-${modelId}`);
+            if (btn) btn.disabled = true;
+            result.innerHTML = '<span style="color:var(--text-tertiary);">Testing connection...</span>';
+            try {
+                const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}/test`, { method: 'POST' });
+                const data = await resp.json();
+                let html = '';
+                const statusColor = data.status === 'healthy' ? 'var(--success)' : data.status === 'warning' ? 'var(--warning)' : 'var(--error)';
+                html += `<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusColor};"></span>
+                    <span style="font-weight:600;color:${statusColor};text-transform:uppercase;">${data.status}</span>
+                </div>`;
+                for (const chk of (data.checks || [])) {
+                    const icon = chk.status === 'pass' ? '✓' : chk.status === 'warn' ? '⚠' : '✗';
+                    const color = chk.status === 'pass' ? 'var(--success)' : chk.status === 'warn' ? 'var(--warning)' : 'var(--error)';
+                    html += `<div style="display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px;">
+                        <span style="color:${color};font-weight:bold;width:16px;">${icon}</span>
+                        <span style="min-width:120px;font-weight:500;">${chk.check}</span>
+                        <span style="color:var(--text-tertiary);">${(chk.detail || '').substring(0, 200)}</span>
+                    </div>`;
+                }
+                result.innerHTML = html;
+                // Also refresh health data globally
+                refreshData();
+            } catch (e) {
+                result.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
+            } finally {
+                if (btn) btn.disabled = false;
             }
         }
 

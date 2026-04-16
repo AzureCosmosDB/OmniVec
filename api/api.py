@@ -3559,6 +3559,77 @@ async def create_model(payload: dict):
         raise HTTPException(status_code=503, detail=f"DocGrok error: {str(e)}")
 
 
+@app.put("/api/models/{model_id}")
+async def update_model(model_id: str, payload: dict):
+    """Update an external model's config (API key, endpoint, etc.)."""
+    if not model_id.startswith("mdl-ext-"):
+        raise HTTPException(status_code=400, detail="Only external models can be updated")
+
+    store = get_store()
+    doc = None
+    try:
+        doc = store.get(model_id, "docgrok_model")
+    except Exception:
+        pass
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    # Merge updatable fields
+    updatable = ("api_key", "endpoint", "deployment", "api_version", "embedding_dim", "auth_type", "client_id")
+    changed = []
+    new_api_key = None
+    for field in updatable:
+        if field in payload and payload[field] is not None:
+            val = payload[field].strip() if isinstance(payload[field], str) else payload[field]
+            if field == "api_key":
+                new_api_key = val
+            else:
+                doc[field] = val
+            changed.append(field)
+
+    if not changed:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+
+    # Handle API key update — Key Vault if available, else CosmosDB
+    if new_api_key:
+        from keyvault_client import set_model_api_key
+        if set_model_api_key(model_id, new_api_key):
+            doc["api_key_source"] = "keyvault"
+            doc.pop("api_key", None)
+        else:
+            doc["api_key"] = new_api_key
+            doc.pop("api_key_source", None)
+
+    doc["updated_at"] = datetime.utcnow().isoformat()
+    store.upsert(doc)
+
+    # Re-register with DocGrok if it's an embedding model (so DocGrok picks up new key/endpoint)
+    if doc.get("model_category") != "chat":
+        try:
+            reg_payload = {
+                "id": model_id,
+                "name": doc.get("name", ""),
+                "type": doc.get("type", "azure-openai"),
+                "endpoint": doc.get("endpoint", ""),
+                "auth_type": doc.get("auth_type", "key"),
+                "api_key": new_api_key or doc.get("api_key", ""),
+                "deployment": doc.get("deployment", ""),
+                "embedding_dim": int(doc.get("embedding_dim", 1536)),
+                "api_version": doc.get("api_version", "2024-06-01"),
+            }
+            # If key was in Key Vault, read it for DocGrok registration
+            if not reg_payload["api_key"] and doc.get("api_key_source") == "keyvault":
+                from keyvault_client import get_model_api_key
+                reg_payload["api_key"] = get_model_api_key(model_id) or ""
+            resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
+            if resp.status_code >= 400:
+                logger.warning(f"DocGrok re-register failed: {resp.text}")
+        except Exception as e:
+            logger.warning(f"DocGrok re-register error: {e}")
+
+    return {"status": "updated", "id": model_id, "fields_updated": changed}
+
+
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: str):
     """Delete an external model â€” proxied to DocGrok, removed from CosmosDB."""
@@ -3598,6 +3669,17 @@ async def delete_model(model_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"DocGrok error: {str(e)}")
+
+
+@app.post("/api/models/{model_id}/test")
+async def test_model_health(model_id: str):
+    """Test a model's connectivity and auth by making a small embed call."""
+    from health_checker import run_health_checks
+    result = await run_health_checks(section="models")
+    for m in result.get("models", []):
+        if m["id"] == model_id:
+            return m
+    return {"id": model_id, "status": "unknown", "checks": [], "detail": "Model not found in health results"}
 
 
 # Native model actions (proxy to DocGrok K8s management)
