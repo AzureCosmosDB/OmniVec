@@ -161,12 +161,39 @@ if [ "$CLEANUP" = "true" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Load deployment info from azd env (needed by all steps)
+# ═════════════════════════════════════════════════════════════════════════════
+if [ -z "$AKS_CLUSTER" ]; then
+  AKS_CLUSTER=$(azd_get AZURE_AKS_CLUSTER_NAME)
+fi
+if [ -z "$RESOURCE_GROUP" ]; then
+  RESOURCE_GROUP=$(azd_get AZURE_RESOURCE_GROUP)
+  [ -z "$RESOURCE_GROUP" ] && RESOURCE_GROUP="rg-omnivec-${ENV_NAME:-$(azd_get AZURE_ENV_NAME)}"
+fi
+if [ -z "$ADMIN_TOKEN" ]; then
+  ADMIN_TOKEN=$(azd_get OMNIVEC_ADMIN_TOKEN)
+fi
+if [ -z "$SERVER_URL" ]; then
+  KUBE_CONTEXT="${AKS_CLUSTER:-omnivec}"
+  if [ -n "$AKS_CLUSTER" ]; then
+    az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER" --context "$KUBE_CONTEXT" --overwrite-existing 2>/dev/null || true
+    _ip=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | tr -d '\r' || true)
+    [ -n "$_ip" ] && SERVER_URL="http://$_ip"
+  fi
+fi
+
+INSTANCE_TOKEN=$(echo "${AKS_CLUSTER:-}" | tr -d '\r' | sed 's/omnivec-aks-//')
+if [ -z "$INSTANCE_TOKEN" ]; then
+  log_err "Cannot determine instance token. Run with --existing --env <name> or ensure azd env is configured."
+  exit 1
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 # STEP 3: Create Azure PostgreSQL Flexible Server
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$FROM_STEP" -le 3 ]; then
   log_step 3 "Provisioning Azure PostgreSQL Flexible Server..."
 
-  INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
   PG_SERVER="omnivec-pgdemo-$INSTANCE_TOKEN"
 
   if az postgres flexible-server show --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
