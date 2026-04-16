@@ -6873,8 +6873,13 @@
                     </div>`;
                 }
                 result.innerHTML = html;
-                // Also refresh health data globally
-                refreshData();
+                // Update cached health data with fresh result and re-render the tab
+                if (healthData && healthData.models) {
+                    const idx = healthData.models.findIndex(m => m.id === modelId);
+                    if (idx >= 0) healthData.models[idx] = data;
+                    else healthData.models.push(data);
+                }
+                renderModelDetailTab();
             } catch (e) {
                 result.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
             } finally {
@@ -8049,6 +8054,11 @@
             if (_metricsChartThroughput) { _metricsChartThroughput.destroy(); _metricsChartThroughput = null; }
             if (_metricsChartLatency) { _metricsChartLatency.destroy(); _metricsChartLatency = null; }
             if (!buckets.length) return;
+            if (typeof Chart === 'undefined') {
+                const el = document.getElementById('metrics-chart-throughput');
+                if (el) el.parentElement.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:300px;color:var(--text-tertiary);">Chart.js not loaded (CDN may be blocked)</div>';
+                return;
+            }
 
             const labels = buckets.map(b => _fmtBucketLabel(b.t, granularity));
             const chartDefaults = {
@@ -8222,7 +8232,10 @@
             container.innerHTML = html;
 
             // Render charts after DOM is ready
-            setTimeout(() => _renderMetricsCharts(buckets, data.granularity), 0);
+            setTimeout(() => {
+                try { _renderMetricsCharts(buckets, data.granularity); }
+                catch(e) { console.error('Chart render error:', e); }
+            }, 100);
         }
 
         let _opsActiveTab = 'overview';
