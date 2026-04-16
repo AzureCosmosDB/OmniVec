@@ -982,6 +982,11 @@
                             <div class="stat-value" id="stat-throughput" style="color: var(--accent-primary);">--</div>
                             <div class="stat-trend" id="stat-throughput-label">docs/sec</div>
                         </div>
+                        <div class="stat-card" id="stat-insights-card" style="display:none;">
+                            <div class="stat-label">Telemetry</div>
+                            <div class="stat-value" id="stat-insights-status" style="font-size:1rem;">—</div>
+                            <div class="stat-trend" id="stat-insights-link"></div>
+                        </div>
                     </div>
 
                     <div class="card">
@@ -2623,6 +2628,26 @@
                             navBadge.style.color = '#fff';
                         } else {
                             navBadge.style.display = 'none';
+                        }
+                    }
+                } catch (e) {}
+
+                // Fetch App Insights telemetry status
+                try {
+                    const insRes = await apiFetch('/api/metrics/insights');
+                    if (insRes.ok) {
+                        const ins = await insRes.json();
+                        const card = document.getElementById('stat-insights-card');
+                        if (ins.enabled) {
+                            card.style.display = '';
+                            document.getElementById('stat-insights-status').innerHTML =
+                                '<span style="color:var(--success);">● Active</span>';
+                            const tracked = Object.keys(ins.custom_metrics || {}).length;
+                            const linkEl = document.getElementById('stat-insights-link');
+                            linkEl.innerHTML = tracked + ' metrics tracked' +
+                                (ins.portal_url ? ' · <a href="' + ins.portal_url + '" target="_blank" style="color:var(--accent-primary);">Portal ↗</a>' : '');
+                        } else {
+                            card.style.display = 'none';
                         }
                     }
                 } catch (e) {}
