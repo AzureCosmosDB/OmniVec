@@ -6729,17 +6729,38 @@
                         <div id="model-health-result-${modelId}" style="margin-top: 12px;"></div>
                     </div>`;
 
-                // Update API Key section (only for external models with key auth)
-                if (isExternal && extModel && extModel.auth_type !== 'managed-identity') {
+                // Authentication section (for external models)
+                if (isExternal && extModel) {
+                    const curAuth = extModel.auth_type || 'key';
                     html += `
-                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Update API Key</h4>
+                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Authentication</h4>
                         <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px;">
-                            <p style="font-size: 13px; color: var(--text-tertiary); margin: 0 0 12px 0;">If authentication is failing, update the API key and test again.</p>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <input type="password" class="form-input" id="model-update-key-${extModel.id}" placeholder="Enter new API key" style="flex: 1;">
-                                <button class="btn btn-primary" onclick="updateModelKey('${extModel.id}')">Update Key</button>
+                            <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 16px; border-radius: 8px; border: 2px solid ${curAuth === 'key' ? 'var(--accent-primary)' : 'var(--border)'}; background: ${curAuth === 'key' ? 'rgba(99,102,241,0.1)' : 'transparent'};">
+                                    <input type="radio" name="model-auth-type-${extModel.id}" value="key" ${curAuth === 'key' ? 'checked' : ''} onchange="toggleModelAuthFields('${extModel.id}', 'key')">
+                                    <span style="font-weight: 500;">API Key</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 16px; border-radius: 8px; border: 2px solid ${curAuth === 'managed-identity' ? 'var(--accent-primary)' : 'var(--border)'}; background: ${curAuth === 'managed-identity' ? 'rgba(34,197,94,0.1)' : 'transparent'};">
+                                    <input type="radio" name="model-auth-type-${extModel.id}" value="managed-identity" ${curAuth === 'managed-identity' ? 'checked' : ''} onchange="toggleModelAuthFields('${extModel.id}', 'managed-identity')">
+                                    <span style="font-weight: 500;">Managed Identity</span>
+                                </label>
                             </div>
-                            <div id="model-update-key-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
+                            <div id="model-auth-key-section-${extModel.id}" style="display: ${curAuth === 'key' ? 'block' : 'none'};">
+                                <p style="font-size: 13px; color: var(--text-tertiary); margin: 0 0 12px 0;">Update the API key for this model.</p>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <input type="password" class="form-input" id="model-update-key-${extModel.id}" placeholder="Enter new API key" style="flex: 1;">
+                                    <button class="btn btn-primary" onclick="updateModelKey('${extModel.id}')">Update Key</button>
+                                </div>
+                                <div id="model-update-key-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
+                            </div>
+                            <div id="model-auth-mi-section-${extModel.id}" style="display: ${curAuth === 'managed-identity' ? 'block' : 'none'};">
+                                <p style="font-size: 13px; color: var(--text-tertiary); margin: 0 0 12px 0;">Uses Azure Workload Identity. Optionally specify a client ID.</p>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <input type="text" class="form-input" id="model-update-clientid-${extModel.id}" placeholder="Client ID (optional — uses workload identity if empty)" value="${extModel.client_id || ''}" style="flex: 1;">
+                                    <button class="btn btn-primary" onclick="updateModelAuth('${extModel.id}', 'managed-identity')">Save</button>
+                                </div>
+                                <div id="model-update-mi-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
+                            </div>
                         </div>`;
                 }
 
@@ -6825,6 +6846,44 @@
             }
         }
 
+        function toggleModelAuthFields(modelId, authType) {
+            const keySection = document.getElementById(`model-auth-key-section-${modelId}`);
+            const miSection = document.getElementById(`model-auth-mi-section-${modelId}`);
+            if (keySection) keySection.style.display = authType === 'key' ? 'block' : 'none';
+            if (miSection) miSection.style.display = authType === 'managed-identity' ? 'block' : 'none';
+            // Update radio button styling
+            document.querySelectorAll(`input[name="model-auth-type-${modelId}"]`).forEach(r => {
+                const label = r.closest('label');
+                if (label) {
+                    const active = r.value === authType;
+                    label.style.borderColor = active ? 'var(--accent-primary)' : 'var(--border)';
+                    label.style.background = active ? (authType === 'key' ? 'rgba(99,102,241,0.1)' : 'rgba(34,197,94,0.1)') : 'transparent';
+                }
+            });
+        }
+
+        async function updateModelAuth(modelId, authType) {
+            const statusEl = document.getElementById(`model-update-mi-status-${modelId}`);
+            statusEl.innerHTML = '<span style="color:var(--text-tertiary);">Updating...</span>';
+            const clientId = document.getElementById(`model-update-clientid-${modelId}`)?.value?.trim() || '';
+            try {
+                const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auth_type: authType, client_id: clientId }),
+                });
+                if (resp.ok) {
+                    statusEl.innerHTML = '<span style="color:var(--success);">✓ Switched to managed identity. Run Test Connection to verify.</span>';
+                    loadDgModels();
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    statusEl.innerHTML = `<span style="color:var(--error);">Failed: ${err.detail || resp.statusText}</span>`;
+                }
+            } catch (e) {
+                statusEl.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
+            }
+        }
+
         async function updateModelKey(modelId) {
             const input = document.getElementById(`model-update-key-${modelId}`);
             const status = document.getElementById(`model-update-key-status-${modelId}`);
@@ -6835,7 +6894,7 @@
                 const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ api_key: key }),
+                    body: JSON.stringify({ api_key: key, auth_type: 'key' }),
                 });
                 if (resp.ok) {
                     status.innerHTML = '<span style="color:var(--success);">✓ API key updated. Run Test Connection to verify.</span>';
