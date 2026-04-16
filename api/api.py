@@ -18,6 +18,20 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
+# Initialize Azure Monitor telemetry (safe if connection string not set)
+try:
+    from telemetry import init_telemetry, track_metric, track_histogram, track_event, Timer
+    init_telemetry()
+except ImportError:
+    # Telemetry module not available — define no-ops
+    def track_metric(*a, **kw): pass
+    def track_histogram(*a, **kw): pass
+    def track_event(*a, **kw): pass
+    class Timer:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
 from models import (
     Source, Destination, Pipeline, Job, JobStatus, JobStats,
     CreateSourceRequest, CreateDestinationRequest, CreatePipelineRequest,
@@ -695,6 +709,11 @@ def report_changefeed_metrics(payload: dict):
     skipped_unchanged = int(payload.get("skipped_unchanged", 0))
     jobs_created = int(payload.get("jobs_created", 0))
     partition = payload.get("partition", "")
+
+    # Forward to Azure Monitor
+    track_metric("documents_embedded", eligible, {"source_id": source_id})
+    if jobs_created > 0:
+        track_metric("jobs_created", jobs_created, {"source_id": source_id})
 
     # Get or create changefeed metrics doc
     cf_doc = store.get("changefeed", "metrics")
@@ -2463,6 +2482,7 @@ def _merge_results(index_results: list, strategy: str, top_k: int) -> list:
         all_results.sort(key=lambda r: r["score"], reverse=True)
         if strategy != "per_index":
             all_results = all_results[:top_k]
+        track_histogram("search_latency", (time.time() - _search_start) * 1000)
         return all_results
 
 
@@ -2470,6 +2490,9 @@ def _merge_results(index_results: list, strategy: str, top_k: int) -> list:
 async def playground_search(req: SearchRequest):
     """Search vectors across one or more indexes using query embedding."""
     import time
+
+    track_metric("search_queries", 1)
+    _search_start = time.time()
 
     if not req.destination_ids:
         raise HTTPException(status_code=400, detail="No destination_ids provided")
