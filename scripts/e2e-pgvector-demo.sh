@@ -67,6 +67,22 @@ api_get()    { curl -sf --max-time 30 -H "Authorization: Bearer $ADMIN_TOKEN" "$
 api_post()   { curl -sf --max-time 30 -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d "$2" "$SERVER_URL$1"; }
 api_delete() { curl -sf --max-time 10 -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" "$SERVER_URL$1" 2>/dev/null || true; }
 
+# ─── Check prerequisites ─────────────────────────────────────────────────────
+if ! command -v psql >/dev/null 2>&1; then
+  log "  psql not found — installing PostgreSQL client..."
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y postgresql >/dev/null 2>&1
+  elif command -v brew >/dev/null 2>&1; then
+    brew install libpq >/dev/null 2>&1 && export PATH="/usr/local/opt/libpq/bin:$PATH"
+  fi
+  if ! command -v psql >/dev/null 2>&1; then
+    die "psql (PostgreSQL client) is required. Install: sudo apt-get install postgresql-client"
+  fi
+  log_ok "psql installed."
+fi
+
 # ─── Banner ──────────────────────────────────────────────────────────────────
 printf "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}\n"
 printf "${GREEN}║  OmniVec E2E Demo — PostgreSQL + pgvector               ║${NC}\n"
