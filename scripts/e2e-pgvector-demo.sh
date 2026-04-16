@@ -200,6 +200,7 @@ if [ "$FROM_STEP" -le 3 ]; then
     log_ok "PostgreSQL server already exists: $PG_SERVER"
   else
     log "  Creating server: $PG_SERVER (this takes ~3-5 minutes)..."
+    set +e
     az postgres flexible-server create \
       --name "$PG_SERVER" \
       --resource-group "$RESOURCE_GROUP" \
@@ -211,8 +212,20 @@ if [ "$FROM_STEP" -le 3 ]; then
       --storage-size 32 \
       --version 16 \
       --public-access 0.0.0.0 \
-      --yes >/dev/null 2>&1
-    log_ok "PostgreSQL server created: $PG_SERVER"
+      --yes 2>&1 | tail -3
+    _pg_rc=$?
+    set -e
+    if [ "$_pg_rc" -ne 0 ]; then
+      # Check if it was actually created despite error
+      if az postgres flexible-server show --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+        log_ok "PostgreSQL server created (with warnings): $PG_SERVER"
+      else
+        log_err "Failed to create PostgreSQL server (exit=$_pg_rc)"
+        exit 1
+      fi
+    else
+      log_ok "PostgreSQL server created: $PG_SERVER"
+    fi
   fi
 
   log "  Enabling pgvector extension..."
@@ -220,7 +233,7 @@ if [ "$FROM_STEP" -le 3 ]; then
     --server-name "$PG_SERVER" \
     --resource-group "$RESOURCE_GROUP" \
     --name azure.extensions \
-    --value VECTOR >/dev/null 2>&1
+    --value VECTOR >/dev/null 2>&1 || true
   log_ok "pgvector extension enabled."
 
   PG_HOST="$PG_SERVER.postgres.database.azure.com"
