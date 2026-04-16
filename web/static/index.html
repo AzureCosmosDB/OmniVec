@@ -2142,17 +2142,127 @@
 
     <!-- DocGrok Add External Model Modal -->
     <div class="modal-overlay" id="dg-external-model-modal">
-        <div class="modal">
+        <div class="modal modal-full">
             <div class="modal-header">
-                <h3 class="modal-title">Add External Model</h3>
+                <h3 class="modal-title" style="display: flex; align-items: center; gap: 10px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" width="22" height="22"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+                    Add External Model
+                </h3>
                 <button class="modal-close" onclick="closeModal('dg-external-model-modal')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
                         <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
                     </svg>
                 </button>
             </div>
-            <div class="modal-body">
-                <form id="dg-external-model-form">
+            <div class="modal-body" style="padding: 0; flex: 1; max-height: none; overflow: hidden;">
+                <form id="dg-external-model-form" style="height: 100%;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; height: 100%;">
+                        <!-- Left: Model Configuration -->
+                        <div style="padding: 24px; border-right: 1px solid var(--border-subtle); overflow-y: auto;">
+                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Model Configuration</div>
+                            <div class="form-group">
+                                <label class="form-label">Model Name</label>
+                                <input type="text" class="form-input" name="name" placeholder="e.g., my-azure-openai">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Model Category</label>
+                                <select class="form-input" name="model_category" onchange="toggleEmbeddingDims(this.value)">
+                                    <option value="embedding">Embedding</option>
+                                    <option value="chat">Chat / LLM</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Provider</label>
+                                <select class="form-input" name="type">
+                                    <option value="azure-openai">Azure OpenAI</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="cohere">Cohere</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Endpoint URL</label>
+                                <input type="text" class="form-input" name="endpoint" placeholder="https://your-resource.openai.azure.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Deployment Name</label>
+                                <input type="text" class="form-input" name="deployment" placeholder="e.g., text-embedding-3-small">
+                                <small style="color: var(--text-tertiary); font-size: 12px;">Must match the deployment name in Azure OpenAI exactly</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">API Version (Azure only)</label>
+                                <input type="text" class="form-input" name="apiVersion" value="2024-06-01">
+                            </div>
+                            <div class="form-group" id="embedding-dims-group">
+                                <label class="form-label">Embedding Dimensions</label>
+                                <input type="number" class="form-input" name="dimensions" value="1536">
+                            </div>
+                        </div>
+
+                        <!-- Right: Authentication -->
+                        <div style="padding: 24px; background: var(--bg-tertiary); display: flex; flex-direction: column; overflow-y: auto;">
+                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Authentication</div>
+
+                            <div class="form-group">
+                                <div style="display: flex; flex-direction: column; gap: 8px;">
+                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 2px solid var(--accent-primary);" id="model-add-auth-key-label">
+                                        <input type="radio" name="auth_type" value="key" checked onchange="toggleAuthFields(this.value)">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 500;">API Key</div>
+                                            <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">Authenticate with a subscription key</div>
+                                        </div>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 2px solid transparent;" id="model-add-auth-mi-label">
+                                        <input type="radio" name="auth_type" value="managed-identity" onchange="toggleAuthFields(this.value)">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 500; display: flex; align-items: center; gap: 8px;">
+                                                Managed Identity
+                                                <span class="badge badge-success" style="font-size: 10px;">Recommended</span>
+                                            </div>
+                                            <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">Uses AKS Workload Identity — no keys needed</div>
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div id="api-key-group">
+                                <div class="form-group">
+                                    <label class="form-label">API Key</label>
+                                    <input type="password" class="form-input" name="apiKey" placeholder="Paste your API key">
+                                </div>
+                            </div>
+
+                            <div id="client-id-group" style="display: none;">
+                                <input type="hidden" name="clientId" value="">
+                                <div style="background: var(--bg-secondary); border-radius: var(--radius-md); padding: 16px; font-size: 13px;">
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="20" height="20"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                        <span style="font-weight: 600; color: var(--success);">No key needed</span>
+                                    </div>
+                                    <p style="margin: 0 0 12px 0; color: var(--text-secondary);">Grant the AKS managed identity access to your Azure OpenAI resource:</p>
+                                    <p style="margin: 0 0 8px 0; font-weight: 500;">Azure Portal:</p>
+                                    <ol style="margin: 0 0 16px 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.8;">
+                                        <li>Open your Azure OpenAI resource → <strong>Access Control (IAM)</strong></li>
+                                        <li>Click <strong>Add role assignment</strong></li>
+                                        <li>Select role: <strong>Cognitive Services OpenAI User</strong></li>
+                                        <li>Assign to: your AKS cluster's managed identity</li>
+                                    </ol>
+                                    <p style="margin: 0 0 4px 0; font-weight: 500;">Or via CLI:</p>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Bash:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 10px; border-radius: 6px; margin-bottom: 8px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \
+  --assignee &lt;aks-managed-identity-client-id&gt; \
+  --role "Cognitive Services OpenAI User" \
+  --scope &lt;azure-openai-resource-id&gt;</div>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">PowerShell:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 10px; border-radius: 6px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create `
+  --assignee &lt;aks-managed-identity-client-id&gt; `
+  --role "Cognitive Services OpenAI User" `
+  --scope &lt;azure-openai-resource-id&gt;</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </form>
                     <div class="form-group">
                         <label class="form-label">Model Name</label>
                         <input type="text" class="form-input" name="name" placeholder="e.g., my-azure-openai">
@@ -6599,8 +6709,8 @@
                             Overview
                         </button>
                         <button class="mdl-detail-tab" data-tab="health" onclick="switchModelDetailTab('health')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                            Health
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                            Auth &amp; Status
                             ${mh && mh.status !== 'healthy' ? '<span style="margin-left:auto;width:8px;height:8px;border-radius:50%;background:' + healthStatusColor(mh.status) + ';display:inline-block;"></span>' : ''}
                         </button>
                     </nav>
@@ -6974,13 +7084,22 @@
                     </div>`;
                 }
                 result.innerHTML = html;
-                // Update cached health data with fresh result and re-render the tab
+                // Update cached health data (but DON'T re-render tab — it would wipe this result)
                 if (healthData && healthData.models) {
                     const idx = healthData.models.findIndex(m => m.id === modelId);
                     if (idx >= 0) healthData.models[idx] = data;
                     else healthData.models.push(data);
                 }
-                renderModelDetailTab();
+                // Update the status banner inline if it exists
+                const banner = document.querySelector(`#dg-model-detail-body .health-status-banner-${modelId}`);
+                if (banner) {
+                    const sc = data.status === 'healthy' ? 'var(--success)' : data.status === 'warning' ? 'var(--warning)' : 'var(--error)';
+                    banner.style.background = sc + '15';
+                    banner.style.borderColor = sc + '33';
+                    banner.querySelector('.health-status-text').style.color = sc;
+                    banner.querySelector('.health-status-text').textContent = data.status;
+                    banner.querySelector('.health-status-dot').style.background = sc;
+                }
             } catch (e) {
                 result.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
             } finally {
@@ -7006,13 +7125,13 @@
             if (authType === 'managed-identity') {
                 if (keyGroup) keyGroup.style.display = 'none';
                 if (clientIdGroup) clientIdGroup.style.display = 'block';
-                if (keyLabel) { keyLabel.style.borderColor = 'var(--border)'; keyLabel.style.background = 'transparent'; }
-                if (miLabel) { miLabel.style.borderColor = 'var(--accent-primary)'; miLabel.style.background = 'rgba(34,197,94,0.1)'; }
+                if (keyLabel) { keyLabel.style.borderColor = 'transparent'; }
+                if (miLabel) { miLabel.style.borderColor = 'var(--accent-primary)'; }
             } else {
                 if (keyGroup) keyGroup.style.display = 'block';
                 if (clientIdGroup) clientIdGroup.style.display = 'none';
-                if (keyLabel) { keyLabel.style.borderColor = 'var(--accent-primary)'; keyLabel.style.background = 'rgba(99,102,241,0.1)'; }
-                if (miLabel) { miLabel.style.borderColor = 'var(--border)'; miLabel.style.background = 'transparent'; }
+                if (keyLabel) { keyLabel.style.borderColor = 'var(--accent-primary)'; }
+                if (miLabel) { miLabel.style.borderColor = 'transparent'; }
             }
         }
 
