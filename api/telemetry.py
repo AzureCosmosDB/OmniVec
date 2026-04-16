@@ -143,6 +143,12 @@ class MetricsStore:
         # --- Throughput tracker (rolling 60s) ---
         self.throughput = _ThroughputTracker(60)
 
+        # --- Time-series buckets (minute granularity, last 24h) ---
+        # { "2026-04-16T14:30:00": {processed, failed, processing_time_ms} }
+        self._timeseries: Dict[str, dict] = defaultdict(lambda: {
+            "processed": 0, "failed": 0, "processing_time_ms": 0.0,
+        })
+
     # -- Recording methods (thread-safe) --
 
     def record_embedding_batch(self, pipeline_id: str, docs_embedded: int = 0,
@@ -167,6 +173,13 @@ class MetricsStore:
                 p["skipped_unchanged"] += docs_skipped_unchanged
                 p["jobs_created"] += jobs_created
                 p["tokens"] += tokens_used
+
+            # Time-series bucket (minute granularity)
+            bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:00")
+            ts = self._timeseries[bucket]
+            ts["processed"] += docs_embedded
+            ts["failed"] += docs_failed
+            ts["processing_time_ms"] += latency_ms
 
         if docs_embedded > 0:
             self.throughput.record(docs_embedded)
@@ -247,6 +260,44 @@ class MetricsStore:
                 "pipelines": pipelines,
             }
 
+    def get_timeseries(self, start: str, end: str, granularity: str = "hour") -> list:
+        """Return time-series buckets between start and end, aggregated by granularity."""
+        gran_seconds = {"minute": 60, "hour": 3600, "day": 86400}.get(granularity, 3600)
+
+        def _trunc(bucket_str: str) -> str:
+            if granularity == "minute":
+                return bucket_str  # already minute granularity
+            elif granularity == "hour":
+                return bucket_str[:13] + ":00:00"
+            else:
+                return bucket_str[:10] + "T00:00:00"
+
+        with self._lock:
+            agg: Dict[str, dict] = {}
+            for bucket, data in self._timeseries.items():
+                if bucket < start or bucket > end:
+                    continue
+                key = _trunc(bucket)
+                if key not in agg:
+                    agg[key] = {"processed": 0, "failed": 0, "processing_time_ms": 0.0}
+                agg[key]["processed"] += data["processed"]
+                agg[key]["failed"] += data["failed"]
+                agg[key]["processing_time_ms"] += data["processing_time_ms"]
+
+        buckets = []
+        for t in sorted(agg.keys()):
+            a = agg[t]
+            p = a["processed"]
+            f = a["failed"]
+            buckets.append({
+                "t": t,
+                "processed": p,
+                "failed": f,
+                "throughput": round(p / gran_seconds, 1) if p > 0 else 0.0,
+                "avg_latency_ms": round(a["processing_time_ms"] / p, 1) if p > 0 else None,
+            })
+        return buckets
+
     def reset(self):
         """Reset all counters (for testing or manual clear)."""
         with self._lock:
@@ -257,6 +308,7 @@ class MetricsStore:
                 setattr(self, attr, 0)
             self._pipelines.clear()
             self._failure_types.clear()
+            self._timeseries.clear()
             self._started_at = datetime.now(timezone.utc).isoformat()
         self.embedding_latency = _SlidingWindow(300)
         self.search_latency = _SlidingWindow(300)

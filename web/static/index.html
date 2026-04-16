@@ -2583,20 +2583,20 @@
                 document.getElementById('stat-destinations').textContent = destinations.length;
                 document.getElementById('stat-pipelines').textContent = pipelines.length;
 
-                // Embedded count — prefer live metrics, fallback to pipeline stats
-                const liveEmbedded = metrics.events_processed || 0;
-                let totalSourceDocs = 0;
+                // Embedded count — use pipeline stats for unique docs (not cumulative batch events)
+                let totalSourceDocs = 0, totalEmbedded = 0;
                 let hasSourceData = false;
                 pipelines.filter(p => p.status === 'active').forEach(p => {
                     if (p.stats?.source_doc_count != null) {
                         totalSourceDocs += p.stats.source_doc_count;
                         hasSourceData = true;
                     }
+                    totalEmbedded += p.stats?.embedded_count || 0;
                 });
-                const overallPct = hasSourceData && totalSourceDocs > 0 ? (liveEmbedded / totalSourceDocs * 100).toFixed(1) : null;
-                document.getElementById('stat-events').textContent = liveEmbedded > 0
-                    ? liveEmbedded.toLocaleString() + (hasSourceData ? ' / ' + totalSourceDocs.toLocaleString() : '')
-                    : '--';
+                const overallPct = hasSourceData && totalSourceDocs > 0 ? (totalEmbedded / totalSourceDocs * 100).toFixed(1) : null;
+                document.getElementById('stat-events').textContent = hasSourceData
+                    ? totalEmbedded.toLocaleString() + ' / ' + totalSourceDocs.toLocaleString()
+                    : totalEmbedded > 0 ? totalEmbedded.toLocaleString() : '--';
                 document.getElementById('stat-events-today').textContent = overallPct != null ? overallPct + '% complete' : '';
 
                 // Failed — from live metrics
@@ -6683,53 +6683,66 @@
                                 <span class="mono">${extModel.embedding_dim || '-'}</span>
                             </div>
                         </div>
+                    `;
+                }
+            } else if (currentModelDetailTab === 'health') {
+                const modelId = name;
+                const isExternal = type === 'external';
+                const extModel = isExternal ? dgModels.external[name] : null;
+                const mh = getHealthForModel(name);
 
+                let html = '';
+
+                // Health status banner
+                if (mh) {
+                    html += `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Health Status</h4>
+                        <div style="background: ${healthStatusBg(mh.status)}; border: 1px solid ${healthStatusColor(mh.status)}33; border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px;">
+                            <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${healthStatusColor(mh.status)};"></span>
+                            <span style="font-weight: 600; color: ${healthStatusColor(mh.status)}; text-transform: uppercase;">${mh.status}</span>
+                        </div>
+                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Checks</h4>
+                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); overflow: hidden; margin-bottom: 24px;">`;
+                    for (const chk of (mh.checks || [])) {
+                        html += `<div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle);">
+                            ${checkIcon(chk.status)}
+                            <span style="font-weight: 500; min-width: 140px;">${chk.check}</span>
+                            <span style="color: var(--text-tertiary); font-size: 13px;">${chk.detail || ''}</span>
+                        </div>`;
+                    }
+                    html += '</div>';
+                } else {
+                    html += `<div style="text-align: center; padding: 40px; color: var(--text-tertiary); margin-bottom: 24px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="margin-bottom: 16px; opacity: 0.5;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        <p>No health data yet. Click Test Connection below.</p>
+                    </div>`;
+                }
+
+                // Test Connection button (for all model types)
+                html += `
+                    <h4 style="margin: 0 0 16px 0; font-size: 16px;">Test Connection</h4>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px;">
+                        <button class="btn btn-primary" onclick="testModelHealth('${modelId}')" id="model-test-btn-${modelId}">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align: middle; margin-right: 6px;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                            Test Connection
+                        </button>
+                        <div id="model-health-result-${modelId}" style="margin-top: 12px;"></div>
+                    </div>`;
+
+                // Update API Key section (only for external models with key auth)
+                if (isExternal && extModel && extModel.auth_type !== 'managed-identity') {
+                    html += `
                         <h4 style="margin: 0 0 16px 0; font-size: 16px;">Update API Key</h4>
-                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px;">
+                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px;">
+                            <p style="font-size: 13px; color: var(--text-tertiary); margin: 0 0 12px 0;">If authentication is failing, update the API key and test again.</p>
                             <div style="display: flex; gap: 8px; align-items: center;">
                                 <input type="password" class="form-input" id="model-update-key-${extModel.id}" placeholder="Enter new API key" style="flex: 1;">
                                 <button class="btn btn-primary" onclick="updateModelKey('${extModel.id}')">Update Key</button>
                             </div>
                             <div id="model-update-key-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
-                        </div>
+                        </div>`;
+                }
 
-                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Quick Health Check</h4>
-                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;">
-                            <button class="btn btn-secondary" onclick="testModelHealth('${extModel.id}')" id="model-test-btn-${extModel.id}">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align: middle; margin-right: 6px;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                                Test Connection
-                            </button>
-                            <div id="model-health-result-${extModel.id}" style="margin-top: 12px;"></div>
-                        </div>
-                    `;
-                }
-            } else if (currentModelDetailTab === 'health') {
-                const mh = getHealthForModel(name);
-                if (!mh) {
-                    body.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-tertiary);">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="margin-bottom: 16px; opacity: 0.5;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                        <p>No health data available for this model.</p>
-                        <p style="font-size: 12px; margin-top: 8px;">Run a health check from the Health tab to see results.</p>
-                    </div>`;
-                    return;
-                }
-                let html = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Health Status</h4>
-                    <div style="background: ${healthStatusBg(mh.status)}; border: 1px solid ${healthStatusColor(mh.status)}33; border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px;">
-                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${healthStatusColor(mh.status)};"></span>
-                        <span style="font-weight: 600; color: ${healthStatusColor(mh.status)}; text-transform: uppercase;">${mh.status}</span>
-                    </div>
-                    <h4 style="margin: 0 0 16px 0; font-size: 16px;">Checks</h4>
-                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); overflow: hidden;">
-                `;
-                for (const chk of (mh.checks || [])) {
-                    html += `<div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle);">
-                        ${checkIcon(chk.status)}
-                        <span style="font-weight: 500; min-width: 140px;">${chk.check}</span>
-                        <span style="color: var(--text-tertiary); font-size: 13px;">${chk.detail || ''}</span>
-                    </div>`;
-                }
-                html += '</div>';
                 body.innerHTML = html;
             } else if (currentModelDetailTab === 'logs') {
                 body.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-tertiary);">Loading logs...</div>`;

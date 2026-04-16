@@ -813,10 +813,11 @@ def get_metrics_timeseries(
     end: str | None = None,
     pipeline_id: str | None = None,
 ):
-    """Get time-series metrics at selected granularity and time range.
-    Granularity: minute, hour, day. Default time range: last 24h."""
-    now = datetime.utcnow()
+    """Get time-series metrics from in-memory store."""
+    if not metrics_store:
+        return {"granularity": granularity, "buckets": []}
 
+    now = datetime.utcnow()
     if granularity not in ("minute", "hour", "day"):
         raise HTTPException(status_code=400, detail="granularity must be minute, hour, or day")
 
@@ -826,63 +827,10 @@ def get_metrics_timeseries(
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail="Invalid date format. Use ISO 8601.")
 
-    # Cap max range to 30 days
-    if (end_dt - start_dt) > timedelta(days=30):
-        start_dt = end_dt - timedelta(days=30)
-
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:00")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:00")
 
-    # Query timeseries buckets
-    query = "SELECT * FROM c WHERE c.doc_type = 'metric_ts' AND c.bucket >= @start AND c.bucket <= @end"
-    params = [
-        {"name": "@start", "value": start_iso},
-        {"name": "@end", "value": end_iso},
-    ]
-    if pipeline_id:
-        query += " AND c.pipeline_id = @pid"
-        params.append({"name": "@pid", "value": pipeline_id})
-
-    store = get_store()
-    rows = store.query(query, params, partition_key="metric_ts")
-
-    # Determine granularity truncation
-    gran_seconds = {"minute": 60, "hour": 3600, "day": 86400}.get(granularity, 3600)
-
-    def _trunc(bucket_str: str) -> str:
-        dt = datetime.fromisoformat(bucket_str)
-        if granularity == "minute":
-            return dt.strftime("%Y-%m-%dT%H:%M:00")
-        elif granularity == "hour":
-            return dt.strftime("%Y-%m-%dT%H:00:00")
-        else:  # day
-            return dt.strftime("%Y-%m-%dT00:00:00")
-
-    # Aggregate by truncated bucket
-    agg: dict[str, dict] = {}
-    for row in rows:
-        key = _trunc(row.get("bucket", ""))
-        if key not in agg:
-            agg[key] = {"processed": 0, "failed": 0, "processing_time_ms": 0.0}
-        agg[key]["processed"] += row.get("processed", 0)
-        agg[key]["failed"] += row.get("failed", 0)
-        agg[key]["processing_time_ms"] += row.get("processing_time_ms", 0.0)
-
-    # Build response buckets
-    buckets = []
-    for t in sorted(agg.keys()):
-        a = agg[t]
-        p = a["processed"]
-        f = a["failed"]
-        throughput = round(p / gran_seconds, 1) if p > 0 else 0.0
-        avg_latency = round(a["processing_time_ms"] / p, 1) if p > 0 else None
-        buckets.append({
-            "t": t,
-            "processed": p,
-            "failed": f,
-            "throughput": throughput,
-            "avg_latency_ms": avg_latency,
-        })
+    buckets = metrics_store.get_timeseries(start_iso, end_iso, granularity)
 
     return {
         "granularity": granularity,
