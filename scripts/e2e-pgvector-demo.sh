@@ -63,12 +63,6 @@ save_checkpoint() { echo "$1" > "$CHECKPOINT_FILE"; }
 
 PG_PASSWORD_FILE="$ROOT_DIR/.e2e-pgvector-password"
 
-# Load saved PG password if not provided
-if [ -z "$PG_ADMIN_PASSWORD" ] && [ -f "$PG_PASSWORD_FILE" ]; then
-  PG_ADMIN_PASSWORD=$(cat "$PG_PASSWORD_FILE" | tr -d '\r\n')
-  [ -n "$PG_ADMIN_PASSWORD" ] && log_ok "Loaded PG password from previous run."
-fi
-
 azd_get() { val=$(azd env get-value "$1" 2>/dev/null) && printf '%s' "$val" | tr -d '\r' || true; }
 
 api_get()    { curl -sf --max-time 30 -H "Authorization: Bearer $ADMIN_TOKEN" "$SERVER_URL$1"; }
@@ -108,12 +102,22 @@ fi
 log_ok "Embedding: $AOAI_DEPLOYMENT (${AOAI_DIMS}d) @ $AOAI_ENDPOINT"
 
 # ─── PG password ─────────────────────────────────────────────────────────────
+# Priority: --pg-password flag > azd env > saved file > generate new
+if [ -z "$PG_ADMIN_PASSWORD" ]; then
+  PG_ADMIN_PASSWORD=$(azd_get OMNIVEC_PG_DEMO_PASSWORD)
+fi
+if [ -z "$PG_ADMIN_PASSWORD" ] && [ -f "$PG_PASSWORD_FILE" ]; then
+  PG_ADMIN_PASSWORD=$(cat "$PG_PASSWORD_FILE" | tr -d '\r\n')
+fi
 if [ -z "$PG_ADMIN_PASSWORD" ]; then
   PG_ADMIN_PASSWORD="OmniVec-Demo-$(shuf -i 1000-9999 -n 1 2>/dev/null || echo $$)!"
   log_ok "Generated PG admin password: $PG_ADMIN_PASSWORD"
+else
+  log_ok "Using saved PG admin password."
 fi
-# Save password for resume across runs
+# Persist to both file and azd env
 echo "$PG_ADMIN_PASSWORD" > "$PG_PASSWORD_FILE"
+azd env set OMNIVEC_PG_DEMO_PASSWORD "$PG_ADMIN_PASSWORD" 2>/dev/null || true
 PG_ADMIN="omnivecadmin"
 
 # ─── Existing deployment mode ────────────────────────────────────────────────
@@ -225,6 +229,10 @@ if [ "$FROM_STEP" -le 3 ]; then
 
   if az postgres flexible-server show --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
     log_ok "PostgreSQL server already exists: $PG_SERVER"
+    # Ensure password is current — reset to our known password
+    log "  Resetting admin password to match current config..."
+    az postgres flexible-server update --name "$PG_SERVER" --resource-group "$RESOURCE_GROUP" \
+      --admin-password "$PG_ADMIN_PASSWORD" >/dev/null 2>&1 || true
   else
     # Try deployment location first, then fallback regions
     PG_LOCATION="${AZURE_LOCATION:-$(azd_get AZURE_LOCATION)}"
