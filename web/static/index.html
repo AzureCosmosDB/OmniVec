@@ -2156,7 +2156,6 @@
                     <div class="form-group">
                         <label class="form-label">Model Name</label>
                         <input type="text" class="form-input" name="name" placeholder="e.g., my-azure-openai">
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Unique identifier for this external model</small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model Category</label>
@@ -2164,7 +2163,6 @@
                             <option value="embedding">Embedding</option>
                             <option value="chat">Chat / LLM</option>
                         </select>
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Embedding models are used in pipelines</small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Provider</label>
@@ -2177,50 +2175,66 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">Endpoint URL</label>
-                        <input type="text" class="form-input" name="endpoint" placeholder="https://...">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Authentication</label>
-                        <div style="display: flex; gap: 12px; margin-top: 4px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 20px; border-radius: 8px; border: 2px solid var(--accent-primary); background: rgba(99,102,241,0.1); flex: 1; justify-content: center;" id="model-add-auth-key-label">
-                                <input type="radio" name="auth_type" value="key" checked onchange="toggleAuthFields(this.value)">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                                <span style="font-weight: 500;">API Key</span>
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 20px; border-radius: 8px; border: 2px solid var(--border); background: transparent; flex: 1; justify-content: center;" id="model-add-auth-mi-label">
-                                <input type="radio" name="auth_type" value="managed-identity" onchange="toggleAuthFields(this.value)">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                                <span style="font-weight: 500;">Managed Identity</span>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="form-group" id="api-key-group">
-                        <label class="form-label">API Key</label>
-                        <input type="password" class="form-input" name="apiKey" placeholder="Enter API key">
-                    </div>
-                    <div class="form-group" id="client-id-group" style="display: none;">
-                        <label class="form-label">Client ID (optional)</label>
-                        <input type="text" class="form-input" name="clientId" placeholder="Managed identity client ID (uses workload identity if empty)">
-                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 12px;">
-                            <p style="margin: 0 0 8px 0; font-weight: 500; color: var(--text-secondary);">Grant access to your Azure OpenAI resource:</p>
-                            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \
-  --assignee &lt;managed-identity-client-id&gt; \
-  --role "Cognitive Services OpenAI User" \
-  --scope /subscriptions/.../Microsoft.CognitiveServices/accounts/&lt;name&gt;</div>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">API Version (Azure only)</label>
-                        <input type="text" class="form-input" name="apiVersion" placeholder="e.g., 2024-06-01">
+                        <input type="text" class="form-input" name="endpoint" placeholder="https://your-resource.openai.azure.com">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Deployment Name</label>
                         <input type="text" class="form-input" name="deployment" placeholder="e.g., text-embedding-3-small">
-                        <small style="color: var(--text-tertiary); font-size: 12px;">The exact deployment name in Azure OpenAI (must match exactly)</small>
+                        <small style="color: var(--text-tertiary); font-size: 12px;">Must match the deployment name in Azure OpenAI exactly</small>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">API Version (Azure only)</label>
+                        <input type="text" class="form-input" name="apiVersion" placeholder="e.g., 2024-06-01" value="2024-06-01">
                     </div>
                     <div class="form-group" id="embedding-dims-group">
                         <label class="form-label">Embedding Dimensions</label>
-                        <input type="number" class="form-input" name="dimensions" value="3072">
+                        <input type="number" class="form-input" name="dimensions" value="1536">
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--border); margin: 24px 0;">
+
+                    <div class="form-group">
+                        <label class="form-label">Authentication</label>
+                        <div style="display: flex; gap: 12px; margin-top: 4px;">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 12px 20px; border-radius: 8px; border: 2px solid var(--accent-primary); background: rgba(99,102,241,0.1); flex: 1; justify-content: center;" id="model-add-auth-key-label">
+                                <input type="radio" name="auth_type" value="key" checked onchange="toggleAuthFields(this.value)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                                <span style="font-weight: 600;">API Key</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 12px 20px; border-radius: 8px; border: 2px solid var(--border); background: transparent; flex: 1; justify-content: center;" id="model-add-auth-mi-label">
+                                <input type="radio" name="auth_type" value="managed-identity" onchange="toggleAuthFields(this.value)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                <span style="font-weight: 600;">Managed Identity</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="api-key-group">
+                        <div class="form-group">
+                            <label class="form-label">API Key</label>
+                            <input type="password" class="form-input" name="apiKey" placeholder="Paste your API key">
+                        </div>
+                    </div>
+                    <div id="client-id-group" style="display: none;">
+                        <input type="hidden" name="clientId" value="">
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px;">
+                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="20" height="20"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                <span style="font-weight: 600; color: var(--success);">No key needed</span>
+                            </div>
+                            <p style="margin: 0 0 12px 0; color: var(--text-secondary);">OmniVec uses the AKS cluster's workload identity to authenticate with Azure OpenAI. Just grant access:</p>
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Azure Portal (easiest):</p>
+                            <ol style="margin: 0 0 16px 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Open your Azure OpenAI resource → <strong>Access Control (IAM)</strong></li>
+                                <li>Click <strong>Add role assignment</strong></li>
+                                <li>Select role: <strong>Cognitive Services OpenAI User</strong></li>
+                                <li>Assign to: your AKS cluster's managed identity</li>
+                            </ol>
+                            <p style="margin: 0 0 4px 0; font-weight: 500;">Or via CLI:</p>
+                            <div style="background: var(--bg-secondary); padding: 10px; border-radius: 6px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \
+  --assignee &lt;aks-managed-identity-client-id&gt; \
+  --role "Cognitive Services OpenAI User" \
+  --scope &lt;azure-openai-resource-id&gt;</div>
+                        </div>
                     </div>
                 </form>
             </div>
