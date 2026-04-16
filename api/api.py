@@ -4,6 +4,7 @@
 import os
 import json
 import uuid
+import time
 import asyncio
 import logging
 import hashlib
@@ -18,15 +19,26 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
-# Initialize Azure Monitor telemetry (safe if connection string not set)
+# Initialize telemetry (in-memory MetricsStore always active; App Insights if configured)
 try:
-    from telemetry import init_telemetry, track_metric, track_histogram, track_event, Timer
+    from telemetry import (
+        init_telemetry, metrics_store,
+        record_embedding_batch, record_search, record_error,
+        record_request, record_failure,
+        track_metric, track_histogram, track_event, Timer,
+    )
     init_telemetry()
 except ImportError:
     # Telemetry module not available — define no-ops
     def track_metric(*a, **kw): pass
     def track_histogram(*a, **kw): pass
     def track_event(*a, **kw): pass
+    def record_embedding_batch(**kw): pass
+    def record_search(**kw): pass
+    def record_error(**kw): pass
+    def record_request(**kw): pass
+    def record_failure(**kw): pass
+    metrics_store = None
     class Timer:
         def __init__(self, *a, **kw): pass
         def __enter__(self): return self
@@ -220,6 +232,21 @@ async def security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Cache-Control"] = "no-store"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Track request latency and error rates for all API calls."""
+    start = time.time()
+    response = await call_next(request)
+    latency_ms = (time.time() - start) * 1000
+    path = request.url.path
+    # Skip metrics/health endpoints to avoid recursion noise
+    if not path.startswith("/api/metrics") and not path.startswith("/api/health"):
+        record_request(latency_ms, method=request.method, path=path)
+        if response.status_code >= 400:
+            record_error(status_code=response.status_code, path=path)
     return response
 
 # â”€â”€ test-connection timeout / retry config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -622,242 +649,130 @@ async def run_health_checks_now(section: str | None = None):
 
 
 # =============================================================================
-# METRICS
+# METRICS — powered by in-memory MetricsStore + App Insights (no CosmosDB)
 # =============================================================================
 
 @app.get("/api/metrics")
 def get_metrics():
-    """Get processing metrics for dashboard."""
-    store = get_store()
-    metrics_doc = store.get("global", "metrics")
+    """Get live processing metrics from in-memory store.
 
-    if not metrics_doc:
-        return {
-            "events_processed": 0,
-            "events_failed": 0,
-            "avg_processing_time_ms": None,
-            "today": {"processed": 0, "failed": 0},
-            "daily": [],
-            "pipelines": {},
-            "last_updated": None,
-        }
+    Primary dashboard endpoint. Returns throughput, latency, progress,
+    token usage, failure breakdown, per-pipeline stats.
+    No CosmosDB queries — reads from MetricsStore singleton.
+    """
+    if not metrics_store:
+        return {"error": "Metrics not available"}
 
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    today_data = metrics_doc.get("daily", {}).get(today_str, {})
+    snap = metrics_store.snapshot()
 
-    avg_time = None
-    total_completed = metrics_doc.get("events_processed", 0)
-    if total_completed > 0:
-        avg_time = round(
-            metrics_doc.get("total_processing_time_ms", 0) / total_completed, 1
-        )
-
-    daily_list = [
-        {"date": k, **v}
-        for k, v in sorted(metrics_doc.get("daily", {}).items())
-    ]
-
+    # Backward-compatible shape for existing dashboard
     return {
-        "events_processed": total_completed,
-        "events_failed": metrics_doc.get("events_failed", 0),
-        "avg_processing_time_ms": avg_time,
-        "total_processing_time_ms": metrics_doc.get("total_processing_time_ms", 0),
-        "today": {
-            "processed": today_data.get("processed", 0),
-            "failed": today_data.get("failed", 0),
+        "events_processed": snap["documents_embedded"],
+        "events_failed": snap["documents_failed"],
+        "avg_processing_time_ms": snap["embedding_latency"]["avg"],
+        "throughput_docs_per_sec": snap["throughput_docs_per_sec"],
+        "search_queries": snap["search_queries"],
+        "jobs_created": snap["jobs_created"],
+        "changefeed_batches": snap["changefeed_batches"],
+        # Latency distributions (5-min sliding window)
+        "latency": {
+            "embedding": snap["embedding_latency"],
+            "search": snap["search_latency"],
+            "request": snap["request_latency"],
         },
-        "daily": daily_list,
-        "pipelines": metrics_doc.get("pipelines", {}),
-        "last_updated": metrics_doc.get("last_updated"),
+        # Token usage
+        "tokens": snap["tokens"],
+        # Skipped documents
+        "skipped": snap["skipped"],
+        # Error breakdown
+        "errors": snap["errors"],
+        # Per-pipeline breakdown
+        "pipelines": snap["pipelines"],
+        # Meta
+        "started_at": snap["started_at"],
+        "uptime_seconds": snap["uptime_seconds"],
     }
 
 
-@app.get("/api/metrics/insights")
-async def get_insights_metrics():
-    """Get Application Insights metrics (request latency, errors, dependencies).
+@app.get("/api/metrics/live")
+def get_live_metrics():
+    """Full metrics snapshot — same as /api/metrics but explicit name."""
+    return get_metrics()
 
-    Queries the App Insights REST API using the connection string.
-    Returns empty data if App Insights is not configured.
-    """
+
+@app.get("/api/metrics/insights")
+def get_insights_metrics():
+    """App Insights status + portal link."""
     conn_str = os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
     if not conn_str:
         return {
             "enabled": False,
-            "message": "Application Insights not configured",
-            "request_latency_ms": None,
-            "error_rate_pct": None,
-            "requests_total": None,
-            "dependencies": [],
-            "custom_metrics": {},
+            "message": "Application Insights not configured. "
+                       "In-memory metrics are still active via /api/metrics.",
         }
 
-    # Parse connection string for app ID
     parts = dict(p.split("=", 1) for p in conn_str.split(";") if "=" in p)
     ikey = parts.get("InstrumentationKey", "")
-
-    # Query via the existing telemetry module's metric counters
-    try:
-        from telemetry import _counters, _histograms, _initialized
-
-        custom = {}
-        if _initialized:
-            # Read current counter values (OpenTelemetry counters are additive)
-            # We report what we know from the in-memory state
-            custom = {
-                "documents_embedded": "tracked",
-                "jobs_created": "tracked",
-                "jobs_failed": "tracked",
-                "search_queries": "tracked",
-                "embedding_latency_ms": "tracked",
-                "search_latency_ms": "tracked",
-            }
-    except ImportError:
-        custom = {}
-
-    # Also pull pipeline-level stats from our store for a combined view
-    store = get_store()
-    pipeline_metrics = []
-    for d in store.list("pipeline"):
-        p = _pipeline_from_doc(d)
-        stats = get_pipeline_stats(p.id)
-        pipeline_metrics.append({
-            "id": p.id,
-            "name": p.name,
-            "status": p.status.value if hasattr(p.status, 'value') else str(p.status),
-            "documents_processed": stats.documents_processed,
-            "embedded_count": stats.embedded_count,
-            "completion_pct": stats.completion_pct,
-            "jobs_total": stats.jobs.total if stats.jobs else 0,
-            "jobs_failed": stats.jobs.failed if stats.jobs else 0,
-            "throughput_docs_per_sec": stats.throughput_docs_per_sec,
-        })
 
     return {
         "enabled": True,
         "instrumentation_key": ikey[:8] + "..." if len(ikey) > 8 else ikey,
-        "custom_metrics": custom,
-        "pipelines": pipeline_metrics,
         "portal_url": f"https://portal.azure.com/#blade/AppInsightsExtension/OverviewBlade/InstrumentationKey/{ikey}" if ikey else None,
+        "metrics_endpoint": "/api/metrics",
+        "note": "All metrics are dual-written to App Insights (persistent) and in-memory (real-time).",
     }
 
 
 @app.delete("/api/metrics")
 def clear_metrics():
-    """Clear all metrics (global + timeseries buckets)."""
-    store = get_store()
-    try:
-        store.delete("global", "metrics")
-    except Exception:
-        pass
-    # Also clear timeseries buckets
-    try:
-        ts_docs = store.query(
-            "SELECT c.id FROM c WHERE c.doc_type = 'metric_ts'",
-            partition_key="metric_ts",
-        )
-        for d in ts_docs:
-            try:
-                store.delete(d["id"], "metric_ts")
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return {"success": True, "message": "Metrics cleared"}
+    """Reset all in-memory metrics counters."""
+    if metrics_store:
+        metrics_store.reset()
+    return {"success": True, "message": "In-memory metrics reset"}
 
 
 @app.post("/api/metrics/changefeed")
 def report_changefeed_metrics(payload: dict):
     """Report changefeed batch metrics from CFP.
-    Payload: {source_id, total, eligible, skipped_no_content, skipped_unchanged, jobs_created, partition}
+    Payload: {source_id, pipeline_id, total, eligible, skipped_no_content,
+              skipped_unchanged, jobs_created, tokens_used, latency_ms, partition}
     """
-    store = get_store()
     source_id = payload.get("source_id", "unknown")
+    pipeline_id = payload.get("pipeline_id", "")
     total = int(payload.get("total", 0))
     eligible = int(payload.get("eligible", 0))
     skipped_no_content = int(payload.get("skipped_no_content", 0))
     skipped_unchanged = int(payload.get("skipped_unchanged", 0))
     jobs_created = int(payload.get("jobs_created", 0))
-    partition = payload.get("partition", "")
+    tokens_used = int(payload.get("tokens_used", 0))
+    latency_ms = float(payload.get("latency_ms", 0))
+    failed = int(payload.get("failed", 0))
 
-    # Forward to Azure Monitor
-    track_metric("documents_embedded", eligible, {"source_id": source_id})
-    if jobs_created > 0:
-        track_metric("jobs_created", jobs_created, {"source_id": source_id})
+    # Feed into unified metrics system (in-memory + App Insights)
+    record_embedding_batch(
+        pipeline_id=pipeline_id, docs_embedded=eligible, docs_failed=failed,
+        docs_skipped_no_content=skipped_no_content,
+        docs_skipped_unchanged=skipped_unchanged,
+        jobs_created=jobs_created, tokens_used=tokens_used,
+        latency_ms=latency_ms, source_id=source_id,
+    )
 
-    # Get or create changefeed metrics doc
-    cf_doc = store.get("changefeed", "metrics")
-    if not cf_doc:
-        cf_doc = {
-            "id": "changefeed",
-            "doc_type": "metrics",
-            "total_batches": 0,
-            "total_docs": 0,
-            "total_eligible": 0,
-            "total_skipped_no_content": 0,
-            "total_skipped_unchanged": 0,
-            "total_jobs_created": 0,
-            "sources": {},
-        }
-
-    # Update totals
-    cf_doc["total_batches"] = cf_doc.get("total_batches", 0) + 1
-    cf_doc["total_docs"] = cf_doc.get("total_docs", 0) + total
-    cf_doc["total_eligible"] = cf_doc.get("total_eligible", 0) + eligible
-    cf_doc["total_skipped_no_content"] = cf_doc.get("total_skipped_no_content", 0) + skipped_no_content
-    cf_doc["total_skipped_unchanged"] = cf_doc.get("total_skipped_unchanged", 0) + skipped_unchanged
-    cf_doc["total_jobs_created"] = cf_doc.get("total_jobs_created", 0) + jobs_created
-    cf_doc["last_updated"] = datetime.utcnow().isoformat()
-
-    # Update per-source metrics
-    if source_id not in cf_doc.get("sources", {}):
-        cf_doc.setdefault("sources", {})[source_id] = {
-            "batches": 0,
-            "docs": 0,
-            "eligible": 0,
-            "skipped_no_content": 0,
-            "skipped_unchanged": 0,
-            "jobs_created": 0,
-        }
-    src = cf_doc["sources"][source_id]
-    src["batches"] = src.get("batches", 0) + 1
-    src["docs"] = src.get("docs", 0) + total
-    src["eligible"] = src.get("eligible", 0) + eligible
-    src["skipped_no_content"] = src.get("skipped_no_content", 0) + skipped_no_content
-    src["skipped_unchanged"] = src.get("skipped_unchanged", 0) + skipped_unchanged
-    src["jobs_created"] = src.get("jobs_created", 0) + jobs_created
-    src["last_partition"] = partition
-    src["last_updated"] = datetime.utcnow().isoformat()
-
-    store.upsert(cf_doc)
     return {"ok": True}
 
 
 @app.get("/api/metrics/changefeed")
 def get_changefeed_metrics():
-    """Get changefeed metrics including skip counts."""
-    store = get_store()
-    cf_doc = store.get("changefeed", "metrics")
-    if not cf_doc:
-        return {
-            "total_batches": 0,
-            "total_docs": 0,
-            "total_eligible": 0,
-            "total_skipped_no_content": 0,
-            "total_skipped_unchanged": 0,
-            "total_jobs_created": 0,
-            "sources": {},
-            "last_updated": None,
-        }
-
+    """Get changefeed metrics from in-memory store."""
+    if not metrics_store:
+        return {"error": "Metrics not available"}
+    snap = metrics_store.snapshot()
     return {
-        "total_batches": cf_doc.get("total_batches", 0),
-        "total_docs": cf_doc.get("total_docs", 0),
-        "total_eligible": cf_doc.get("total_eligible", 0),
-        "total_skipped_no_content": cf_doc.get("total_skipped_no_content", 0),
-        "total_skipped_unchanged": cf_doc.get("total_skipped_unchanged", 0),
-        "total_jobs_created": cf_doc.get("total_jobs_created", 0),
-        "sources": cf_doc.get("sources", {}),
-        "last_updated": cf_doc.get("last_updated"),
+        "total_batches": snap["changefeed_batches"],
+        "total_eligible": snap["documents_embedded"],
+        "total_skipped_no_content": snap["skipped"]["no_content"],
+        "total_skipped_unchanged": snap["skipped"]["unchanged"],
+        "total_jobs_created": snap["jobs_created"],
+        "pipelines": snap["pipelines"],
     }
 
 
@@ -977,62 +892,6 @@ def get_metrics_timeseries(
         "buckets": buckets,
     }
 
-
-@app.post("/api/metrics/backfill")
-def backfill_metrics():
-    """One-time backfill of metrics from existing job history."""
-    store = get_store()
-    metrics = {
-        "id": "global",
-        "doc_type": "metrics",
-        "events_processed": 0,
-        "events_failed": 0,
-        "total_processing_time_ms": 0.0,
-        "daily": {},
-        "pipelines": {},
-        "last_updated": datetime.utcnow().isoformat(),
-    }
-
-    for doc in store.list("job"):
-        job = _job_from_doc(doc)
-        if job.status not in (JobStatus.COMPLETED, JobStatus.FAILED):
-            continue
-
-        proc_time = 0.0
-        if job.started_at and job.completed_at:
-            proc_time = (job.completed_at - job.started_at).total_seconds() * 1000
-
-        if job.status == JobStatus.COMPLETED:
-            metrics["events_processed"] += 1
-        else:
-            metrics["events_failed"] += 1
-        metrics["total_processing_time_ms"] += proc_time
-
-        if job.completed_at:
-            day = job.completed_at.strftime("%Y-%m-%d")
-            if day not in metrics["daily"]:
-                metrics["daily"][day] = {"processed": 0, "failed": 0, "processing_time_ms": 0.0}
-            if job.status == JobStatus.COMPLETED:
-                metrics["daily"][day]["processed"] += 1
-            else:
-                metrics["daily"][day]["failed"] += 1
-            metrics["daily"][day]["processing_time_ms"] += proc_time
-
-        pid = job.pipeline_id
-        if pid not in metrics["pipelines"]:
-            metrics["pipelines"][pid] = {"processed": 0, "failed": 0, "processing_time_ms": 0.0}
-        if job.status == JobStatus.COMPLETED:
-            metrics["pipelines"][pid]["processed"] += 1
-        else:
-            metrics["pipelines"][pid]["failed"] += 1
-        metrics["pipelines"][pid]["processing_time_ms"] += proc_time
-
-    store.upsert(metrics)
-    return {
-        "message": "Backfill complete",
-        "events_processed": metrics["events_processed"],
-        "events_failed": metrics["events_failed"],
-    }
 
 
 # =============================================================================
@@ -2551,7 +2410,6 @@ def _merge_results(index_results: list, strategy: str, top_k: int) -> list:
         all_results.sort(key=lambda r: r["score"], reverse=True)
         if strategy != "per_index":
             all_results = all_results[:top_k]
-        track_histogram("search_latency", (time.time() - _search_start) * 1000)
         return all_results
 
 
@@ -2560,7 +2418,6 @@ async def playground_search(req: SearchRequest):
     """Search vectors across one or more indexes using query embedding."""
     import time
 
-    track_metric("search_queries", 1)
     _search_start = time.time()
 
     if not req.destination_ids:
@@ -2695,6 +2552,14 @@ async def playground_search(req: SearchRequest):
         indexes_searched.append(entry)
 
     embedding_dims = len(next(iter(embeddings.values()))) if embeddings else 0
+
+    total_latency_ms = int((time.time() - _search_start) * 1000)
+    record_search(
+        latency_ms=total_latency_ms,
+        embed_latency_ms=embed_time,
+        tokens_used=0,  # TODO: parse from embed_result.get("usage", {}).get("total_tokens", 0)
+        results_count=len(merged),
+    )
 
     return {
         "query": req.query,

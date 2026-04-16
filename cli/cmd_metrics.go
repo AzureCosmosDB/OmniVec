@@ -11,7 +11,7 @@ func newMetricsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "metrics",
 		Aliases: []string{"metric", "stats"},
-		Short:   "Show pipeline and system metrics",
+		Short:   "Show live pipeline and system metrics",
 	}
 	cmd.AddCommand(
 		newMetricsSummaryCmd(),
@@ -23,7 +23,7 @@ func newMetricsCmd() *cobra.Command {
 func newMetricsSummaryCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "summary",
-		Short: "Show pipeline processing summary",
+		Short: "Show live processing metrics (throughput, latency, progress)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := getClient()
 			data, err := c.Get("/api/metrics", nil)
@@ -39,33 +39,77 @@ func newMetricsSummaryCmd() *cobra.Command {
 			}
 
 			resp := parseJSONObject(data)
-			processed := toFloat(resp["events_processed"])
-			failed := toFloat(resp["events_failed"])
-			avgTime := resp["avg_processing_time_ms"]
 
-			fmt.Println("OmniVec Processing Metrics")
-			fmt.Println("─────────────────────────────")
-			fmt.Printf("Documents Processed: %.0f\n", processed)
-			fmt.Printf("Documents Failed:    %.0f\n", failed)
-			if avgTime != nil {
-				fmt.Printf("Avg Processing Time: %.1fms\n", toFloat(avgTime))
+			fmt.Println("OmniVec Live Metrics")
+			fmt.Println("════════════════════════════════════════")
+
+			// Primary: throughput, latency, progress
+			fmt.Println("\n▸ Pipeline Progress")
+			fmt.Printf("  Documents Embedded:  %.0f\n", toFloat(resp["events_processed"]))
+			fmt.Printf("  Documents Failed:    %.0f\n", toFloat(resp["events_failed"]))
+			fmt.Printf("  Throughput:          %s\n", formatThroughput(resp["throughput_docs_per_sec"]))
+			fmt.Printf("  Jobs Created:        %.0f\n", toFloat(resp["jobs_created"]))
+			fmt.Printf("  Changefeed Batches:  %.0f\n", toFloat(resp["changefeed_batches"]))
+
+			fmt.Println("\n▸ Latency (5-min window)")
+			if lat, ok := resp["latency"].(map[string]any); ok {
+				printLatency("  Embedding", lat["embedding"])
+				printLatency("  Search   ", lat["search"])
+				printLatency("  Request  ", lat["request"])
 			}
 
-			if today, ok := resp["today"].(map[string]any); ok {
-				fmt.Println("\nToday:")
-				fmt.Printf("  Processed: %.0f\n", toFloat(today["processed"]))
-				fmt.Printf("  Failed:    %.0f\n", toFloat(today["failed"]))
+			// Secondary: tokens, skips, errors
+			if tok, ok := resp["tokens"].(map[string]any); ok {
+				fmt.Println("\n▸ Token Usage")
+				fmt.Printf("  Embedding: %s\n", fmtInt(tok["embedding"]))
+				fmt.Printf("  Search:    %s\n", fmtInt(tok["search"]))
+				fmt.Printf("  Total:     %s\n", fmtInt(tok["total"]))
 			}
 
-			if pipelines, ok := resp["pipelines"].(map[string]any); ok && len(pipelines) > 0 {
-				fmt.Println("\nPer Pipeline:")
-				for id, v := range pipelines {
-					if pm, ok := v.(map[string]any); ok {
-						fmt.Printf("  %s: %.0f processed, %.0f failed\n",
-							id, toFloat(pm["processed"]), toFloat(pm["failed"]))
+			if skip, ok := resp["skipped"].(map[string]any); ok {
+				total := toFloat(skip["total"])
+				if total > 0 {
+					fmt.Println("\n▸ Skipped Documents")
+					fmt.Printf("  No Content: %.0f\n", toFloat(skip["no_content"]))
+					fmt.Printf("  Unchanged:  %.0f\n", toFloat(skip["unchanged"]))
+				}
+			}
+
+			if errs, ok := resp["errors"].(map[string]any); ok {
+				e4 := toFloat(errs["client_4xx"])
+				e5 := toFloat(errs["server_5xx"])
+				if e4+e5 > 0 {
+					fmt.Println("\n▸ Errors")
+					fmt.Printf("  Client (4xx): %.0f\n", e4)
+					fmt.Printf("  Server (5xx): %.0f\n", e5)
+					if ft, ok := errs["failure_types"].(map[string]any); ok && len(ft) > 0 {
+						fmt.Println("  Failure Types:")
+						for k, v := range ft {
+							fmt.Printf("    %s: %.0f\n", k, toFloat(v))
+						}
 					}
 				}
 			}
+
+			// Per-pipeline
+			if pipelines, ok := resp["pipelines"].(map[string]any); ok && len(pipelines) > 0 {
+				fmt.Println("\n▸ Per Pipeline")
+				fmt.Printf("  %-20s %8s %8s %8s %8s\n", "PIPELINE", "EMBEDDED", "FAILED", "SKIPPED", "TOKENS")
+				for id, v := range pipelines {
+					if pm, ok := v.(map[string]any); ok {
+						short := id
+						if len(short) > 18 {
+							short = short[:18] + ".."
+						}
+						skipped := toFloat(pm["skipped_no_content"]) + toFloat(pm["skipped_unchanged"])
+						fmt.Printf("  %-20s %8.0f %8.0f %8.0f %8s\n",
+							short, toFloat(pm["embedded"]), toFloat(pm["failed"]),
+							skipped, fmtInt(pm["tokens"]))
+					}
+				}
+			}
+
+			fmt.Printf("\nUptime: %ds\n", int(toFloat(resp["uptime_seconds"])))
 			return nil
 		},
 	}
@@ -74,7 +118,7 @@ func newMetricsSummaryCmd() *cobra.Command {
 func newMetricsInsightsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "insights",
-		Short: "Show Application Insights metrics and pipeline health",
+		Short: "Show Application Insights connection status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := getClient()
 			data, err := c.Get("/api/metrics/insights", nil)
@@ -90,53 +134,41 @@ func newMetricsInsightsCmd() *cobra.Command {
 			}
 
 			resp := parseJSONObject(data)
-
 			enabled, _ := resp["enabled"].(bool)
 			if !enabled {
 				fmt.Println("Application Insights: not configured")
-				fmt.Println("  Deploy with azd up to enable telemetry.")
+				fmt.Println("  In-memory metrics are active via: omnivec metrics summary")
+				fmt.Println("  Deploy with azd up to enable App Insights (persistent, multi-replica).")
 				return nil
 			}
 
-			fmt.Println("Application Insights: enabled")
+			fmt.Println("Application Insights: ● enabled")
 			if ikey, ok := resp["instrumentation_key"].(string); ok {
-				fmt.Printf("  Instrumentation Key: %s\n", ikey)
+				fmt.Printf("  Key:    %s\n", ikey)
 			}
 			if url, ok := resp["portal_url"].(string); ok {
-				fmt.Printf("  Azure Portal: %s\n", url)
+				fmt.Printf("  Portal: %s\n", url)
 			}
-
-			// Custom metrics
-			if cm, ok := resp["custom_metrics"].(map[string]any); ok && len(cm) > 0 {
-				fmt.Println("\nTracked Metrics:")
-				for k := range cm {
-					fmt.Printf("  ✓ %s\n", k)
-				}
-			}
-
-			// Pipeline health
-			if pipelines, ok := resp["pipelines"].([]any); ok && len(pipelines) > 0 {
-				fmt.Println("\nPipeline Health:")
-				fmt.Printf("  %-16s %-20s %-8s %8s %8s %6s %10s\n", "ID", "NAME", "STATUS", "EMBEDDED", "FAILED", "PCT", "THROUGHPUT")
-				for _, p := range pipelines {
-					if pm, ok := p.(map[string]any); ok {
-						name := pm["name"]
-						if s, ok := name.(string); ok && len(s) > 18 {
-							name = s[:18] + ".."
-						}
-						fmt.Printf("  %-16s %-20s %-8s %8.0f %8.0f %5.1f%% %8s\n",
-							pm["id"], name, pm["status"],
-							toFloat(pm["embedded_count"]),
-							toFloat(pm["jobs_failed"]),
-							toFloat(pm["completion_pct"]),
-							formatThroughput(pm["throughput_docs_per_sec"]),
-						)
-					}
-				}
-			}
+			fmt.Println("\n  All metrics are dual-written:")
+			fmt.Println("  • In-memory → /api/metrics (real-time dashboard)")
+			fmt.Println("  • App Insights (persistent, aggregated across replicas)")
 			return nil
 		},
 	}
+}
+
+func printLatency(label string, v any) {
+	if v == nil {
+		fmt.Printf("%s: —\n", label)
+		return
+	}
+	lat, ok := v.(map[string]any)
+	if !ok || toFloat(lat["count"]) == 0 {
+		fmt.Printf("%s: —\n", label)
+		return
+	}
+	fmt.Printf("%s: avg=%.0fms  p95=%.0fms  p99=%.0fms  (n=%.0f)\n",
+		label, toFloat(lat["avg"]), toFloat(lat["p95"]), toFloat(lat["p99"]), toFloat(lat["count"]))
 }
 
 func formatThroughput(v any) string {
@@ -147,7 +179,20 @@ func formatThroughput(v any) string {
 	if f == 0 {
 		return "—"
 	}
-	return fmt.Sprintf("%.1f/s", f)
+	return fmt.Sprintf("%.1f docs/sec", f)
 }
 
+func fmtInt(v any) string {
+	f := toFloat(v)
+	if f == 0 {
+		return "0"
+	}
+	if f >= 1000000 {
+		return fmt.Sprintf("%.1fM", f/1000000)
+	}
+	if f >= 1000 {
+		return fmt.Sprintf("%.1fK", f/1000)
+	}
+	return fmt.Sprintf("%.0f", f)
+}
 

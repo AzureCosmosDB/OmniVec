@@ -982,8 +982,8 @@
                             <div class="stat-value" id="stat-throughput" style="color: var(--accent-primary);">--</div>
                             <div class="stat-trend" id="stat-throughput-label">docs/sec</div>
                         </div>
-                        <div class="stat-card" id="stat-insights-card" style="display:none;">
-                            <div class="stat-label">Telemetry</div>
+                        <div class="stat-card" id="stat-insights-card">
+                            <div class="stat-label">Avg Latency</div>
                             <div class="stat-value" id="stat-insights-status" style="font-size:1rem;">—</div>
                             <div class="stat-trend" id="stat-insights-link"></div>
                         </div>
@@ -2577,36 +2577,55 @@
                 document.getElementById('destinations-count').textContent = destinations.length;
                 document.getElementById('pipelines-count').textContent = pipelines.length;
 
-                // Update stats
+                // Update stats from in-memory metrics (no CosmosDB reads)
                 const metrics = metricsRes.ok ? await metricsRes.json() : {};
                 document.getElementById('stat-sources').textContent = sources.length;
                 document.getElementById('stat-destinations').textContent = destinations.length;
                 document.getElementById('stat-pipelines').textContent = pipelines.length;
-                // Aggregate embedded/total across active pipelines
-                let totalSourceDocs = 0, totalEmbedded = 0;
+
+                // Embedded count — prefer live metrics, fallback to pipeline stats
+                const liveEmbedded = metrics.events_processed || 0;
+                let totalSourceDocs = 0;
                 let hasSourceData = false;
                 pipelines.filter(p => p.status === 'active').forEach(p => {
                     if (p.stats?.source_doc_count != null) {
                         totalSourceDocs += p.stats.source_doc_count;
                         hasSourceData = true;
                     }
-                    totalEmbedded += p.stats?.embedded_count || 0;
                 });
-                const overallPct = hasSourceData && totalSourceDocs > 0 ? (totalEmbedded / totalSourceDocs * 100).toFixed(1) : null;
-                document.getElementById('stat-events').textContent = hasSourceData ? totalEmbedded.toLocaleString() + ' / ' + totalSourceDocs.toLocaleString() : '--';
+                const overallPct = hasSourceData && totalSourceDocs > 0 ? (liveEmbedded / totalSourceDocs * 100).toFixed(1) : null;
+                document.getElementById('stat-events').textContent = liveEmbedded > 0
+                    ? liveEmbedded.toLocaleString() + (hasSourceData ? ' / ' + totalSourceDocs.toLocaleString() : '')
+                    : '--';
                 document.getElementById('stat-events-today').textContent = overallPct != null ? overallPct + '% complete' : '';
-                document.getElementById('stat-failed').textContent = (metrics.events_failed || 0).toLocaleString();
-                document.getElementById('stat-failed-today').textContent = 'Today: ' + (metrics.today?.failed || 0);
 
-                // Aggregate throughput across active pipelines
-                let totalThroughput = 0;
-                let hasThroughput = false;
-                pipelines.filter(p => p.status === 'active').forEach(p => {
-                    const tp = p.stats?.throughput_docs_per_sec || p.stats?.recent_throughput_docs_per_sec;
-                    if (tp) { totalThroughput += tp; hasThroughput = true; }
-                });
-                document.getElementById('stat-throughput').textContent = hasThroughput ? totalThroughput.toFixed(1) : '--';
-                document.getElementById('stat-throughput-label').textContent = hasThroughput ? 'docs/sec (active pipelines)' : 'docs/sec';
+                // Failed — from live metrics
+                const totalFailed = metrics.events_failed || 0;
+                document.getElementById('stat-failed').textContent = totalFailed.toLocaleString();
+                const skipTotal = metrics.skipped?.total || 0;
+                document.getElementById('stat-failed-today').textContent = skipTotal > 0
+                    ? skipTotal.toLocaleString() + ' skipped'
+                    : '';
+
+                // Throughput — from live metrics (rolling 60s window)
+                const liveThroughput = metrics.throughput_docs_per_sec || 0;
+                document.getElementById('stat-throughput').textContent = liveThroughput > 0 ? liveThroughput.toFixed(1) : '--';
+                document.getElementById('stat-throughput-label').textContent = liveThroughput > 0 ? 'docs/sec (live)' : 'docs/sec';
+
+                // Latency card — show avg embedding latency
+                const avgLatency = metrics.latency?.embedding?.avg;
+                const latencyCard = document.getElementById('stat-insights-card');
+                if (latencyCard) {
+                    latencyCard.style.display = '';
+                    const p95 = metrics.latency?.embedding?.p95;
+                    document.getElementById('stat-insights-status').innerHTML = avgLatency != null
+                        ? '<span style="color:var(--accent-primary);">' + avgLatency + 'ms</span>'
+                        : '<span>—</span>';
+                    document.getElementById('stat-insights-link').innerHTML = p95 != null
+                        ? 'p95: ' + p95 + 'ms'
+                        + (metrics.tokens?.total ? ' · ' + metrics.tokens.total.toLocaleString() + ' tokens' : '')
+                        : (metrics.tokens?.total ? metrics.tokens.total.toLocaleString() + ' tokens' : 'No data yet');
+                }
 
                 // Render tables
                 renderSources();
@@ -2628,26 +2647,6 @@
                             navBadge.style.color = '#fff';
                         } else {
                             navBadge.style.display = 'none';
-                        }
-                    }
-                } catch (e) {}
-
-                // Fetch App Insights telemetry status
-                try {
-                    const insRes = await apiFetch('/api/metrics/insights');
-                    if (insRes.ok) {
-                        const ins = await insRes.json();
-                        const card = document.getElementById('stat-insights-card');
-                        if (ins.enabled) {
-                            card.style.display = '';
-                            document.getElementById('stat-insights-status').innerHTML =
-                                '<span style="color:var(--success);">● Active</span>';
-                            const tracked = Object.keys(ins.custom_metrics || {}).length;
-                            const linkEl = document.getElementById('stat-insights-link');
-                            linkEl.innerHTML = tracked + ' metrics tracked' +
-                                (ins.portal_url ? ' · <a href="' + ins.portal_url + '" target="_blank" style="color:var(--accent-primary);">Portal ↗</a>' : '');
-                        } else {
-                            card.style.display = 'none';
                         }
                     }
                 } catch (e) {}
