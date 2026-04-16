@@ -315,8 +315,10 @@ if [ "$FROM_STEP" -le 4 ]; then
   export PGSSLMODE="require"
 
   log "  Creating database: $PG_DB"
+  # Drop if exists (clean slate for re-runs)
+  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d postgres -c "DROP DATABASE IF EXISTS $PG_DB;" 2>/dev/null || true
   psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d postgres -c "CREATE DATABASE $PG_DB;" 2>/dev/null || true
-  log_ok "Database created."
+  log_ok "Database created (clean)."
 
   log "  Creating tables..."
   if ! psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
@@ -397,11 +399,23 @@ if [ "$FROM_STEP" -le 6 ]; then
   log_step 6 "Creating PostgreSQL source and pgvector destination..."
 
   if [ -z "${PG_HOST:-}" ]; then
-    INSTANCE_TOKEN=$(echo "$AKS_CLUSTER" | tr -d '\r' | sed 's/omnivec-aks-//')
     PG_SERVER="omnivec-pgdemo-$INSTANCE_TOKEN"
     PG_HOST="$PG_SERVER.postgres.database.azure.com"
     PG_PORT=5432
     PG_DB="omnivec_demo"
+  fi
+
+  # Clean up any existing demo resources first
+  if [ -n "$SERVER_URL" ] && [ -n "$ADMIN_TOKEN" ]; then
+    _old_pips=$(api_get "/api/pipelines" 2>/dev/null || true)
+    _old_pid=$(echo "$_old_pips" | grep "pgvector-demo" | grep -o '"id":"pip-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    [ -n "$_old_pid" ] && { api_delete "/api/pipelines/$_old_pid"; log "  Cleaned up old pipeline: $_old_pid"; }
+    _old_srcs=$(api_get "/api/sources" 2>/dev/null || true)
+    _old_sid=$(echo "$_old_srcs" | grep "pg-demo" | grep -o '"id":"src-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    [ -n "$_old_sid" ] && { api_delete "/api/sources/$_old_sid"; log "  Cleaned up old source: $_old_sid"; }
+    _old_dsts=$(api_get "/api/destinations" 2>/dev/null || true)
+    _old_did=$(echo "$_old_dsts" | grep "pg-demo" | grep -o '"id":"dst-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+    [ -n "$_old_did" ] && { api_delete "/api/destinations/$_old_did"; log "  Cleaned up old destination: $_old_did"; }
   fi
 
   SRC_BODY="{\"name\":\"pg-demo-source\",\"type\":\"postgresql\",\"config\":{\"host\":\"$PG_HOST\",\"port\":$PG_PORT,\"database\":\"$PG_DB\",\"table\":\"documents\",\"user\":\"$PG_ADMIN\",\"password\":\"$PG_ADMIN_PASSWORD\",\"ssl_mode\":\"require\",\"id_column\":\"id\",\"timestamp_column\":\"updated_at\"}}"
@@ -428,28 +442,57 @@ if [ "$FROM_STEP" -le 7 ]; then
     MODEL_ID=$(echo "$MODELS_RAW" | grep -o '"id":"mdl-ext-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
   fi
 
+  if [ -z "${SOURCE_ID:-}" ]; then
+    _srcs=$(api_get "/api/sources" 2>/dev/null || true)
+    SOURCE_ID=$(echo "$_srcs" | grep -o '"id":"src-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+  fi
+  if [ -z "${DEST_ID:-}" ]; then
+    _dsts=$(api_get "/api/destinations" 2>/dev/null || true)
+    DEST_ID=$(echo "$_dsts" | grep -o '"id":"dst-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+  fi
+
   PIP_BODY="{\"name\":\"pgvector-demo-pipeline\",\"sources\":[{\"source_id\":\"$SOURCE_ID\",\"filters\":{},\"content_fields\":[\"content\"]}],\"destination_id\":\"$DEST_ID\",\"docgrok_pipeline\":\"$MODEL_ID\",\"vector_index_path\":\"embedding\",\"process_existing\":true,\"processing_mode\":\"queue\",\"content_strategy\":\"truncate\"}"
   PIP_RESP=$(api_post "/api/pipelines" "$PIP_BODY")
   PIP_ID=$(echo "$PIP_RESP" | grep -o '"id":"pip-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
   log_ok "Pipeline created: $PIP_ID"
 
-  log "  Waiting for documents to be embedded..."
+  # Trigger source sync to kick the changefeed processor
+  log "  Triggering source sync..."
+  api_post "/api/sources/$SOURCE_ID/sync" "{}" >/dev/null 2>&1 || true
+  api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null 2>&1 || true
+
+  log "  Waiting for documents to be embedded (checking pgvector table directly)..."
+
+  if [ -z "${PG_HOST:-}" ]; then
+    PG_SERVER="omnivec-pgdemo-$INSTANCE_TOKEN"
+    PG_HOST="$PG_SERVER.postgres.database.azure.com"
+    PG_PORT=5432
+    PG_DB="omnivec_demo"
+  fi
+
   _waited=0
   _embedded=0
-  while [ "$_waited" -lt 120 ]; do
-    sleep 10
-    _waited=$((_waited + 10))
-    _stats=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
-    _embedded=$(echo "$_stats" | grep -o '"embedded_count":[0-9]*' | head -1 | cut -d: -f2)
+  export PGPASSWORD="$PG_ADMIN_PASSWORD"
+  export PGSSLMODE="require"
+  while [ "$_waited" -lt 180 ]; do
+    sleep 15
+    _waited=$((_waited + 15))
+    # Check pgvector table directly — more reliable than API stats for PG pipelines
+    _embedded=$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -t -c "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
     _embedded=${_embedded:-0}
-    _pct=$(echo "$_stats" | grep -o '"completion_pct":[0-9.]*' | head -1 | cut -d: -f2)
     if [ "$_embedded" -ge 3 ] 2>/dev/null; then
-      log_ok "Queue mode: $_embedded documents embedded ($_pct%)"
+      log_ok "Queue mode: $_embedded documents embedded in pgvector!"
       break
     fi
-    log "  Waiting... ($_embedded embedded, ${_pct:-0}%)"
+    log "  Waiting... ($_embedded/3 embedded, ${_waited}s)"
   done
-  [ "$_embedded" -lt 3 ] 2>/dev/null && log_warn "Only $_embedded/3 documents embedded after 120s"
+  unset PGPASSWORD PGSSLMODE
+
+  if [ "$_embedded" -lt 3 ] 2>/dev/null; then
+    log_warn "Only $_embedded/3 documents embedded after 180s"
+    log "  Checking changefeed logs for errors..."
+    kubectl --context "${KUBE_CONTEXT:-omnivec}" logs -l app=omnivec-cosmos-changefeed -n omnivec --tail=10 2>/dev/null | grep -i "error\|fail\|postgres" | tail -5
+  fi
 
   save_checkpoint 7
 fi
