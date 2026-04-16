@@ -2181,11 +2181,18 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">Authentication</label>
-                        <select class="form-input" name="auth_type" onchange="toggleAuthFields(this.value)">
-                            <option value="key">API Key</option>
-                            <option value="managed-identity">Managed Identity</option>
-                        </select>
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Use managed identity for keyless access via Azure workload identity</small>
+                        <div style="display: flex; gap: 12px; margin-top: 4px;">
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 20px; border-radius: 8px; border: 2px solid var(--accent-primary); background: rgba(99,102,241,0.1); flex: 1; justify-content: center;" id="model-add-auth-key-label">
+                                <input type="radio" name="auth_type" value="key" checked onchange="toggleAuthFields(this.value)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                                <span style="font-weight: 500;">API Key</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 10px 20px; border-radius: 8px; border: 2px solid var(--border); background: transparent; flex: 1; justify-content: center;" id="model-add-auth-mi-label">
+                                <input type="radio" name="auth_type" value="managed-identity" onchange="toggleAuthFields(this.value)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                <span style="font-weight: 500;">Managed Identity</span>
+                            </label>
+                        </div>
                     </div>
                     <div class="form-group" id="api-key-group">
                         <label class="form-label">API Key</label>
@@ -2194,6 +2201,13 @@
                     <div class="form-group" id="client-id-group" style="display: none;">
                         <label class="form-label">Client ID (optional)</label>
                         <input type="text" class="form-input" name="clientId" placeholder="Managed identity client ID (uses workload identity if empty)">
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 12px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500; color: var(--text-secondary);">Grant access to your Azure OpenAI resource:</p>
+                            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \
+  --assignee &lt;managed-identity-client-id&gt; \
+  --role "Cognitive Services OpenAI User" \
+  --scope /subscriptions/.../Microsoft.CognitiveServices/accounts/&lt;name&gt;</div>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label class="form-label">API Version (Azure only)</label>
@@ -6754,7 +6768,21 @@
                                 <div id="model-update-key-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
                             </div>
                             <div id="model-auth-mi-section-${extModel.id}" style="display: ${curAuth === 'managed-identity' ? 'block' : 'none'};">
-                                <p style="font-size: 13px; color: var(--text-tertiary); margin: 0 0 12px 0;">Uses Azure Workload Identity. Optionally specify a client ID.</p>
+                                <div style="background: var(--bg-secondary); border-radius: 8px; padding: 16px; margin-bottom: 12px; font-size: 13px;">
+                                    <p style="margin: 0 0 12px 0; font-weight: 500;">Uses Azure Workload Identity — no API key needed.</p>
+                                    <p style="margin: 0 0 12px 0; color: var(--text-secondary);">Grant the AKS managed identity access to your Azure OpenAI resource:</p>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Bash / Linux:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 12px; border-radius: 6px; margin: 4px 0 8px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \\
+  --assignee &lt;managed-identity-client-id&gt; \\
+  --role "Cognitive Services OpenAI User" \\
+  --scope /subscriptions/&lt;sub-id&gt;/resourceGroups/&lt;rg&gt;/providers/Microsoft.CognitiveServices/accounts/&lt;name&gt;</div>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">PowerShell / Windows:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 12px; border-radius: 6px; margin: 4px 0 12px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \`
+  --assignee &lt;managed-identity-client-id&gt; \`
+  --role "Cognitive Services OpenAI User" \`
+  --scope /subscriptions/&lt;sub-id&gt;/resourceGroups/&lt;rg&gt;/providers/Microsoft.CognitiveServices/accounts/&lt;name&gt;</div>
+                                    <p style="margin: 0 0 8px 0; color: var(--text-secondary);"><strong>Azure Portal:</strong> Azure OpenAI resource → Access Control (IAM) → Add role assignment → "Cognitive Services OpenAI User" → Assign to your AKS managed identity</p>
+                                </div>
                                 <div style="display: flex; gap: 8px; align-items: center;">
                                     <input type="text" class="form-input" id="model-update-clientid-${extModel.id}" placeholder="Client ID (optional — uses workload identity if empty)" value="${extModel.client_id || ''}" style="flex: 1;">
                                     <button class="btn btn-primary" onclick="updateModelAuth('${extModel.id}', 'managed-identity')">Save</button>
@@ -6959,12 +6987,18 @@
         function toggleAuthFields(authType) {
             const keyGroup = document.getElementById('api-key-group');
             const clientIdGroup = document.getElementById('client-id-group');
+            const keyLabel = document.getElementById('model-add-auth-key-label');
+            const miLabel = document.getElementById('model-add-auth-mi-label');
             if (authType === 'managed-identity') {
                 if (keyGroup) keyGroup.style.display = 'none';
                 if (clientIdGroup) clientIdGroup.style.display = 'block';
+                if (keyLabel) { keyLabel.style.borderColor = 'var(--border)'; keyLabel.style.background = 'transparent'; }
+                if (miLabel) { miLabel.style.borderColor = 'var(--accent-primary)'; miLabel.style.background = 'rgba(34,197,94,0.1)'; }
             } else {
                 if (keyGroup) keyGroup.style.display = 'block';
                 if (clientIdGroup) clientIdGroup.style.display = 'none';
+                if (keyLabel) { keyLabel.style.borderColor = 'var(--accent-primary)'; keyLabel.style.background = 'rgba(99,102,241,0.1)'; }
+                if (miLabel) { miLabel.style.borderColor = 'var(--border)'; miLabel.style.background = 'transparent'; }
             }
         }
 
