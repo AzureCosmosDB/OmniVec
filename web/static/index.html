@@ -2071,7 +2071,13 @@
                                 <div id="pl-dest-existing-test-result" style="margin-top: 8px;"></div>
                                 <div class="form-group" id="pl-dest-vector-policy-group" style="display: none; margin-top: 12px;">
                                     <label class="form-label">Vector Embedding Policy</label>
-                                    <select class="form-input" id="pl-dest-vector-policy"></select>
+                                    <div style="display: flex; gap: 8px;">
+                                        <select class="form-input" id="pl-dest-vector-policy" style="flex: 1;"></select>
+                                        <button type="button" class="btn btn-secondary" onclick="loadVectorPoliciesForDest()" style="white-space: nowrap;" title="Refresh embedding policies">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                                            Refresh
+                                        </button>
+                                    </div>
                                     <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
                                         Select which vector embedding field to use for this pipeline
                                     </small>
