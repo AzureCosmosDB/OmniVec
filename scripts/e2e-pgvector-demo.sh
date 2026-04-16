@@ -61,6 +61,14 @@ die()      { log_err "$1"; exit 1; }
 
 save_checkpoint() { echo "$1" > "$CHECKPOINT_FILE"; }
 
+PG_PASSWORD_FILE="$ROOT_DIR/.e2e-pgvector-password"
+
+# Load saved PG password if not provided
+if [ -z "$PG_ADMIN_PASSWORD" ] && [ -f "$PG_PASSWORD_FILE" ]; then
+  PG_ADMIN_PASSWORD=$(cat "$PG_PASSWORD_FILE" | tr -d '\r\n')
+  [ -n "$PG_ADMIN_PASSWORD" ] && log_ok "Loaded PG password from previous run."
+fi
+
 azd_get() { val=$(azd env get-value "$1" 2>/dev/null) && printf '%s' "$val" | tr -d '\r' || true; }
 
 api_get()    { curl -sf --max-time 30 -H "Authorization: Bearer $ADMIN_TOKEN" "$SERVER_URL$1"; }
@@ -104,6 +112,8 @@ if [ -z "$PG_ADMIN_PASSWORD" ]; then
   PG_ADMIN_PASSWORD="OmniVec-Demo-$(shuf -i 1000-9999 -n 1 2>/dev/null || echo $$)!"
   log_ok "Generated PG admin password: $PG_ADMIN_PASSWORD"
 fi
+# Save password for resume across runs
+echo "$PG_ADMIN_PASSWORD" > "$PG_PASSWORD_FILE"
 PG_ADMIN="omnivecadmin"
 
 # ─── Existing deployment mode ────────────────────────────────────────────────
@@ -294,6 +304,7 @@ if [ "$FROM_STEP" -le 4 ]; then
   fi
 
   export PGPASSWORD="$PG_ADMIN_PASSWORD"
+  export PGSSLMODE="require"
 
   log "  Creating database: $PG_DB"
   psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d postgres -c "CREATE DATABASE $PG_DB;" 2>/dev/null || true
@@ -444,8 +455,9 @@ if [ "$FROM_STEP" -le 8 ]; then
   fi
 
   export PGPASSWORD="$PG_ADMIN_PASSWORD"
+  export PGSSLMODE="require"
   _count=$(psql -h "$PG_HOST" -p 5432 -U "$PG_ADMIN" -d "$PG_DB" -t -c "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
-  unset PGPASSWORD
+  unset PGPASSWORD PGSSLMODE
 
   if [ "$_count" -ge 3 ] 2>/dev/null; then
     log_ok "pgvector table has $_count rows with embeddings!"
