@@ -739,7 +739,31 @@ async def get_metrics():
     rows = await asyncio.to_thread(_run_kql, kql, timedelta(days=7))
 
     if rows is None:
-        # App Insights not configured
+        # App Insights not configured — fallback to CosmosDB inline metrics
+        try:
+            store = get_store()
+            doc = store.get("global", "metrics")
+            if doc and doc.get("pipelines"):
+                total_processed = doc.get("events_processed", 0)
+                total_failed = doc.get("events_failed", 0)
+                total_time_ms = 0.0
+                for pdata in doc["pipelines"].values():
+                    total_time_ms += pdata.get("total_time_ms", 0.0)
+                avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
+                return {
+                    "events_processed": total_processed,
+                    "events_failed": total_failed,
+                    "avg_processing_time_ms": avg_lat,
+                    "throughput_docs_per_sec": 0,
+                    "search_queries": 0,
+                    "latency": {"embedding": {"avg": avg_lat, "p95": None}, "search": {}, "request": {}},
+                    "tokens": {"total": 0},
+                    "skipped": {"total": 0},
+                    "errors": {"total": total_failed},
+                    "source": "cosmos_inline",
+                }
+        except Exception:
+            pass
         return {
             "events_processed": 0,
             "events_failed": 0,
@@ -751,7 +775,6 @@ async def get_metrics():
             "skipped": {"total": 0},
             "errors": {"total": 0},
             "source": "unavailable",
-            "message": "App Insights not configured. Deploy with azd up to enable metrics.",
         }
 
     m = {}
@@ -792,12 +815,6 @@ def get_insights_metrics():
         "instrumentation_key": ikey[:8] + "..." if len(ikey) > 8 else ikey,
         "portal_url": f"https://portal.azure.com/#blade/AppInsightsExtension/OverviewBlade/InstrumentationKey/{ikey}" if ikey else None,
     }
-
-
-@app.delete("/api/metrics")
-def clear_metrics():
-    """Clear is not applicable — metrics are in App Insights."""
-    return {"success": False, "message": "Metrics are stored in App Insights and cannot be cleared from here. Use Azure Portal to manage retention."}
 
 
 @app.post("/api/metrics/changefeed")
@@ -856,6 +873,90 @@ async def get_changefeed_metrics():
 
 # â”€â”€ timeseries metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
+def _build_cosmos_metrics_buckets(granularity, gran_seconds, start_dt, end_dt, pipeline_id):
+    """Build time-series buckets from CosmosDB-stored inline metrics when App Insights is unavailable."""
+    from collections import defaultdict
+
+    store = get_store()
+    doc = store.get("global", "metrics")
+    if not doc:
+        return []
+
+    pipelines_data = doc.get("pipelines", {})
+    if not pipelines_data:
+        return []
+
+    # Collect all recent entries from matching pipelines
+    entries = []
+    for pid, pdata in pipelines_data.items():
+        if pipeline_id and pid != pipeline_id:
+            continue
+        for entry in pdata.get("recent", []):
+            t_str = entry.get("t", "")
+            n = entry.get("n", 0)
+            if t_str:
+                try:
+                    t_dt = datetime.fromisoformat(t_str)
+                    if start_dt <= t_dt <= end_dt:
+                        entries.append((t_dt, n))
+                except (ValueError, TypeError):
+                    pass
+
+    if not entries:
+        # No recent data - create a single summary bucket from totals
+        total_processed = 0
+        total_time_ms = 0.0
+        for pid, pdata in pipelines_data.items():
+            if pipeline_id and pid != pipeline_id:
+                continue
+            total_processed += pdata.get("processed", 0)
+            total_time_ms += pdata.get("total_time_ms", 0.0)
+        if total_processed > 0:
+            avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
+            return [{
+                "t": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:00"),
+                "processed": total_processed,
+                "failed": 0,
+                "throughput": round(total_processed / gran_seconds, 1),
+                "avg_latency_ms": avg_lat,
+            }]
+        return []
+
+    # Bucket entries by granularity
+    bucket_map = defaultdict(lambda: {"processed": 0, "failed": 0})
+    for t_dt, n in entries:
+        if granularity == "minute":
+            key = t_dt.strftime("%Y-%m-%dT%H:%M:00")
+        elif granularity == "hour":
+            key = t_dt.strftime("%Y-%m-%dT%H:00:00")
+        else:  # day
+            key = t_dt.strftime("%Y-%m-%dT00:00:00")
+        bucket_map[key]["processed"] += n
+
+    # Also gather total time for avg latency
+    total_time_ms = 0.0
+    total_processed = 0
+    for pid, pdata in pipelines_data.items():
+        if pipeline_id and pid != pipeline_id:
+            continue
+        total_time_ms += pdata.get("total_time_ms", 0.0)
+        total_processed += pdata.get("processed", 0)
+    avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
+
+    buckets = []
+    for t_str in sorted(bucket_map.keys()):
+        b = bucket_map[t_str]
+        buckets.append({
+            "t": t_str,
+            "processed": b["processed"],
+            "failed": b["failed"],
+            "throughput": round(b["processed"] / gran_seconds, 1) if b["processed"] > 0 else 0.0,
+            "avg_latency_ms": avg_lat,
+        })
+
+    return buckets
+
 @app.get("/api/metrics/timeseries")
 async def get_metrics_timeseries(
     granularity: str = "hour",
@@ -894,14 +995,20 @@ async def get_metrics_timeseries(
     rows = await asyncio.to_thread(_run_kql, kql, (start_dt, end_dt))
 
     if rows is None:
+        # Fallback: build buckets from CosmosDB inline metrics
+        try:
+            buckets = _build_cosmos_metrics_buckets(
+                granularity, gran_seconds, start_dt, end_dt, pipeline_id
+            )
+        except Exception:
+            buckets = []
         return {
             "granularity": granularity,
             "start": start_iso,
             "end": end_iso,
             "pipeline_id": pipeline_id,
-            "source": "unavailable",
-            "buckets": [],
-            "message": "App Insights not configured. Deploy with azd up to enable metrics.",
+            "source": "cosmos_inline",
+            "buckets": buckets,
         }
 
     buckets = []
@@ -1033,6 +1140,10 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    # Preserve stored password if masked value was sent
+    for sensitive_key in _SENSITIVE_CONFIG_KEYS:
+        if clean_config.get(sensitive_key) == "***":
+            clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
     source.name = req.name.strip()
     source.type = req.type
     source.config = clean_config
@@ -1136,11 +1247,22 @@ async def test_source(source_id: str):
 class TestConnectionRequest(BaseModel):
     type: str
     config: dict
+    source_id: Optional[str] = None
 
 
 @app.post("/api/sources/test-connection")
 async def test_source_connection_before_save(req: TestConnectionRequest):
     """Test source connection before saving (used by UI)."""
+    # If password is masked, look up real password from stored config
+    if req.source_id and req.config.get("password") == "***":
+        store = get_store()
+        try:
+            doc = store.get(req.source_id, partition_key="source")
+            stored_pw = doc.get("config", {}).get("password", "")
+            if stored_pw:
+                req.config["password"] = stored_pw
+        except Exception:
+            pass
     try:
         if req.type == "azure-blob":
             from azure.storage.blob import BlobServiceClient
@@ -1259,6 +1381,18 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
             error_msg = "Resource not found. Check the account URL, database, or container name."
         elif "InvalidAuthenticationInfo" in error_msg:
             error_msg = "Authentication failed. Check your credentials or managed identity configuration."
+        elif "Connection refused" in error_msg or "[Errno 111]" in error_msg:
+            error_msg = "Connection refused. Check that the host and port are correct, the database server is running, and the firewall allows connections from this service."
+        elif "no PostgreSQL user name" in error_msg:
+            error_msg = "No PostgreSQL username provided. Please enter your database username in the Authentication tab."
+        elif "password authentication failed" in error_msg:
+            error_msg = "Password authentication failed. Check that the username and password are correct."
+        elif "does not exist" in error_msg and "database" in error_msg.lower():
+            error_msg = f"Database not found. Verify the database name is correct. Original error: {error_msg}"
+        elif "could not translate host name" in error_msg or "Name or service not known" in error_msg:
+            error_msg = "Cannot resolve hostname. Check that the host address is correct."
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            error_msg = "Connection timed out. Check that the host is reachable and the firewall allows connections."
 
         return {"success": False, "error": error_msg}
 
@@ -1443,9 +1577,14 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
         raise HTTPException(status_code=400, detail=f"Destination name '{req.name.strip()}' already exists")
 
     destination = _destination_from_doc(doc)
+    clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    # Preserve stored password if masked value was sent
+    for sensitive_key in _SENSITIVE_CONFIG_KEYS:
+        if clean_config.get(sensitive_key) == "***":
+            clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
     destination.name = req.name
     destination.type = req.type
-    destination.config = req.config
+    destination.config = clean_config
     destination.enabled = req.enabled
     destination.updated_at = datetime.utcnow()
 
@@ -1534,11 +1673,22 @@ async def test_destination(dest_id: str):
 class TestDestConnectionRequest(BaseModel):
     type: str
     config: dict
+    destination_id: Optional[str] = None
 
 
 @app.post("/api/destinations/test-connection")
 async def test_destination_connection_before_save(req: TestDestConnectionRequest):
     """Test destination connection before saving (used by UI)."""
+    # If password is masked, look up real password from stored config
+    if req.destination_id and req.config.get("password") == "***":
+        store = get_store()
+        try:
+            doc = store.get(req.destination_id, partition_key="destination")
+            stored_pw = doc.get("config", {}).get("password", "")
+            if stored_pw:
+                req.config["password"] = stored_pw
+        except Exception:
+            pass
     try:
         if req.type == "cosmosdb-vector":
             from azure.cosmos import CosmosClient
@@ -1687,6 +1837,18 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             error_msg = "Resource not found. Check the endpoint, database, or container name."
         elif "InvalidAuthenticationInfo" in error_msg:
             error_msg = "Authentication failed. Check your credentials or managed identity configuration."
+        elif "Connection refused" in error_msg or "[Errno 111]" in error_msg:
+            error_msg = "Connection refused. Check that the host and port are correct, the database server is running, and the firewall allows connections from this service."
+        elif "no PostgreSQL user name" in error_msg:
+            error_msg = "No PostgreSQL username provided. Please enter your database username in the Authentication tab."
+        elif "password authentication failed" in error_msg:
+            error_msg = "Password authentication failed. Check that the username and password are correct."
+        elif "does not exist" in error_msg and "database" in error_msg.lower():
+            error_msg = f"Database not found. Verify the database name is correct. Original error: {error_msg}"
+        elif "could not translate host name" in error_msg or "Name or service not known" in error_msg:
+            error_msg = "Cannot resolve hostname. Check that the host address is correct."
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            error_msg = "Connection timed out. Check that the host is reachable and the firewall allows connections."
 
         return {"success": False, "error": error_msg}
 
@@ -4486,7 +4648,7 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         if source_id:
             source_doc = store.get(source_id, "source")
             if source_doc:
-                source = _source_from_doc(source_doc)
+                source = _source_from_doc(source_doc, mask=False)
                 if source.type == SourceType.COSMOSDB:
                     src_endpoint = source.config.get("endpoint", "")
                     src_client = CosmosClient(src_endpoint, credential=DefaultAzureCredential())

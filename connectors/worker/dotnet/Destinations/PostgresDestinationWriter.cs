@@ -42,12 +42,18 @@ public class PostgresDestinationWriter : IDestinationWriter
         await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(ct);
 
-        // Ensure pgvector extension and cfp_generation column exist
+        // Ensure pgvector extension and required metadata columns exist
         try
         {
             await using (var cmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector", conn))
                 await cmd.ExecuteNonQueryAsync(ct);
-            await using (var cmd2 = new NpgsqlCommand($"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cfp_generation TEXT DEFAULT ''", conn))
+            var ddl = $@"
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cfp_generation TEXT DEFAULT '';
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS pipeline_id TEXT DEFAULT '';
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS pipeline_name TEXT DEFAULT '';
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT '';
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ DEFAULT NOW();";
+            await using (var cmd2 = new NpgsqlCommand(ddl, conn))
                 await cmd2.ExecuteNonQueryAsync(ct);
         }
         catch { /* ignore permission errors — columns may already exist */ }

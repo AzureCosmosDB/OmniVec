@@ -1308,12 +1308,6 @@
                 <header class="header">
                     <h2 class="header-title">Metrics</h2>
                     <div class="header-actions">
-                        <button class="btn btn-secondary" onclick="clearMetrics()">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                                <path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                            </svg>
-                            Clear Metrics
-                        </button>
                         <button class="btn btn-ghost" onclick="loadMetricsSection()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/></svg>
                             Refresh
@@ -3006,6 +3000,47 @@
                     `}
                 `;
             } else if (currentDetailTab === 'auth') {
+                if (source.type === 'postgresql' || source.type === 'mssql') {
+                    const isPg = source.type === 'postgresql';
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
+                        <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
+                            <div style="width: 48px; height: 48px; background: rgba(59,130,246,0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="24" height="24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; font-size: 16px;">${isPg ? 'PostgreSQL' : 'SQL Server'} Credentials</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Username and password for database access</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" id="detail-pg-user" value="${config.user || ''}" placeholder="${isPg ? 'postgres' : 'sa'}" oninput="markSourceDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-input" id="detail-pg-password" value="${config.password || ''}" placeholder="Enter password" oninput="markSourceDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SSL Mode</label>
+                            <select class="form-input" id="detail-pg-ssl-mode" onchange="markSourceDetailDirty()">
+                                <option value="require" ${(config.ssl_mode || 'require') === 'require' ? 'selected' : ''}>Require (recommended)</option>
+                                <option value="verify-full" ${config.ssl_mode === 'verify-full' ? 'selected' : ''}>Verify Full</option>
+                                <option value="prefer" ${config.ssl_mode === 'prefer' ? 'selected' : ''}>Prefer</option>
+                                <option value="disable" ${config.ssl_mode === 'disable' ? 'selected' : ''}>Disable</option>
+                            </select>
+                        </div>
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px; margin-top: 16px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Troubleshooting</p>
+                            <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Verify the username has read access to the table</li>
+                                <li>Check that the database firewall allows connections from this service</li>
+                                ${isPg ? '<li>For Azure PostgreSQL: ensure "Allow access to Azure services" is enabled</li>' : ''}
+                                <li>If using SSL, ensure the server certificate is valid</li>
+                            </ul>
+                        </div>
+                    `;
+                } else {
                 const authLabel = authType === 'managed-identity' ? 'Managed Identity' : 'Connection String';
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -3061,6 +3096,7 @@
                         </div>
                     `}
                 `;
+                }
             } else if (currentDetailTab === 'health') {
                 const sh = getHealthFor('sources', source.id);
                 if (!sh) {
@@ -3144,13 +3180,21 @@
                 config.endpoint = editedSourceData.endpoint || source.config.endpoint;
                 config.database = editedSourceData.database || source.config.database;
                 config.container = editedSourceData.container || source.config.container;
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                config.host = editedSourceData.host || source.config?.host || '';
+                config.port = editedSourceData.port || source.config?.port || 5432;
+                config.database = editedSourceData.database || source.config?.database || '';
+                config.table = editedSourceData.table || source.config?.table || '';
+                config.user = editedSourceData.user || source.config?.user || '';
+                config.password = editedSourceData.password || source.config?.password || '';
+                config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
             }
 
             try {
                 const res = await apiFetch('/api/sources/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: source.type, config })
+                    body: JSON.stringify({ type: source.type, config, source_id: source.id })
                 });
                 const data = await res.json();
 
@@ -3199,6 +3243,25 @@
                 if (endpointEl) editedSourceData.endpoint = endpointEl.value;
                 if (dbEl) editedSourceData.database = dbEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                const hostEl = document.getElementById('detail-pg-host');
+                const portEl = document.getElementById('detail-pg-port');
+                const dbEl = document.getElementById('detail-pg-database');
+                const tableEl = document.getElementById('detail-pg-table');
+                const idColEl = document.getElementById('detail-pg-id-column');
+                const tsColEl = document.getElementById('detail-pg-ts-column');
+                const userEl = document.getElementById('detail-pg-user');
+                const passEl = document.getElementById('detail-pg-password');
+                const sslEl = document.getElementById('detail-pg-ssl-mode');
+                if (hostEl) editedSourceData.host = hostEl.value;
+                if (portEl) editedSourceData.port = parseInt(portEl.value) || 5432;
+                if (dbEl) editedSourceData.database = dbEl.value;
+                if (tableEl) editedSourceData.table = tableEl.value;
+                if (idColEl) editedSourceData.id_column = idColEl.value;
+                if (tsColEl) editedSourceData.timestamp_column = tsColEl.value;
+                if (userEl) editedSourceData.user = userEl.value;
+                if (passEl) editedSourceData.password = passEl.value;
+                if (sslEl) editedSourceData.ssl_mode = sslEl.value;
             }
         }
 
@@ -3225,6 +3288,16 @@
                 config.endpoint = editedSourceData.endpoint || source.config?.endpoint || '';
                 config.database = editedSourceData.database || source.config?.database || '';
                 config.container = editedSourceData.container || source.config?.container || '';
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                config.host = editedSourceData.host || source.config?.host || '';
+                config.port = editedSourceData.port || source.config?.port || 5432;
+                config.database = editedSourceData.database || source.config?.database || '';
+                config.table = editedSourceData.table || source.config?.table || '';
+                config.id_column = editedSourceData.id_column || source.config?.id_column || 'id';
+                config.timestamp_column = editedSourceData.timestamp_column || source.config?.timestamp_column || 'updated_at';
+                config.user = editedSourceData.user || source.config?.user || '';
+                config.password = editedSourceData.password || source.config?.password || '';
+                config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
             }
 
             try {
@@ -3489,6 +3562,51 @@
                     </div>
                 `;
             } else if (currentDestDetailTab === 'auth') {
+                if (dest.type === 'pgvector') {
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
+                        <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
+                            <div style="width: 48px; height: 48px; background: rgba(59,130,246,0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="24" height="24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; font-size: 16px;">PostgreSQL Credentials</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Username and password for database access</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" id="dest-detail-pg-user" value="${config.user || ''}" placeholder="postgres" oninput="markDestDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-input" id="dest-detail-pg-password" value="${config.password || ''}" placeholder="Enter password" oninput="markDestDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SSL Mode</label>
+                            <select class="form-input" id="dest-detail-pg-ssl-mode" onchange="markDestDetailDirty()">
+                                <option value="require" ${(config.ssl_mode || 'require') === 'require' ? 'selected' : ''}>Require (recommended)</option>
+                                <option value="verify-full" ${config.ssl_mode === 'verify-full' ? 'selected' : ''}>Verify Full</option>
+                                <option value="prefer" ${config.ssl_mode === 'prefer' ? 'selected' : ''}>Prefer</option>
+                                <option value="disable" ${config.ssl_mode === 'disable' ? 'selected' : ''}>Disable</option>
+                            </select>
+                        </div>
+                        <button type="button" class="btn btn-secondary" onclick="testDestDetailConnection()" id="dest-detail-test-btn" style="width: 100%; justify-content: center; padding: 12px; margin-top: 8px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                            Test Connection
+                        </button>
+                        <div id="dest-detail-test-result" style="margin-top: 12px;"></div>
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px; margin-top: 16px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Troubleshooting</p>
+                            <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Verify the username has read/write access to the table</li>
+                                <li>Check that the database firewall allows connections from this service</li>
+                                <li>For Azure PostgreSQL: ensure "Allow access to Azure services" is enabled</li>
+                                <li>Ensure the pgvector extension is installed (<code>CREATE EXTENSION vector</code>)</li>
+                            </ul>
+                        </div>
+                    `;
+                } else {
                 const authLabel = authType === 'managed-identity' ? 'Managed Identity' : 'API Key';
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -3543,15 +3661,22 @@
                         </div>
                     `}
                 `;
+                } // end else (non-pgvector dest auth)
             } else if (currentDestDetailTab === 'vector') {
+                const isPgVector = dest.type === 'pgvector';
+                const vecTitle = isPgVector ? 'Vector Columns' : 'Vector Configuration';
+                const vecDesc = isPgVector
+                    ? 'Discover vector columns in your PostgreSQL table. Columns with the <code>vector</code> type will be listed.'
+                    : 'Vector index details are read from the destination when you test the connection.';
+                const btnLabel = isPgVector ? 'Discover Vector Columns' : 'Fetch Embedding Policies';
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Vector Configuration</h4>
-                    <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">Vector index details are read from the destination when you test the connection.</p>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">${vecTitle}</h4>
+                    <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">${vecDesc}</p>
                     <button type="button" class="btn btn-secondary" onclick="testDestinationFromDetail()" style="width: 100%; justify-content: center; padding: 12px;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
                         </svg>
-                        Fetch Embedding Policies
+                        ${btnLabel}
                     </button>
                     <div id="dest-detail-vector-result" style="margin-top: 16px;"></div>
                 `;
@@ -3614,6 +3739,9 @@
                 const vecColEl = document.getElementById('dest-detail-pg-vector-col');
                 const contentColEl = document.getElementById('dest-detail-pg-content-col');
                 const dimsEl = document.getElementById('dest-detail-pg-dimensions');
+                const userEl = document.getElementById('dest-detail-pg-user');
+                const passEl = document.getElementById('dest-detail-pg-password');
+                const sslEl = document.getElementById('dest-detail-pg-ssl-mode');
                 if (hostEl) editedDestData.host = hostEl.value;
                 if (portEl) editedDestData.port = parseInt(portEl.value) || 5432;
                 if (dbEl) editedDestData.database = dbEl.value;
@@ -3621,6 +3749,9 @@
                 if (vecColEl) editedDestData.vector_column = vecColEl.value;
                 if (contentColEl) editedDestData.content_column = contentColEl.value;
                 if (dimsEl) editedDestData.vector_dimensions = parseInt(dimsEl.value) || 1536;
+                if (userEl) editedDestData.user = userEl.value;
+                if (passEl) editedDestData.password = passEl.value;
+                if (sslEl) editedDestData.ssl_mode = sslEl.value;
             }
         }
 
@@ -3647,17 +3778,20 @@
                 config.host = editedDestData.host || dest.config?.host || '';
                 config.port = editedDestData.port || dest.config?.port || 5432;
                 config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
             }
 
             try {
                 const res = await apiFetch('/api/destinations/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: dest.type, config })
+                    body: JSON.stringify({ type: dest.type, config, destination_id: dest.id })
                 });
                 const data = await res.json();
-
-                let html = '';
                 if (data.success) {
                     let details = '';
                     const vi = data.vector_indexes || data.result?.vector_indexes || [];
@@ -3706,18 +3840,32 @@
             if (resultDiv) resultDiv.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Testing connection...</div>';
 
             // Get current form values
-            const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
-            const database = document.getElementById('dest-detail-database')?.value || dest.config?.database || '';
-            const container = document.getElementById('dest-detail-container')?.value || dest.config?.container || '';
-
             const authType = dest.config?.auth_type || 'managed-identity';
-            const config = { auth_type: authType, endpoint, database, container };
+            let config = { auth_type: authType };
+
+            if (dest.type === 'pgvector') {
+                captureDestTabData();
+                config.host = editedDestData.host || dest.config?.host || '';
+                config.port = editedDestData.port || dest.config?.port || 5432;
+                config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+            } else {
+                // CosmosDB and other types
+                const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
+                const database = document.getElementById('dest-detail-database')?.value || dest.config?.database || '';
+                const container = document.getElementById('dest-detail-container')?.value || dest.config?.container || '';
+                config = { auth_type: authType, endpoint, database, container };
+            }
 
             try {
                 const res = await apiFetch('/api/destinations/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: dest.type, config })
+                    body: JSON.stringify({ type: dest.type, config, destination_id: dest.id })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -3767,6 +3915,19 @@
                 config.endpoint = editedDestData.endpoint || dest.config?.endpoint || '';
                 config.database = editedDestData.database || dest.config?.database || '';
                 config.container = editedDestData.container || dest.config?.container || '';
+            } else if (dest.type === 'pgvector') {
+                config.host = editedDestData.host || dest.config?.host || '';
+                config.port = editedDestData.port || dest.config?.port || 5432;
+                config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.content_column = editedDestData.content_column || dest.config?.content_column || 'content';
+                config.vector_dimensions = editedDestData.vector_dimensions || dest.config?.vector_dimensions || 1536;
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+                // Preserve discovered vector_indexes
+                if (dest.config?.vector_indexes) config.vector_indexes = dest.config.vector_indexes;
             } else if (dest.type === 'pinecone') {
                 config.index = editedDestData.index || dest.config?.index || '';
                 config.environment = editedDestData.environment || dest.config?.environment || '';
@@ -4119,12 +4280,16 @@
                     </div>
 
                     <div class="form-group" style="margin-top: 16px;">
-                        <label class="form-label">Embedding Policy Path</label>
+                        <label class="form-label">${destType === 'pgvector' ? 'Vector Column' : 'Embedding Policy Path'}</label>
                         <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
-                            /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
+                            ${destType === 'pgvector'
+                                ? (pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">embedding</span>')
+                                : '/' + (pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>')}
                         </div>
                         <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                            The vector embedding path in the destination container. Cannot be changed after creation.
+                            ${destType === 'pgvector'
+                                ? 'The vector column in the destination table where embeddings are stored. Cannot be changed after creation.'
+                                : 'The vector embedding path in the destination container. Cannot be changed after creation.'}
                         </small>
                     </div>
                 `;
@@ -4883,8 +5048,16 @@
                 document.getElementById('pl-dest-vector-policy-group').style.display = 'none';
                 return;
             }
-            // Try to load from destination's stored config first
+            // Update label based on dest type
             const dest = destinations.find(d => d.id === destId);
+            const isPg = dest?.type === 'pgvector';
+            const labelEl = document.querySelector('#pl-dest-vector-policy-group .form-label');
+            if (labelEl) labelEl.textContent = isPg ? 'Vector Column' : 'Vector Embedding Policy';
+            const smallEl = document.querySelector('#pl-dest-vector-policy-group small');
+            if (smallEl) smallEl.textContent = isPg
+                ? 'Select which vector column to use for storing embeddings'
+                : 'Select which vector embedding field to use for this pipeline';
+
             const vi = dest?.config?.vector_indexes || [];
             if (vi.length > 0) {
                 populateVectorPolicyDropdown(vi);
@@ -5517,7 +5690,9 @@
                     vector_column: formData.get('vector_column') || 'embedding',
                     vector_dimensions: parseInt(formData.get('vector_dimensions')) || 1024,
                     index_type: formData.get('index_type') || 'ivfflat',
-                    ssl_mode: 'require'
+                    user: formData.get('user') || '',
+                    password: formData.get('password') || '',
+                    ssl_mode: formData.get('ssl_mode') || 'require'
                 };
             }
 
@@ -6009,6 +6184,14 @@
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
                 config.container = formData.get('container');
+            } else if (type === 'postgresql' || type === 'mssql') {
+                config.host = formData.get('host');
+                config.port = parseInt(formData.get('port')) || 5432;
+                config.database = formData.get('database');
+                config.table = formData.get('table');
+                config.user = formData.get('user') || '';
+                config.password = formData.get('password') || '';
+                config.ssl_mode = formData.get('ssl_mode') || 'require';
             }
 
             if (authType === 'connection-string') {
@@ -6311,6 +6494,25 @@
                             <option value="hnsw">HNSW (faster, more memory)</option>
                         </select>
                     </div>
+                    <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                    <h5 style="margin: 0 0 12px 0; font-size: 14px;">Authentication</h5>
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-input" name="user" placeholder="postgres">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-input" name="password" placeholder="Enter password">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">SSL Mode</label>
+                        <select class="form-input" name="ssl_mode">
+                            <option value="require" selected>Require (recommended)</option>
+                            <option value="verify-full">Verify Full</option>
+                            <option value="prefer">Prefer</option>
+                            <option value="disable">Disable</option>
+                        </select>
+                    </div>
                 `;
             } else if (type === 'pinecone') {
                 container.innerHTML = `
@@ -6365,9 +6567,24 @@
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
                 config.container = formData.get('container');
-            }
-
-            if (!config.endpoint || !config.database || !config.container) {
+                if (!config.endpoint || !config.database || !config.container) {
+                    resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
+                    return;
+                }
+            } else if (type === 'pgvector') {
+                config.host = formData.get('host') || '';
+                config.port = parseInt(formData.get('port')) || 5432;
+                config.database = formData.get('database') || '';
+                config.table = formData.get('table') || 'vectors';
+                config.user = formData.get('user') || '';
+                config.password = formData.get('password') || '';
+                config.vector_column = formData.get('vector_column') || 'embedding';
+                config.ssl_mode = formData.get('ssl_mode') || 'require';
+                if (!config.host || !config.database) {
+                    resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Host and Database</div>`;
+                    return;
+                }
+            } else {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
                 return;
             }
@@ -8256,17 +8473,6 @@
                 metricsEnd = ed.value + 'T' + (et && et.value ? et.value : '23:59') + ':00';
                 metricsRange = 'custom';
                 loadMetricsSection();
-            }
-        }
-
-        async function clearMetrics() {
-            if (!confirm('Clear all metrics? This cannot be undone.')) return;
-            try {
-                await apiFetch('/api/metrics', { method: 'DELETE' });
-                showNotification('Metrics cleared', 'success');
-                loadMetricsSection();
-            } catch (e) {
-                showNotification('Error: ' + e.message, 'error');
             }
         }
 
