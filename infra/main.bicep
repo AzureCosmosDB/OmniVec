@@ -144,6 +144,7 @@ module appinsights 'modules/appinsights.bicep' = {
     appInsightsName: '${prefix}-insights-${resourceToken}'
     location: location
     tags: tags
+    principalId: aks.outputs.kubeletIdentityObjectId
   }
 }
 
