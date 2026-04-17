@@ -29,7 +29,7 @@ public class PostgresCdcWatcher : ISourceWatcher
     private readonly object _pipelineLock = new();
     private List<Destination> _destinations = new();
 
-    private DateTime _lastCheckpoint = DateTime.MinValue;
+    private DateTime _lastCheckpoint = DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
 
     public string SourceId => _source.Id;
     public string Generation { get; }
@@ -117,7 +117,7 @@ public class PostgresCdcWatcher : ISourceWatcher
 
                 List<Dictionary<string, object?>> changes;
 
-                if (trackingColumn is not null && _lastCheckpoint > DateTime.MinValue)
+                if (trackingColumn is not null && _lastCheckpoint > DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc))
                 {
                     // Incremental: rows changed since last checkpoint
                     // Use >= with PK tiebreaker to handle rows with same timestamp
@@ -151,7 +151,7 @@ public class PostgresCdcWatcher : ISourceWatcher
                     {
                         var last = changes[^1];
                         if (last.TryGetValue(trackingColumn, out var tv) && tv is DateTime dt && dt >= _lastCheckpoint)
-                            _lastCheckpoint = dt;
+                            _lastCheckpoint = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
                         _lastPkValue = last.TryGetValue(pk, out var pv) ? pv?.ToString() : null;
                     }
                 }
@@ -176,7 +176,7 @@ public class PostgresCdcWatcher : ISourceWatcher
                     {
                         var last = changes[^1];
                         if (last.TryGetValue(trackingColumn, out var tv) && tv is DateTime dt)
-                            _lastCheckpoint = dt;
+                            _lastCheckpoint = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
                         else
                             _lastCheckpoint = DateTime.UtcNow;
                         _lastPkValue = last.TryGetValue(pk, out var pv) ? pv?.ToString() : null;
@@ -390,9 +390,15 @@ public class PostgresCdcWatcher : ISourceWatcher
             var table = _source.Table!;
             var now = DateTime.UtcNow.ToString("O");
 
-            // Ensure cfp_generation column exists
-            await using (var alterCmd = new NpgsqlCommand(
-                $@"ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS cfp_generation TEXT DEFAULT ''", conn))
+            // Ensure metadata columns exist
+            var ddl = $@"
+                ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS cfp_generation TEXT DEFAULT '';
+                ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS pipeline_id TEXT DEFAULT '';
+                ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS pipeline_name TEXT DEFAULT '';
+                ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT '';
+                ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ DEFAULT NOW();
+                ALTER TABLE ""{schema}"".""{table}"" ADD COLUMN IF NOT EXISTS embedding_dims INTEGER DEFAULT 0;";
+            await using (var alterCmd = new NpgsqlCommand(ddl, conn))
                 try { await alterCmd.ExecuteNonQueryAsync(ct); } catch { /* ignore if exists */ }
 
             for (int i = 0; i < docs.Count; i++)

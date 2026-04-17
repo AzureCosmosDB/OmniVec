@@ -227,7 +227,12 @@ azure:
 
   # Key Vault
   keyVault:
-    uri: "" # Set from Terraform output
+    uri: ""
+
+  # Application Insights
+  appInsights:
+    connectionString: ""
+    workspaceId: ""
 
 # =============================================================================
 # DOCGROK (Submodule)
