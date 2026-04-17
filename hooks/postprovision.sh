@@ -20,19 +20,17 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 read_input() {
   prompt="$1"
   _ri_val=""
-  if [ -t 0 ]; then
-    printf "%s" "$prompt"
-    read -r _ri_val || true
-  elif [ -w /dev/tty ] 2>/dev/null && printf "" > /dev/tty 2>/dev/null; then
+  # Always prefer /dev/tty — azd hooks have stdin piped from azd, so stdin
+  # may be consumed by child processes (az cli, etc.) causing hangs.
+  if [ -e /dev/tty ]; then
     printf "%s" "$prompt" > /dev/tty
     read -r _ri_val < /dev/tty || true
+  elif [ -t 0 ]; then
+    printf "%s" "$prompt"
+    read -r _ri_val || true
   else
-    # No TTY available — try reading from stdin directly
-    if read -r _ri_val 2>/dev/null; then
-      : # got input from redirected stdin
-    else
-      _ri_val=""
-    fi
+    # No TTY at all — return empty (caller uses default)
+    _ri_val=""
   fi
   echo "$_ri_val"
 }
@@ -58,7 +56,7 @@ get_azd_value() {
   val=$(printf '%s' "$val" | tr -d '\r')
   if [ -n "$val" ]; then echo "$val"; return 0; fi
   # Fallback: read from azd env store (use && to suppress stdout errors)
-  val=$(azd env get-value "$key" 2>/dev/null) && val=$(printf '%s' "$val" | tr -d '\r') || val=""
+  val=$(azd env get-value "$key" < /dev/null 2>/dev/null) && val=$(printf '%s' "$val" | tr -d '\r') || val=""
   if [ -n "$val" ]; then echo "$val"; return 0; fi
   echo ""
 }
@@ -126,7 +124,7 @@ GPU_CNT=$(get_azd_value "OMNIVEC_GPU_NODE_COUNT")
 META=$(get_azd_value "OMNIVEC_METADATA_STORE")
 BLOB=$(get_azd_value "OMNIVEC_ENABLE_BLOB_SOURCE")
 BUILD=$(get_azd_value "OMNIVEC_BUILD_MODE")
-_RG_ID=$(az group show --name "$RESOURCE_GROUP" --query "id" -o tsv 2>/dev/null)
+_RG_ID=$(az group show --name "$RESOURCE_GROUP" --query "id" -o tsv < /dev/null 2>/dev/null)
 az tag update --resource-id "$_RG_ID" --operation merge --tags \
     "omnivec-sys-sku=$SYS_VM" \
     "omnivec-sys-count=$SYS_CNT" \
