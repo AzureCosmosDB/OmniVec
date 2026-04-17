@@ -135,7 +135,19 @@ module eventgrid 'modules/eventgrid.bicep' = if (enableBlobSource) {
   }
 }
 
-// 6. ACR (no dependencies)
+// 6. Application Insights (telemetry)
+module appinsights 'modules/appinsights.bicep' = {
+  name: 'appinsights'
+  scope: rg
+  params: {
+    workspaceName: '${prefix}-logs-${resourceToken}'
+    appInsightsName: '${prefix}-insights-${resourceToken}'
+    location: location
+    tags: tags
+  }
+}
+
+// 7. ACR (no dependencies)
 module acr 'modules/acr.bicep' = {
   name: 'acr'
   scope: rg
@@ -209,4 +221,6 @@ output AZURE_SERVICEBUS_NAMESPACE string = enableBlobSource ? servicebus!.output
 output AZURE_SERVICEBUS_ENDPOINT string = enableBlobSource ? servicebus!.outputs.endpoint : ''
 output AZURE_IDENTITY_CLIENT_ID string = identity.outputs.clientId
 output AZURE_KEYVAULT_URI string = keyvault.outputs.vaultUri
+output AZURE_APPINSIGHTS_CONNECTION_STRING string = appinsights.outputs.connectionString
+output AZURE_LOG_ANALYTICS_WORKSPACE_ID string = appinsights.outputs.workspaceId
 output AZURE_RESOURCE_GROUP string = rg.name

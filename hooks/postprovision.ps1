@@ -62,6 +62,7 @@ $STORAGE_BLOB_ENDPOINT = Get-AzdValue "AZURE_STORAGE_BLOB_ENDPOINT"
 $STORAGE_QUEUE_ENDPOINT = Get-AzdValue "AZURE_STORAGE_QUEUE_ENDPOINT"
 $SB_ENDPOINT = Get-AzdValue "AZURE_SERVICEBUS_ENDPOINT"
 $KEYVAULT_URI = Get-AzdValue "AZURE_KEYVAULT_URI"
+$APPINSIGHTS_CS = Get-AzdValue "AZURE_APPINSIGHTS_CONNECTION_STRING"
 
 # Validate required vars
 foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","COSMOS_ENDPOINT","IDENTITY_CLIENT_ID","RESOURCE_GROUP")) {
@@ -478,6 +479,12 @@ $helmArgs = @(
 if ($KEYVAULT_URI) {
     $helmArgs += @(
         "--set", "azure.keyVault.uri=$KEYVAULT_URI"
+    )
+}
+
+if ($APPINSIGHTS_CS) {
+    $helmArgs += @(
+        "--set", "azure.appInsights.connectionString=$APPINSIGHTS_CS"
     )
 }
 
