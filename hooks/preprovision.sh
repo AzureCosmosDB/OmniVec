@@ -145,6 +145,22 @@ require_tty_or_preset() {
 DEPLOYMENT_DETECTED=false
 IN_PLACE_UPDATE=false
 
+# ── Source hardening libraries ──────────────────────────────────────────────
+SCRIPT_DIR_INIT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/heartbeat.sh
+. "$SCRIPT_DIR_INIT/lib/heartbeat.sh" 2>/dev/null || true
+# shellcheck source=lib/preflight.sh
+. "$SCRIPT_DIR_INIT/lib/preflight.sh" 2>/dev/null || true
+
+# Extend the existing EXIT trap to also emit a slowest-step summary on failure.
+_preprov_exit() {
+  _rc=$?
+  [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary
+  release_lock
+  exit "$_rc"
+}
+trap '_preprov_exit' EXIT INT TERM
+
 
 
 # ── Validate required tools ──────────────────────────────────────────────────
@@ -161,7 +177,12 @@ KUBECTL_DIR="${HOME}/.azure-kubectl"
 if ! command -v kubectl >/dev/null 2>&1; then
   printf "  ${YELLOW}kubectl not found — installing to ${KUBECTL_DIR}...${NC}\n"
   mkdir -p "$KUBECTL_DIR"
-  az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" < /dev/null 2>/dev/null || true
+  if command -v wait_with_heartbeat >/dev/null 2>&1; then
+    wait_with_heartbeat "Installing kubectl (az aks install-cli)" \
+      az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" </dev/null 2>/dev/null || true
+  else
+    az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" < /dev/null 2>/dev/null || true
+  fi
   chmod +x "$KUBECTL_DIR/kubectl" "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
   export PATH="$KUBECTL_DIR:$PATH"
   if ! command -v kubectl >/dev/null 2>&1; then
@@ -178,7 +199,15 @@ if ! command -v helm >/dev/null 2>&1; then
   HELM_INSTALL_DIR="${HOME}/.local/bin"
   mkdir -p "$HELM_INSTALL_DIR"
   export PATH="$HELM_INSTALL_DIR:$PATH"
-  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 </dev/null | HELM_INSTALL_DIR="$HELM_INSTALL_DIR" USE_SUDO="false" sh </dev/null 2>/dev/null || true
+  # d4: Pin helm version by default for deterministic installs. Override via
+  # HELM_VERSION=v3.x.y. Unset/empty ⇒ get-helm-3 grabs "latest" (legacy).
+  HELM_VERSION="${HELM_VERSION:-v3.16.2}"
+  if command -v wait_with_heartbeat >/dev/null 2>&1; then
+    wait_with_heartbeat "Installing helm ${HELM_VERSION}" sh -c \
+      "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 </dev/null | HELM_INSTALL_DIR='$HELM_INSTALL_DIR' DESIRED_VERSION='$HELM_VERSION' USE_SUDO=false sh </dev/null 2>/dev/null" || true
+  else
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 </dev/null | HELM_INSTALL_DIR="$HELM_INSTALL_DIR" DESIRED_VERSION="$HELM_VERSION" USE_SUDO="false" sh </dev/null 2>/dev/null || true
+  fi
   if ! command -v helm >/dev/null 2>&1; then
     printf "  ${RED}Failed to install helm. Install manually: https://helm.sh/docs/intro/install/${NC}\n"
     exit 1
@@ -209,6 +238,11 @@ fi
 SUBSCRIPTION=$(az account show --query name -o tsv < /dev/null)
 SUBSCRIPTION_ID=$(az account show --query id -o tsv < /dev/null)
 printf "${GREEN}Logged in to subscription: ${SUBSCRIPTION} (${SUBSCRIPTION_ID})${NC}\n"
+
+# ── c1: Ensure required resource providers are registered ───────────────────
+if command -v preflight_require_providers >/dev/null 2>&1; then
+  preflight_require_providers || true
+fi
 
 # ── Check for existing deployment (RG exists + config present = update in-place) ─
 RG_NAME="rg-omnivec-${AZURE_ENV_NAME}"
@@ -492,3 +526,21 @@ done
 printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
 printf "${CYAN}Environment: ${AZURE_ENV_NAME}${NC}\n"
 printf "${CYAN}Each installation gets a unique resource token derived from (subscription + resource group + env name).${NC}\n"
+
+# ── b4/c2: Final preflight — quota + blob-flip guard + re-sanitize ──────────
+if command -v preflight_blob_flip_guard >/dev/null 2>&1; then
+  _want_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
+  preflight_blob_flip_guard "$RG_NAME" "${_want_blob:-true}" || exit 1
+fi
+if command -v preflight_vcpu_quota >/dev/null 2>&1; then
+  _sys_sku=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
+  _sys_count=$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)
+  _gpu_sku=$(azd_get OMNIVEC_GPU_NODE_VM_SIZE)
+  _gpu_count=$(azd_get OMNIVEC_GPU_NODE_COUNT)
+  preflight_vcpu_quota "$LOCATION" "$_sys_sku" "$_sys_count" "$_gpu_sku" "$_gpu_count" || true
+fi
+if command -v preflight_sanitize_env >/dev/null 2>&1; then
+  for _k in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE; do
+    preflight_sanitize_env "$_k" || true
+  done
+fi

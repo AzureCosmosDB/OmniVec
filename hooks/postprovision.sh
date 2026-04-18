@@ -16,6 +16,20 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ── Source hardening libraries ──────────────────────────────────────────────
+# shellcheck source=lib/heartbeat.sh
+. "$SCRIPT_DIR/lib/heartbeat.sh" 2>/dev/null || true
+# shellcheck source=lib/retry.sh
+. "$SCRIPT_DIR/lib/retry.sh" 2>/dev/null || true
+
+# Emit a slowest-step summary on any failure so the user sees where time went.
+_postprov_exit() {
+  _rc=$?
+  [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary
+  exit "$_rc"
+}
+trap '_postprov_exit' EXIT INT TERM
+
 # Helper: read user input (handles non-TTY contexts)
 read_input() {
   prompt="$1"
@@ -606,10 +620,15 @@ if [ -n "$_helm_phase" ]; then
   printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
 fi
 
-# Execute
+# Execute (d1: retry on transient ARM / Helm errors)
 set +e
-run_helm_deploy
-helm_rc=$?
+if command -v retry_run >/dev/null 2>&1; then
+  retry_run "helm-deploy" -- run_helm_deploy
+  helm_rc=$?
+else
+  run_helm_deploy
+  helm_rc=$?
+fi
 set -e
 
 # Clean up temp values file

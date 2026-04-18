@@ -32,7 +32,7 @@ function Acquire-Lock {
         if ($alive) {
             Write-Host "`n`e[31mERROR: Another deployment for '$env:AZURE_ENV_NAME' is already running (PID $lockPid).`e[0m"
             Write-Host "  If that process is stuck, you can force-take the lock."
-            $forceLock = (Read-Host "  Take over lock and continue? [y/N]").Trim()
+            $forceLock = Read-InputSafely -Prompt "  Take over lock and continue? [y/N]" -Default 'n'
             if ($forceLock -match "^[yY]") {
                 Write-Host "  `e[33mKilling PID $lockPid and taking lock...`e[0m"
                 try { Stop-Process -Id ([int]$lockPid) -Force -ErrorAction SilentlyContinue } catch {}
@@ -52,6 +52,109 @@ function Acquire-Lock {
 
 function Release-Lock {
     if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
+}
+
+# ── a1/a3: Interactive-safety helpers (mirror of hooks/preprovision.sh) ────
+function Test-CanPrompt {
+    if ($env:OMNIVEC_FORCE_NO_TTY) { return $false }
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch {}
+    try {
+        return [Environment]::UserInteractive
+    } catch { return $false }
+}
+
+function Test-IsNonInteractive {
+    foreach ($v in 'OMNIVEC_NONINTERACTIVE','AZD_NONINTERACTIVE','CI','GITHUB_ACTIONS') {
+        $val = [Environment]::GetEnvironmentVariable($v)
+        if ($val) { return $true }
+    }
+    return $false
+}
+
+function Read-InputSafely {
+    param([string]$Prompt, [string]$Default = '', [int]$TimeoutSec = 0)
+    if (-not (Test-CanPrompt)) { return $Default }
+    # Windows PowerShell has no built-in Read-Host timeout; the 30s variant
+    # below is only used when TimeoutSec>0 AND host supports RawUI.
+    if ($TimeoutSec -gt 0 -and $Host.UI.RawUI) {
+        try {
+            [Console]::Write($Prompt)
+            $sb = New-Object System.Text.StringBuilder
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                if ([Console]::KeyAvailable) {
+                    $k = [Console]::ReadKey($true)
+                    if ($k.Key -eq [ConsoleKey]::Enter) { [Console]::WriteLine(); break }
+                    if ($k.Key -eq [ConsoleKey]::Backspace) {
+                        if ($sb.Length -gt 0) { $sb.Length -= 1; [Console]::Write("`b `b") }
+                        continue
+                    }
+                    [void]$sb.Append($k.KeyChar)
+                    [Console]::Write($k.KeyChar)
+                }
+                Start-Sleep -Milliseconds 50
+            }
+            if ((Get-Date) -ge $deadline) {
+                [Console]::WriteLine()
+                Write-Host "  [timeout after ${TimeoutSec}s — using default: $Default]" -ForegroundColor Yellow
+                return $Default
+            }
+            $val = $sb.ToString().Trim()
+            if (-not $val) { return $Default }
+            return $val
+        } catch {
+            # Fall back to plain Read-Host
+        }
+    }
+    try {
+        $val = (Read-Host $Prompt).Trim()
+        if (-not $val) { return $Default }
+        return $val
+    } catch {
+        return $Default
+    }
+}
+
+function Use-QuickstartDefaults {
+    Write-Host "  `e[32mApplying Quick-start defaults (non-interactive mode).`e[0m"
+    $defaults = @{
+        'OMNIVEC_SYSTEM_NODE_VM_SIZE' = 'Standard_B4ms'
+        'OMNIVEC_SYSTEM_NODE_COUNT'   = '2'
+        'OMNIVEC_GPU_NODE_VM_SIZE'    = ''
+        'OMNIVEC_GPU_NODE_COUNT'      = '0'
+        'OMNIVEC_METADATA_STORE'      = 'cosmosdb-serverless'
+        'OMNIVEC_ENABLE_BLOB_SOURCE'  = 'true'
+    }
+    foreach ($kv in $defaults.GetEnumerator()) {
+        azd env set $kv.Key $kv.Value 2>$null
+    }
+}
+
+function Require-InteractiveOrPreset {
+    if (Test-CanPrompt) { return }
+    if (Test-IsNonInteractive) {
+        Use-QuickstartDefaults
+        Write-Host "`n`e[32mPre-provision checks passed (non-interactive). Proceeding with Bicep deployment...`e[0m"
+        Release-Lock
+        exit 0
+    }
+    Write-Host "`n`e[31mERROR: No interactive console and no configuration found.`e[0m"
+    Write-Host "  azd hooks are running without an interactive terminal (common in CI,"
+    Write-Host "  piped shells, or redirected stdin), and no config has been pre-set."
+    Write-Host ""
+    Write-Host "  Fix with ONE of:"
+    Write-Host "    1) Run from a real terminal:  azd up"
+    Write-Host "    2) Accept defaults:           `$env:OMNIVEC_NONINTERACTIVE=1; azd up"
+    Write-Host "    3) Pre-set config, e.g.:"
+    Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms"
+    Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2"
+    Write-Host "         azd env set OMNIVEC_GPU_NODE_COUNT 0"
+    Write-Host "         azd env set OMNIVEC_ENABLE_BLOB_SOURCE true"
+    Write-Host "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless"
+    Release-Lock
+    exit 1
 }
 
 Acquire-Lock
@@ -155,13 +258,15 @@ if ($_vmExit -eq 0 -and $_existingVm -and "$_existingVm" -notmatch "ERROR") {
 }
 
 # -- Fresh deploy: offer auto-defaults or interactive --
+# a1/a3: fast-fail (or apply defaults) if no interactive console.
+Require-InteractiveOrPreset
+
 Write-Host ""
 Write-Host "`e[33mNo configuration found. Choose setup mode:`e[0m"
 Write-Host "  1) Quick start — use recommended defaults (fastest, no GPU)"
 Write-Host "  2) Custom     — choose VM sizes, GPU, metadata store"
 Write-Host ""
-$setupMode = (Read-Host "Choice [1]").Trim()
-if (-not $setupMode) { $setupMode = "1" }
+$setupMode = Read-InputSafely -Prompt "Choice [1]" -Default "1"
 
 if ($setupMode -eq "1") {
     Write-Host "`n`e[32mApplying recommended defaults:`e[0m"
@@ -207,8 +312,7 @@ if ($curMeta) {
     Write-Host "  1) Azure CosmosDB (Serverless NoSQL)"
     Write-Host "  2) Azure CosmosDB (Provisioned throughput)"
     Write-Host ""
-    $metaChoice = (Read-Host "Choice [$defMetaNum]").Trim()
-    if (-not $metaChoice) { $metaChoice = $defMetaNum }
+    $metaChoice = Read-InputSafely -Prompt "Choice [$defMetaNum]" -Default $defMetaNum
     switch ($metaChoice) {
         "2" {
             Write-Host "`e[32mUsing CosmosDB Provisioned for metadata storage.`e[0m"
@@ -235,8 +339,7 @@ if ($curBlob) {
     Write-Host "  1) Yes - enable blob source ingestion"
     Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)"
     Write-Host ""
-    $blobChoice = (Read-Host "Choice [$defBlobNum]").Trim()
-    if (-not $blobChoice) { $blobChoice = $defBlobNum }
+    $blobChoice = Read-InputSafely -Prompt "Choice [$defBlobNum]" -Default $defBlobNum
     if ($blobChoice -eq "1") {
         Write-Host "`e[32mBlob source enabled.`e[0m"
         azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
@@ -300,13 +403,11 @@ while (-not $SYS_SKU) {
     Write-Host ""
     if (-not $nextDefault) { $nextDefault = $($defIdx+1) }
 
-    $sysPick = (Read-Host "  System VM SKU [$nextDefault]").Trim()
-    if (-not $sysPick) { $sysPick = "$nextDefault" }
+    $sysPick = Read-InputSafely -Prompt "  System VM SKU [$nextDefault]" -Default "$nextDefault"
 
     if ([int]$sysPick -eq ($sysCandidates.Count + 1)) {
         $defManual = if ($curSysSku) { $curSysSku } else { "Standard_D4s_v3" }
-        $candidate = (Read-Host "  Enter SKU name [$defManual]").Trim()
-        if (-not $candidate) { $candidate = $defManual }
+        $candidate = Read-InputSafely -Prompt "  Enter SKU name [$defManual]" -Default $defManual
     } else {
         $idx = [int]$sysPick - 1
         if ($idx -ge 0 -and $idx -lt $sysCandidates.Count) {
@@ -338,8 +439,7 @@ if ($curSysCount) {
     $sysCount = $curSysCount
 } else {
     $defSysCount = "2"
-    $sysCount = (Read-Host "  System node count [$defSysCount]").Trim()
-    if (-not $sysCount) { $sysCount = $defSysCount }
+    $sysCount = Read-InputSafely -Prompt "  System node count [$defSysCount]" -Default $defSysCount
     Write-Host "  `e[32mSystem nodes: $sysCount`e[0m"
 }
 
@@ -358,8 +458,7 @@ if ($curGpuCount) {
     Write-Host "  Enter 0 nodes to skip GPU pool (use external models only)."
 
     $defGpuCount = "0"
-    $gpuCount = (Read-Host "  GPU node count (0 = no GPU pool) [$defGpuCount]").Trim()
-    if (-not $gpuCount) { $gpuCount = $defGpuCount }
+    $gpuCount = Read-InputSafely -Prompt "  GPU node count (0 = no GPU pool) [$defGpuCount]" -Default $defGpuCount
 
     if ($gpuCount -ne "0") {
     $gpuCandidates = @(
@@ -390,13 +489,11 @@ if ($curGpuCount) {
         Write-Host ""
         if (-not $nextGpuDefault) { $nextGpuDefault = $($defGpuIdx+1) }
 
-        $gpuPick = (Read-Host "  GPU VM SKU [$nextGpuDefault]").Trim()
-        if (-not $gpuPick) { $gpuPick = "$nextGpuDefault" }
+        $gpuPick = Read-InputSafely -Prompt "  GPU VM SKU [$nextGpuDefault]" -Default "$nextGpuDefault"
 
         if ([int]$gpuPick -eq ($gpuCandidates.Count + 1)) {
             $defGpuManual = if ($curGpuSku) { $curGpuSku } else { "Standard_NC4as_T4_v3" }
-            $candidate = (Read-Host "  Enter SKU name [$defGpuManual]").Trim()
-            if (-not $candidate) { $candidate = $defGpuManual }
+            $candidate = Read-InputSafely -Prompt "  Enter SKU name [$defGpuManual]" -Default $defGpuManual
         } else {
             $idx = [int]$gpuPick - 1
             if ($idx -ge 0 -and $idx -lt $gpuCandidates.Count) {
