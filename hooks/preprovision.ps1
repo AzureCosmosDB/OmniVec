@@ -1,4 +1,4 @@
-# OmniVec — preprovision hook (PowerShell)
+# OmniVec - preprovision hook (PowerShell)
 # Validates prerequisites, checks for existing installations, and collects config choices
 
 $ErrorActionPreference = "Stop"
@@ -54,7 +54,7 @@ function Release-Lock {
     if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
 }
 
-# ── a1/a3: Interactive-safety helpers (mirror of hooks/preprovision.sh) ────
+# -- a1/a3: Interactive-safety helpers (mirror of hooks/preprovision.sh) ----
 function Test-CanPrompt {
     if ($env:OMNIVEC_FORCE_NO_TTY) { return $false }
     try {
@@ -98,7 +98,7 @@ function Read-InputSafely {
             }
             if ((Get-Date) -ge $deadline) {
                 [Console]::WriteLine()
-                Write-Host "  [timeout after ${TimeoutSec}s — using default: $Default]" -ForegroundColor Yellow
+                Write-Host "  [timeout after ${TimeoutSec}s - using default: $Default]" -ForegroundColor Yellow
                 return $Default
             }
             $val = $sb.ToString().Trim()
@@ -246,7 +246,7 @@ if ("$rgExists".Trim() -eq "true") {
     exit 0
 }
 
-# -- Config already set (e.g. via azd env set before azd up) — skip prompts --
+# -- Config already set (e.g. via azd env set before azd up) - skip prompts --
 $ErrorActionPreference = "SilentlyContinue"
 $_existingVm = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
 $_vmExit = $LASTEXITCODE
@@ -263,8 +263,8 @@ Require-InteractiveOrPreset
 
 Write-Host ""
 Write-Host "`e[33mNo configuration found. Choose setup mode:`e[0m"
-Write-Host "  1) Quick start — use recommended defaults (fastest, no GPU)"
-Write-Host "  2) Custom     — choose VM sizes, GPU, metadata store"
+Write-Host "  1) Quick start - use recommended defaults (fastest, no GPU)"
+Write-Host "  2) Custom     - choose VM sizes, GPU, metadata store"
 Write-Host ""
 $setupMode = Read-InputSafely -Prompt "Choice [1]" -Default "1"
 
@@ -395,7 +395,7 @@ while (-not $SYS_SKU) {
     for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
         $mark = ""
         if ($curSysSku -and $sysCandidates[$i].name -eq $curSysSku) { $mark = " (current)" }
-        if ($failedSkus.ContainsKey($sysCandidates[$i].name)) { $mark = " `e[31m[✗ unavailable]`e[0m" }
+        if ($failedSkus.ContainsKey($sysCandidates[$i].name)) { $mark = " `e[31m[x unavailable]`e[0m" }
         elseif (-not $nextDefault) { $nextDefault = $($i+1) }
         Write-Host "    $($i+1)) $($sysCandidates[$i].name) - $($sysCandidates[$i].desc)$mark"
     }
@@ -418,16 +418,16 @@ while (-not $SYS_SKU) {
     }
 
     if ($failedSkus.ContainsKey($candidate)) {
-        Write-Host "  `e[31m$candidate already checked — not available. Pick another.`e[0m"
+        Write-Host "  `e[31m$candidate already checked - not available. Pick another.`e[0m"
         continue
     }
 
     Write-Host "  `e[36mValidating $candidate in $location...`e[0m" -NoNewline
     if (Test-SkuAvailable -Sku $candidate -Location $location) {
-        Write-Host " `e[32m✓ available`e[0m"
+        Write-Host " `e[32m* available`e[0m"
         $SYS_SKU = $candidate
     } else {
-        Write-Host " `e[31m✗ not available in $location`e[0m"
+        Write-Host " `e[31mx not available in $location`e[0m"
         $failedSkus[$candidate] = $true
     }
 }
@@ -481,7 +481,7 @@ if ($curGpuCount) {
         for ($i = 0; $i -lt $gpuCandidates.Count; $i++) {
             $mark = ""
             if ($curGpuSku -and $gpuCandidates[$i].name -eq $curGpuSku) { $mark = " (current)" }
-            if ($failedGpuSkus.ContainsKey($gpuCandidates[$i].name)) { $mark = " `e[31m[✗ unavailable]`e[0m" }
+            if ($failedGpuSkus.ContainsKey($gpuCandidates[$i].name)) { $mark = " `e[31m[x unavailable]`e[0m" }
             elseif (-not $nextGpuDefault) { $nextGpuDefault = $($i+1) }
             Write-Host "    $($i+1)) $($gpuCandidates[$i].name) - $($gpuCandidates[$i].desc)$mark"
         }
@@ -504,16 +504,16 @@ if ($curGpuCount) {
         }
 
         if ($failedGpuSkus.ContainsKey($candidate)) {
-            Write-Host "  `e[31m$candidate already checked — not available. Pick another.`e[0m"
+            Write-Host "  `e[31m$candidate already checked - not available. Pick another.`e[0m"
             continue
         }
 
         Write-Host "  `e[36mValidating $candidate in $location...`e[0m" -NoNewline
         if (Test-SkuAvailable -Sku $candidate -Location $location) {
-            Write-Host " `e[32m✓ available`e[0m"
+            Write-Host " `e[32m* available`e[0m"
             $GPU_SKU = $candidate
         } else {
-            Write-Host " `e[31m✗ not available in $location`e[0m"
+            Write-Host " `e[31mx not available in $location`e[0m"
             $failedGpuSkus[$candidate] = $true
         }
     }
