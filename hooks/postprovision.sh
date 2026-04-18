@@ -156,7 +156,7 @@ IMAGES="omnivec-api omnivec-web omnivec-changefeed omnivec-dotnet-worker docgrok
 image_exists() {
   name=$1
   tag=$2
-  existing=$(az acr repository show-tags --name "$ACR_NAME" --repository "$name" --query "[?@ == '$tag']" -o tsv 2>/dev/null || true)
+  existing=$(az acr repository show-tags --name "$ACR_NAME" --repository "$name" --query "[?@ == '$tag']" -o tsv </dev/null 2>/dev/null || true)
   [ -n "$existing" ]
 }
 
@@ -165,10 +165,10 @@ image_up_to_date() {
   name=$1
   tag=$2
   # Get digest from local ACR
-  local_digest=$(az acr manifest show-metadata --registry "$ACR_NAME" --name "${name}:${tag}" --query "digest" -o tsv 2>/dev/null || true)
+  local_digest=$(az acr manifest show-metadata --registry "$ACR_NAME" --name "${name}:${tag}" --query "digest" -o tsv </dev/null 2>/dev/null || true)
   if [ -z "$local_digest" ]; then return 1; fi
   # Get digest from shared registry
-  shared_digest=$(az acr manifest show-metadata --registry "omnivecregistry" --name "${name}:${tag}" --query "digest" -o tsv 2>/dev/null || true)
+  shared_digest=$(az acr manifest show-metadata --registry "omnivecregistry" --name "${name}:${tag}" --query "digest" -o tsv </dev/null 2>/dev/null || true)
   if [ -z "$shared_digest" ]; then return 1; fi
   [ "$local_digest" = "$shared_digest" ]
 }
@@ -190,8 +190,8 @@ build_image() {
     docker build -t "${ACR_LOGIN_SERVER}/${name}:${tag}" -f "$dockerfile" "$context"
     docker push "${ACR_LOGIN_SERVER}/${name}:${tag}"
   else
-    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs 2>/dev/null || \
-    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context"
+    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs </dev/null 2>/dev/null || \
+    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" </dev/null
   fi
   printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
 }
@@ -267,7 +267,7 @@ if [ "$OMNIVEC_BUILD" != "true" ]; then
       if [ -n "$_new_token" ]; then
         if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
           SHARED_REGISTRY_TOKEN="$_new_token"
-          azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" 2>/dev/null || true
+          azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null 2>/dev/null || true
           printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
           TOKEN_OK=true
         else
@@ -433,7 +433,7 @@ elif [ ! -f "$HOME/.kube/config" ]; then
 fi
 
 export KUBE_CONTEXT
-kubectl --context "$KUBE_CONTEXT" get nodes >/dev/null
+kubectl --context "$KUBE_CONTEXT" get nodes </dev/null >/dev/null
 printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEXT})${NC}\n"
 
 # =============================================================================
@@ -443,10 +443,10 @@ printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEX
 printf "\n${YELLOW}Phase 3: Creating namespaces and secrets...${NC}\n"
 
 # Create namespaces and label for Helm ownership
-kubectl --context "$KUBE_CONTEXT" create namespace omnivec 2>/dev/null || true
-kubectl --context "$KUBE_CONTEXT" create namespace docgrok 2>/dev/null || true
-kubectl --context "$KUBE_CONTEXT" label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite
-kubectl --context "$KUBE_CONTEXT" annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite
+kubectl --context "$KUBE_CONTEXT" create namespace omnivec </dev/null 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" create namespace docgrok </dev/null 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite </dev/null
+kubectl --context "$KUBE_CONTEXT" annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite </dev/null
 
 # Storage connection string secret (only when blob source is enabled)
 if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
@@ -482,7 +482,7 @@ if [ -n "$CURRENT_HASH" ] && [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
   printf "  ${GREEN}Helm dependencies up to date, skipping.${NC}\n"
 else
   printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
-  helm dependency build "$CHART_DIR" 2>/dev/null
+  helm dependency build "$CHART_DIR" </dev/null 2>/dev/null
   if [ -n "$CURRENT_HASH" ]; then
     echo "$CURRENT_HASH" > "$LOCK_HASH_FILE"
   fi
@@ -493,7 +493,7 @@ fi
 ADMIN_TOKEN=$(get_azd_value "OMNIVEC_ADMIN_TOKEN")
 if [ -z "$ADMIN_TOKEN" ]; then
   ADMIN_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 44)
-  azd env set OMNIVEC_ADMIN_TOKEN "$ADMIN_TOKEN"
+  azd env set OMNIVEC_ADMIN_TOKEN "$ADMIN_TOKEN" </dev/null
   printf "  ${GREEN}Generated new admin token.${NC}\n"
 else
   printf "  ${GREEN}Using existing admin token.${NC}\n"
@@ -590,18 +590,18 @@ run_helm_deploy() {
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
 set +e
-_helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" -o json 2>/dev/null)
+_helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" -o json </dev/null 2>/dev/null)
 _helm_phase=$(echo "$_helm_status" | grep -o '"status":"pending-[^"]*"' | head -1 | cut -d'"' -f4)
 set -e
 if [ -n "$_helm_phase" ]; then
   printf "${YELLOW}Detected stuck Helm release (status: ${_helm_phase}). Rolling back...${NC}\n"
   set +e
-  helm rollback omnivec -n omnivec --kube-context "$KUBE_CONTEXT" 2>/dev/null
+  helm rollback omnivec -n omnivec --kube-context "$KUBE_CONTEXT" </dev/null 2>/dev/null
   _rb_rc=$?
   set -e
   if [ "$_rb_rc" -ne 0 ]; then
     printf "${YELLOW}Rollback failed — uninstalling stuck release...${NC}\n"
-    helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" 2>/dev/null || true
+    helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" </dev/null 2>/dev/null || true
   fi
   printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
 fi
@@ -617,15 +617,17 @@ rm -f "$HELM_VALUES_FILE"
 
 if [ "$helm_rc" -ne 0 ]; then
   printf "${RED}Helm deploy failed. Collecting pod diagnostics...${NC}\n"
-  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -o wide || true
-  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers 2>/dev/null | while read -r line; do
+  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -o wide </dev/null || true
+  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers </dev/null 2>/dev/null | while read -r line; do
     pod=$(echo "$line" | awk '{print $1}')
     status=$(echo "$line" | awk '{print $3}')
     case "$status" in
       ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending)
         printf "\n${YELLOW}=== %s (%s) ===${NC}\n" "$pod" "$status"
-        kubectl --context "$KUBE_CONTEXT" describe pod "$pod" -n omnivec | sed -n '/Events:/,$p' || true
-        kubectl --context "$KUBE_CONTEXT" logs "$pod" -n omnivec --tail=80 || true
+        # CRITICAL: inner kubectl calls need </dev/null inside while-read loop,
+        # otherwise they consume the outer pipe's stdin and break the loop.
+        kubectl --context "$KUBE_CONTEXT" describe pod "$pod" -n omnivec </dev/null | sed -n '/Events:/,$p' || true
+        kubectl --context "$KUBE_CONTEXT" logs "$pod" -n omnivec --tail=80 </dev/null || true
         ;;
     esac
   done
@@ -637,8 +639,8 @@ printf "${GREEN}Helm deployment complete.${NC}\n"
 # Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
 if [ "$IMAGES_CHANGED" = "true" ]; then
   printf "\n${YELLOW}Images updated — restarting pods to pull new images...${NC}\n"
-  kubectl --context "$KUBE_CONTEXT" rollout restart deployment -n omnivec 2>/dev/null || true
-  kubectl --context "$KUBE_CONTEXT" rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>/dev/null || true
+  kubectl --context "$KUBE_CONTEXT" rollout restart deployment -n omnivec </dev/null 2>/dev/null || true
+  kubectl --context "$KUBE_CONTEXT" rollout status deployment/omnivec-api -n omnivec --timeout=5m </dev/null 2>/dev/null || true
   printf "${GREEN}Pods restarted with new images.${NC}\n"
 fi
 
@@ -649,18 +651,18 @@ fi
 printf "\n${YELLOW}Phase 5: Verifying deployment...${NC}\n"
 
 printf "\n${CYAN}OmniVec pods:${NC}\n"
-kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers </dev/null 2>/dev/null || true
 
 printf "\n${CYAN}DocGrok pods:${NC}\n"
-kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok --no-headers 2>/dev/null || true
-kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok-controller --no-headers 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok --no-headers </dev/null 2>/dev/null || true
+kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok-controller --no-headers </dev/null 2>/dev/null || true
 
 # Wait for external IP
 printf "\n${YELLOW}Waiting for external IP...${NC}\n"
 EXTERNAL_IP=""
 i=0
 while [ $i -lt 30 ]; do
-  EXTERNAL_IP=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  EXTERNAL_IP=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' </dev/null 2>/dev/null || true)
   if [ -n "$EXTERNAL_IP" ]; then
     break
   fi

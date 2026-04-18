@@ -63,23 +63,83 @@ azd_get() {
   _val=$(azd env get-value "$1" < /dev/null 2>/dev/null) && printf '%s' "$_val" | tr -d '\r' || printf ''
 }
 
+# Helper: can we actually prompt the user right now?
+# Tries /dev/tty first (most reliable: even if stdin is redirected, the hook
+# may still have a controlling terminal we can write prompts to). Falls back
+# to stdin-is-a-tty. Respects OMNIVEC_FORCE_NO_TTY for tests / CI simulation.
+_can_prompt() {
+  [ -n "${OMNIVEC_FORCE_NO_TTY:-}" ] && return 1
+  if [ -e /dev/tty ] && ( : >/dev/tty ) 2>/dev/null && ( : </dev/tty ) 2>/dev/null; then
+    return 0
+  fi
+  [ -t 0 ] && return 0
+  return 1
+}
+
 # Helper: read user input from TTY (works in hook context where stdin may be redirected)
+# Returns empty string when no TTY is available — callers must fall back to
+# defaults OR pre-check with _can_prompt to fast-fail before calling this.
 read_input() {
   _prompt=$1
   _input=""
-  # Always prefer /dev/tty — azd hooks have stdin piped from azd, so stdin
-  # may be consumed by child processes (az cli, etc.) causing hangs.
-  if [ -e /dev/tty ]; then
-    printf '%b' "$_prompt" > /dev/tty
-    read -r _input < /dev/tty || true
-  elif [ -t 0 ]; then
-    printf '%b' "$_prompt"
-    read -r _input || true
-  else
-    # No TTY at all — return empty (caller uses default)
-    _input=""
+  if _can_prompt; then
+    if [ -e /dev/tty ] && ( : >/dev/tty ) 2>/dev/null; then
+      printf '%b' "$_prompt" > /dev/tty
+      read -r _input < /dev/tty 2>/dev/null || true
+    else
+      printf '%b' "$_prompt"
+      read -r _input || true
+    fi
   fi
   printf '%s' "$_input"
+}
+
+# a2: Detect non-interactive mode from several common sources. Users (and CI)
+# commonly set one of these; we honor any of them.
+is_noninteractive() {
+  case "${OMNIVEC_NONINTERACTIVE:-}${AZD_NONINTERACTIVE:-}${CI:-}${GITHUB_ACTIONS:-}" in
+    '') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# a2: Apply Quick-start defaults to azd env. Used when non-interactive and no
+# preset config exists, to give a predictable fallback instead of silently
+# accepting empty/garbage input.
+apply_quickstart_defaults() {
+  printf "  ${GREEN}Applying Quick-start defaults (non-interactive mode).${NC}\n"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
+  azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
+  azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
+  azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
+  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true" < /dev/null
+}
+
+# a2: Fail fast when we would need to prompt but can't. Far better than a
+# silent 10-minute deploy with surprise defaults.
+require_tty_or_preset() {
+  if _can_prompt; then
+    return 0
+  fi
+  if is_noninteractive; then
+    apply_quickstart_defaults
+    printf "\n${GREEN}Pre-provision checks passed (non-interactive). Proceeding with Bicep deployment...${NC}\n"
+    exit 0
+  fi
+  printf "\n${RED}ERROR: No TTY and no configuration found.${NC}\n" >&2
+  printf "  azd hooks run this script without an interactive terminal (common in CI,\n" >&2
+  printf "  Docker, nohup, or piped shells), and no configuration has been pre-set.\n" >&2
+  printf "\n  Fix with ONE of:\n" >&2
+  printf "    1) Run interactively:  azd up  (from a real terminal)\n" >&2
+  printf "    2) Accept defaults:    OMNIVEC_NONINTERACTIVE=1 azd up\n" >&2
+  printf "    3) Pre-set config, e.g.:\n" >&2
+  printf "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms\n" >&2
+  printf "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2\n" >&2
+  printf "         azd env set OMNIVEC_GPU_NODE_COUNT 0\n" >&2
+  printf "         azd env set OMNIVEC_ENABLE_BLOB_SOURCE true\n" >&2
+  printf "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless\n" >&2
+  exit 1
 }
 
 DEPLOYMENT_DETECTED=false
@@ -118,7 +178,7 @@ if ! command -v helm >/dev/null 2>&1; then
   HELM_INSTALL_DIR="${HOME}/.local/bin"
   mkdir -p "$HELM_INSTALL_DIR"
   export PATH="$HELM_INSTALL_DIR:$PATH"
-  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR="$HELM_INSTALL_DIR" USE_SUDO="false" sh 2>/dev/null || true
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 </dev/null | HELM_INSTALL_DIR="$HELM_INSTALL_DIR" USE_SUDO="false" sh </dev/null 2>/dev/null || true
   if ! command -v helm >/dev/null 2>&1; then
     printf "  ${RED}Failed to install helm. Install manually: https://helm.sh/docs/intro/install/${NC}\n"
     exit 1
@@ -135,7 +195,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 if [ ! -f "$REPO_ROOT/docgrok/Dockerfile" ]; then
   printf "  ${YELLOW}Initializing git submodules...${NC}\n"
-  (cd "$REPO_ROOT" && git submodule update --init --recursive 2>/dev/null) || true
+  (cd "$REPO_ROOT" && git submodule update --init --recursive </dev/null 2>/dev/null) || true
 fi
 
 # ── Validate Azure login ────────────────────────────────────────────────────
@@ -187,6 +247,11 @@ if [ -n "$_existing_vm" ]; then
 fi
 
 # ── Fresh deploy: offer auto-defaults or interactive ─────────────────────────
+# a2: If we have no preset config AND no TTY, fail fast with a clear error
+# (or auto-apply Quick-start if OMNIVEC_NONINTERACTIVE / CI is set).
+# Must run BEFORE the first read_input.
+require_tty_or_preset
+
 echo ""
 printf "${YELLOW}No configuration found. Choose setup mode:${NC}\n"
 echo "  1) Quick start — use recommended defaults (fastest, no GPU)"
