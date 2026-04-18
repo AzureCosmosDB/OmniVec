@@ -20,7 +20,7 @@ for _sh in $SHELLS_TO_TRY; do
         continue
     fi
     printf '\n========== running under %s ==========\n' "$_sh"
-    for _t in "$SCRIPT_DIR"/hooks/test-*.sh "$SCRIPT_DIR"/infra/test-*.sh; do
+    for _t in "$SCRIPT_DIR"/hooks/test-*.sh "$SCRIPT_DIR"/infra/test-*.sh "$SCRIPT_DIR"/scripts/test-*.sh; do
         [ -f "$_t" ] || continue
         printf '\n--- %s ---\n' "$(basename "$_t")"
         "$_sh" "$_t"
