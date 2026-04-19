@@ -454,6 +454,13 @@ elif [ ! -f "$HOME/.kube/config" ]; then
 fi
 
 export KUBE_CONTEXT
+# Helper: always invoke kubectl against the freshly-fetched kubeconfig and context.
+# Some azd/heartbeat wrappers reset $KUBECONFIG between hook phases, so we cannot
+# rely solely on the env var.
+kubectl_omnivec() {
+  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" "$@"
+}
+
 # Sanity check before first kubectl call — surface config issues clearly.
 if ! kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts "$KUBE_CONTEXT" >/dev/null 2>&1; then
   printf "${RED}Context '%s' not found in %s. Kubeconfig contents:${NC}\n" "$KUBE_CONTEXT" "$OMNIVEC_KUBECONFIG"
@@ -461,7 +468,7 @@ if ! kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts "$KUBE_CONTE
   ls -la "$OMNIVEC_KUBECONFIG" "$HOME/.kube/config" 2>&1 || true
   exit 1
 fi
-kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" get nodes </dev/null >/dev/null
+kubectl_omnivec get nodes </dev/null >/dev/null
 printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEXT})${NC}\n"
 
 # =============================================================================
@@ -471,18 +478,18 @@ printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEX
 printf "\n${YELLOW}Phase 3: Creating namespaces and secrets...${NC}\n"
 
 # Create namespaces and label for Helm ownership
-kubectl --context "$KUBE_CONTEXT" create namespace omnivec </dev/null 2>/dev/null || true
-kubectl --context "$KUBE_CONTEXT" create namespace docgrok </dev/null 2>/dev/null || true
-kubectl --context "$KUBE_CONTEXT" label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite </dev/null
-kubectl --context "$KUBE_CONTEXT" annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite </dev/null
+kubectl_omnivec create namespace omnivec </dev/null 2>/dev/null || true
+kubectl_omnivec create namespace docgrok </dev/null 2>/dev/null || true
+kubectl_omnivec label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite </dev/null
+kubectl_omnivec annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite </dev/null
 
 # Storage connection string secret (only when blob source is enabled)
 if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
-  kubectl --context "$KUBE_CONTEXT" create secret generic omnivec-storage \
+  kubectl_omnivec create secret generic omnivec-storage \
     --namespace omnivec \
     --from-literal=account-name="$STORAGE_ACCOUNT" \
     --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" \
-    --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f -
+    --dry-run=client -o yaml | kubectl_omnivec apply -f -
   printf "  ${GREEN}omnivec-storage secret created.${NC}\n"
 fi
 
@@ -587,7 +594,7 @@ fi
 # Build helm command as a proper argument list using a function
 run_helm_deploy() {
   set -- helm upgrade --install omnivec "${ROOT_DIR}/helm/omnivec" \
-    --kube-context "$KUBE_CONTEXT" \
+    --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" \
     --namespace omnivec \
     --values "$HELM_VALUES_FILE"
 
@@ -618,18 +625,18 @@ run_helm_deploy() {
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
 set +e
-_helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" -o json </dev/null 2>/dev/null)
+_helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" -o json </dev/null 2>/dev/null)
 _helm_phase=$(echo "$_helm_status" | grep -o '"status":"pending-[^"]*"' | head -1 | cut -d'"' -f4)
 set -e
 if [ -n "$_helm_phase" ]; then
   printf "${YELLOW}Detected stuck Helm release (status: ${_helm_phase}). Rolling back...${NC}\n"
   set +e
-  helm rollback omnivec -n omnivec --kube-context "$KUBE_CONTEXT" </dev/null 2>/dev/null
+  helm rollback omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" </dev/null 2>/dev/null
   _rb_rc=$?
   set -e
   if [ "$_rb_rc" -ne 0 ]; then
     printf "${YELLOW}Rollback failed — uninstalling stuck release...${NC}\n"
-    helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" </dev/null 2>/dev/null || true
+    helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" </dev/null 2>/dev/null || true
   fi
   printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
 fi
@@ -650,8 +657,8 @@ rm -f "$HELM_VALUES_FILE"
 
 if [ "$helm_rc" -ne 0 ]; then
   printf "${RED}Helm deploy failed. Collecting pod diagnostics...${NC}\n"
-  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -o wide </dev/null || true
-  kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers </dev/null 2>/dev/null | while read -r line; do
+  kubectl_omnivec get pods -n omnivec -o wide </dev/null || true
+  kubectl_omnivec get pods -n omnivec --no-headers </dev/null 2>/dev/null | while read -r line; do
     pod=$(echo "$line" | awk '{print $1}')
     status=$(echo "$line" | awk '{print $3}')
     case "$status" in
@@ -659,8 +666,8 @@ if [ "$helm_rc" -ne 0 ]; then
         printf "\n${YELLOW}=== %s (%s) ===${NC}\n" "$pod" "$status"
         # CRITICAL: inner kubectl calls need </dev/null inside while-read loop,
         # otherwise they consume the outer pipe's stdin and break the loop.
-        kubectl --context "$KUBE_CONTEXT" describe pod "$pod" -n omnivec </dev/null | sed -n '/Events:/,$p' || true
-        kubectl --context "$KUBE_CONTEXT" logs "$pod" -n omnivec --tail=80 </dev/null || true
+        kubectl_omnivec describe pod "$pod" -n omnivec </dev/null | sed -n '/Events:/,$p' || true
+        kubectl_omnivec logs "$pod" -n omnivec --tail=80 </dev/null || true
         ;;
     esac
   done
@@ -672,8 +679,8 @@ printf "${GREEN}Helm deployment complete.${NC}\n"
 # Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
 if [ "$IMAGES_CHANGED" = "true" ]; then
   printf "\n${YELLOW}Images updated — restarting pods to pull new images...${NC}\n"
-  kubectl --context "$KUBE_CONTEXT" rollout restart deployment -n omnivec </dev/null 2>/dev/null || true
-  kubectl --context "$KUBE_CONTEXT" rollout status deployment/omnivec-api -n omnivec --timeout=5m </dev/null 2>/dev/null || true
+  kubectl_omnivec rollout restart deployment -n omnivec </dev/null 2>/dev/null || true
+  kubectl_omnivec rollout status deployment/omnivec-api -n omnivec --timeout=5m </dev/null 2>/dev/null || true
   printf "${GREEN}Pods restarted with new images.${NC}\n"
 fi
 
@@ -684,18 +691,18 @@ fi
 printf "\n${YELLOW}Phase 5: Verifying deployment...${NC}\n"
 
 printf "\n${CYAN}OmniVec pods:${NC}\n"
-kubectl --context "$KUBE_CONTEXT" get pods -n omnivec --no-headers </dev/null 2>/dev/null || true
+kubectl_omnivec get pods -n omnivec --no-headers </dev/null 2>/dev/null || true
 
 printf "\n${CYAN}DocGrok pods:${NC}\n"
-kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok --no-headers </dev/null 2>/dev/null || true
-kubectl --context "$KUBE_CONTEXT" get pods -n omnivec -l app=docgrok-controller --no-headers </dev/null 2>/dev/null || true
+kubectl_omnivec get pods -n omnivec -l app=docgrok --no-headers </dev/null 2>/dev/null || true
+kubectl_omnivec get pods -n omnivec -l app=docgrok-controller --no-headers </dev/null 2>/dev/null || true
 
 # Wait for external IP
 printf "\n${YELLOW}Waiting for external IP...${NC}\n"
 EXTERNAL_IP=""
 i=0
 while [ $i -lt 30 ]; do
-  EXTERNAL_IP=$(kubectl --context "$KUBE_CONTEXT" get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' </dev/null 2>/dev/null || true)
+  EXTERNAL_IP=$(kubectl_omnivec get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' </dev/null 2>/dev/null || true)
   if [ -n "$EXTERNAL_IP" ]; then
     break
   fi
@@ -703,7 +710,7 @@ while [ $i -lt 30 ]; do
   i=$((i + 1))
 done
 
-if ! kubectl --context "$KUBE_CONTEXT" rollout status deployment/omnivec-api -n omnivec --timeout=5m >/dev/null; then
+if ! kubectl_omnivec rollout status deployment/omnivec-api -n omnivec --timeout=5m >/dev/null; then
   printf "${RED}API deployment did not become ready.${NC}\n"
   exit 1
 fi
