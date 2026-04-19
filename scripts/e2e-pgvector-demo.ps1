@@ -61,6 +61,19 @@ $CheckpointFile = Join-Path $ROOT_DIR ".e2e-pgvector-checkpoint"
 
 function Save-Checkpoint { param([int]$Step) Set-Content -Path $CheckpointFile -Value $Step }
 
+# ─── Resolve native CLIs (avoid PS profile shadowing of `az`/`azd`) ──────────
+function Resolve-NativeExe {
+    param([string]$Name)
+    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) {
+        LogErr "Required CLI not found on PATH: $Name"
+        exit 1
+    }
+    return $cmd.Source
+}
+$AzExe  = Resolve-NativeExe 'az'
+$AzdExe = Resolve-NativeExe 'azd'
+
 # ─── Banner ──────────────────────────────────────────────────────────────────
 Write-Host "`e[32m╔══════════════════════════════════════════════════════════╗`e[0m"
 Write-Host "`e[32m║  OmniVec E2E Demo — PostgreSQL + pgvector               ║`e[0m"
@@ -87,22 +100,22 @@ if (-not $PgAdminPassword) {
 if ($Existing) {
     if (-not $EnvName) { $EnvName = Read-Host "  Enter azd environment name"; if (-not $EnvName) { LogErr "EnvName required."; exit 1 } }
     Log "`nUsing existing deployment: $EnvName"
-    azd env select $EnvName 2>$null
+    & $AzdExe env select $EnvName 2>$null
 
     if (-not $AdminToken) {
-        $AdminToken = (azd env get-value OMNIVEC_ADMIN_TOKEN 2>$null).Trim()
+        $AdminToken = (& $AzdExe env get-value OMNIVEC_ADMIN_TOKEN 2>$null | Out-String).Trim()
     }
     if (-not $AdminToken) {
         $AdminToken = Read-Host "  Enter admin token"
         if (-not $AdminToken) { LogErr "Admin token required."; exit 1 }
     }
 
-    $AKS_CLUSTER = (azd env get-value AZURE_AKS_CLUSTER_NAME 2>$null).Trim()
-    $RESOURCE_GROUP = (azd env get-value AZURE_RESOURCE_GROUP 2>$null).Trim()
+    $AKS_CLUSTER = (& $AzdExe env get-value AZURE_AKS_CLUSTER_NAME 2>$null | Out-String).Trim()
+    $RESOURCE_GROUP = (& $AzdExe env get-value AZURE_RESOURCE_GROUP 2>$null | Out-String).Trim()
     if (-not $RESOURCE_GROUP) { $RESOURCE_GROUP = "rg-omnivec-$EnvName" }
 
     $KUBE_CONTEXT = $AKS_CLUSTER
-    az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --context $KUBE_CONTEXT --overwrite-existing 2>$null
+    & $AzExe aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --context $KUBE_CONTEXT --overwrite-existing 2>$null
 
     # Get external IP
     $externalIp = kubectl --context $KUBE_CONTEXT get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
@@ -155,7 +168,7 @@ if ($Cleanup) {
 
     # Delete PostgreSQL server
     $PG_SERVER = "omnivec-pgdemo-$(($AKS_CLUSTER -replace 'omnivec-aks-',''))"
-    az postgres flexible-server delete --name $PG_SERVER --resource-group $RESOURCE_GROUP --yes 2>$null
+    & $AzExe postgres flexible-server delete --name $PG_SERVER --resource-group $RESOURCE_GROUP --yes 2>$null
     LogOk "Deleted PostgreSQL server: $PG_SERVER"
 
     Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
@@ -179,12 +192,14 @@ if ($FromStep -le 3) {
     $PG_ADMIN = "omnivecadmin"
 
     # Check if server already exists
-    $existing = az postgres flexible-server show --name $PG_SERVER --resource-group $RESOURCE_GROUP 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+    $showArgs = @('postgres','flexible-server','show','--name',$PG_SERVER,'--resource-group',$RESOURCE_GROUP)
+    $showJson = & $AzExe @showArgs 2>$null
+    $existing = if ($showJson) { $showJson | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $null }
     if ($existing) {
         LogOk "PostgreSQL server already exists: $PG_SERVER"
     } else {
         Log "  Creating server: $PG_SERVER (this takes ~3-5 minutes)..."
-        az postgres flexible-server create `
+        & $AzExe postgres flexible-server create `
             --name $PG_SERVER `
             --resource-group $RESOURCE_GROUP `
             --location eastus2 `
@@ -201,7 +216,7 @@ if ($FromStep -le 3) {
 
     # Enable pgvector extension
     Log "  Enabling pgvector extension..."
-    az postgres flexible-server parameter set `
+    & $AzExe postgres flexible-server parameter set `
         --server-name $PG_SERVER `
         --resource-group $RESOURCE_GROUP `
         --name azure.extensions `
@@ -214,7 +229,7 @@ if ($FromStep -le 3) {
     $PG_DB = "omnivec_demo"
 
     # Allow Azure services
-    az postgres flexible-server firewall-rule create `
+    & $AzExe postgres flexible-server firewall-rule create `
         --name $PG_SERVER `
         --resource-group $RESOURCE_GROUP `
         --rule-name AllowAzure `
@@ -223,7 +238,7 @@ if ($FromStep -le 3) {
 
     # Allow current IP
     $myIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 5)
-    az postgres flexible-server firewall-rule create `
+    & $AzExe postgres flexible-server firewall-rule create `
         --name $PG_SERVER `
         --resource-group $RESOURCE_GROUP `
         --rule-name AllowMyIP `
