@@ -1,4 +1,4 @@
-# OmniVec End-to-End Demo — Fully Automated
+﻿# OmniVec End-to-End Demo — Fully Automated
 # Creates environment, provisions infra, registers model, creates pipeline, verifies it works
 # Tests both queue mode (CFP → jobs → worker → destination) and inline mode (CFP embeds directly into source)
 #
@@ -21,6 +21,31 @@ param(
     [int]$AoaiDims = $(if ($env:AOAI_DIMS) { [int]$env:AOAI_DIMS } else { 1536 }),
     [string]$SharedRegistryToken = $env:OMNIVEC_SHARED_REGISTRY_TOKEN
 )
+
+# Require PowerShell 7+ (uses `e ANSI escape + relies on pwsh native-stderr handling).
+# Windows PowerShell 5.1 treats `e as the literal letter "e" and surfaces every
+# native stderr line as a terminating NativeCommandError.
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwshCmd) {
+        $forwarded = @('-NoLogo', '-NoProfile', '-File', $PSCommandPath)
+        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+            if ($kv.Value -is [System.Management.Automation.SwitchParameter]) {
+                if ($kv.Value.IsPresent) { $forwarded += "-$($kv.Key)" }
+            } else {
+                $forwarded += "-$($kv.Key)"; $forwarded += "$($kv.Value)"
+            }
+        }
+        Write-Host "Relaunching under PowerShell 7 (pwsh) for ANSI color + stderr support..." -ForegroundColor DarkGray
+        & $pwshCmd.Source @forwarded
+        exit $LASTEXITCODE
+    }
+    Write-Host "ERROR: This script requires PowerShell 7+ (pwsh)." -ForegroundColor Red
+    Write-Host "  Your shell:   Windows PowerShell $($PSVersionTable.PSVersion)" -ForegroundColor Red
+    Write-Host "  Install pwsh: winget install --id Microsoft.PowerShell --source winget" -ForegroundColor Yellow
+    Write-Host "  Then run:     pwsh -File $PSCommandPath" -ForegroundColor Yellow
+    exit 1
+}
 
 $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
