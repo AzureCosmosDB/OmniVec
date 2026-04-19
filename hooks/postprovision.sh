@@ -433,6 +433,13 @@ az aks get-credentials \
   --file "$OMNIVEC_KUBECONFIG" \
   --overwrite-existing >/dev/null
 
+# Also materialize to the default kubeconfig path so kubectl finds the context
+# even if $KUBECONFIG is reset by the outer runner (azd / heartbeat wrappers).
+mkdir -p "$HOME/.kube"
+if [ -L "$HOME/.kube/config" ]; then rm -f "$HOME/.kube/config"; fi
+cp -f "$OMNIVEC_KUBECONFIG" "$HOME/.kube/config"
+chmod 600 "$HOME/.kube/config" "$OMNIVEC_KUBECONFIG" 2>/dev/null || true
+
 # WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
 if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
   mkdir -p "$HOME/.kube"
@@ -447,7 +454,14 @@ elif [ ! -f "$HOME/.kube/config" ]; then
 fi
 
 export KUBE_CONTEXT
-kubectl --context "$KUBE_CONTEXT" get nodes </dev/null >/dev/null
+# Sanity check before first kubectl call — surface config issues clearly.
+if ! kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts "$KUBE_CONTEXT" >/dev/null 2>&1; then
+  printf "${RED}Context '%s' not found in %s. Kubeconfig contents:${NC}\n" "$KUBE_CONTEXT" "$OMNIVEC_KUBECONFIG"
+  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts 2>&1 || true
+  ls -la "$OMNIVEC_KUBECONFIG" "$HOME/.kube/config" 2>&1 || true
+  exit 1
+fi
+kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" get nodes </dev/null >/dev/null
 printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEXT})${NC}\n"
 
 # =============================================================================
