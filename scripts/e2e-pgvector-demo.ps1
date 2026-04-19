@@ -1,4 +1,4 @@
-# OmniVec E2E Demo — PostgreSQL + pgvector
+﻿# OmniVec E2E Demo — PostgreSQL + pgvector
 # Provisions Azure PostgreSQL Flexible Server, creates source/destination tables,
 # registers an embedding model, creates a pipeline, and verifies vector search.
 #

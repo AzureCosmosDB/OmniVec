@@ -1,4 +1,4 @@
-# OmniVec Deployment Diagnostics
+﻿# OmniVec Deployment Diagnostics
 # Comprehensive health check across infrastructure, pods, networking, auth,
 # images, pipelines, models, and common failure modes.
 #

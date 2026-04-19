@@ -1,4 +1,4 @@
-# scripts/doctor.ps1 — OmniVec environment diagnostic tool (Windows).
+﻿# scripts/doctor.ps1 — OmniVec environment diagnostic tool (Windows).
 # Mirror of scripts/doctor.sh. Exits 0 if no fails.
 
 $ErrorActionPreference = 'Continue'

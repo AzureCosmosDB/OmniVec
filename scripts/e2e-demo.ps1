@@ -1,4 +1,4 @@
-# OmniVec End-to-End Demo — Fully Automated
+﻿# OmniVec End-to-End Demo — Fully Automated
 # Creates environment, provisions infra, registers model, creates pipeline, verifies it works
 # Tests both queue mode (CFP → jobs → worker → destination) and inline mode (CFP embeds directly into source)
 #
