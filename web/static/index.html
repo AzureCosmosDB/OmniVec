@@ -2891,6 +2891,11 @@
             document.getElementById('exp-secrets').checked = false;
             document.getElementById('exp-checkpoints').checked = false;
             const picker = document.getElementById('exp-picker');
+            const runBtn = document.getElementById('export-run-btn');
+            // Disable Download until everything is loaded
+            runBtn.disabled = true;
+            const origBtnText = 'Download bundle';
+            runBtn.textContent = 'Loading resources…';
             // Render placeholder sections immediately so user sees structure
             picker.innerHTML = EXP_TYPES.map(t => `
                 <div class="picker-section" data-type="${t.key}" data-loaded="0" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
@@ -2904,27 +2909,32 @@
             showModal('export-modal');
 
             // Load one type at a time, render as each completes
-            for (const t of EXP_TYPES) {
-                const sec = picker.querySelector(`.picker-section[data-type="${t.key}"]`);
-                if (!sec) continue;
-                const statusEl = sec.querySelector('.picker-placeholder-status');
-                const itemsEl = sec.querySelector('.picker-items');
-                if (statusEl) statusEl.textContent = 'loading…';
-                if (itemsEl) itemsEl.textContent = 'Loading…';
-                let items = [];
-                try {
-                    const res = await apiFetch(t.endpoint);
-                    if (res.ok) {
-                        const data = await res.json();
-                        const raw = Array.isArray(data) ? data : (data[t.listKey] || []);
-                        items = raw.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
-                    }
-                } catch (_) { /* ignore, show empty */ }
-                sec.outerHTML = renderPickerSection('exp-picker', t.key, t.label, items, { selected: true });
+            try {
+                for (const t of EXP_TYPES) {
+                    const sec = picker.querySelector(`.picker-section[data-type="${t.key}"]`);
+                    if (!sec) continue;
+                    const statusEl = sec.querySelector('.picker-placeholder-status');
+                    const itemsEl = sec.querySelector('.picker-items');
+                    if (statusEl) statusEl.textContent = 'loading…';
+                    if (itemsEl) itemsEl.textContent = 'Loading…';
+                    let items = [];
+                    try {
+                        const res = await apiFetch(t.endpoint);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const raw = Array.isArray(data) ? data : (data[t.listKey] || []);
+                            items = raw.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                        }
+                    } catch (_) { /* ignore, show empty */ }
+                    sec.outerHTML = renderPickerSection('exp-picker', t.key, t.label, items, { selected: true });
+                    pickerUpdateCounts('exp-picker');
+                }
+                picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'));
                 pickerUpdateCounts('exp-picker');
+            } finally {
+                runBtn.disabled = false;
+                runBtn.textContent = origBtnText;
             }
-            picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'));
-            pickerUpdateCounts('exp-picker');
         }
 
         async function runExport() {
