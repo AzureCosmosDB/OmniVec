@@ -170,11 +170,23 @@ function Build-Image {
     Write-Host "  `e[36mBuilding ${Name}:${Tag}...`e[0m"
     if ($BUILD_MODE -eq "docker") {
         docker build -t "${ACR_LOGIN_SERVER}/${Name}:${Tag}" -f $Dockerfile $Context
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  `e[31mdocker build failed for ${Name}:${Tag}.`e[0m"
+            exit 1
+        }
         docker push "${ACR_LOGIN_SERVER}/${Name}:${Tag}"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  `e[31mdocker push failed for ${Name}:${Tag}.`e[0m"
+            exit 1
+        }
     } else {
         az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --no-logs 2>$null
         if ($LASTEXITCODE -ne 0) {
             az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  `e[31maz acr build failed for ${Name}:${Tag}.`e[0m"
+                exit 1
+            }
         }
     }
     Write-Host "  `e[32m${Name}:${Tag} pushed.`e[0m"
