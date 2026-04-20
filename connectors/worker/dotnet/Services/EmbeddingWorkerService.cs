@@ -43,6 +43,9 @@ public class EmbeddingWorkerService : BackgroundService
         if (_sbClient is null)
         {
             _logger.LogWarning("Service Bus not configured — worker idle. Set Worker__ServiceBusNamespace to enable queue processing.");
+            // Mark ready so the pod becomes Ready in k8s (idle is a legitimate
+            // steady state — helm --wait must not hang on an optional worker).
+            WorkerHeartbeat.MarkReady();
             // Stay alive but idle — don't crash the pod
             await Task.Delay(Timeout.Infinite, ct);
             return;
@@ -60,6 +63,11 @@ public class EmbeddingWorkerService : BackgroundService
                 PrefetchCount = _options.EmbedBatchSize,
                 ReceiveMode = ServiceBusReceiveMode.PeekLock,
             });
+
+        // Receiver constructed successfully — we can serve. Marking ready here
+        // (not on first message) so an empty queue does not keep the pod 0/1
+        // and cause helm --wait to hang for 25 minutes.
+        WorkerHeartbeat.MarkReady();
 
         // Run multiple concurrent receive loops
         var tasks = Enumerable.Range(0, _options.MaxConcurrentCalls)
