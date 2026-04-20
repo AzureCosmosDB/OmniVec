@@ -1,0 +1,38 @@
+#!/bin/sh
+# tests/emu/bin/docker - stateful emulator of docker.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/../lib/_common.sh"
+emu_enter docker "$@"
+
+case "${1:-}" in
+    version)
+        echo "Docker version 27.0.0 (emu)" ;;
+    build|buildx)
+        # parse -t TAG to record the built image
+        tag=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t|--tag) tag=$2; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        [ -n "$tag" ] && emu_set "docker/images" "$(emu_safe "$tag")" "built"
+        echo "Successfully built (emu) $tag" ;;
+    push)
+        tag=${2:-}
+        [ -n "$tag" ] && emu_set "docker/registry" "$(emu_safe "$tag")" "pushed"
+        echo "Successfully pushed (emu) $tag" ;;
+    pull)
+        tag=${2:-}
+        [ -n "$tag" ] && emu_set "docker/images" "$(emu_safe "$tag")" "pulled"
+        echo "Successfully pulled (emu) $tag" ;;
+    images)
+        printf 'REPOSITORY  TAG   IMAGE ID     CREATED  SIZE\n'
+        emu_list "docker/images" | while read -r t; do
+            printf '%s  latest  emu-id   1m      1MB\n' "$t"
+        done ;;
+    login|logout|rmi|rm|tag|info)
+        exit 0 ;;
+    *)
+        exit 0 ;;
+esac

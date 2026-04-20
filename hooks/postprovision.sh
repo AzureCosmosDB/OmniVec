@@ -251,6 +251,8 @@ build_missing_images() {
 # ── If not explicitly set to build, try import ──────────────────────────
 ANON_OK=false
 TOKEN_OK=false
+AUTH_IMPORTED=false
+IMAGES_CHANGED=false
 FIRST_IMAGE=$(echo "$IMAGES" | awk '{print $1}')
 
 # Honour OMNIVEC_SKIP_IMPORT — set this when you have locally built (or
@@ -285,6 +287,7 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
     if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
       printf " ${GREEN}✓ anonymous pull works${NC}\n"
       ANON_OK=true
+      AUTH_IMPORTED=true
     else
       printf " ${YELLOW}✗ requires auth${NC}\n"
       # Try stored token
@@ -293,6 +296,7 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
         if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
           printf " ${GREEN}✓ token works${NC}\n"
           TOKEN_OK=true
+          AUTH_IMPORTED=true
         else
           printf " ${RED}✗ token invalid/expired${NC}\n"
         fi
@@ -307,6 +311,7 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
             azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null 2>/dev/null || true
             printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
             TOKEN_OK=true
+            AUTH_IMPORTED=true
           else
             printf "  ${RED}Token invalid. Will build from source.${NC}\n"
           fi
@@ -328,16 +333,25 @@ if [ "$OMNIVEC_BUILD" = "true" ] || { [ "$ANON_OK" = "false" ] && [ "$TOKEN_OK" 
   IMAGES_CHANGED=true
   printf "${GREEN}All images built and pushed.${NC}\n"
 else
-  # IMPORT MODE: first image already imported by test above, do the rest
-  import_count=1
+  # IMPORT MODE: iterate every image. FIRST_IMAGE was handled by the auth
+  # test above — count it as imported only if the auth test actually ran
+  # an import (AUTH_IMPORTED=true); otherwise count it as a skip so
+  # IMAGES_CHANGED stays false when nothing really changed.
+  import_count=0
   skip_count=0
   IMPORT_TMP=$(mktemp -d)
   import_pids=""
 
   for image in $IMAGES; do
-    # Skip first image — already imported during auth test
+    # First image — already handled by auth test (imported or preserved)
     if [ "$image" = "$FIRST_IMAGE" ]; then
-      printf "  ${GREEN}${image}:latest already imported (auth test).${NC}\n"
+      if [ "$AUTH_IMPORTED" = "true" ]; then
+        printf "  ${GREEN}${image}:latest already imported (auth test).${NC}\n"
+        import_count=$((import_count + 1))
+      else
+        printf "  ${GREEN}${image}:latest already present locally, preserving (auth test).${NC}\n"
+        skip_count=$((skip_count + 1))
+      fi
       continue
     fi
     if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
