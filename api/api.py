@@ -3838,10 +3838,45 @@ async def update_model(model_id: str, payload: dict):
 
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: str):
-    """Delete an external model â€” proxied to DocGrok, removed from CosmosDB."""
+    """Delete an external model — proxied to DocGrok, removed from CosmosDB."""
     try:
-        # Check if it's a chat-only model (only in CosmosDB, not in DocGrok)
         store = get_store()
+
+        # Guard: refuse delete if any pipeline or assistant references this model.
+        # Pipelines reference models via the `docgrok_pipeline` field (which can
+        # also be a transform pipeline id; direct equality is fine as a match).
+        # Assistants reference chat models via `model_id`.
+        pipeline_users: list[str] = []
+        try:
+            for d in store.list("pipeline"):
+                if d.get("docgrok_pipeline") == model_id:
+                    pipeline_users.append(d.get("name") or d.get("id") or "<unnamed>")
+        except Exception:
+            pass
+
+        assistant_users: list[str] = []
+        try:
+            for d in store.list("assistant"):
+                if d.get("model_id") == model_id:
+                    assistant_users.append(d.get("name") or d.get("id") or "<unnamed>")
+        except Exception:
+            pass
+
+        if pipeline_users or assistant_users:
+            parts: list[str] = []
+            if pipeline_users:
+                names = ", ".join(f"'{n}'" for n in pipeline_users)
+                parts.append(f"{len(pipeline_users)} pipeline(s): {names}")
+            if assistant_users:
+                names = ", ".join(f"'{n}'" for n in assistant_users)
+                parts.append(f"{len(assistant_users)} assistant(s): {names}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete — model is used by {' and '.join(parts)}. "
+                       f"Delete or update those resources first.",
+            )
+
+        # Check if it's a chat-only model (only in CosmosDB, not in DocGrok)
         doc = None
         if model_id.startswith("mdl-ext-"):
             try:
@@ -3850,7 +3885,7 @@ async def delete_model(model_id: str):
                 pass
 
         if doc and doc.get("model_category") == "chat":
-            # Chat model â€” only delete from CosmosDB
+            # Chat model — only delete from CosmosDB
             store.delete(model_id, "docgrok_model")
             return {"status": "deleted", "id": model_id}
 
@@ -5277,7 +5312,7 @@ def _new_suffixed_id(old_id: str) -> str:
 
 
 @app.post("/api/admin/import")
-def import_bundle(
+async def import_bundle(
     payload: dict,
     on_conflict: str = "skip",
     dry_run: bool = False,
@@ -5415,9 +5450,43 @@ def import_bundle(
         }
 
     # Apply writes
+    # For external embedding models we must also register with DocGrok so they
+    # appear in GET /api/models (which is sourced from the DocGrok registry for
+    # non-chat models). Chat models are surfaced via the CosmosDB fallback and
+    # don't need DocGrok registration.
+    model_docs_to_register: list[dict] = []
     for doc_type, item in to_write:
         try:
             doc = {**item, "doc_type": doc_type}
+            if doc_type == "docgrok_model":
+                # Route secrets through Key Vault so we don't persist plaintext
+                # api keys into the Cosmos doc (mirrors create_model behaviour).
+                api_key_value = doc.get("api_key") or ""
+                if api_key_value and api_key_value != "***":
+                    try:
+                        from keyvault_client import set_model_api_key
+                        if set_model_api_key(doc.get("id", ""), api_key_value):
+                            doc.pop("api_key", None)
+                            doc["api_key_source"] = "keyvault"
+                    except Exception as kv_err:
+                        warnings.append(
+                            f"models/{doc.get('id')}: key vault write failed ({kv_err}); "
+                            f"api_key will be stored in CosmosDB as a fallback"
+                        )
+                elif api_key_value == "***":
+                    # Redacted bundle — clear the placeholder so we don't store it.
+                    doc.pop("api_key", None)
+                    warnings.append(
+                        f"models/{doc.get('id')}: api_key is redacted; update the "
+                        f"model's credentials via PUT /api/models/{doc.get('id')} "
+                        f"before use"
+                    )
+                # Remember models that need DocGrok registration after the write
+                if (doc.get("model_category") or "embedding") != "chat" \
+                        and str(doc.get("id", "")).startswith("mdl-ext-"):
+                    # Keep the plaintext key (if any) around for the registration
+                    # call only; the persisted doc above has already been scrubbed.
+                    model_docs_to_register.append({**doc, "_plain_api_key": api_key_value})
             store.upsert(doc)
         except Exception as e:
             rtype = next((k for k, v in _EXPORT_RESOURCE_TYPES.items() if v == doc_type), doc_type)
@@ -5428,6 +5497,53 @@ def import_bundle(
             store.upsert(cp)
         except Exception as e:
             summary["checkpoints"]["errors"].append(f"{cp.get('id')}: {e}")
+
+    # Register imported external embedding models with DocGrok so they show up
+    # in GET /api/models immediately (list_models reads from the DocGrok
+    # registry for non-chat models). Best-effort: a registration failure is
+    # reported as a warning — DocGrok will also rehydrate from CosmosDB on its
+    # next restart, so the model isn't lost either way.
+    for mdoc in model_docs_to_register:
+        mid = mdoc.get("id", "")
+        plain_key = mdoc.pop("_plain_api_key", "") or ""
+        # If the plaintext key wasn't in the bundle but we already have one in
+        # Key Vault (e.g. re-import over an existing model), fetch it so the
+        # DocGrok registration is functional.
+        if (not plain_key or plain_key == "***") and mdoc.get("api_key_source") == "keyvault":
+            try:
+                from keyvault_client import get_model_api_key
+                plain_key = get_model_api_key(mid) or ""
+            except Exception:
+                plain_key = ""
+        reg_payload = {
+            "id": mid,
+            "name": mdoc.get("name", ""),
+            "type": mdoc.get("type", "azure-openai"),
+            "endpoint": mdoc.get("endpoint", ""),
+            "deployment": mdoc.get("deployment", "") or mdoc.get("name", ""),
+            "api_key": plain_key,
+            "api_version": mdoc.get("api_version", "2024-06-01"),
+            "embedding_dim": int(mdoc.get("embedding_dim", 1536) or 1536),
+        }
+        auth_type = mdoc.get("auth_type") or ("managed-identity" if not plain_key else "key")
+        if auth_type == "managed-identity":
+            reg_payload["auth_type"] = "managed-identity"
+            if mdoc.get("client_id"):
+                reg_payload["client_id"] = mdoc["client_id"]
+        try:
+            resp = await http_client.post(
+                f"{DOCGROK_URL}/admin/models/registry", json=reg_payload
+            )
+            if resp.status_code >= 400:
+                warnings.append(
+                    f"models/{mid}: DocGrok registration returned "
+                    f"{resp.status_code}: {resp.text[:200]}"
+                )
+        except Exception as e:
+            warnings.append(
+                f"models/{mid}: DocGrok registration failed ({e}); the model "
+                f"will appear after the next DocGrok restart"
+            )
 
     return {
         "success": True,
