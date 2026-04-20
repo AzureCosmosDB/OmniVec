@@ -42,6 +42,33 @@ spec:
               value: {{ .Values.dotnetWorker.batchAccumulateMs | default 500 | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.dotnetWorker.healthPort | default 8080 }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.dotnetWorker.healthPort | default 8080 }}
+            initialDelaySeconds: {{ .Values.dotnetWorker.probes.liveness.initialDelaySeconds | default 30 }}
+            periodSeconds: {{ .Values.dotnetWorker.probes.liveness.periodSeconds | default 30 }}
+            timeoutSeconds: {{ .Values.dotnetWorker.probes.liveness.timeoutSeconds | default 5 }}
+            failureThreshold: {{ .Values.dotnetWorker.probes.liveness.failureThreshold | default 3 }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.dotnetWorker.healthPort | default 8080 }}
+            initialDelaySeconds: {{ .Values.dotnetWorker.probes.readiness.initialDelaySeconds | default 10 }}
+            periodSeconds: {{ .Values.dotnetWorker.probes.readiness.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.dotnetWorker.probes.readiness.timeoutSeconds | default 3 }}
+            failureThreshold: {{ .Values.dotnetWorker.probes.readiness.failureThreshold | default 6 }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.dotnetWorker.healthPort | default 8080 }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: {{ .Values.dotnetWorker.probes.startup.failureThreshold | default 30 }}
           resources:
             {{- toYaml .Values.dotnetWorker.resources | nindent 12 }}
 {{- if .Values.dotnetWorker.autoscaling.enabled }}
