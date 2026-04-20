@@ -627,6 +627,7 @@ run_helm_deploy() {
 set +e
 _helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" -o json </dev/null 2>/dev/null)
 _helm_phase=$(echo "$_helm_status" | grep -o '"status":"pending-[^"]*"' | head -1 | cut -d'"' -f4)
+_helm_state=$(echo "$_helm_status" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
 set -e
 if [ -n "$_helm_phase" ]; then
   printf "${YELLOW}Detected stuck Helm release (status: ${_helm_phase}). Rolling back...${NC}\n"
@@ -637,23 +638,84 @@ if [ -n "$_helm_phase" ]; then
   if [ "$_rb_rc" -ne 0 ]; then
     printf "${YELLOW}Rollback failed — uninstalling stuck release...${NC}\n"
     helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" </dev/null 2>/dev/null || true
+    _helm_state=""
   fi
   printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
 fi
 
-# Execute (d1: retry on transient ARM / Helm errors)
-set +e
-if command -v retry_run >/dev/null 2>&1; then
-  retry_run "helm-deploy" -- run_helm_deploy
-  helm_rc=$?
-else
-  run_helm_deploy
-  helm_rc=$?
+# ── Skip helm upgrade if nothing has changed ────────────────────────────────
+# Rationale: helm upgrade --install --wait --atomic takes 1-2 minutes even
+# when the computed manifest is identical to the live one. We avoid that cost
+# when:
+#   1. the release is currently 'deployed' (healthy, not pending/failed),
+#   2. no images were imported / rebuilt in this run (IMAGES_CHANGED != true),
+#   3. the helm values fingerprint matches the one we cached after the last
+#      successful deploy,
+#   4. all deployments in the omnivec namespace report at least one available
+#      replica (so we don't skip past a broken cluster).
+# Set OMNIVEC_FORCE_HELM=true to bypass this optimisation.
+FINGERPRINT_FILE="${CHART_DIR}/.last-deploy-fingerprint"
+# Fingerprint captures everything that determines the rendered manifest:
+#   - the helm values we're about to pass in
+#   - every file under the chart directory (templates, values.yaml, Chart.yaml,
+#     Chart.lock, built subcharts) — so a template edit invalidates the cache
+#     even if images/values didn't change.
+# Any failure to compute the fingerprint → empty string → skip never triggers.
+CURRENT_FP=""
+if [ -f "$HELM_VALUES_FILE" ] && [ -d "$CHART_DIR" ]; then
+  CURRENT_FP=$(
+    {
+      sha256sum "$HELM_VALUES_FILE" 2>/dev/null | cut -d' ' -f1
+      find "$CHART_DIR" -type f ! -name '.last-deploy-fingerprint' 2>/dev/null \
+        | LC_ALL=C sort \
+        | xargs -r sha256sum 2>/dev/null \
+        | awk '{print $1}'
+    } | sha256sum 2>/dev/null | cut -d' ' -f1
+  )
 fi
-set -e
+CACHED_FP=""
+[ -f "$FINGERPRINT_FILE" ] && CACHED_FP=$(cat "$FINGERPRINT_FILE" 2>/dev/null || true)
 
-# Clean up temp values file
-rm -f "$HELM_VALUES_FILE"
+SKIP_HELM=false
+if [ "${OMNIVEC_FORCE_HELM:-}" != "true" ] \
+   && [ "$IMAGES_CHANGED" != "true" ] \
+   && [ "$_helm_state" = "deployed" ] \
+   && [ -n "$CURRENT_FP" ] \
+   && [ "$CURRENT_FP" = "$CACHED_FP" ]; then
+  set +e
+  _unavail=$(kubectl_omnivec get deploy -n omnivec -o jsonpath='{range .items[?(@.status.availableReplicas==0)]}{.metadata.name}{"\n"}{end}' </dev/null 2>/dev/null)
+  _deploy_rc=$?
+  set -e
+  if [ "$_deploy_rc" -eq 0 ] && [ -z "$_unavail" ]; then
+    SKIP_HELM=true
+  fi
+fi
+
+if [ "$SKIP_HELM" = "true" ]; then
+  printf "  ${GREEN}No image/config changes detected and cluster is healthy — skipping helm upgrade.${NC}\n"
+  printf "  ${CYAN}(Set OMNIVEC_FORCE_HELM=true to force a redeploy.)${NC}\n"
+  rm -f "$HELM_VALUES_FILE"
+  helm_rc=0
+else
+  # Execute (d1: retry on transient ARM / Helm errors)
+  set +e
+  if command -v retry_run >/dev/null 2>&1; then
+    retry_run "helm-deploy" -- run_helm_deploy
+    helm_rc=$?
+  else
+    run_helm_deploy
+    helm_rc=$?
+  fi
+  set -e
+
+  # Clean up temp values file
+  rm -f "$HELM_VALUES_FILE"
+
+  # Cache fingerprint only on success so a failed run doesn't poison future skips
+  if [ "$helm_rc" -eq 0 ] && [ -n "$CURRENT_FP" ]; then
+    echo "$CURRENT_FP" > "$FINGERPRINT_FILE"
+  fi
+fi
 
 if [ "$helm_rc" -ne 0 ]; then
   printf "${RED}Helm deploy failed. Collecting pod diagnostics...${NC}\n"
