@@ -501,7 +501,12 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
     )
 }
 
-$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m", "--atomic")
+$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
+# Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
+# strips the release metadata but can leave Deployments/Services behind (they
+# have finalizers or take time to delete). Next run sees "release not found"
+# + orphaned resources → fresh install conflicts on AlreadyExists → --atomic
+# times out → uninstall again → infinite loop.
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
 $helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -517,8 +522,33 @@ if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pend
     Write-Host "`e[32mStuck release cleared. Proceeding with fresh deploy.`e[0m"
 }
 
+# If no helm release exists but resources do (orphaned from a prior --atomic
+# uninstall), relabel them with Helm ownership so `helm install` can adopt
+# them instead of failing with AlreadyExists.
+if (-not $helmState) {
+    $existing = kubectl --context $KUBE_CONTEXT get deploy -n omnivec -o name 2>$null | Select-Object -First 1
+    if ($existing) {
+        Write-Host "`e[33mNo Helm release found but resources exist in omnivec ns — adopting them for Helm ownership...`e[0m"
+        foreach ($kind in @('deploy','svc','sa','cm','secret','hpa','ingress')) {
+            $resources = kubectl --context $KUBE_CONTEXT get $kind -n omnivec -o name 2>$null
+            foreach ($res in $resources) {
+                if (-not $res) { continue }
+                if ($res -eq 'secret/omnivec-storage') { continue }
+                if ($res -like 'secret/sh.helm.*') { continue }
+                if ($res -like 'secret/default-token-*') { continue }
+                kubectl --context $KUBE_CONTEXT annotate $res -n omnivec --overwrite `
+                    meta.helm.sh/release-name=omnivec `
+                    meta.helm.sh/release-namespace=omnivec 2>$null | Out-Null
+                kubectl --context $KUBE_CONTEXT label $res -n omnivec --overwrite `
+                    app.kubernetes.io/managed-by=Helm 2>$null | Out-Null
+            }
+        }
+        Write-Host "`e[32mAdoption annotations applied — helm install will take ownership.`e[0m"
+    }
+}
+
 # ── Skip helm upgrade if nothing has changed ────────────────────────────────
-# Rationale: helm upgrade --install --wait --atomic takes 1-2 minutes even
+# Rationale: helm upgrade --install --wait takes 1-2 minutes even
 # when the computed manifest is identical to the live one. Skip when:
 #   1. release is currently 'deployed' (healthy, not pending/failed),
 #   2. no images were imported/rebuilt this run ($script:imagesChanged is false),
