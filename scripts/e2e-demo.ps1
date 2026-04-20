@@ -13,6 +13,7 @@ param(
     [switch]$Quiet,
     [switch]$Existing,  # Use an existing deployment (skip provisioning)
     [switch]$Cleanup,   # Delete test resources (OmniVec + Azure) after run
+    [Alias('h','?')][switch]$Help,
     [string]$EnvName = $env:AZURE_ENV_NAME,
     [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
@@ -21,6 +22,79 @@ param(
     [int]$AoaiDims = $(if ($env:AOAI_DIMS) { [int]$env:AOAI_DIMS } else { 1536 }),
     [string]$SharedRegistryToken = $env:OMNIVEC_SHARED_REGISTRY_TOKEN
 )
+
+if ($Help) {
+@'
+OmniVec End-to-End Demo — Fully Automated (Windows / pwsh 7+)
+
+Provisions OmniVec on Azure (via azd up), registers an Azure OpenAI embedding
+model, creates source/destination/pipeline, ingests sample docs, and verifies
+both queue-mode and inline-mode embedding flows end-to-end.
+
+USAGE:
+  pwsh scripts/e2e-demo.ps1 [OPTIONS]
+
+MODES (mutually exclusive; default = full provision + demo):
+  -Existing               Run against an already-provisioned azd env
+                          (skips steps 1-2). Requires -EnvName.
+  -Cleanup                Delete OmniVec test entities + azd env.
+                          Requires -EnvName.
+
+OPTIONS:
+  -h, -Help               Show this help and exit.
+  -FromStep N             Start at step N (1-12). Auto-resumes from last
+                          successful step via .e2e-checkpoint if present.
+  -EnvName NAME           azd environment name.
+  -AdminToken TOKEN       OmniVec admin token (skips auto-discovery).
+  -AoaiEndpoint URL       Azure OpenAI endpoint.
+  -AoaiKey KEY            Azure OpenAI API key.
+  -AoaiDeployment NAME    Embedding deployment (default: text-embedding-3-small).
+  -AoaiDims N             Embedding dimensions (default: 1536).
+  -SharedRegistryToken T  Token for shared image registry (anonymous first).
+  -Quiet                  Minimal output.
+
+ENVIRONMENT VARIABLES (used when flag is not passed):
+  AZURE_ENV_NAME, OMNIVEC_ADMIN_TOKEN, AOAI_ENDPOINT, AOAI_KEY,
+  AOAI_DEPLOYMENT, AOAI_DIMS, OMNIVEC_SHARED_REGISTRY_TOKEN
+
+EXAMPLES:
+  # Full fresh deployment + demo
+  pwsh scripts/e2e-demo.ps1 `
+      -AoaiEndpoint https://my-aoai.openai.azure.com `
+      -AoaiKey $env:AOAI_KEY
+
+  # Demo against an existing deployment
+  pwsh scripts/e2e-demo.ps1 -Existing -EnvName my-omnivec `
+      -AoaiEndpoint https://my-aoai.openai.azure.com -AoaiKey $env:AOAI_KEY
+
+  # Resume after a failure (auto-detects last successful step)
+  pwsh scripts/e2e-demo.ps1
+
+  # Skip ahead manually
+  pwsh scripts/e2e-demo.ps1 -FromStep 8
+
+  # Clean up everything
+  pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName my-omnivec
+
+STEPS (12 total):
+   1. Prerequisite check (az, azd, kubectl)
+   2. Provision OmniVec infra via `azd up`
+   3. Connect to AKS, fetch admin token
+   4. Wait for API health
+   5. Collect Azure OpenAI credentials
+   6. Register embedding model
+   7. Create source (blob) + destination (blob)
+   8. Create pipeline
+   9. Upload sample documents
+  10. Verify queue-mode embeddings land in destination
+  11. Verify inline-mode embeddings patched back to source
+  12. Vector search smoke test
+
+Linux/macOS/WSL: use the shell variant instead:
+  ./scripts/e2e-demo.sh --help
+'@ | Write-Host
+    exit 0
+}
 
 # Require PowerShell 7+ (uses `e ANSI escape + relies on pwsh native-stderr handling).
 # Windows PowerShell 5.1 treats `e as the literal letter "e" and surfaces every

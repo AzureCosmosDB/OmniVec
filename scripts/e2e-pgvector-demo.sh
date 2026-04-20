@@ -12,6 +12,84 @@
 
 set +e  # Don't exit on errors — we handle them explicitly
 
+# ─── Help ────────────────────────────────────────────────────────────────────
+show_help() {
+  cat <<'EOF'
+OmniVec E2E Demo — PostgreSQL + pgvector (Linux/macOS/WSL)
+
+Provisions an Azure PostgreSQL Flexible Server with the pgvector extension,
+registers an Azure OpenAI embedding model, creates source/destination tables,
+runs a pipeline, and verifies vector similarity search.
+
+USAGE:
+  ./scripts/e2e-pgvector-demo.sh [OPTIONS]
+
+MODES (mutually exclusive; default = run against an existing OmniVec deployment):
+  --existing            Run against an already-provisioned azd env
+                        (this is also the default). Requires --env.
+  --cleanup             Delete PG server + OmniVec test entities.
+                        Requires --env.
+
+OPTIONS:
+  -h, --help            Show this help and exit.
+  --from-step N         Start at step N (1-10). Auto-resumes from last
+                        successful step via .e2e-pgvector-checkpoint if present.
+  --env NAME            azd environment name (e.g. my-omnivec).
+  --token TOKEN         OmniVec admin token (skips auto-discovery).
+  --pg-password PW      PostgreSQL admin password
+                        (default: auto-generated OmniVec-Demo-NNNN!).
+  --endpoint URL        Azure OpenAI endpoint
+                        (e.g. https://my-aoai.openai.azure.com).
+  --key KEY             Azure OpenAI API key.
+  --deployment NAME     Embedding deployment name
+                        (default: text-embedding-3-small).
+  --dims N              Embedding dimensions (default: 1536).
+  -q, --quiet           Minimal output (one line per step).
+
+ENVIRONMENT VARIABLES (used when flag is not passed):
+  AOAI_ENDPOINT, AOAI_KEY, AOAI_DEPLOYMENT, AOAI_DIMS
+
+REQUIREMENTS:
+  az, azd, kubectl, curl
+  (SQL runs via `az postgres flexible-server execute` — no local psql needed.)
+
+EXAMPLES:
+  # Default: run against an existing OmniVec deployment
+  ./scripts/e2e-pgvector-demo.sh --env my-omnivec \
+      --endpoint https://my-aoai.openai.azure.com --key $AOAI_KEY
+
+  # Resume after a failure
+  ./scripts/e2e-pgvector-demo.sh --env my-omnivec
+
+  # Skip ahead manually
+  ./scripts/e2e-pgvector-demo.sh --env my-omnivec --from-step 6
+
+  # Clean up (delete PG server + demo entities)
+  ./scripts/e2e-pgvector-demo.sh --cleanup --env my-omnivec
+
+STEPS (10 total):
+   1. Parse config, collect AOAI credentials
+   2. Resolve AKS cluster + RG from azd env (fallback to discovery)
+   3. Provision Azure PostgreSQL Flexible Server + enable pgvector
+   4. Create database, source/destination tables, sample rows
+   5. Register Azure OpenAI embedding model in OmniVec
+   6. Create PG source + PG destination in OmniVec
+   7. Create pipeline
+   8. Verify embeddings populated in destination table
+   9. Vector similarity search smoke test
+  10. Summary + cleanup hints
+
+Windows users: use the PowerShell variant instead:
+  pwsh scripts/e2e-pgvector-demo.ps1 -h
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|help) show_help; exit 0 ;;
+  esac
+done
+
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 FROM_STEP=1
 QUIET=false
