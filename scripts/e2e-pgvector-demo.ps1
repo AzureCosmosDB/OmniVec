@@ -322,12 +322,20 @@ function ApiPost { param([string]$Path, [object]$Body)
         -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" } `
         -Body ($Body | ConvertTo-Json -Depth 10) -TimeoutSec 30
 }
+function ApiPut { param([string]$Path, [object]$Body)
+    $json = $Body | ConvertTo-Json -Depth 10 -Compress
+    Invoke-RestMethod -Uri "$SERVER_URL$Path" -Method PUT `
+        -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } `
+        -ContentType "application/json" -Body $json -TimeoutSec 30
+}
+
 function ApiDelete { param([string]$Path)
     try { Invoke-RestMethod -Uri "$SERVER_URL$Path" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } -TimeoutSec 10 | Out-Null } catch {}
 }
 
-# Create-or-get: POST, but if the resource already exists, look it up by name.
-function ApiCreateOrGet {
+# Create-or-UPDATE: POST first; if already exists, find it by name and PUT the
+# current body so stale config (e.g. rotated passwords) gets refreshed.
+function ApiUpsert {
     param(
         [Parameter(Mandatory)][string]$CollectionPath,   # e.g. '/api/sources'
         [Parameter(Mandatory)][string]$ListField,        # e.g. 'sources'
@@ -341,12 +349,29 @@ function ApiCreateOrGet {
         if ($msg -match 'already exists' -or $msg -match '409') {
             $existing = (ApiGet $CollectionPath).$ListField | Where-Object { $_.name -eq $Name } | Select-Object -First 1
             if ($existing) {
-                LogOk "Reusing existing $($CollectionPath): $($existing.id) (name=$Name)"
-                return $existing
+                try {
+                    $updated = ApiPut "$CollectionPath/$($existing.id)" $Body
+                    LogOk "Refreshed existing $($CollectionPath): $($existing.id) (name=$Name)"
+                    return $updated
+                } catch {
+                    LogWarn "PUT refresh failed for $($existing.id): $_. Reusing stale config."
+                    return $existing
+                }
             }
         }
         throw
     }
+}
+
+# Back-compat alias — older code paths call ApiCreateOrGet.
+function ApiCreateOrGet {
+    param(
+        [Parameter(Mandatory)][string]$CollectionPath,
+        [Parameter(Mandatory)][string]$ListField,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][object]$Body
+    )
+    ApiUpsert -CollectionPath $CollectionPath -ListField $ListField -Name $Name -Body $Body
 }
 
 # ─── Cleanup mode ────────────────────────────────────────────────────────────
@@ -645,7 +670,7 @@ if ($FromStep -le 6) {
             timestamp_column = "updated_at"
         }
     }
-    $srcResp = ApiCreateOrGet -CollectionPath "/api/sources" -ListField "sources" -Name "pg-demo-source" -Body $srcBody
+    $srcResp = ApiUpsert -CollectionPath "/api/sources" -ListField "sources" -Name "pg-demo-source" -Body $srcBody
     $SOURCE_ID = $srcResp.id
     LogOk "Source: $SOURCE_ID (postgresql://.../$PG_DB/documents)"
 
@@ -668,7 +693,7 @@ if ($FromStep -le 6) {
             index_type = "hnsw"
         }
     }
-    $dstResp = ApiCreateOrGet -CollectionPath "/api/destinations" -ListField "destinations" -Name "pg-demo-vectors" -Body $dstBody
+    $dstResp = ApiUpsert -CollectionPath "/api/destinations" -ListField "destinations" -Name "pg-demo-vectors" -Body $dstBody
     $DEST_ID = $dstResp.id
     LogOk "Destination: $DEST_ID (pgvector://.../$PG_DB/embeddings)"
 
@@ -713,6 +738,15 @@ if ($FromStep -le 7) {
                 LogOk "Reusing existing pipeline: $PIP_ID"
             } else { throw }
         } else { throw }
+    }
+
+    # Pipelines are created in `paused` status. The SourceWatcherManager only
+    # reconciles watchers for active pipelines, so we must resume explicitly.
+    try {
+        ApiPost "/api/pipelines/$PIP_ID/resume" @{} | Out-Null
+        LogOk "Pipeline activated (resume)."
+    } catch {
+        LogWarn "Pipeline resume failed: $_. Watcher may not engage."
     }
 
     # Wait for processing
