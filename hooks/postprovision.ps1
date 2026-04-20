@@ -435,7 +435,11 @@ if ($currentHash -and $currentHash -eq $cachedHash) {
     Write-Host "  `e[32mHelm dependencies up to date, skipping.`e[0m"
 } else {
     Write-Host "  `e[36mResolving helm dependencies...`e[0m"
-    helm dependency build $chartDir --quiet
+    helm dependency build $chartDir 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  `e[31mhelm dependency build failed.`e[0m"
+        exit 1
+    }
     if ($currentHash) {
         $currentHash | Set-Content $lockHashFile -NoNewline
     }
