@@ -414,30 +414,65 @@ if ($FromStep -le 3) {
     $existing = if ($showJson) { $showJson | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $null }
     if ($existing) {
         LogOk "PostgreSQL server already exists: $PG_SERVER"
+        $PG_LOCATION = $existing.location
     } else {
-        Log "  Creating server: $PG_SERVER (this takes ~3-5 minutes)..."
-        & $AzExe postgres flexible-server create `
-            --name $PG_SERVER `
-            --resource-group $RESOURCE_GROUP `
-            --location eastus2 `
-            --admin-user $PG_ADMIN `
-            --admin-password $PgAdminPassword `
-            --sku-name Standard_B1ms `
-            --tier Burstable `
-            --storage-size 32 `
-            --version 16 `
-            --public-access 0.0.0.0 `
-            --yes 2>$null | Out-Null
-        LogOk "PostgreSQL server created: $PG_SERVER"
+        # Pick a location for the flex server. Not every region allows flex
+        # server provisioning for every subscription, so we try the RG's
+        # location first, then fall back through a safe list.
+        $rgLoc = (& $AzExe group show --name $RESOURCE_GROUP --query location -o tsv 2>$null)
+        if ($rgLoc) { $rgLoc = "$rgLoc".Trim() }
+        $candidates = @()
+        if ($rgLoc) { $candidates += $rgLoc }
+        foreach ($fb in @('eastus','centralus','westus3','westus2','northeurope','westeurope')) {
+            if ($candidates -notcontains $fb) { $candidates += $fb }
+        }
+
+        $created = $false
+        foreach ($loc in $candidates) {
+            Log "  Creating server: $PG_SERVER in $loc (this takes ~3-5 minutes)..."
+            $out = & $AzExe postgres flexible-server create `
+                --name $PG_SERVER `
+                --resource-group $RESOURCE_GROUP `
+                --location $loc `
+                --admin-user $PG_ADMIN `
+                --admin-password $PgAdminPassword `
+                --sku-name Standard_B1ms `
+                --tier Burstable `
+                --storage-size 32 `
+                --version 16 `
+                --public-access 0.0.0.0 `
+                --yes 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $PG_LOCATION = $loc
+                $created = $true
+                LogOk "PostgreSQL server created: $PG_SERVER (location=$loc)"
+                break
+            }
+            $outStr = "$out"
+            if ($outStr -match 'location is restricted' -or $outStr -match 'not available in the region' -or $outStr -match 'SubscriptionIsRestrictedForLocation') {
+                LogWarn "  Location '$loc' restricted for PG flex server. Trying next..."
+                continue
+            }
+            LogErr "PG server create failed (exit $LASTEXITCODE): $outStr"
+            throw "PostgreSQL server creation failed"
+        }
+        if (-not $created) {
+            LogErr "Could not find an allowed region for PG flex server. Tried: $($candidates -join ', ')"
+            throw "No allowed region for PG flex server"
+        }
     }
 
     # Enable pgvector extension
     Log "  Enabling pgvector extension..."
-    & $AzExe postgres flexible-server parameter set `
+    $extOut = & $AzExe postgres flexible-server parameter set `
         --server-name $PG_SERVER `
         --resource-group $RESOURCE_GROUP `
         --name azure.extensions `
-        --value VECTOR 2>$null | Out-Null
+        --value VECTOR 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "Failed to enable azure.extensions=VECTOR: $extOut"
+        throw "pgvector enable failed"
+    }
     LogOk "pgvector extension enabled."
 
     # Get connection info
