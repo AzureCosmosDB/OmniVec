@@ -157,6 +157,19 @@ function Invoke-PgSql {
         [string]$Database = 'postgres',
         [Parameter(Mandatory)][string]$Query
     )
+    # Ensure the rdbms-connect extension is installed (it provides `execute`).
+    if (-not $script:_rdbmsConnectChecked) {
+        $have = & $AzExe extension list --query "[?name=='rdbms-connect'].name | [0]" -o tsv 2>$null
+        if (-not $have) {
+            Log "  Installing az extension: rdbms-connect (first run only)..."
+            & $AzExe extension add --name rdbms-connect --only-show-errors --yes 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                LogErr "Failed to install 'rdbms-connect' az extension. Install manually: az extension add --name rdbms-connect"
+                throw "rdbms-connect install failed"
+            }
+        }
+        $script:_rdbmsConnectChecked = $true
+    }
     $out = & $AzExe postgres flexible-server execute `
         --name $Server `
         --admin-user $AdminUser `
@@ -164,8 +177,8 @@ function Invoke-PgSql {
         --database-name $Database `
         --querytext $Query 2>&1
     if ($LASTEXITCODE -ne 0) {
-        LogErr "psql via az failed ($LASTEXITCODE): $out"
-        return $null
+        LogErr "PG SQL failed ($LASTEXITCODE): $out"
+        throw "PG SQL execution failed (database=$Database)"
     }
     return $out
 }
@@ -251,6 +264,29 @@ function ApiPost { param([string]$Path, [object]$Body)
 }
 function ApiDelete { param([string]$Path)
     try { Invoke-RestMethod -Uri "$SERVER_URL$Path" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } -TimeoutSec 10 | Out-Null } catch {}
+}
+
+# Create-or-get: POST, but if the resource already exists, look it up by name.
+function ApiCreateOrGet {
+    param(
+        [Parameter(Mandatory)][string]$CollectionPath,   # e.g. '/api/sources'
+        [Parameter(Mandatory)][string]$ListField,        # e.g. 'sources'
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][object]$Body
+    )
+    try {
+        return ApiPost $CollectionPath $Body
+    } catch {
+        $msg = "$_"
+        if ($msg -match 'already exists' -or $msg -match '409') {
+            $existing = (ApiGet $CollectionPath).$ListField | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+            if ($existing) {
+                LogOk "Reusing existing $($CollectionPath): $($existing.id) (name=$Name)"
+                return $existing
+            }
+        }
+        throw
+    }
 }
 
 # ─── Cleanup mode ────────────────────────────────────────────────────────────
@@ -510,7 +546,7 @@ if ($FromStep -le 6) {
             timestamp_column = "updated_at"
         }
     }
-    $srcResp = ApiPost "/api/sources" $srcBody
+    $srcResp = ApiCreateOrGet -CollectionPath "/api/sources" -ListField "sources" -Name "pg-demo-source" -Body $srcBody
     $SOURCE_ID = $srcResp.id
     LogOk "Source: $SOURCE_ID (postgresql://.../$PG_DB/documents)"
 
@@ -533,7 +569,7 @@ if ($FromStep -le 6) {
             index_type = "hnsw"
         }
     }
-    $dstResp = ApiPost "/api/destinations" $dstBody
+    $dstResp = ApiCreateOrGet -CollectionPath "/api/destinations" -ListField "destinations" -Name "pg-demo-vectors" -Body $dstBody
     $DEST_ID = $dstResp.id
     LogOk "Destination: $DEST_ID (pgvector://.../$PG_DB/embeddings)"
 
@@ -565,10 +601,20 @@ if ($FromStep -le 7) {
         processing_mode = "queue"
         content_strategy = "truncate"
     }
-    $pipResp = ApiPost "/api/pipelines" $pipBody
-    $PIP_ID = $pipResp.pipeline.id
-    if (-not $PIP_ID) { $PIP_ID = $pipResp.id }
-    LogOk "Pipeline created: $PIP_ID"
+    try {
+        $pipResp = ApiPost "/api/pipelines" $pipBody
+        $PIP_ID = $pipResp.pipeline.id
+        if (-not $PIP_ID) { $PIP_ID = $pipResp.id }
+        LogOk "Pipeline created: $PIP_ID"
+    } catch {
+        if ("$_" -match 'already exists' -or "$_" -match '409') {
+            $existingPip = (ApiGet "/api/pipelines").pipelines | Where-Object { $_.name -eq "pgvector-demo-pipeline" } | Select-Object -First 1
+            if ($existingPip) {
+                $PIP_ID = $existingPip.id
+                LogOk "Reusing existing pipeline: $PIP_ID"
+            } else { throw }
+        } else { throw }
+    }
 
     # Wait for processing
     Log "  Waiting for documents to be embedded..."
