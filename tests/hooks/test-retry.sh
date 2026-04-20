@@ -80,5 +80,32 @@ else
 fi
 rm -f "$T4" "$ERR"
 
+# ── 6. Heartbeat fires while a long-running command is executing ────────────
+export OMNIVEC_RETRY_HEARTBEAT_SEC=1
+export OMNIVEC_RETRY_HEARTBEAT_CMD='echo "    sentinel-pod  Running"'
+slow_ok() { sleep 3; return 0; }
+HB_ERR=$(mktemp)
+retry_run "hb-test" -- slow_ok >/dev/null 2>"$HB_ERR"
+if grep -q 'still running' "$HB_ERR" && grep -q 'sentinel-pod' "$HB_ERR"; then
+    ok "heartbeat emitted during long-running cmd"
+else
+    bad "heartbeat emitted during long-running cmd" "stderr missing heartbeat"
+fi
+unset OMNIVEC_RETRY_HEARTBEAT_CMD OMNIVEC_RETRY_HEARTBEAT_SEC
+rm -f "$HB_ERR"
+
+# ── 7. Heartbeat does NOT fire for sub-interval commands ────────────────────
+export OMNIVEC_RETRY_HEARTBEAT_SEC=5
+export OMNIVEC_RETRY_HEARTBEAT_CMD='echo "should-not-appear"'
+HB_ERR2=$(mktemp)
+retry_run "hb-fast" -- true >/dev/null 2>"$HB_ERR2"
+if ! grep -q 'should-not-appear' "$HB_ERR2"; then
+    ok "heartbeat suppressed for fast commands"
+else
+    bad "heartbeat suppressed for fast commands" "heartbeat leaked"
+fi
+unset OMNIVEC_RETRY_HEARTBEAT_CMD OMNIVEC_RETRY_HEARTBEAT_SEC
+rm -f "$HB_ERR2"
+
 printf "\n%d passed, %d failed\n" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

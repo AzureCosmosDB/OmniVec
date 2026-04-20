@@ -698,6 +698,11 @@ if [ "$SKIP_HELM" = "true" ]; then
   helm_rc=0
 else
   # Execute (d1: retry on transient ARM / Helm errors)
+  # While helm waits (can take 1-3 minutes with --wait --atomic), show a
+  # heartbeat so the user isn't staring at a frozen screen.
+  OMNIVEC_RETRY_HEARTBEAT_SEC=${OMNIVEC_HELM_HEARTBEAT_SEC:-20}
+  OMNIVEC_RETRY_HEARTBEAT_CMD='kubectl --context "'"$KUBE_CONTEXT"'" --kubeconfig "'"$OMNIVEC_KUBECONFIG"'" -n omnivec get pods --no-headers 2>/dev/null | awk '"'"'{printf "    %-50s %-12s %s\n", $1, $3, $2}'"'"' | head -20'
+  export OMNIVEC_RETRY_HEARTBEAT_SEC OMNIVEC_RETRY_HEARTBEAT_CMD
   set +e
   if command -v retry_run >/dev/null 2>&1; then
     retry_run "helm-deploy" -- run_helm_deploy
@@ -707,6 +712,7 @@ else
     helm_rc=$?
   fi
   set -e
+  unset OMNIVEC_RETRY_HEARTBEAT_CMD OMNIVEC_RETRY_HEARTBEAT_SEC
 
   # Clean up temp values file
   rm -f "$HELM_VALUES_FILE"
