@@ -253,43 +253,74 @@ ANON_OK=false
 TOKEN_OK=false
 FIRST_IMAGE=$(echo "$IMAGES" | awk '{print $1}')
 
-if [ "$OMNIVEC_BUILD" != "true" ]; then
+# Honour OMNIVEC_SKIP_IMPORT — set this when you have locally built (or
+# patched) images in ACR that you do NOT want overwritten by shared-registry
+# copies on every azd up. Combined with image_up_to_date treating any local
+# digest as authoritative (see below), this prevents regressions introduced
+# by stale shared images clobbering a freshly built local image.
+SKIP_IMPORT=${OMNIVEC_SKIP_IMPORT:-$(get_azd_value "OMNIVEC_SKIP_IMPORT")}
+
+# Auth-test helper: skip the unconditional auth-test re-import when the
+# first image already exists locally and either (a) the user asked us to
+# preserve local, or (b) it already matches the shared digest.
+_auth_test_can_skip() {
+  if [ "$FORCE_IMPORT" = "true" ]; then return 1; fi
+  if ! image_exists "$FIRST_IMAGE" "latest"; then return 1; fi
+  if [ "$SKIP_IMPORT" = "true" ] || [ "$SKIP_IMPORT" = "1" ]; then return 0; fi
+  if image_up_to_date "$FIRST_IMAGE" "latest"; then return 0; fi
+  return 1
+}
+
+if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IMPORT" != "1" ]; then
   printf "\n${YELLOW}Phase 1: Importing pre-built images from shared registry...${NC}\n"
   printf "  ${CYAN}Source: $SHARED_REGISTRY${NC}\n"
 
-  # Try anonymous pull first
-  printf "  ${CYAN}Testing anonymous pull (this may take 30-60s)...${NC}"
-  if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
-    printf " ${GREEN}✓ anonymous pull works${NC}\n"
+  # If the first image is already present and up-to-date locally, skip
+  # the auth test entirely — importing unconditionally here is what used
+  # to clobber locally patched images.
+  if _auth_test_can_skip; then
+    printf "  ${GREEN}${FIRST_IMAGE}:latest already present locally, skipping auth test.${NC}\n"
     ANON_OK=true
   else
-    printf " ${YELLOW}✗ requires auth${NC}\n"
-    # Try stored token
-    if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
-      printf "  ${CYAN}Trying stored token...${NC}"
-      if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
-        printf " ${GREEN}✓ token works${NC}\n"
-        TOKEN_OK=true
-      else
-        printf " ${RED}✗ token invalid/expired${NC}\n"
-      fi
-    fi
-    # Prompt for token if nothing worked
-    if [ "$TOKEN_OK" = "false" ]; then
-      printf "  ${YELLOW}Registry token required for import.${NC}\n"
-      _new_token=$(read_input "  Enter token for $SHARED_REGISTRY (or Enter to build from source): ")
-      if [ -n "$_new_token" ]; then
-        if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
-          SHARED_REGISTRY_TOKEN="$_new_token"
-          azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null 2>/dev/null || true
-          printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
+    # Try anonymous pull first
+    printf "  ${CYAN}Testing anonymous pull (this may take 30-60s)...${NC}"
+    if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
+      printf " ${GREEN}✓ anonymous pull works${NC}\n"
+      ANON_OK=true
+    else
+      printf " ${YELLOW}✗ requires auth${NC}\n"
+      # Try stored token
+      if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
+        printf "  ${CYAN}Trying stored token...${NC}"
+        if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
+          printf " ${GREEN}✓ token works${NC}\n"
           TOKEN_OK=true
         else
-          printf "  ${RED}Token invalid. Will build from source.${NC}\n"
+          printf " ${RED}✗ token invalid/expired${NC}\n"
+        fi
+      fi
+      # Prompt for token if nothing worked
+      if [ "$TOKEN_OK" = "false" ]; then
+        printf "  ${YELLOW}Registry token required for import.${NC}\n"
+        _new_token=$(read_input "  Enter token for $SHARED_REGISTRY (or Enter to build from source): ")
+        if [ -n "$_new_token" ]; then
+          if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:latest" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
+            SHARED_REGISTRY_TOKEN="$_new_token"
+            azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null 2>/dev/null || true
+            printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
+            TOKEN_OK=true
+          else
+            printf "  ${RED}Token invalid. Will build from source.${NC}\n"
+          fi
         fi
       fi
     fi
   fi
+elif [ "$SKIP_IMPORT" = "true" ] || [ "$SKIP_IMPORT" = "1" ]; then
+  printf "\n${YELLOW}Phase 1: Skipping image import (OMNIVEC_SKIP_IMPORT=true).${NC}\n"
+  printf "  ${CYAN}Using images already present in $ACR_NAME.${NC}\n"
+  # Treat as "imported" so we do not fall through to build-from-source.
+  ANON_OK=true
 fi
 
 if [ "$OMNIVEC_BUILD" = "true" ] || { [ "$ANON_OK" = "false" ] && [ "$TOKEN_OK" = "false" ]; }; then
@@ -316,7 +347,12 @@ else
       skip_count=$((skip_count + 1))
       continue
     elif [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
-      printf "  ${CYAN}${image}:latest exists but digest differs, re-importing...${NC}\n"
+      if [ "$SKIP_IMPORT" = "true" ] || [ "$SKIP_IMPORT" = "1" ]; then
+        printf "  ${GREEN}${image}:latest exists locally, preserving (OMNIVEC_SKIP_IMPORT=true).${NC}\n"
+        skip_count=$((skip_count + 1))
+        continue
+      fi
+      printf "  ${CYAN}${image}:latest exists but digest differs, re-importing (set OMNIVEC_SKIP_IMPORT=true to keep local).${NC}\n"
     fi
 
     printf "  ${CYAN}Importing ${image}:latest...${NC}\n"
