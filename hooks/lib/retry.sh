@@ -85,8 +85,44 @@ retry_run() {
     _rc=0
     while [ "$_attempt" -le "$OMNIVEC_RETRY_ATTEMPTS" ]; do
         : > "$_log"
+
+        # Optional heartbeat: while the command runs, periodically print an
+        # "elapsed + pod status" line to stderr so the user doesn't stare at
+        # a frozen terminal during long helm waits. Activated by setting
+        #   OMNIVEC_RETRY_HEARTBEAT_CMD  — shell cmd that prints a one-shot status
+        #   OMNIVEC_RETRY_HEARTBEAT_SEC  — interval (default 20)
+        _hb_pid=""
+        if [ -n "${OMNIVEC_RETRY_HEARTBEAT_CMD:-}" ]; then
+            _hb_interval=${OMNIVEC_RETRY_HEARTBEAT_SEC:-20}
+            _hb_label=$_label
+            (
+                _hb_start=$(date +%s 2>/dev/null || echo 0)
+                # Wait one interval before the first heartbeat so fast commands
+                # (< interval) never produce any heartbeat noise.
+                sleep "$_hb_interval"
+                while :; do
+                    _hb_now=$(date +%s 2>/dev/null || echo 0)
+                    _hb_el=$(( _hb_now - _hb_start ))
+                    printf "  ${CYAN}[%s] still running (%ds elapsed)...${NC}\n" \
+                        "$_hb_label" "$_hb_el" >&2
+                    # Run the heartbeat command; ignore its stderr (cluster may
+                    # be briefly unreachable during a rollout), pipe its stdout
+                    # to the parent's stderr so the user sees status inline.
+                    sh -c "$OMNIVEC_RETRY_HEARTBEAT_CMD" >&2 2>/dev/null || true
+                    sleep "$_hb_interval"
+                done
+            ) &
+            _hb_pid=$!
+        fi
+
         "$@" </dev/null >"$_log" 2>&1
         _rc=$?
+
+        if [ -n "$_hb_pid" ]; then
+            kill "$_hb_pid" 2>/dev/null || true
+            wait "$_hb_pid" 2>/dev/null || true
+        fi
+
         if [ "$_rc" -eq 0 ]; then
             cat "$_log"
             return 0
