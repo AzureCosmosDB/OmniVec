@@ -409,9 +409,13 @@ if ($FromStep -le 3) {
     $PG_ADMIN = "omnivecadmin"
 
     # Check if server already exists
-    $showArgs = @('postgres','flexible-server','show','--name',$PG_SERVER,'--resource-group',$RESOURCE_GROUP)
-    $showJson = & $AzExe @showArgs 2>$null
-    $existing = if ($showJson) { $showJson | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $null }
+    $showArgs = @('postgres','flexible-server','show','--name',$PG_SERVER,'--resource-group',$RESOURCE_GROUP,'-o','json')
+    $showRaw = & $AzExe @showArgs 2>$null
+    $showText = if ($null -ne $showRaw) { ($showRaw | Out-String).Trim() } else { '' }
+    $existing = $null
+    if ($showText -and $showText.StartsWith('{')) {
+        try { $existing = $showText | ConvertFrom-Json -ErrorAction Stop } catch { $existing = $null }
+    }
     if ($existing) {
         LogOk "PostgreSQL server already exists: $PG_SERVER"
         $PG_LOCATION = $existing.location
