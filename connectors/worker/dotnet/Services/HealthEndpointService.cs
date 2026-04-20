@@ -26,15 +26,41 @@ public class HealthEndpointService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
+        // Everything inside runs on a BackgroundService. In .NET 8 an uncaught
+        // exception here causes HostOptions.BackgroundServiceExceptionBehavior
+        // (default: StopHost) to terminate the entire process — including the
+        // EmbeddingWorkerService — with exit 0. A broken health listener must
+        // never kill the worker. We isolate failures here so the worker keeps
+        // running; kubelet's startup probe will surface the bad state.
+        try
+        {
+            await RunListenerAsync(ct);
+        }
+        catch (OperationCanceledException) { /* shutdown */ }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Health endpoint crashed — probes will fail but worker stays up. " +
+                "Set HEALTH_PORT or investigate HttpListener support in this runtime.");
+            // Idle until shutdown so this BackgroundService doesn't fault the host.
+            try { await Task.Delay(Timeout.Infinite, ct); } catch { /* shutdown */ }
+        }
+    }
+
+    private async Task RunListenerAsync(CancellationToken ct)
+    {
         var listener = new HttpListener();
         listener.Prefixes.Add($"http://+:{_port}/");
         try
         {
             listener.Start();
         }
-        catch (HttpListenerException ex)
+        catch (Exception ex)
         {
-            // Common on dev machines without netsh urlacl; fall back to localhost-only.
+            // Common on dev machines without netsh urlacl, and in some Linux
+            // container runtimes where the '+' prefix needs elevated caps.
+            // Fall back to localhost-only (also wrapped so the whole host
+            // does not go down if even that fails).
             _logger.LogWarning(ex, "HttpListener could not bind to http://+:{Port}/, falling back to http://127.0.0.1:{Port}/", _port, _port);
             listener = new HttpListener();
             listener.Prefixes.Add($"http://127.0.0.1:{_port}/");
