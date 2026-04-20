@@ -1,0 +1,18 @@
+#!/bin/sh
+# Mock `kubectl`.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/_record.sh"
+_mock_record kubectl "$@"
+
+case "${1:-}" in
+    version)
+        printf 'Client Version: v1.30.0 (mock)\n'
+        exit 0
+        ;;
+    get)
+        # Return empty lists by default (hook uses this for existence checks).
+        printf 'No resources found.\n'
+        exit 0
+        ;;
+esac
+exit 0

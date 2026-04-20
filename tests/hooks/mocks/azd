@@ -1,0 +1,43 @@
+#!/bin/sh
+# Mock `azd` - records invocation, emulates env set/get-value semantics.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/_record.sh"
+_mock_record azd "$@"
+
+case "${1:-}" in
+    env)
+        case "${2:-}" in
+            set)
+                _mock_env_set "$3" "${4:-}"
+                exit 0
+                ;;
+            get-value)
+                _mock_env_get "$3"
+                exit 0
+                ;;
+            get-values)
+                _mock_env_store
+                cat "$OMNIVEC_MOCK_AZD_ENV" 2>/dev/null || true
+                exit 0
+                ;;
+            list)
+                # Emit a single env so hooks that inspect list can proceed.
+                printf 'NAME            DEFAULT  LOCAL\n'
+                printf '%s  true     true\n' "${AZURE_ENV_NAME:-mock-env}"
+                exit 0
+                ;;
+            new|select|refresh)
+                exit 0
+                ;;
+        esac
+        ;;
+    version)
+        printf 'azd version 1.24.1 (commit mock-harness) (mock)\n'
+        exit 0
+        ;;
+    auth)
+        # az auth login/token - never reach the internet in tests.
+        exit 0
+        ;;
+esac
+exit 0

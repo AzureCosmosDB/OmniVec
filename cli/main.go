@@ -36,9 +36,11 @@ func main() {
 		newModelCmd(),
 		newTransformCmd(),
 		newSearchCmd(),
+		newMetricsCmd(),
 		newStatusCmd(),
 		newSettingsCmd(),
 		newConfigCmd(),
+		newAdminCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

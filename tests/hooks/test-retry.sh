@@ -1,0 +1,63 @@
+#!/bin/sh
+# tests/hooks/test-retry.sh — verify retry_run wraps transient failures.
+
+set -u
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=../../hooks/lib/retry.sh
+. "$REPO_ROOT/hooks/lib/retry.sh"
+
+PASS=0; FAIL=0
+ok()   { PASS=$((PASS+1)); printf "  OK  %s\n" "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf "  FAIL %s — %s\n" "$1" "$2"; }
+
+# Silence retry logs during tests
+export OMNIVEC_RETRY_QUIET=1
+# Short delay so tests don't take 10s
+export OMNIVEC_RETRY_ATTEMPTS=3
+export OMNIVEC_RETRY_BASE_SEC=0
+
+# ── 1. Succeeds on first try ────────────────────────────────────────────────
+_rc=0
+retry_run "noop" -- true || _rc=$?
+[ "$_rc" -eq 0 ] && ok "succeeds on first try" || bad "succeeds on first try" "rc=$_rc"
+
+# ── 2. Fails fast on non-transient error ────────────────────────────────────
+T=$(mktemp); : > "$T"
+fail_nontransient() { printf 'some fatal error\n' >&2; echo "x" >> "$T"; return 1; }
+_rc=0
+retry_run "non-transient" -- fail_nontransient >/dev/null 2>&1 || _rc=$?
+_n=$(wc -l < "$T" | tr -d ' ')
+[ "$_rc" -ne 0 ] && [ "$_n" = "1" ] && ok "no retry on non-transient" || bad "no retry on non-transient" "rc=$_rc calls=$_n"
+
+# ── 3. Retries on transient error then succeeds ─────────────────────────────
+T2=$(mktemp); echo 0 > "$T2"
+flaky_transient() {
+    n=$(cat "$T2")
+    n=$((n+1)); echo "$n" > "$T2"
+    if [ "$n" -lt 2 ]; then
+        echo "429 TooManyRequests" >&2
+        return 1
+    fi
+    return 0
+}
+_rc=0
+retry_run "flaky" -- flaky_transient >/dev/null 2>&1 || _rc=$?
+_n=$(cat "$T2")
+[ "$_rc" -eq 0 ] && [ "$_n" -ge 2 ] && ok "retries on transient 429" || bad "retries on transient 429" "rc=$_rc calls=$_n"
+
+# ── 4. Gives up after max attempts ──────────────────────────────────────────
+T3=$(mktemp); echo 0 > "$T3"
+always_transient() {
+    n=$(cat "$T3"); n=$((n+1)); echo "$n" > "$T3"
+    echo "503 ServiceUnavailable" >&2
+    return 1
+}
+_rc=0
+retry_run "always" -- always_transient >/dev/null 2>&1 || _rc=$?
+_n=$(cat "$T3")
+[ "$_rc" -ne 0 ] && [ "$_n" = "3" ] && ok "gives up after max attempts" || bad "gives up after max attempts" "rc=$_rc calls=$_n"
+
+rm -f "$T" "$T2" "$T3"
+printf "\n%d passed, %d failed\n" "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

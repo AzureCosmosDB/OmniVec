@@ -910,6 +910,16 @@
                         Deployments
                     </a>
                 </div>
+
+                <div class="nav-section">
+                    <div class="nav-section-title">Deployment</div>
+                    <a class="nav-item" onclick="showSection('deployment')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Import / Export
+                    </a>
+                </div>
             </nav>
 
             <div class="sidebar-footer">
@@ -981,6 +991,11 @@
                             <div class="stat-label">Throughput</div>
                             <div class="stat-value" id="stat-throughput" style="color: var(--accent-primary);">--</div>
                             <div class="stat-trend" id="stat-throughput-label">docs/sec</div>
+                        </div>
+                        <div class="stat-card" id="stat-insights-card">
+                            <div class="stat-label">Avg Latency</div>
+                            <div class="stat-value" id="stat-insights-status" style="font-size:1rem;">—</div>
+                            <div class="stat-trend" id="stat-insights-link"></div>
                         </div>
                     </div>
 
@@ -1303,12 +1318,6 @@
                 <header class="header">
                     <h2 class="header-title">Metrics</h2>
                     <div class="header-actions">
-                        <button class="btn btn-secondary" onclick="clearMetrics()">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                                <path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                            </svg>
-                            Clear Metrics
-                        </button>
                         <button class="btn btn-ghost" onclick="loadMetricsSection()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/></svg>
                             Refresh
@@ -1450,6 +1459,46 @@
                 </div>
             </section>
 
+            <section id="section-deployment" class="section" style="display: none;">
+                <header class="header">
+                    <h2 class="header-title">Import / Export</h2>
+                </header>
+                <div class="content">
+                    <div class="card" style="margin-bottom: 24px;">
+                        <div class="card-body">
+                            <h3 class="card-title">Backup / migrate deployment</h3>
+                            <p style="color: var(--text-secondary); margin: 8px 0 16px;">
+                                Export sources, vector stores, pipelines, models, and assistants as a JSON bundle and import them back here
+                                or into another OmniVec deployment. You choose which resource types to include; pipelines/source checkpoints
+                                can be bundled so in-progress runs resume after restore.
+                            </p>
+                            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                                <button class="btn btn-primary" onclick="showExportModal()">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                    Export deployment
+                                </button>
+                                <button class="btn btn-secondary" onclick="showImportModal()">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                    Import bundle
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-body">
+                            <h3 class="card-title">Tips</h3>
+                            <ul style="color: var(--text-secondary); line-height: 1.8; padding-left: 20px; margin: 8px 0;">
+                                <li>Secrets (connection strings, API keys, passwords) are redacted as <code>"***"</code> by default &mdash; toggle <b>Include secrets</b> to embed them.</li>
+                                <li>Enable <b>Include checkpoints</b> to carry over processing progress so imported pipelines can resume where they left off.</li>
+                                <li>Pipeline filter restricts the bundle to just the listed pipelines and the sources / vector stores / models / assistants they reference.</li>
+                                <li>Imports land pipelines in <b>paused</b> state by default &mdash; review and resume explicitly.</li>
+                                <li>On conflict, choose <b>skip</b> (safe), <b>overwrite</b> (replace), or <b>rename</b> (copy with new IDs).</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
         </main>
     </div>
 
@@ -1492,6 +1541,94 @@
                     </button>
                     <button class="btn btn-primary" onclick="saveSourceFromDetail()">Save Changes</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export / Import Modals -->
+    <div class="modal-overlay" id="export-modal">
+        <div class="modal modal-full">
+            <div class="modal-header">
+                <h3 class="modal-title">Export Deployment</h3>
+                <button class="modal-close" onclick="closeModal('export-modal')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden;">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <div style="background: var(--bg-tertiary); padding: 20px; border-right: 1px solid var(--border-primary); overflow-y: auto;">
+                        <h4 style="margin: 0 0 8px;">Options</h4>
+                        <p style="color: var(--text-tertiary); font-size: 0.88em; margin-bottom: 16px;">
+                            Pick exactly which items go into the bundle. A section with nothing selected is omitted entirely.
+                        </p>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                            <input type="checkbox" id="exp-secrets">
+                            <span>Include <b>secrets</b></span>
+                        </label>
+                        <small style="color: var(--text-tertiary); display: block; margin-bottom: 16px;">
+                            Secrets are redacted as <code>"***"</code> when unchecked.
+                        </small>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+                            <input type="checkbox" id="exp-checkpoints">
+                            <span>Include <b>checkpoints</b><br><small style="color:var(--text-tertiary);">Resume in-progress runs after restore</small></span>
+                        </label>
+                        <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                        <div id="exp-summary" style="color: var(--text-secondary); font-size: 0.88em;">Loading resources...</div>
+                    </div>
+                    <div id="exp-picker" style="padding: 20px; overflow-y: auto;">
+                        <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">Loading...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('export-modal')">Cancel</button>
+                <button class="btn btn-primary" id="export-run-btn" onclick="runExport()">Download bundle</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="import-modal">
+        <div class="modal modal-full">
+            <div class="modal-header">
+                <h3 class="modal-title">Import Deployment</h3>
+                <button class="modal-close" onclick="closeModal('import-modal')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden;">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <div style="background: var(--bg-tertiary); padding: 20px; border-right: 1px solid var(--border-primary); overflow-y: auto;">
+                        <h4 style="margin: 0 0 8px;">Options</h4>
+                        <div class="form-group">
+                            <label>Bundle file</label>
+                            <input type="file" id="imp-file" accept="application/json,.json" class="form-input" onchange="onImportFileChosen()">
+                        </div>
+                        <div class="form-group">
+                            <label>On conflict</label>
+                            <select id="imp-on-conflict" class="form-input">
+                                <option value="skip" selected>skip — keep existing (safest)</option>
+                                <option value="overwrite">overwrite — replace existing</option>
+                                <option value="rename">rename — create copies with new IDs</option>
+                            </select>
+                        </div>
+                        <p style="color: var(--text-tertiary); font-size: 0.88em;">
+                            Imported pipelines always land in <b>paused</b> state.
+                        </p>
+                        <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                        <div id="imp-summary" style="color: var(--text-secondary); font-size: 0.88em;">Pick a file to preview its contents.</div>
+                    </div>
+                    <div style="padding: 20px; overflow-y: auto; display: flex; flex-direction: column;">
+                        <div id="imp-picker" style="flex: 1;">
+                            <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">Select a bundle file to preview &amp; choose items.</div>
+                        </div>
+                        <div id="imp-result" style="display:none; margin-top: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px; white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85em; max-height: 260px; overflow:auto;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('import-modal')">Cancel</button>
+                <button class="btn btn-secondary" onclick="runImport(true)">Dry run</button>
+                <button class="btn btn-primary" onclick="runImport(false)">Apply import</button>
             </div>
         </div>
     </div>
@@ -2149,21 +2286,130 @@
 
     <!-- DocGrok Add External Model Modal -->
     <div class="modal-overlay" id="dg-external-model-modal">
-        <div class="modal">
+        <div class="modal modal-full">
             <div class="modal-header">
-                <h3 class="modal-title">Add External Model</h3>
+                <h3 class="modal-title" style="display: flex; align-items: center; gap: 10px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" width="22" height="22"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+                    Add External Model
+                </h3>
                 <button class="modal-close" onclick="closeModal('dg-external-model-modal')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
                         <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
                     </svg>
                 </button>
             </div>
-            <div class="modal-body">
-                <form id="dg-external-model-form">
+            <div class="modal-body" style="padding: 0; flex: 1; max-height: none; overflow: hidden;">
+                <form id="dg-external-model-form" style="height: 100%;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; height: 100%;">
+                        <!-- Left: Model Configuration -->
+                        <div style="padding: 24px; border-right: 1px solid var(--border-subtle); overflow-y: auto;">
+                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Model Configuration</div>
+                            <div class="form-group">
+                                <label class="form-label">Model Name</label>
+                                <input type="text" class="form-input" name="name" placeholder="e.g., my-azure-openai">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Model Category</label>
+                                <select class="form-input" name="model_category" onchange="toggleEmbeddingDims(this.value)">
+                                    <option value="embedding">Embedding</option>
+                                    <option value="chat">Chat / LLM</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Provider</label>
+                                <select class="form-input" name="type">
+                                    <option value="azure-openai">Azure OpenAI</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="cohere">Cohere</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Endpoint URL</label>
+                                <input type="text" class="form-input" name="endpoint" placeholder="https://your-resource.openai.azure.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Deployment Name</label>
+                                <input type="text" class="form-input" name="deployment" placeholder="e.g., text-embedding-3-small">
+                                <small style="color: var(--text-tertiary); font-size: 12px;">Must match the deployment name in Azure OpenAI exactly</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">API Version (Azure only)</label>
+                                <input type="text" class="form-input" name="apiVersion" value="2024-06-01">
+                            </div>
+                            <div class="form-group" id="embedding-dims-group">
+                                <label class="form-label">Embedding Dimensions</label>
+                                <input type="number" class="form-input" name="dimensions" value="1536">
+                            </div>
+                        </div>
+
+                        <!-- Right: Authentication -->
+                        <div style="padding: 24px; background: var(--bg-tertiary); display: flex; flex-direction: column; overflow-y: auto;">
+                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Authentication</div>
+
+                            <div class="form-group">
+                                <div style="display: flex; flex-direction: column; gap: 8px;">
+                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 2px solid var(--accent-primary);" id="model-add-auth-key-label">
+                                        <input type="radio" name="auth_type" value="key" checked onchange="toggleAuthFields(this.value)">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 500;">API Key</div>
+                                            <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">Authenticate with a subscription key</div>
+                                        </div>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 2px solid transparent;" id="model-add-auth-mi-label">
+                                        <input type="radio" name="auth_type" value="managed-identity" onchange="toggleAuthFields(this.value)">
+                                        <div style="flex: 1;">
+                                            <div style="font-weight: 500; display: flex; align-items: center; gap: 8px;">
+                                                Managed Identity
+                                                <span class="badge badge-success" style="font-size: 10px;">Recommended</span>
+                                            </div>
+                                            <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">Uses AKS Workload Identity — no keys needed</div>
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div id="api-key-group">
+                                <div class="form-group">
+                                    <label class="form-label">API Key</label>
+                                    <input type="password" class="form-input" name="apiKey" placeholder="Paste your API key">
+                                </div>
+                            </div>
+
+                            <div id="client-id-group" style="display: none;">
+                                <input type="hidden" name="clientId" value="">
+                                <div style="background: var(--bg-secondary); border-radius: var(--radius-md); padding: 16px; font-size: 13px;">
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="20" height="20"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                        <span style="font-weight: 600; color: var(--success);">No key needed</span>
+                                    </div>
+                                    <p style="margin: 0 0 12px 0; color: var(--text-secondary);">Grant the AKS managed identity access to your Azure OpenAI resource:</p>
+                                    <p style="margin: 0 0 8px 0; font-weight: 500;">Azure Portal:</p>
+                                    <ol style="margin: 0 0 16px 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.8;">
+                                        <li>Open your Azure OpenAI resource → <strong>Access Control (IAM)</strong></li>
+                                        <li>Click <strong>Add role assignment</strong></li>
+                                        <li>Select role: <strong>Cognitive Services OpenAI User</strong></li>
+                                        <li>Assign to: your AKS cluster's managed identity</li>
+                                    </ol>
+                                    <p style="margin: 0 0 4px 0; font-weight: 500;">Or via CLI:</p>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Bash:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 10px; border-radius: 6px; margin-bottom: 8px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \
+  --assignee &lt;aks-managed-identity-client-id&gt; \
+  --role "Cognitive Services OpenAI User" \
+  --scope &lt;azure-openai-resource-id&gt;</div>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">PowerShell:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 10px; border-radius: 6px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create `
+  --assignee &lt;aks-managed-identity-client-id&gt; `
+  --role "Cognitive Services OpenAI User" `
+  --scope &lt;azure-openai-resource-id&gt;</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </form>
                     <div class="form-group">
                         <label class="form-label">Model Name</label>
                         <input type="text" class="form-input" name="name" placeholder="e.g., my-azure-openai">
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Unique identifier for this external model</small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Model Category</label>
@@ -2171,7 +2417,6 @@
                             <option value="embedding">Embedding</option>
                             <option value="chat">Chat / LLM</option>
                         </select>
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Embedding models are used in pipelines</small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Provider</label>
@@ -2184,36 +2429,66 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">Endpoint URL</label>
-                        <input type="text" class="form-input" name="endpoint" placeholder="https://...">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Authentication</label>
-                        <select class="form-input" name="auth_type" onchange="toggleAuthFields(this.value)">
-                            <option value="key">API Key</option>
-                            <option value="managed-identity">Managed Identity</option>
-                        </select>
-                        <small style="color: var(--text-tertiary); font-size: 12px;">Use managed identity for keyless access via Azure workload identity</small>
-                    </div>
-                    <div class="form-group" id="api-key-group">
-                        <label class="form-label">API Key</label>
-                        <input type="password" class="form-input" name="apiKey" placeholder="Enter API key">
-                    </div>
-                    <div class="form-group" id="client-id-group" style="display: none;">
-                        <label class="form-label">Client ID (optional)</label>
-                        <input type="text" class="form-input" name="clientId" placeholder="Managed identity client ID (uses workload identity if empty)">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">API Version (Azure only)</label>
-                        <input type="text" class="form-input" name="apiVersion" placeholder="e.g., 2024-06-01">
+                        <input type="text" class="form-input" name="endpoint" placeholder="https://your-resource.openai.azure.com">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Deployment Name</label>
                         <input type="text" class="form-input" name="deployment" placeholder="e.g., text-embedding-3-small">
-                        <small style="color: var(--text-tertiary); font-size: 12px;">The exact deployment name in Azure OpenAI (must match exactly)</small>
+                        <small style="color: var(--text-tertiary); font-size: 12px;">Must match the deployment name in Azure OpenAI exactly</small>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">API Version (Azure only)</label>
+                        <input type="text" class="form-input" name="apiVersion" placeholder="e.g., 2024-06-01" value="2024-06-01">
                     </div>
                     <div class="form-group" id="embedding-dims-group">
                         <label class="form-label">Embedding Dimensions</label>
-                        <input type="number" class="form-input" name="dimensions" value="3072">
+                        <input type="number" class="form-input" name="dimensions" value="1536">
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--border); margin: 24px 0;">
+
+                    <div class="form-group">
+                        <label class="form-label">Authentication</label>
+                        <div style="display: flex; gap: 12px; margin-top: 4px;">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 12px 20px; border-radius: 8px; border: 2px solid var(--accent-primary); background: rgba(99,102,241,0.1); flex: 1; justify-content: center;" id="model-add-auth-key-label">
+                                <input type="radio" name="auth_type" value="key" checked onchange="toggleAuthFields(this.value)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                                <span style="font-weight: 600;">API Key</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 12px 20px; border-radius: 8px; border: 2px solid var(--border); background: transparent; flex: 1; justify-content: center;" id="model-add-auth-mi-label">
+                                <input type="radio" name="auth_type" value="managed-identity" onchange="toggleAuthFields(this.value)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                <span style="font-weight: 600;">Managed Identity</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="api-key-group">
+                        <div class="form-group">
+                            <label class="form-label">API Key</label>
+                            <input type="password" class="form-input" name="apiKey" placeholder="Paste your API key">
+                        </div>
+                    </div>
+                    <div id="client-id-group" style="display: none;">
+                        <input type="hidden" name="clientId" value="">
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px;">
+                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="20" height="20"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                <span style="font-weight: 600; color: var(--success);">No key needed</span>
+                            </div>
+                            <p style="margin: 0 0 12px 0; color: var(--text-secondary);">OmniVec uses the AKS cluster's workload identity to authenticate with Azure OpenAI. Just grant access:</p>
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Azure Portal (easiest):</p>
+                            <ol style="margin: 0 0 16px 0; padding-left: 20px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Open your Azure OpenAI resource → <strong>Access Control (IAM)</strong></li>
+                                <li>Click <strong>Add role assignment</strong></li>
+                                <li>Select role: <strong>Cognitive Services OpenAI User</strong></li>
+                                <li>Assign to: your AKS cluster's managed identity</li>
+                            </ol>
+                            <p style="margin: 0 0 4px 0; font-weight: 500;">Or via CLI:</p>
+                            <div style="background: var(--bg-secondary); padding: 10px; border-radius: 6px; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \
+  --assignee &lt;aks-managed-identity-client-id&gt; \
+  --role "Cognitive Services OpenAI User" \
+  --scope &lt;azure-openai-resource-id&gt;</div>
+                        </div>
                     </div>
                 </form>
             </div>
@@ -2533,6 +2808,318 @@
             showModal('destination-modal');
         }
 
+        // -------- Export / Import --------
+        const EXP_TYPES = [
+            { key: 'sources',      label: 'Sources',      endpoint: '/api/sources',      listKey: 'sources' },
+            { key: 'destinations', label: 'Vector Stores',endpoint: '/api/destinations', listKey: 'destinations' },
+            { key: 'pipelines',    label: 'Pipelines',    endpoint: '/api/pipelines',    listKey: 'pipelines' },
+            { key: 'models',       label: 'Models',       endpoint: '/api/models',       listKey: 'models' },
+            { key: 'assistants',   label: 'Assistants',   endpoint: '/api/assistants',   listKey: 'assistants' },
+        ];
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function renderPickerSection(containerId, typeKey, label, items, opts) {
+            opts = opts || {};
+            const selected = opts.selected == null ? true : !!opts.selected;
+            const itemsHtml = items.length === 0
+                ? `<div style="padding: 12px; color: var(--text-tertiary); font-size: 0.9em;">No ${label.toLowerCase()} available.</div>`
+                : items.map((it, i) => {
+                    const id = it.id || ('' + i);
+                    const name = it.name || it.id || '(unnamed)';
+                    const sub = it.id && it.id !== name ? it.id : '';
+                    return `<label class="picker-item" style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:4px;">
+                        <input type="checkbox" class="picker-chk" data-type="${typeKey}" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" ${selected ? 'checked' : ''}>
+                        <span style="flex:1;">
+                            <span style="color: var(--text-primary);">${escapeHtml(name)}</span>
+                            ${sub ? `<small style="color: var(--text-tertiary); margin-left: 6px;">${escapeHtml(sub)}</small>` : ''}
+                        </span>
+                    </label>`;
+                }).join('');
+            return `
+                <div class="picker-section" data-type="${typeKey}" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
+                    <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);">
+                        <label style="display:flex; align-items:center; gap:8px; flex:1;">
+                            <input type="checkbox" class="picker-section-chk" data-type="${typeKey}" ${selected ? 'checked' : ''} onchange="pickerToggleSection('${containerId}', '${typeKey}', this.checked)">
+                            <b>${label}</b>
+                            <span class="picker-count" data-type="${typeKey}" style="color: var(--text-tertiary); font-size: 0.85em;"></span>
+                        </label>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="pickerSelectAll('${containerId}', '${typeKey}', true)">All</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="pickerSelectAll('${containerId}', '${typeKey}', false)">None</button>
+                    </div>
+                    <div class="picker-items" data-type="${typeKey}" style="padding: 6px 10px; max-height: 260px; overflow-y: auto;">
+                        ${itemsHtml}
+                    </div>
+                </div>`;
+        }
+
+        function pickerSelectAll(containerId, typeKey, value) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll(`.picker-chk[data-type="${typeKey}"]`).forEach(cb => cb.checked = value);
+            const sc = root.querySelector(`.picker-section-chk[data-type="${typeKey}"]`);
+            if (sc) sc.checked = value;
+            pickerUpdateCounts(containerId);
+        }
+
+        function pickerToggleSection(containerId, typeKey, value) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll(`.picker-chk[data-type="${typeKey}"]`).forEach(cb => cb.checked = value);
+            pickerUpdateCounts(containerId);
+        }
+
+        function pickerUpdateCounts(containerId) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll('.picker-section').forEach(sec => {
+                const t = sec.getAttribute('data-type');
+                const total = sec.querySelectorAll('.picker-chk').length;
+                const sel = sec.querySelectorAll('.picker-chk:checked').length;
+                const el = sec.querySelector(`.picker-count[data-type="${t}"]`);
+                if (el) el.textContent = total === 0 ? '(empty)' : `${sel}/${total} selected`;
+                const sc = sec.querySelector(`.picker-section-chk[data-type="${t}"]`);
+                if (sc) sc.checked = sel > 0 && sel === total;
+            });
+            // summary update
+            const summaryId = containerId === 'exp-picker' ? 'exp-summary' : 'imp-summary';
+            const summary = document.getElementById(summaryId);
+            if (summary) {
+                const parts = [];
+                root.querySelectorAll('.picker-section').forEach(sec => {
+                    const t = sec.getAttribute('data-type');
+                    const sel = sec.querySelectorAll('.picker-chk:checked').length;
+                    const label = (EXP_TYPES.find(x => x.key === t) || {}).label || t;
+                    if (sel > 0) parts.push(`${label}: ${sel}`);
+                });
+                summary.innerHTML = parts.length
+                    ? '<b>Selected:</b><br>' + parts.map(p => '&bull; ' + escapeHtml(p)).join('<br>')
+                    : '<i>Nothing selected.</i>';
+            }
+        }
+
+        async function showExportModal() {
+            document.getElementById('exp-secrets').checked = false;
+            document.getElementById('exp-checkpoints').checked = false;
+            const picker = document.getElementById('exp-picker');
+            const runBtn = document.getElementById('export-run-btn');
+            // Disable Download until everything is loaded
+            runBtn.disabled = true;
+            const origBtnText = 'Download bundle';
+            runBtn.textContent = 'Loading resources…';
+            // Render placeholder sections immediately so user sees structure
+            picker.innerHTML = EXP_TYPES.map(t => `
+                <div class="picker-section" data-type="${t.key}" data-loaded="0" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
+                    <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);">
+                        <b style="flex:1;">${t.label}</b>
+                        <span style="color: var(--text-tertiary); font-size: 0.85em;" class="picker-placeholder-status">queued…</span>
+                    </div>
+                    <div class="picker-items" data-type="${t.key}" style="padding: 12px; color: var(--text-tertiary); font-size: 0.9em;">Waiting…</div>
+                </div>
+            `).join('');
+            showModal('export-modal');
+
+            // Load one type at a time, render as each completes
+            try {
+                for (const t of EXP_TYPES) {
+                    const sec = picker.querySelector(`.picker-section[data-type="${t.key}"]`);
+                    if (!sec) continue;
+                    const statusEl = sec.querySelector('.picker-placeholder-status');
+                    const itemsEl = sec.querySelector('.picker-items');
+                    if (statusEl) statusEl.textContent = 'loading…';
+                    if (itemsEl) itemsEl.textContent = 'Loading…';
+                    let items = [];
+                    try {
+                        const res = await apiFetch(t.endpoint);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const raw = Array.isArray(data) ? data : (data[t.listKey] || []);
+                            items = raw.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                        }
+                    } catch (_) { /* ignore, show empty */ }
+                    sec.outerHTML = renderPickerSection('exp-picker', t.key, t.label, items, { selected: true });
+                    pickerUpdateCounts('exp-picker');
+                }
+                picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'));
+                pickerUpdateCounts('exp-picker');
+            } finally {
+                runBtn.disabled = false;
+                runBtn.textContent = origBtnText;
+            }
+        }
+
+        async function runExport() {
+            const root = document.getElementById('exp-picker');
+            const includeTypes = [];
+            const idsByType = {};
+            for (const t of EXP_TYPES) {
+                const sel = Array.from(root.querySelectorAll(`.picker-chk[data-type="${t.key}"]:checked`))
+                    .map(cb => cb.getAttribute('data-id'));
+                const total = root.querySelectorAll(`.picker-chk[data-type="${t.key}"]`).length;
+                if (sel.length === 0) continue;
+                includeTypes.push(t.key);
+                // If the user selected every item, don't send an id filter (server returns all)
+                if (sel.length < total) idsByType[t.key] = sel;
+            }
+            if (includeTypes.length === 0) { alert('Select at least one item.'); return; }
+
+            const params = new URLSearchParams({
+                include: includeTypes.join(','),
+                include_secrets: document.getElementById('exp-secrets').checked ? 'true' : 'false',
+                include_checkpoints: document.getElementById('exp-checkpoints').checked ? 'true' : 'false',
+            });
+            const paramKey = {
+                sources: 'source_ids', destinations: 'destination_ids',
+                pipelines: 'pipeline_ids', models: 'model_ids', assistants: 'assistant_ids'
+            };
+            for (const [t, ids] of Object.entries(idsByType)) params.set(paramKey[t], ids.join(','));
+
+            const btn = document.getElementById('export-run-btn');
+            btn.disabled = true; btn.textContent = 'Exporting...';
+            try {
+                const res = await apiFetch('/api/admin/export?' + params.toString());
+                if (!res.ok) {
+                    const err = await res.text();
+                    throw new Error(err || ('HTTP ' + res.status));
+                }
+                const bundle = await res.json();
+                const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+                const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `omnivec-export-${ts}.json`;
+                document.body.appendChild(a); a.click(); a.remove();
+                URL.revokeObjectURL(a.href);
+                closeModal('export-modal');
+            } catch (e) {
+                alert('Export failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = 'Download bundle';
+            }
+        }
+
+        let _importBundle = null;
+
+        function showImportModal() {
+            document.getElementById('imp-file').value = '';
+            document.getElementById('imp-on-conflict').value = 'skip';
+            document.getElementById('imp-picker').innerHTML = '<div style="text-align:center; color: var(--text-tertiary); padding: 40px;">Select a bundle file to preview &amp; choose items.</div>';
+            document.getElementById('imp-summary').textContent = 'Pick a file to preview its contents.';
+            const r = document.getElementById('imp-result');
+            r.style.display = 'none'; r.textContent = '';
+            _importBundle = null;
+            showModal('import-modal');
+        }
+
+        async function onImportFileChosen() {
+            const fileInput = document.getElementById('imp-file');
+            const picker = document.getElementById('imp-picker');
+            if (!fileInput.files || !fileInput.files[0]) return;
+            try {
+                const text = await fileInput.files[0].text();
+                _importBundle = JSON.parse(text);
+            } catch (e) {
+                picker.innerHTML = `<div style="color: var(--error-color); padding: 20px;">Invalid JSON: ${escapeHtml(e.message)}</div>`;
+                _importBundle = null;
+                return;
+            }
+            const res = _importBundle.resources || {};
+            const sections = EXP_TYPES.map(t => {
+                const items = (res[t.key] || []).map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                return renderPickerSection('imp-picker', t.key, t.label, items, { selected: true });
+            });
+            // checkpoints summary
+            const cps = Array.isArray(_importBundle.checkpoints) ? _importBundle.checkpoints.length : 0;
+            const headerInfo = `
+                <div style="margin-bottom: 12px; color: var(--text-secondary); font-size: 0.9em;">
+                    Exported at: ${escapeHtml(_importBundle.exported_at || '—')}
+                    &bull; secrets: ${_importBundle.includes_secrets ? '<b>included</b>' : 'redacted'}
+                    &bull; checkpoints: ${cps}
+                </div>`;
+            picker.innerHTML = headerInfo + sections.join('');
+            pickerUpdateCounts('imp-picker');
+        }
+
+        async function runImport(dryRun) {
+            if (!_importBundle) { alert('Pick a bundle file first.'); return; }
+            const root = document.getElementById('imp-picker');
+            // Build filtered bundle based on checkboxes
+            const bundle = JSON.parse(JSON.stringify(_importBundle));
+            bundle.resources = bundle.resources || {};
+            for (const t of EXP_TYPES) {
+                const checked = new Set(Array.from(root.querySelectorAll(`.picker-chk[data-type="${t.key}"]:checked`))
+                    .map(cb => cb.getAttribute('data-id')));
+                const orig = (bundle.resources[t.key] || []);
+                bundle.resources[t.key] = orig.filter(x => checked.has(x.id));
+            }
+            const total = EXP_TYPES.reduce((n, t) => n + (bundle.resources[t.key] || []).length, 0);
+            if (total === 0) { alert('Select at least one item to import.'); return; }
+
+            const onConflict = document.getElementById('imp-on-conflict').value;
+            const resEl = document.getElementById('imp-result');
+            resEl.style.display = 'block';
+            resEl.textContent = (dryRun ? 'Dry run' : 'Importing') + '...';
+            try {
+                const qs = new URLSearchParams({ on_conflict: onConflict, dry_run: dryRun ? 'true' : 'false' });
+                const res = await apiFetch('/api/admin/import?' + qs.toString(), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(bundle),
+                });
+                const body = await res.json();
+                if (!res.ok) {
+                    throw new Error(body.detail || ('HTTP ' + res.status));
+                }
+                resEl.textContent = formatImportSummary(body, dryRun);
+                if (!dryRun && typeof refreshData === 'function') { try { refreshData(); } catch(_) {} }
+            } catch (e) {
+                resEl.textContent = 'Import failed: ' + e.message;
+            }
+        }
+
+        function formatImportSummary(body, dryRun) {
+            const lines = [];
+            lines.push((dryRun ? 'DRY RUN' : 'IMPORTED') + '  on_conflict=' + (body.on_conflict || '?'));
+            lines.push('');
+            const order = ['sources','destinations','models','assistants','pipelines','checkpoints'];
+            const s = body.summary || {};
+            lines.push('Resource       Created  Overwritten  Skipped  Renamed');
+            for (const k of order) {
+                const r = s[k];
+                if (!r) continue;
+                lines.push(
+                    k.padEnd(14) +
+                    String(r.created || 0).padStart(9) +
+                    String(r.overwritten || 0).padStart(13) +
+                    String(r.skipped || 0).padStart(9) +
+                    String(r.renamed || 0).padStart(9)
+                );
+            }
+            const warns = body.warnings || [];
+            if (warns.length) {
+                lines.push('');
+                lines.push('Warnings (' + warns.length + '):');
+                for (const w of warns) lines.push('  - ' + w);
+            }
+            for (const k of order) {
+                const r = s[k];
+                if (r && r.errors && r.errors.length) {
+                    lines.push('');
+                    lines.push('Errors in ' + k + ':');
+                    for (const e of r.errors) lines.push('  - ' + e);
+                }
+            }
+            const idMap = body.id_map || {};
+            const keys = Object.keys(idMap);
+            if (keys.length) {
+                lines.push('');
+                lines.push('Renamed IDs:');
+                for (const k of keys) lines.push('  ' + k + ' -> ' + idMap[k]);
+            }
+            return lines.join('\n');
+        }
+
         async function showAddPipelineModal() {
             document.getElementById('pipeline-form').reset();
             // Ensure models are loaded for Single Model dropdown
@@ -2584,12 +3171,13 @@
                 document.getElementById('destinations-count').textContent = destinations.length;
                 document.getElementById('pipelines-count').textContent = pipelines.length;
 
-                // Update stats
+                // Update stats from in-memory metrics (no CosmosDB reads)
                 const metrics = metricsRes.ok ? await metricsRes.json() : {};
                 document.getElementById('stat-sources').textContent = sources.length;
                 document.getElementById('stat-destinations').textContent = destinations.length;
                 document.getElementById('stat-pipelines').textContent = pipelines.length;
-                // Aggregate embedded/total across active pipelines
+
+                // Embedded count — use pipeline stats for unique docs (not cumulative batch events)
                 let totalSourceDocs = 0, totalEmbedded = 0;
                 let hasSourceData = false;
                 pipelines.filter(p => p.status === 'active').forEach(p => {
@@ -2600,20 +3188,38 @@
                     totalEmbedded += p.stats?.embedded_count || 0;
                 });
                 const overallPct = hasSourceData && totalSourceDocs > 0 ? (totalEmbedded / totalSourceDocs * 100).toFixed(1) : null;
-                document.getElementById('stat-events').textContent = hasSourceData ? totalEmbedded.toLocaleString() + ' / ' + totalSourceDocs.toLocaleString() : '--';
+                document.getElementById('stat-events').textContent = hasSourceData
+                    ? totalEmbedded.toLocaleString() + ' / ' + totalSourceDocs.toLocaleString()
+                    : totalEmbedded > 0 ? totalEmbedded.toLocaleString() : '--';
                 document.getElementById('stat-events-today').textContent = overallPct != null ? overallPct + '% complete' : '';
-                document.getElementById('stat-failed').textContent = (metrics.events_failed || 0).toLocaleString();
-                document.getElementById('stat-failed-today').textContent = 'Today: ' + (metrics.today?.failed || 0);
 
-                // Aggregate throughput across active pipelines
-                let totalThroughput = 0;
-                let hasThroughput = false;
-                pipelines.filter(p => p.status === 'active').forEach(p => {
-                    const tp = p.stats?.throughput_docs_per_sec || p.stats?.recent_throughput_docs_per_sec;
-                    if (tp) { totalThroughput += tp; hasThroughput = true; }
-                });
-                document.getElementById('stat-throughput').textContent = hasThroughput ? totalThroughput.toFixed(1) : '--';
-                document.getElementById('stat-throughput-label').textContent = hasThroughput ? 'docs/sec (active pipelines)' : 'docs/sec';
+                // Failed — from live metrics
+                const totalFailed = metrics.events_failed || 0;
+                document.getElementById('stat-failed').textContent = totalFailed.toLocaleString();
+                const skipTotal = metrics.skipped?.total || 0;
+                document.getElementById('stat-failed-today').textContent = skipTotal > 0
+                    ? skipTotal.toLocaleString() + ' skipped'
+                    : '';
+
+                // Throughput — from live metrics (rolling 60s window)
+                const liveThroughput = metrics.throughput_docs_per_sec || 0;
+                document.getElementById('stat-throughput').textContent = liveThroughput > 0 ? liveThroughput.toFixed(1) : '--';
+                document.getElementById('stat-throughput-label').textContent = liveThroughput > 0 ? 'docs/sec (live)' : 'docs/sec';
+
+                // Latency card — show avg embedding latency
+                const avgLatency = metrics.latency?.embedding?.avg;
+                const latencyCard = document.getElementById('stat-insights-card');
+                if (latencyCard) {
+                    latencyCard.style.display = '';
+                    const p95 = metrics.latency?.embedding?.p95;
+                    document.getElementById('stat-insights-status').innerHTML = avgLatency != null
+                        ? '<span style="color:var(--accent-primary);">' + avgLatency + 'ms</span>'
+                        : '<span>—</span>';
+                    document.getElementById('stat-insights-link').innerHTML = p95 != null
+                        ? 'p95: ' + p95 + 'ms'
+                        + (metrics.tokens?.total ? ' · ' + metrics.tokens.total.toLocaleString() + ' tokens' : '')
+                        : (metrics.tokens?.total ? metrics.tokens.total.toLocaleString() + ' tokens' : 'No data yet');
+                }
 
                 // Render tables
                 renderSources();
@@ -2856,6 +3462,47 @@
                     `}
                 `;
             } else if (currentDetailTab === 'auth') {
+                if (source.type === 'postgresql' || source.type === 'mssql') {
+                    const isPg = source.type === 'postgresql';
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
+                        <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
+                            <div style="width: 48px; height: 48px; background: rgba(59,130,246,0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="24" height="24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; font-size: 16px;">${isPg ? 'PostgreSQL' : 'SQL Server'} Credentials</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Username and password for database access</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" id="detail-pg-user" value="${config.user || ''}" placeholder="${isPg ? 'postgres' : 'sa'}" oninput="markSourceDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-input" id="detail-pg-password" value="${config.password || ''}" placeholder="Enter password" oninput="markSourceDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SSL Mode</label>
+                            <select class="form-input" id="detail-pg-ssl-mode" onchange="markSourceDetailDirty()">
+                                <option value="require" ${(config.ssl_mode || 'require') === 'require' ? 'selected' : ''}>Require (recommended)</option>
+                                <option value="verify-full" ${config.ssl_mode === 'verify-full' ? 'selected' : ''}>Verify Full</option>
+                                <option value="prefer" ${config.ssl_mode === 'prefer' ? 'selected' : ''}>Prefer</option>
+                                <option value="disable" ${config.ssl_mode === 'disable' ? 'selected' : ''}>Disable</option>
+                            </select>
+                        </div>
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px; margin-top: 16px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Troubleshooting</p>
+                            <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Verify the username has read access to the table</li>
+                                <li>Check that the database firewall allows connections from this service</li>
+                                ${isPg ? '<li>For Azure PostgreSQL: ensure "Allow access to Azure services" is enabled</li>' : ''}
+                                <li>If using SSL, ensure the server certificate is valid</li>
+                            </ul>
+                        </div>
+                    `;
+                } else {
                 const authLabel = authType === 'managed-identity' ? 'Managed Identity' : 'Connection String';
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -2911,6 +3558,7 @@
                         </div>
                     `}
                 `;
+                }
             } else if (currentDetailTab === 'health') {
                 const sh = getHealthFor('sources', source.id);
                 if (!sh) {
@@ -2994,13 +3642,21 @@
                 config.endpoint = editedSourceData.endpoint || source.config.endpoint;
                 config.database = editedSourceData.database || source.config.database;
                 config.container = editedSourceData.container || source.config.container;
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                config.host = editedSourceData.host || source.config?.host || '';
+                config.port = editedSourceData.port || source.config?.port || 5432;
+                config.database = editedSourceData.database || source.config?.database || '';
+                config.table = editedSourceData.table || source.config?.table || '';
+                config.user = editedSourceData.user || source.config?.user || '';
+                config.password = editedSourceData.password || source.config?.password || '';
+                config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
             }
 
             try {
                 const res = await apiFetch('/api/sources/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: source.type, config })
+                    body: JSON.stringify({ type: source.type, config, source_id: source.id })
                 });
                 const data = await res.json();
 
@@ -3049,6 +3705,25 @@
                 if (endpointEl) editedSourceData.endpoint = endpointEl.value;
                 if (dbEl) editedSourceData.database = dbEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                const hostEl = document.getElementById('detail-pg-host');
+                const portEl = document.getElementById('detail-pg-port');
+                const dbEl = document.getElementById('detail-pg-database');
+                const tableEl = document.getElementById('detail-pg-table');
+                const idColEl = document.getElementById('detail-pg-id-column');
+                const tsColEl = document.getElementById('detail-pg-ts-column');
+                const userEl = document.getElementById('detail-pg-user');
+                const passEl = document.getElementById('detail-pg-password');
+                const sslEl = document.getElementById('detail-pg-ssl-mode');
+                if (hostEl) editedSourceData.host = hostEl.value;
+                if (portEl) editedSourceData.port = parseInt(portEl.value) || 5432;
+                if (dbEl) editedSourceData.database = dbEl.value;
+                if (tableEl) editedSourceData.table = tableEl.value;
+                if (idColEl) editedSourceData.id_column = idColEl.value;
+                if (tsColEl) editedSourceData.timestamp_column = tsColEl.value;
+                if (userEl) editedSourceData.user = userEl.value;
+                if (passEl) editedSourceData.password = passEl.value;
+                if (sslEl) editedSourceData.ssl_mode = sslEl.value;
             }
         }
 
@@ -3075,6 +3750,16 @@
                 config.endpoint = editedSourceData.endpoint || source.config?.endpoint || '';
                 config.database = editedSourceData.database || source.config?.database || '';
                 config.container = editedSourceData.container || source.config?.container || '';
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                config.host = editedSourceData.host || source.config?.host || '';
+                config.port = editedSourceData.port || source.config?.port || 5432;
+                config.database = editedSourceData.database || source.config?.database || '';
+                config.table = editedSourceData.table || source.config?.table || '';
+                config.id_column = editedSourceData.id_column || source.config?.id_column || 'id';
+                config.timestamp_column = editedSourceData.timestamp_column || source.config?.timestamp_column || 'updated_at';
+                config.user = editedSourceData.user || source.config?.user || '';
+                config.password = editedSourceData.password || source.config?.password || '';
+                config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
             }
 
             try {
@@ -3339,6 +4024,51 @@
                     </div>
                 `;
             } else if (currentDestDetailTab === 'auth') {
+                if (dest.type === 'pgvector') {
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
+                        <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
+                            <div style="width: 48px; height: 48px; background: rgba(59,130,246,0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="24" height="24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; font-size: 16px;">PostgreSQL Credentials</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Username and password for database access</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" id="dest-detail-pg-user" value="${config.user || ''}" placeholder="postgres" oninput="markDestDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-input" id="dest-detail-pg-password" value="${config.password || ''}" placeholder="Enter password" oninput="markDestDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SSL Mode</label>
+                            <select class="form-input" id="dest-detail-pg-ssl-mode" onchange="markDestDetailDirty()">
+                                <option value="require" ${(config.ssl_mode || 'require') === 'require' ? 'selected' : ''}>Require (recommended)</option>
+                                <option value="verify-full" ${config.ssl_mode === 'verify-full' ? 'selected' : ''}>Verify Full</option>
+                                <option value="prefer" ${config.ssl_mode === 'prefer' ? 'selected' : ''}>Prefer</option>
+                                <option value="disable" ${config.ssl_mode === 'disable' ? 'selected' : ''}>Disable</option>
+                            </select>
+                        </div>
+                        <button type="button" class="btn btn-secondary" onclick="testDestDetailConnection()" id="dest-detail-test-btn" style="width: 100%; justify-content: center; padding: 12px; margin-top: 8px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                            Test Connection
+                        </button>
+                        <div id="dest-detail-test-result" style="margin-top: 12px;"></div>
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px; margin-top: 16px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Troubleshooting</p>
+                            <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Verify the username has read/write access to the table</li>
+                                <li>Check that the database firewall allows connections from this service</li>
+                                <li>For Azure PostgreSQL: ensure "Allow access to Azure services" is enabled</li>
+                                <li>Ensure the pgvector extension is installed (<code>CREATE EXTENSION vector</code>)</li>
+                            </ul>
+                        </div>
+                    `;
+                } else {
                 const authLabel = authType === 'managed-identity' ? 'Managed Identity' : 'API Key';
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -3393,15 +4123,22 @@
                         </div>
                     `}
                 `;
+                } // end else (non-pgvector dest auth)
             } else if (currentDestDetailTab === 'vector') {
+                const isPgVector = dest.type === 'pgvector';
+                const vecTitle = isPgVector ? 'Vector Columns' : 'Vector Configuration';
+                const vecDesc = isPgVector
+                    ? 'Discover vector columns in your PostgreSQL table. Columns with the <code>vector</code> type will be listed.'
+                    : 'Vector index details are read from the destination when you test the connection.';
+                const btnLabel = isPgVector ? 'Discover Vector Columns' : 'Fetch Embedding Policies';
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Vector Configuration</h4>
-                    <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">Vector index details are read from the destination when you test the connection.</p>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">${vecTitle}</h4>
+                    <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">${vecDesc}</p>
                     <button type="button" class="btn btn-secondary" onclick="testDestinationFromDetail()" style="width: 100%; justify-content: center; padding: 12px;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
                         </svg>
-                        Fetch Embedding Policies
+                        ${btnLabel}
                     </button>
                     <div id="dest-detail-vector-result" style="margin-top: 16px;"></div>
                 `;
@@ -3464,6 +4201,9 @@
                 const vecColEl = document.getElementById('dest-detail-pg-vector-col');
                 const contentColEl = document.getElementById('dest-detail-pg-content-col');
                 const dimsEl = document.getElementById('dest-detail-pg-dimensions');
+                const userEl = document.getElementById('dest-detail-pg-user');
+                const passEl = document.getElementById('dest-detail-pg-password');
+                const sslEl = document.getElementById('dest-detail-pg-ssl-mode');
                 if (hostEl) editedDestData.host = hostEl.value;
                 if (portEl) editedDestData.port = parseInt(portEl.value) || 5432;
                 if (dbEl) editedDestData.database = dbEl.value;
@@ -3471,6 +4211,9 @@
                 if (vecColEl) editedDestData.vector_column = vecColEl.value;
                 if (contentColEl) editedDestData.content_column = contentColEl.value;
                 if (dimsEl) editedDestData.vector_dimensions = parseInt(dimsEl.value) || 1536;
+                if (userEl) editedDestData.user = userEl.value;
+                if (passEl) editedDestData.password = passEl.value;
+                if (sslEl) editedDestData.ssl_mode = sslEl.value;
             }
         }
 
@@ -3497,17 +4240,20 @@
                 config.host = editedDestData.host || dest.config?.host || '';
                 config.port = editedDestData.port || dest.config?.port || 5432;
                 config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
             }
 
             try {
                 const res = await apiFetch('/api/destinations/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: dest.type, config })
+                    body: JSON.stringify({ type: dest.type, config, destination_id: dest.id })
                 });
                 const data = await res.json();
-
-                let html = '';
                 if (data.success) {
                     let details = '';
                     const vi = data.vector_indexes || data.result?.vector_indexes || [];
@@ -3556,18 +4302,32 @@
             if (resultDiv) resultDiv.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Testing connection...</div>';
 
             // Get current form values
-            const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
-            const database = document.getElementById('dest-detail-database')?.value || dest.config?.database || '';
-            const container = document.getElementById('dest-detail-container')?.value || dest.config?.container || '';
-
             const authType = dest.config?.auth_type || 'managed-identity';
-            const config = { auth_type: authType, endpoint, database, container };
+            let config = { auth_type: authType };
+
+            if (dest.type === 'pgvector') {
+                captureDestTabData();
+                config.host = editedDestData.host || dest.config?.host || '';
+                config.port = editedDestData.port || dest.config?.port || 5432;
+                config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+            } else {
+                // CosmosDB and other types
+                const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
+                const database = document.getElementById('dest-detail-database')?.value || dest.config?.database || '';
+                const container = document.getElementById('dest-detail-container')?.value || dest.config?.container || '';
+                config = { auth_type: authType, endpoint, database, container };
+            }
 
             try {
                 const res = await apiFetch('/api/destinations/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: dest.type, config })
+                    body: JSON.stringify({ type: dest.type, config, destination_id: dest.id })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -3617,6 +4377,19 @@
                 config.endpoint = editedDestData.endpoint || dest.config?.endpoint || '';
                 config.database = editedDestData.database || dest.config?.database || '';
                 config.container = editedDestData.container || dest.config?.container || '';
+            } else if (dest.type === 'pgvector') {
+                config.host = editedDestData.host || dest.config?.host || '';
+                config.port = editedDestData.port || dest.config?.port || 5432;
+                config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.content_column = editedDestData.content_column || dest.config?.content_column || 'content';
+                config.vector_dimensions = editedDestData.vector_dimensions || dest.config?.vector_dimensions || 1536;
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+                // Preserve discovered vector_indexes
+                if (dest.config?.vector_indexes) config.vector_indexes = dest.config.vector_indexes;
             } else if (dest.type === 'pinecone') {
                 config.index = editedDestData.index || dest.config?.index || '';
                 config.environment = editedDestData.environment || dest.config?.environment || '';
@@ -3969,12 +4742,16 @@
                     </div>
 
                     <div class="form-group" style="margin-top: 16px;">
-                        <label class="form-label">Embedding Policy Path</label>
+                        <label class="form-label">${destType === 'pgvector' ? 'Vector Column' : 'Embedding Policy Path'}</label>
                         <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
-                            /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
+                            ${destType === 'pgvector'
+                                ? (pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">embedding</span>')
+                                : '/' + (pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>')}
                         </div>
                         <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                            The vector embedding path in the destination container. Cannot be changed after creation.
+                            ${destType === 'pgvector'
+                                ? 'The vector column in the destination table where embeddings are stored. Cannot be changed after creation.'
+                                : 'The vector embedding path in the destination container. Cannot be changed after creation.'}
                         </small>
                     </div>
                 `;
@@ -4753,6 +5530,15 @@
             const select = document.getElementById('pl-dest-vector-policy');
             group.style.display = 'block';
 
+            // Update label based on dest type (pgvector vs cosmos)
+            const isPg = dest?.type === 'pgvector';
+            const labelEl = document.querySelector('#pl-dest-vector-policy-group .form-label');
+            if (labelEl) labelEl.textContent = isPg ? 'Vector Column' : 'Vector Embedding Policy';
+            const smallEl = document.querySelector('#pl-dest-vector-policy-group small');
+            if (smallEl) smallEl.textContent = isPg
+                ? 'Select which vector column to use for storing embeddings'
+                : 'Select which vector embedding field to use for this pipeline';
+
             // Show cached while fetching live
             if (cachedVi.length > 0) {
                 populateVectorPolicyDropdown(cachedVi);
@@ -5465,7 +6251,9 @@
                     vector_column: formData.get('vector_column') || 'embedding',
                     vector_dimensions: parseInt(formData.get('vector_dimensions')) || 1024,
                     index_type: formData.get('index_type') || 'ivfflat',
-                    ssl_mode: 'require'
+                    user: formData.get('user') || '',
+                    password: formData.get('password') || '',
+                    ssl_mode: formData.get('ssl_mode') || 'require'
                 };
             }
 
@@ -5957,6 +6745,14 @@
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
                 config.container = formData.get('container');
+            } else if (type === 'postgresql' || type === 'mssql') {
+                config.host = formData.get('host');
+                config.port = parseInt(formData.get('port')) || 5432;
+                config.database = formData.get('database');
+                config.table = formData.get('table');
+                config.user = formData.get('user') || '';
+                config.password = formData.get('password') || '';
+                config.ssl_mode = formData.get('ssl_mode') || 'require';
             }
 
             if (authType === 'connection-string') {
@@ -6259,6 +7055,25 @@
                             <option value="hnsw">HNSW (faster, more memory)</option>
                         </select>
                     </div>
+                    <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                    <h5 style="margin: 0 0 12px 0; font-size: 14px;">Authentication</h5>
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-input" name="user" placeholder="postgres">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-input" name="password" placeholder="Enter password">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">SSL Mode</label>
+                        <select class="form-input" name="ssl_mode">
+                            <option value="require" selected>Require (recommended)</option>
+                            <option value="verify-full">Verify Full</option>
+                            <option value="prefer">Prefer</option>
+                            <option value="disable">Disable</option>
+                        </select>
+                    </div>
                 `;
             } else if (type === 'pinecone') {
                 container.innerHTML = `
@@ -6313,9 +7128,24 @@
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
                 config.container = formData.get('container');
-            }
-
-            if (!config.endpoint || !config.database || !config.container) {
+                if (!config.endpoint || !config.database || !config.container) {
+                    resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
+                    return;
+                }
+            } else if (type === 'pgvector') {
+                config.host = formData.get('host') || '';
+                config.port = parseInt(formData.get('port')) || 5432;
+                config.database = formData.get('database') || '';
+                config.table = formData.get('table') || 'vectors';
+                config.user = formData.get('user') || '';
+                config.password = formData.get('password') || '';
+                config.vector_column = formData.get('vector_column') || 'embedding';
+                config.ssl_mode = formData.get('ssl_mode') || 'require';
+                if (!config.host || !config.database) {
+                    resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Host and Database</div>`;
+                    return;
+                }
+            } else {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
                 return;
             }
@@ -6657,8 +7487,8 @@
                             Overview
                         </button>
                         <button class="mdl-detail-tab" data-tab="health" onclick="switchModelDetailTab('health')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                            Health
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                            Auth &amp; Status
                             ${mh && mh.status !== 'healthy' ? '<span style="margin-left:auto;width:8px;height:8px;border-radius:50%;background:' + healthStatusColor(mh.status) + ';display:inline-block;"></span>' : ''}
                         </button>
                     </nav>
@@ -6772,32 +7602,98 @@
                     `;
                 }
             } else if (currentModelDetailTab === 'health') {
+                const modelId = name;
+                const isExternal = type === 'external';
+                const extModel = isExternal ? dgModels.external[name] : null;
                 const mh = getHealthForModel(name);
-                if (!mh) {
-                    body.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-tertiary);">
+
+                let html = '';
+
+                // Health status banner
+                if (mh) {
+                    html += `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Health Status</h4>
+                        <div style="background: ${healthStatusBg(mh.status)}; border: 1px solid ${healthStatusColor(mh.status)}33; border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px;">
+                            <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${healthStatusColor(mh.status)};"></span>
+                            <span style="font-weight: 600; color: ${healthStatusColor(mh.status)}; text-transform: uppercase;">${mh.status}</span>
+                        </div>
+                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Checks</h4>
+                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); overflow: hidden; margin-bottom: 24px;">`;
+                    for (const chk of (mh.checks || [])) {
+                        html += `<div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle);">
+                            ${checkIcon(chk.status)}
+                            <span style="font-weight: 500; min-width: 140px;">${chk.check}</span>
+                            <span style="color: var(--text-tertiary); font-size: 13px;">${chk.detail || ''}</span>
+                        </div>`;
+                    }
+                    html += '</div>';
+                } else {
+                    html += `<div style="text-align: center; padding: 40px; color: var(--text-tertiary); margin-bottom: 24px;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48" style="margin-bottom: 16px; opacity: 0.5;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                        <p>No health data available for this model.</p>
-                        <p style="font-size: 12px; margin-top: 8px;">Run a health check from the Health tab to see results.</p>
-                    </div>`;
-                    return;
-                }
-                let html = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Health Status</h4>
-                    <div style="background: ${healthStatusBg(mh.status)}; border: 1px solid ${healthStatusColor(mh.status)}33; border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px;">
-                        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${healthStatusColor(mh.status)};"></span>
-                        <span style="font-weight: 600; color: ${healthStatusColor(mh.status)}; text-transform: uppercase;">${mh.status}</span>
-                    </div>
-                    <h4 style="margin: 0 0 16px 0; font-size: 16px;">Checks</h4>
-                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); overflow: hidden;">
-                `;
-                for (const chk of (mh.checks || [])) {
-                    html += `<div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border-subtle);">
-                        ${checkIcon(chk.status)}
-                        <span style="font-weight: 500; min-width: 140px;">${chk.check}</span>
-                        <span style="color: var(--text-tertiary); font-size: 13px;">${chk.detail || ''}</span>
+                        <p>No health data yet. Click Test Connection below.</p>
                     </div>`;
                 }
-                html += '</div>';
+
+                // Test Connection button (for all model types)
+                html += `
+                    <h4 style="margin: 0 0 16px 0; font-size: 16px;">Test Connection</h4>
+                    <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px; margin-bottom: 24px;">
+                        <button class="btn btn-primary" onclick="testModelHealth('${modelId}')" id="model-test-btn-${modelId}">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align: middle; margin-right: 6px;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                            Test Connection
+                        </button>
+                        <div id="model-health-result-${modelId}" style="margin-top: 12px;"></div>
+                    </div>`;
+
+                // Authentication section (for external models)
+                if (isExternal && extModel) {
+                    const curAuth = extModel.auth_type || 'key';
+                    html += `
+                        <h4 style="margin: 0 0 16px 0; font-size: 16px;">Authentication</h4>
+                        <div style="background: var(--bg-tertiary); border-radius: var(--radius-md); padding: 16px;">
+                            <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 16px; border-radius: 8px; border: 2px solid ${curAuth === 'key' ? 'var(--accent-primary)' : 'var(--border)'}; background: ${curAuth === 'key' ? 'rgba(99,102,241,0.1)' : 'transparent'};">
+                                    <input type="radio" name="model-auth-type-${extModel.id}" value="key" ${curAuth === 'key' ? 'checked' : ''} onchange="toggleModelAuthFields('${extModel.id}', 'key')">
+                                    <span style="font-weight: 500;">API Key</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 16px; border-radius: 8px; border: 2px solid ${curAuth === 'managed-identity' ? 'var(--accent-primary)' : 'var(--border)'}; background: ${curAuth === 'managed-identity' ? 'rgba(34,197,94,0.1)' : 'transparent'};">
+                                    <input type="radio" name="model-auth-type-${extModel.id}" value="managed-identity" ${curAuth === 'managed-identity' ? 'checked' : ''} onchange="toggleModelAuthFields('${extModel.id}', 'managed-identity')">
+                                    <span style="font-weight: 500;">Managed Identity</span>
+                                </label>
+                            </div>
+                            <div id="model-auth-key-section-${extModel.id}" style="display: ${curAuth === 'key' ? 'block' : 'none'};">
+                                <p style="font-size: 13px; color: var(--text-tertiary); margin: 0 0 12px 0;">Update the API key for this model.</p>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <input type="password" class="form-input" id="model-update-key-${extModel.id}" placeholder="Enter new API key" style="flex: 1;">
+                                    <button class="btn btn-primary" onclick="updateModelKey('${extModel.id}')">Update Key</button>
+                                </div>
+                                <div id="model-update-key-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
+                            </div>
+                            <div id="model-auth-mi-section-${extModel.id}" style="display: ${curAuth === 'managed-identity' ? 'block' : 'none'};">
+                                <div style="background: var(--bg-secondary); border-radius: 8px; padding: 16px; margin-bottom: 12px; font-size: 13px;">
+                                    <p style="margin: 0 0 12px 0; font-weight: 500;">Uses Azure Workload Identity — no API key needed.</p>
+                                    <p style="margin: 0 0 12px 0; color: var(--text-secondary);">Grant the AKS managed identity access to your Azure OpenAI resource:</p>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Bash / Linux:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 12px; border-radius: 6px; margin: 4px 0 8px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \\
+  --assignee &lt;managed-identity-client-id&gt; \\
+  --role "Cognitive Services OpenAI User" \\
+  --scope /subscriptions/&lt;sub-id&gt;/resourceGroups/&lt;rg&gt;/providers/Microsoft.CognitiveServices/accounts/&lt;name&gt;</div>
+                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">PowerShell / Windows:</div>
+                                    <div style="background: var(--bg-tertiary); padding: 12px; border-radius: 6px; margin: 4px 0 12px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \`
+  --assignee &lt;managed-identity-client-id&gt; \`
+  --role "Cognitive Services OpenAI User" \`
+  --scope /subscriptions/&lt;sub-id&gt;/resourceGroups/&lt;rg&gt;/providers/Microsoft.CognitiveServices/accounts/&lt;name&gt;</div>
+                                    <p style="margin: 0 0 8px 0; color: var(--text-secondary);"><strong>Azure Portal:</strong> Azure OpenAI resource → Access Control (IAM) → Add role assignment → "Cognitive Services OpenAI User" → Assign to your AKS managed identity</p>
+                                </div>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <input type="text" class="form-input" id="model-update-clientid-${extModel.id}" placeholder="Client ID (optional — uses workload identity if empty)" value="${extModel.client_id || ''}" style="flex: 1;">
+                                    <button class="btn btn-primary" onclick="updateModelAuth('${extModel.id}', 'managed-identity')">Save</button>
+                                </div>
+                                <div id="model-update-mi-status-${extModel.id}" style="margin-top: 8px; font-size: 13px;"></div>
+                            </div>
+                        </div>`;
+                }
+
                 body.innerHTML = html;
             } else if (currentModelDetailTab === 'logs') {
                 body.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-tertiary);">Loading logs...</div>`;
@@ -6880,6 +7776,115 @@
             }
         }
 
+        function toggleModelAuthFields(modelId, authType) {
+            const keySection = document.getElementById(`model-auth-key-section-${modelId}`);
+            const miSection = document.getElementById(`model-auth-mi-section-${modelId}`);
+            if (keySection) keySection.style.display = authType === 'key' ? 'block' : 'none';
+            if (miSection) miSection.style.display = authType === 'managed-identity' ? 'block' : 'none';
+            // Update radio button styling
+            document.querySelectorAll(`input[name="model-auth-type-${modelId}"]`).forEach(r => {
+                const label = r.closest('label');
+                if (label) {
+                    const active = r.value === authType;
+                    label.style.borderColor = active ? 'var(--accent-primary)' : 'var(--border)';
+                    label.style.background = active ? (authType === 'key' ? 'rgba(99,102,241,0.1)' : 'rgba(34,197,94,0.1)') : 'transparent';
+                }
+            });
+        }
+
+        async function updateModelAuth(modelId, authType) {
+            const statusEl = document.getElementById(`model-update-mi-status-${modelId}`);
+            statusEl.innerHTML = '<span style="color:var(--text-tertiary);">Updating...</span>';
+            const clientId = document.getElementById(`model-update-clientid-${modelId}`)?.value?.trim() || '';
+            try {
+                const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auth_type: authType, client_id: clientId }),
+                });
+                if (resp.ok) {
+                    statusEl.innerHTML = '<span style="color:var(--success);">✓ Switched to managed identity. Run Test Connection to verify.</span>';
+                    loadDgModels();
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    statusEl.innerHTML = `<span style="color:var(--error);">Failed: ${err.detail || resp.statusText}</span>`;
+                }
+            } catch (e) {
+                statusEl.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
+            }
+        }
+
+        async function updateModelKey(modelId) {
+            const input = document.getElementById(`model-update-key-${modelId}`);
+            const status = document.getElementById(`model-update-key-status-${modelId}`);
+            const key = input?.value?.trim();
+            if (!key) { status.innerHTML = '<span style="color:var(--error);">Please enter an API key</span>'; return; }
+            status.innerHTML = '<span style="color:var(--text-tertiary);">Updating...</span>';
+            try {
+                const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ api_key: key, auth_type: 'key' }),
+                });
+                if (resp.ok) {
+                    status.innerHTML = '<span style="color:var(--success);">✓ API key updated. Run Test Connection to verify.</span>';
+                    input.value = '';
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    status.innerHTML = `<span style="color:var(--error);">Failed: ${err.detail || resp.statusText}</span>`;
+                }
+            } catch (e) {
+                status.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
+            }
+        }
+
+        async function testModelHealth(modelId) {
+            const btn = document.getElementById(`model-test-btn-${modelId}`);
+            const result = document.getElementById(`model-health-result-${modelId}`);
+            if (btn) btn.disabled = true;
+            result.innerHTML = '<span style="color:var(--text-tertiary);">Testing connection...</span>';
+            try {
+                const resp = await apiFetch(`/api/models/${encodeURIComponent(modelId)}/test`, { method: 'POST' });
+                const data = await resp.json();
+                let html = '';
+                const statusColor = data.status === 'healthy' ? 'var(--success)' : data.status === 'warning' ? 'var(--warning)' : 'var(--error)';
+                html += `<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusColor};"></span>
+                    <span style="font-weight:600;color:${statusColor};text-transform:uppercase;">${data.status}</span>
+                </div>`;
+                for (const chk of (data.checks || [])) {
+                    const icon = chk.status === 'pass' ? '✓' : chk.status === 'warn' ? '⚠' : '✗';
+                    const color = chk.status === 'pass' ? 'var(--success)' : chk.status === 'warn' ? 'var(--warning)' : 'var(--error)';
+                    html += `<div style="display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px;">
+                        <span style="color:${color};font-weight:bold;width:16px;">${icon}</span>
+                        <span style="min-width:120px;font-weight:500;">${chk.check}</span>
+                        <span style="color:var(--text-tertiary);">${(chk.detail || '').substring(0, 200)}</span>
+                    </div>`;
+                }
+                result.innerHTML = html;
+                // Update cached health data (but DON'T re-render tab — it would wipe this result)
+                if (healthData && healthData.models) {
+                    const idx = healthData.models.findIndex(m => m.id === modelId);
+                    if (idx >= 0) healthData.models[idx] = data;
+                    else healthData.models.push(data);
+                }
+                // Update the status banner inline if it exists
+                const banner = document.querySelector(`#dg-model-detail-body .health-status-banner-${modelId}`);
+                if (banner) {
+                    const sc = data.status === 'healthy' ? 'var(--success)' : data.status === 'warning' ? 'var(--warning)' : 'var(--error)';
+                    banner.style.background = sc + '15';
+                    banner.style.borderColor = sc + '33';
+                    banner.querySelector('.health-status-text').style.color = sc;
+                    banner.querySelector('.health-status-text').textContent = data.status;
+                    banner.querySelector('.health-status-dot').style.background = sc;
+                }
+            } catch (e) {
+                result.innerHTML = `<span style="color:var(--error);">Error: ${e.message}</span>`;
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
         function showAddExternalModelModal() {
             document.getElementById('dg-external-model-form').reset();
             showModal('dg-external-model-modal');
@@ -6893,12 +7898,18 @@
         function toggleAuthFields(authType) {
             const keyGroup = document.getElementById('api-key-group');
             const clientIdGroup = document.getElementById('client-id-group');
+            const keyLabel = document.getElementById('model-add-auth-key-label');
+            const miLabel = document.getElementById('model-add-auth-mi-label');
             if (authType === 'managed-identity') {
                 if (keyGroup) keyGroup.style.display = 'none';
                 if (clientIdGroup) clientIdGroup.style.display = 'block';
+                if (keyLabel) { keyLabel.style.borderColor = 'transparent'; }
+                if (miLabel) { miLabel.style.borderColor = 'var(--accent-primary)'; }
             } else {
                 if (keyGroup) keyGroup.style.display = 'block';
                 if (clientIdGroup) clientIdGroup.style.display = 'none';
+                if (keyLabel) { keyLabel.style.borderColor = 'var(--accent-primary)'; }
+                if (miLabel) { miLabel.style.borderColor = 'transparent'; }
             }
         }
 
@@ -7989,7 +9000,7 @@
             let url = `/api/metrics/timeseries?granularity=${metricsGranularity}&start=${start}&end=${end}`;
             if (metricsPipelineFilter) url += `&pipeline_id=${metricsPipelineFilter}`;
             try {
-                const resp = await fetch(url);
+                const resp = await apiFetch(url);
                 const data = await resp.json();
                 renderMetricsSection(data);
             } catch (e) {
@@ -8026,17 +9037,6 @@
             }
         }
 
-        async function clearMetrics() {
-            if (!confirm('Clear all metrics? This cannot be undone.')) return;
-            try {
-                await apiFetch('/api/metrics', { method: 'DELETE' });
-                showNotification('Metrics cleared', 'success');
-                loadMetricsSection();
-            } catch (e) {
-                showNotification('Error: ' + e.message, 'error');
-            }
-        }
-
         function _fmtBucketLabel(t, gran) {
             if (gran === 'day') return t.slice(5, 10);
             if (gran === 'hour') return t.slice(11, 16);
@@ -8047,6 +9047,11 @@
             if (_metricsChartThroughput) { _metricsChartThroughput.destroy(); _metricsChartThroughput = null; }
             if (_metricsChartLatency) { _metricsChartLatency.destroy(); _metricsChartLatency = null; }
             if (!buckets.length) return;
+            if (typeof Chart === 'undefined') {
+                const el = document.getElementById('metrics-chart-throughput');
+                if (el) el.parentElement.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:300px;color:var(--text-tertiary);">Chart.js not loaded (CDN may be blocked)</div>';
+                return;
+            }
 
             const labels = buckets.map(b => _fmtBucketLabel(b.t, granularity));
             const chartDefaults = {
@@ -8220,7 +9225,10 @@
             container.innerHTML = html;
 
             // Render charts after DOM is ready
-            setTimeout(() => _renderMetricsCharts(buckets, data.granularity), 0);
+            setTimeout(() => {
+                try { _renderMetricsCharts(buckets, data.granularity); }
+                catch(e) { console.error('Chart render error:', e); }
+            }, 100);
         }
 
         let _opsActiveTab = 'overview';

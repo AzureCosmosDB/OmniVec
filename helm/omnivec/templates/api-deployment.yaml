@@ -50,6 +50,14 @@ spec:
             - name: KEY_VAULT_URI
               value: {{ .Values.azure.keyVault.uri | quote }}
             {{- end }}
+            {{- if .Values.azure.appInsights.connectionString }}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: {{ .Values.azure.appInsights.connectionString | quote }}
+            {{- if .Values.azure.appInsights.workspaceId }}
+            - name: LOG_ANALYTICS_WORKSPACE_ID
+              value: {{ .Values.azure.appInsights.workspaceId | quote }}
+            {{- end }}
+            {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           livenessProbe:

@@ -19,6 +19,7 @@ public class SourceWatcherManager : IAsyncDisposable
     private readonly ChangeFeedOptions _options;
     private readonly OmniVecApiClient _apiClient;
     private readonly LeaseContainerManager _leaseManager;
+    private readonly BlobLeaseManager _blobLeaseManager;
     private readonly ContentHasher _hasher;
     private readonly ServiceBusPublisher _sbPublisher;
     private readonly ILoggerFactory _loggerFactory;
@@ -41,6 +42,7 @@ public class SourceWatcherManager : IAsyncDisposable
         IOptions<ChangeFeedOptions> options,
         OmniVecApiClient apiClient,
         LeaseContainerManager leaseManager,
+        BlobLeaseManager blobLeaseManager,
         ContentHasher hasher,
         ServiceBusPublisher sbPublisher,
         ILoggerFactory loggerFactory,
@@ -49,6 +51,7 @@ public class SourceWatcherManager : IAsyncDisposable
         _options = options.Value;
         _apiClient = apiClient;
         _leaseManager = leaseManager;
+        _blobLeaseManager = blobLeaseManager;
         _hasher = hasher;
         _sbPublisher = sbPublisher;
         _loggerFactory = loggerFactory;
@@ -96,6 +99,26 @@ public class SourceWatcherManager : IAsyncDisposable
         foreach (var source in desiredSources)
         {
             var generation = GetGeneration(source.Id, activePipelines);
+
+            // For azure-blob sources we partition across replicas with a Cosmos lease so
+            // only one pod enumerates a given container. Without this, all 15 replicas
+            // publish the same blobs → duplicate work and can blow past SB capacity.
+            bool isBlob = string.Equals(source.Type, "azure-blob", StringComparison.OrdinalIgnoreCase);
+            if (isBlob)
+            {
+                var haveLease = await _blobLeaseManager.TryAcquireAsync(source.Id, ct);
+                if (!haveLease)
+                {
+                    // Another pod owns this blob source. If we were running it, stop.
+                    if (_watchers.TryRemove(source.Id, out var old))
+                    {
+                        _logger.LogInformation(
+                            "Lost blob lease for source {SourceId}, stopping local watcher", source.Id);
+                        await old.DisposeAsync();
+                    }
+                    continue;
+                }
+            }
 
             if (currentIds.Contains(source.Id))
             {
@@ -226,7 +249,7 @@ public class SourceWatcherManager : IAsyncDisposable
                 source, _options, _apiClient, _hasher,
                 _loggerFactory.CreateLogger<BlobSourceWatcher>(),
                 generation: generation,
-                sbPublisher: _sbPublisher),
+                sbPublisher: _sbPublisher.IsEnabled ? _sbPublisher : null),
 
             _ => new SourceWatcher(
                 source, _options, _apiClient, _leaseManager, _hasher,
