@@ -145,29 +145,102 @@ function Resolve-NativeExe {
 $AzExe  = Resolve-NativeExe 'az'
 $AzdExe = Resolve-NativeExe 'azd'
 
-# ─── PG SQL helper using az (no local psql required) ───────────────────────
-# Uses `az postgres flexible-server execute` so the script works on any box
-# with the Azure CLI, without needing the psql client installed. Requires the
-# `rdbms-connect` az extension, which az auto-installs on first use.
+# ─── PG SQL helper via throwaway kubectl pod (no local psql, no az extensions) ─
+# Runs psql inside a one-shot postgres:16-alpine pod in the AKS cluster. The
+# pod has network access to the Azure PostgreSQL Flexible Server (both in
+# Azure) and avoids any dependency on local psql or the fragile
+# `rdbms-connect` az extension. Requires only kubectl (already required).
+#
+# To dodge DNS-propagation delays after creating a fresh Azure PG flexible
+# server, we resolve the host's IP from the local box (with retry) and
+# inject it as a hostAliases entry on the pod so the container bypasses
+# CoreDNS entirely.
+function Resolve-PgHostIp {
+    param([Parameter(Mandatory)][string]$PgHost, [int]$TimeoutSec = 120)
+    $waited = 0
+    while ($waited -lt $TimeoutSec) {
+        try {
+            $rec = Resolve-DnsName -Name $PgHost -Type A -ErrorAction Stop 2>$null |
+                   Where-Object { $_.IPAddress -and $_.IPAddress -match '^\d+\.\d+\.\d+\.\d+$' } |
+                   Select-Object -First 1
+            if ($rec -and $rec.IPAddress) { return $rec.IPAddress }
+        } catch {}
+        Start-Sleep -Seconds 5; $waited += 5
+    }
+    return $null
+}
+
 function Invoke-PgSql {
     param(
-        [Parameter(Mandatory)][string]$Server,
+        [Parameter(Mandatory)][string]$PgHost,
         [Parameter(Mandatory)][string]$AdminUser,
         [Parameter(Mandatory)][string]$AdminPassword,
         [string]$Database = 'postgres',
-        [Parameter(Mandatory)][string]$Query
+        [int]$Port = 5432,
+        [Parameter(Mandatory)][string]$Query,
+        [string]$Namespace = 'default'
     )
-    $out = & $AzExe postgres flexible-server execute `
-        --name $Server `
-        --admin-user $AdminUser `
-        --admin-password $AdminPassword `
-        --database-name $Database `
-        --querytext $Query 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        LogErr "psql via az failed ($LASTEXITCODE): $out"
-        return $null
+    # Cache the resolved IP per-run.
+    if (-not $script:_pgHostIp -or $script:_pgHostIpFor -ne $PgHost) {
+        Log "  Resolving $PgHost ..."
+        $ip = Resolve-PgHostIp -PgHost $PgHost
+        if (-not $ip) {
+            LogErr "Could not resolve $PgHost within 120s (DNS propagation lag?)."
+            throw "DNS resolution failed for $PgHost"
+        }
+        Log "  -> $ip"
+        $script:_pgHostIp = $ip
+        $script:_pgHostIpFor = $PgHost
     }
-    return $out
+    $ip = $script:_pgHostIp
+
+    $suffix = [Guid]::NewGuid().ToString('N').Substring(0,8)
+    $podName = "ov-pgclient-$suffix"
+
+    $overrides = @{
+        apiVersion = 'v1'
+        spec = @{
+            restartPolicy = 'Never'
+            hostAliases = @(@{ ip = $ip; hostnames = @($PgHost) })
+            containers = @(@{
+                name  = 'psql'
+                image = 'postgres:16-alpine'
+                env = @(
+                    @{ name = 'PGPASSWORD'; value = $AdminPassword }
+                    @{ name = 'PGSSLMODE';  value = 'require' }
+                )
+                command = @('psql','-h',$PgHost,'-p',"$Port",'-U',$AdminUser,
+                            '-d',$Database,'-v','ON_ERROR_STOP=1','-t','-A','-c',$Query)
+            })
+        }
+    } | ConvertTo-Json -Depth 10 -Compress
+
+    $createOut = & kubectl run $podName `
+        --namespace $Namespace `
+        --image=postgres:16-alpine `
+        --restart=Never `
+        --overrides=$overrides 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "kubectl run failed: $createOut"
+        throw "Failed to launch psql pod"
+    }
+
+    $timeoutSec = 120
+    $waited = 0
+    $phase = ''
+    while ($waited -lt $timeoutSec) {
+        $phase = (& kubectl get pod $podName -n $Namespace -o jsonpath='{.status.phase}' 2>$null)
+        if ($phase -eq 'Succeeded' -or $phase -eq 'Failed') { break }
+        Start-Sleep -Seconds 2; $waited += 2
+    }
+    $logs = (& kubectl logs $podName -n $Namespace 2>&1) -join "`n"
+    & kubectl delete pod $podName -n $Namespace --grace-period=0 --force 2>&1 | Out-Null
+
+    if ($phase -ne 'Succeeded') {
+        LogErr "PG SQL failed (pod phase=$phase, db=$Database):`n$logs"
+        throw "PG SQL execution failed"
+    }
+    return $logs
 }
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
@@ -253,6 +326,29 @@ function ApiDelete { param([string]$Path)
     try { Invoke-RestMethod -Uri "$SERVER_URL$Path" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } -TimeoutSec 10 | Out-Null } catch {}
 }
 
+# Create-or-get: POST, but if the resource already exists, look it up by name.
+function ApiCreateOrGet {
+    param(
+        [Parameter(Mandatory)][string]$CollectionPath,   # e.g. '/api/sources'
+        [Parameter(Mandatory)][string]$ListField,        # e.g. 'sources'
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][object]$Body
+    )
+    try {
+        return ApiPost $CollectionPath $Body
+    } catch {
+        $msg = "$_"
+        if ($msg -match 'already exists' -or $msg -match '409') {
+            $existing = (ApiGet $CollectionPath).$ListField | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+            if ($existing) {
+                LogOk "Reusing existing $($CollectionPath): $($existing.id) (name=$Name)"
+                return $existing
+            }
+        }
+        throw
+    }
+}
+
 # ─── Cleanup mode ────────────────────────────────────────────────────────────
 if ($Cleanup) {
     Log "`nCleaning up pgvector demo resources..."
@@ -318,30 +414,65 @@ if ($FromStep -le 3) {
     $existing = if ($showJson) { $showJson | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $null }
     if ($existing) {
         LogOk "PostgreSQL server already exists: $PG_SERVER"
+        $PG_LOCATION = $existing.location
     } else {
-        Log "  Creating server: $PG_SERVER (this takes ~3-5 minutes)..."
-        & $AzExe postgres flexible-server create `
-            --name $PG_SERVER `
-            --resource-group $RESOURCE_GROUP `
-            --location eastus2 `
-            --admin-user $PG_ADMIN `
-            --admin-password $PgAdminPassword `
-            --sku-name Standard_B1ms `
-            --tier Burstable `
-            --storage-size 32 `
-            --version 16 `
-            --public-access 0.0.0.0 `
-            --yes 2>$null | Out-Null
-        LogOk "PostgreSQL server created: $PG_SERVER"
+        # Pick a location for the flex server. Not every region allows flex
+        # server provisioning for every subscription, so we try the RG's
+        # location first, then fall back through a safe list.
+        $rgLoc = (& $AzExe group show --name $RESOURCE_GROUP --query location -o tsv 2>$null)
+        if ($rgLoc) { $rgLoc = "$rgLoc".Trim() }
+        $candidates = @()
+        if ($rgLoc) { $candidates += $rgLoc }
+        foreach ($fb in @('eastus','centralus','westus3','westus2','northeurope','westeurope')) {
+            if ($candidates -notcontains $fb) { $candidates += $fb }
+        }
+
+        $created = $false
+        foreach ($loc in $candidates) {
+            Log "  Creating server: $PG_SERVER in $loc (this takes ~3-5 minutes)..."
+            $out = & $AzExe postgres flexible-server create `
+                --name $PG_SERVER `
+                --resource-group $RESOURCE_GROUP `
+                --location $loc `
+                --admin-user $PG_ADMIN `
+                --admin-password $PgAdminPassword `
+                --sku-name Standard_B1ms `
+                --tier Burstable `
+                --storage-size 32 `
+                --version 16 `
+                --public-access 0.0.0.0 `
+                --yes 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $PG_LOCATION = $loc
+                $created = $true
+                LogOk "PostgreSQL server created: $PG_SERVER (location=$loc)"
+                break
+            }
+            $outStr = "$out"
+            if ($outStr -match 'location is restricted' -or $outStr -match 'not available in the region' -or $outStr -match 'SubscriptionIsRestrictedForLocation') {
+                LogWarn "  Location '$loc' restricted for PG flex server. Trying next..."
+                continue
+            }
+            LogErr "PG server create failed (exit $LASTEXITCODE): $outStr"
+            throw "PostgreSQL server creation failed"
+        }
+        if (-not $created) {
+            LogErr "Could not find an allowed region for PG flex server. Tried: $($candidates -join ', ')"
+            throw "No allowed region for PG flex server"
+        }
     }
 
     # Enable pgvector extension
     Log "  Enabling pgvector extension..."
-    & $AzExe postgres flexible-server parameter set `
+    $extOut = & $AzExe postgres flexible-server parameter set `
         --server-name $PG_SERVER `
         --resource-group $RESOURCE_GROUP `
         --name azure.extensions `
-        --value VECTOR 2>$null | Out-Null
+        --value VECTOR 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "Failed to enable azure.extensions=VECTOR: $extOut"
+        throw "pgvector enable failed"
+    }
     LogOk "pgvector extension enabled."
 
     # Get connection info
@@ -391,7 +522,7 @@ if ($FromStep -le 4) {
 
     # Create database (via az; no local psql needed)
     Log "  Creating database: $PG_DB"
-    Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+    Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
         -Database 'postgres' -Query "CREATE DATABASE $PG_DB;" | Out-Null
     LogOk "Database created."
 
@@ -424,7 +555,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
 "@
-    Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+    Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
         -Database $PG_DB -Query $sql | Out-Null
     LogOk "Tables created: documents (source), embeddings (destination)"
 
@@ -436,7 +567,7 @@ CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embed
         "INSERT INTO documents (id, title, content, category) VALUES ('doc-003', 'Azure Blob Storage', 'Azure Blob Storage stores massive amounts of unstructured data like documents and images optimized for cloud scale.', 'storage') ON CONFLICT (id) DO NOTHING;"
     )
     foreach ($doc in $docs) {
-        Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+        Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
             -Database $PG_DB -Query $doc | Out-Null
     }
     LogOk "Inserted 3 sample documents."
@@ -510,7 +641,7 @@ if ($FromStep -le 6) {
             timestamp_column = "updated_at"
         }
     }
-    $srcResp = ApiPost "/api/sources" $srcBody
+    $srcResp = ApiCreateOrGet -CollectionPath "/api/sources" -ListField "sources" -Name "pg-demo-source" -Body $srcBody
     $SOURCE_ID = $srcResp.id
     LogOk "Source: $SOURCE_ID (postgresql://.../$PG_DB/documents)"
 
@@ -533,7 +664,7 @@ if ($FromStep -le 6) {
             index_type = "hnsw"
         }
     }
-    $dstResp = ApiPost "/api/destinations" $dstBody
+    $dstResp = ApiCreateOrGet -CollectionPath "/api/destinations" -ListField "destinations" -Name "pg-demo-vectors" -Body $dstBody
     $DEST_ID = $dstResp.id
     LogOk "Destination: $DEST_ID (pgvector://.../$PG_DB/embeddings)"
 
@@ -565,10 +696,20 @@ if ($FromStep -le 7) {
         processing_mode = "queue"
         content_strategy = "truncate"
     }
-    $pipResp = ApiPost "/api/pipelines" $pipBody
-    $PIP_ID = $pipResp.pipeline.id
-    if (-not $PIP_ID) { $PIP_ID = $pipResp.id }
-    LogOk "Pipeline created: $PIP_ID"
+    try {
+        $pipResp = ApiPost "/api/pipelines" $pipBody
+        $PIP_ID = $pipResp.pipeline.id
+        if (-not $PIP_ID) { $PIP_ID = $pipResp.id }
+        LogOk "Pipeline created: $PIP_ID"
+    } catch {
+        if ("$_" -match 'already exists' -or "$_" -match '409') {
+            $existingPip = (ApiGet "/api/pipelines").pipelines | Where-Object { $_.name -eq "pgvector-demo-pipeline" } | Select-Object -First 1
+            if ($existingPip) {
+                $PIP_ID = $existingPip.id
+                LogOk "Reusing existing pipeline: $PIP_ID"
+            } else { throw }
+        } else { throw }
+    }
 
     # Wait for processing
     Log "  Waiting for documents to be embedded..."
@@ -607,9 +748,8 @@ if ($FromStep -le 8) {
         $PG_ADMIN = "omnivecadmin"
     }
 
-    $rawCount = Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+    $rawCount = Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
         -Database $PG_DB -Query "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;"
-    # az execute returns rows as JSON-ish text; pull the first integer out.
     $count = if ($rawCount) { ([regex]::Match("$rawCount", '\d+')).Value } else { '0' }
     if (-not $count) { $count = '0' }
 
