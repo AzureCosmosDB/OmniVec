@@ -505,34 +505,87 @@ $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m", "-
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
 $helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+$helmState = if ($helmStatus -and $helmStatus.info) { $helmStatus.info.status } else { "" }
 if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pending-") {
     Write-Host "`e[33mDetected stuck Helm release (status: $($helmStatus.info.status)). Rolling back...`e[0m"
     helm rollback omnivec -n omnivec --kube-context $KUBE_CONTEXT 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "`e[33mRollback failed — uninstalling stuck release...`e[0m"
         helm uninstall omnivec -n omnivec --kube-context $KUBE_CONTEXT 2>$null
+        $helmState = ""
     }
     Write-Host "`e[32mStuck release cleared. Proceeding with fresh deploy.`e[0m"
 }
 
-& helm @helmArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
-    kubectl --context $KUBE_CONTEXT get pods -n omnivec -o wide
+# ── Skip helm upgrade if nothing has changed ────────────────────────────────
+# Rationale: helm upgrade --install --wait --atomic takes 1-2 minutes even
+# when the computed manifest is identical to the live one. Skip when:
+#   1. release is currently 'deployed' (healthy, not pending/failed),
+#   2. no images were imported/rebuilt this run ($script:imagesChanged is false),
+#   3. helm args fingerprint matches the one cached after the last successful deploy,
+#   4. all deployments in the omnivec namespace have >=1 available replica.
+# Set $env:OMNIVEC_FORCE_HELM = 'true' to bypass.
+$fingerprintFile = "$chartDir/.last-deploy-fingerprint"
+# Fingerprint captures everything that determines the rendered manifest:
+#   - the helm args (values + --set) we're about to pass in
+#   - every file under the chart dir (templates, values.yaml, Chart.yaml,
+#     Chart.lock, built subcharts) — so template edits invalidate the cache.
+$currentFp = ""
+try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $argsHash = [BitConverter]::ToString($sha.ComputeHash(
+        [Text.Encoding]::UTF8.GetBytes(($helmArgs -join "`n"))
+    )) -replace '-',''
+    $chartHashes = Get-ChildItem -Path $chartDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne '.last-deploy-fingerprint' } |
+        Sort-Object FullName |
+        ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
+    $combined = $argsHash + "`n" + ($chartHashes -join "`n")
+    $currentFp = [BitConverter]::ToString($sha.ComputeHash(
+        [Text.Encoding]::UTF8.GetBytes($combined)
+    )) -replace '-',''
+} catch {
+    $currentFp = ""
+}
+$cachedFp = ""
+if (Test-Path $fingerprintFile) { $cachedFp = (Get-Content $fingerprintFile -Raw).Trim() }
 
-    $problemPods = kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null | `
-        Where-Object { $_ -match "ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending" }
-
-    foreach ($line in $problemPods) {
-        $parts = ($line -replace '\s+', ' ').Trim().Split(' ')
-        if ($parts.Count -lt 3) { continue }
-        $podName = $parts[0]
-        $status = $parts[2]
-        Write-Host "`n`e[33m=== $podName ($status) ===`e[0m"
-        kubectl --context $KUBE_CONTEXT describe pod $podName -n omnivec | Select-String -Pattern "Events:" -Context 0,60
-        kubectl --context $KUBE_CONTEXT logs $podName -n omnivec --tail=80 2>$null
+$skipHelm = $false
+if ($env:OMNIVEC_FORCE_HELM -ne "true" `
+    -and -not $script:imagesChanged `
+    -and $helmState -eq "deployed" `
+    -and $currentFp -and $currentFp -eq $cachedFp) {
+    $unavail = kubectl --context $KUBE_CONTEXT get deploy -n omnivec -o jsonpath='{range .items[?(@.status.availableReplicas==0)]}{.metadata.name}{"\n"}{end}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not $unavail) {
+        $skipHelm = $true
     }
-    exit 1
+}
+
+if ($skipHelm) {
+    Write-Host "  `e[32mNo image/config changes detected and cluster is healthy — skipping helm upgrade.`e[0m"
+    Write-Host "  `e[36m(Set `$env:OMNIVEC_FORCE_HELM='true' to force a redeploy.)`e[0m"
+} else {
+    & helm @helmArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
+        kubectl --context $KUBE_CONTEXT get pods -n omnivec -o wide
+
+        $problemPods = kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null | `
+            Where-Object { $_ -match "ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending" }
+
+        foreach ($line in $problemPods) {
+            $parts = ($line -replace '\s+', ' ').Trim().Split(' ')
+            if ($parts.Count -lt 3) { continue }
+            $podName = $parts[0]
+            $status = $parts[2]
+            Write-Host "`n`e[33m=== $podName ($status) ===`e[0m"
+            kubectl --context $KUBE_CONTEXT describe pod $podName -n omnivec | Select-String -Pattern "Events:" -Context 0,60
+            kubectl --context $KUBE_CONTEXT logs $podName -n omnivec --tail=80 2>$null
+        }
+        exit 1
+    }
+    # Cache fingerprint only on success so a failed run doesn't poison future skips
+    if ($currentFp) { $currentFp | Set-Content $fingerprintFile -NoNewline }
 }
 
 Write-Host "`e[32mHelm deployment complete.`e[0m"
