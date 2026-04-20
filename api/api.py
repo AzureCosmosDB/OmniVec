@@ -817,6 +817,12 @@ def get_insights_metrics():
     }
 
 
+@app.delete("/api/metrics")
+def clear_metrics():
+    """Clear is not applicable — metrics are in App Insights."""
+    return {"success": False, "message": "Metrics are stored in App Insights and cannot be cleared from here. Use Azure Portal to manage retention."}
+
+
 @app.post("/api/metrics/changefeed")
 def report_changefeed_metrics(payload: dict):
     """Report changefeed batch metrics from CFP.
