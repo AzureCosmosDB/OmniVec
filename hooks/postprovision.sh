@@ -699,9 +699,36 @@ if [ "$SKIP_HELM" = "true" ]; then
 else
   # Execute (d1: retry on transient ARM / Helm errors)
   # While helm waits (can take 1-3 minutes with --wait --atomic), show a
-  # heartbeat so the user isn't staring at a frozen screen.
+  # focused heartbeat so the user sees WHAT helm is blocked on. We surface:
+  #   - deployments with ready != desired (the primary `helm --wait` target)
+  #   - services of type LoadBalancer still waiting for external IP
+  #   - the 5 most recent warning/error events
+  # If everything is green, a single line tells the user helm itself is just
+  # finalising (common: 15-30s post-ready wait for atomic).
   OMNIVEC_RETRY_HEARTBEAT_SEC=${OMNIVEC_HELM_HEARTBEAT_SEC:-20}
-  OMNIVEC_RETRY_HEARTBEAT_CMD='kubectl --context "'"$KUBE_CONTEXT"'" --kubeconfig "'"$OMNIVEC_KUBECONFIG"'" -n omnivec get pods --no-headers 2>/dev/null | awk '"'"'{printf "    %-50s %-12s %s\n", $1, $3, $2}'"'"' | head -20'
+  OMNIVEC_RETRY_HEARTBEAT_CMD='
+KC="kubectl --context '"$KUBE_CONTEXT"' --kubeconfig '"$OMNIVEC_KUBECONFIG"' -n omnivec"
+_not_ready=$($KC get deploy -o "jsonpath={range .items[?(@.status.readyReplicas<@.spec.replicas)]}{.metadata.name}{\" \"}{.status.readyReplicas}{\"/\"}{.spec.replicas}{\"\n\"}{end}" 2>/dev/null | grep -v "^$")
+_not_ready_all=$($KC get deploy -o "jsonpath={range .items[?(!@.status.readyReplicas)]}{.metadata.name}{\" 0/\"}{.spec.replicas}{\"\n\"}{end}" 2>/dev/null | grep -v "^$")
+_pending_lb=$($KC get svc -o "jsonpath={range .items[?(@.spec.type==\"LoadBalancer\")]}{.metadata.name}{\" \"}{.status.loadBalancer.ingress[0].ip}{\"\n\"}{end}" 2>/dev/null | awk "/ \$/ {print \$1}")
+_events=$($KC get events --sort-by=.lastTimestamp -o "jsonpath={range .items[?(@.type==\"Warning\")]}{.reason}{\": \"}{.message}{\"\n\"}{end}" 2>/dev/null | tail -5)
+{
+  if [ -n "$_not_ready$_not_ready_all" ]; then
+    printf "    deployments not ready:\n"
+    printf "%s\n" "$_not_ready" "$_not_ready_all" | grep -v "^$" | awk "{printf \"      %s\n\", \$0}"
+  fi
+  if [ -n "$_pending_lb" ]; then
+    printf "    services waiting for external IP:\n"
+    printf "%s\n" "$_pending_lb" | awk "{printf \"      %s\n\", \$0}"
+  fi
+  if [ -n "$_events" ]; then
+    printf "    recent warnings (last 5):\n"
+    printf "%s\n" "$_events" | awk "{printf \"      %s\n\", substr(\$0,1,120)}"
+  fi
+  if [ -z "$_not_ready$_not_ready_all$_pending_lb$_events" ]; then
+    printf "    all resources ready — helm is finalising (atomic wait, typically 15-30s)\n"
+  fi
+}'
   export OMNIVEC_RETRY_HEARTBEAT_SEC OMNIVEC_RETRY_HEARTBEAT_CMD
   set +e
   if command -v retry_run >/dev/null 2>&1; then
