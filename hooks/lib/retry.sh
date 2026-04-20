@@ -59,37 +59,55 @@ retry_is_transient() {
 # retry_run LABEL -- cmd args...
 # Runs cmd; on non-zero exit, classifies output; retries with exponential
 # backoff if transient. Exit code of last attempt propagates.
+_retry_print_excerpt() {
+    # Print the last few non-blank lines of $1 to stderr, indented, in yellow.
+    # Helps users understand WHY a transient retry happened without dumping
+    # the entire log mid-flow.
+    _src=$1
+    _max=${2:-6}
+    [ -s "$_src" ] || return 0
+    printf "  ${YELLOW}---- last output ----${NC}\n" >&2
+    grep -v '^[[:space:]]*$' "$_src" 2>/dev/null | tail -n "$_max" \
+        | sed 's/^/    /' >&2
+    printf "  ${YELLOW}---------------------${NC}\n" >&2
+}
+
 retry_run() {
     _label=${1:-retry}; shift 2>/dev/null || true
     [ "${1:-}" = "--" ] && shift
 
+    # Persist last attempt's full log to a stable path so users can inspect it
+    # after a successful retry (mktemp would be lost on success).
+    _log_dir=${TMPDIR:-/tmp}
+    _log="${_log_dir}/omnivec-retry-${_label}.log"
+
     _attempt=1
     _rc=0
     while [ "$_attempt" -le "$OMNIVEC_RETRY_ATTEMPTS" ]; do
-        _tmp=$(mktemp 2>/dev/null || mktemp -t retry)
-        "$@" </dev/null >"$_tmp" 2>&1
+        : > "$_log"
+        "$@" </dev/null >"$_log" 2>&1
         _rc=$?
         if [ "$_rc" -eq 0 ]; then
-            cat "$_tmp"
-            rm -f "$_tmp"
+            cat "$_log"
             return 0
         fi
-        _out=$(cat "$_tmp")
-        rm -f "$_tmp"
+        _out=$(cat "$_log")
         if [ "$_attempt" -ge "$OMNIVEC_RETRY_ATTEMPTS" ]; then
             printf '%s\n' "$_out"
-            printf "  ${RED}[%s] failed after %d attempts (rc=%d).${NC}\n" \
-                "$_label" "$_attempt" "$_rc" >&2
+            printf "  ${RED}[%s] failed after %d attempts (rc=%d). Full log: %s${NC}\n" \
+                "$_label" "$_attempt" "$_rc" "$_log" >&2
             return "$_rc"
         fi
         if ! retry_is_transient "$_out"; then
             printf '%s\n' "$_out"
-            printf "  ${RED}[%s] failed (rc=%d, non-transient).${NC}\n" "$_label" "$_rc" >&2
+            printf "  ${RED}[%s] failed (rc=%d, non-transient). Full log: %s${NC}\n" "$_label" "$_rc" "$_log" >&2
             return "$_rc"
         fi
         _sleep=$(( OMNIVEC_RETRY_BASE_SEC * _attempt ))
         printf "  ${YELLOW}[%s] transient failure (attempt %d/%d, rc=%d). Retrying in %ds...${NC}\n" \
             "$_label" "$_attempt" "$OMNIVEC_RETRY_ATTEMPTS" "$_rc" "$_sleep" >&2
+        _retry_print_excerpt "$_log" 6
+        printf "  ${CYAN}(full log: %s)${NC}\n" "$_log" >&2
         sleep "$_sleep"
         _attempt=$(( _attempt + 1 ))
     done
