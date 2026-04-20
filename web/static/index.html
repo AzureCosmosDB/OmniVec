@@ -883,16 +883,6 @@
                 </div>
 
                 <div class="nav-section">
-                    <div class="nav-section-title">Deployment</div>
-                    <a class="nav-item" onclick="showSection('deployment')">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                        </svg>
-                        Import / Export
-                    </a>
-                </div>
-
-                <div class="nav-section">
                     <div class="nav-section-title">DocGrok</div>
                     <a class="nav-item" onclick="showSection('dg-models')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -918,6 +908,16 @@
                             <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/>
                         </svg>
                         Deployments
+                    </a>
+                </div>
+
+                <div class="nav-section">
+                    <div class="nav-section-title">Deployment</div>
+                    <a class="nav-item" onclick="showSection('deployment')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Import / Export
                     </a>
                 </div>
             </nav>
@@ -2891,26 +2891,40 @@
             document.getElementById('exp-secrets').checked = false;
             document.getElementById('exp-checkpoints').checked = false;
             const picker = document.getElementById('exp-picker');
-            picker.innerHTML = '<div style="text-align:center; color: var(--text-tertiary); padding: 40px;">Loading resources...</div>';
+            // Render placeholder sections immediately so user sees structure
+            picker.innerHTML = EXP_TYPES.map(t => `
+                <div class="picker-section" data-type="${t.key}" data-loaded="0" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
+                    <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);">
+                        <b style="flex:1;">${t.label}</b>
+                        <span style="color: var(--text-tertiary); font-size: 0.85em;" class="picker-placeholder-status">queued…</span>
+                    </div>
+                    <div class="picker-items" data-type="${t.key}" style="padding: 12px; color: var(--text-tertiary); font-size: 0.9em;">Waiting…</div>
+                </div>
+            `).join('');
             showModal('export-modal');
-            try {
-                const results = await Promise.all(EXP_TYPES.map(async t => {
-                    try {
-                        const res = await apiFetch(t.endpoint);
-                        if (!res.ok) return [];
+
+            // Load one type at a time, render as each completes
+            for (const t of EXP_TYPES) {
+                const sec = picker.querySelector(`.picker-section[data-type="${t.key}"]`);
+                if (!sec) continue;
+                const statusEl = sec.querySelector('.picker-placeholder-status');
+                const itemsEl = sec.querySelector('.picker-items');
+                if (statusEl) statusEl.textContent = 'loading…';
+                if (itemsEl) itemsEl.textContent = 'Loading…';
+                let items = [];
+                try {
+                    const res = await apiFetch(t.endpoint);
+                    if (res.ok) {
                         const data = await res.json();
-                        const items = Array.isArray(data) ? data : (data[t.listKey] || []);
-                        return items.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
-                    } catch (e) { return []; }
-                }));
-                picker.innerHTML = EXP_TYPES.map((t, i) =>
-                    renderPickerSection('exp-picker', t.key, t.label, results[i], { selected: true })
-                ).join('');
-                picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'), { once: false });
+                        const raw = Array.isArray(data) ? data : (data[t.listKey] || []);
+                        items = raw.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                    }
+                } catch (_) { /* ignore, show empty */ }
+                sec.outerHTML = renderPickerSection('exp-picker', t.key, t.label, items, { selected: true });
                 pickerUpdateCounts('exp-picker');
-            } catch (e) {
-                picker.innerHTML = `<div style="color: var(--error-color); padding: 20px;">Failed to load: ${escapeHtml(e.message)}</div>`;
             }
+            picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'));
+            pickerUpdateCounts('exp-picker');
         }
 
         async function runExport() {
