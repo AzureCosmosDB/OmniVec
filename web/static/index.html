@@ -883,6 +883,16 @@
                 </div>
 
                 <div class="nav-section">
+                    <div class="nav-section-title">Deployment</div>
+                    <a class="nav-item" onclick="showSection('deployment')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Import / Export
+                    </a>
+                </div>
+
+                <div class="nav-section">
                     <div class="nav-section-title">DocGrok</div>
                     <a class="nav-item" onclick="showSection('dg-models')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1130,14 +1140,6 @@
                         <button class="btn btn-secondary" onclick="refreshData()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
                             Refresh
-                        </button>
-                        <button class="btn btn-secondary" onclick="showExportModal()" title="Export sources, destinations, pipelines, models & assistants as JSON">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            Export
-                        </button>
-                        <button class="btn btn-secondary" onclick="showImportModal()" title="Import a JSON bundle">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                            Import
                         </button>
                         <button class="btn btn-primary" onclick="showAddPipelineModal()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1457,6 +1459,46 @@
                 </div>
             </section>
 
+            <section id="section-deployment" class="section" style="display: none;">
+                <header class="header">
+                    <h2 class="header-title">Import / Export</h2>
+                </header>
+                <div class="content">
+                    <div class="card" style="margin-bottom: 24px;">
+                        <div class="card-body">
+                            <h3 class="card-title">Backup / migrate deployment</h3>
+                            <p style="color: var(--text-secondary); margin: 8px 0 16px;">
+                                Export sources, vector stores, pipelines, models, and assistants as a JSON bundle and import them back here
+                                or into another OmniVec deployment. You choose which resource types to include; pipelines/source checkpoints
+                                can be bundled so in-progress runs resume after restore.
+                            </p>
+                            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                                <button class="btn btn-primary" onclick="showExportModal()">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                    Export deployment
+                                </button>
+                                <button class="btn btn-secondary" onclick="showImportModal()">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                    Import bundle
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-body">
+                            <h3 class="card-title">Tips</h3>
+                            <ul style="color: var(--text-secondary); line-height: 1.8; padding-left: 20px; margin: 8px 0;">
+                                <li>Secrets (connection strings, API keys, passwords) are redacted as <code>"***"</code> by default &mdash; toggle <b>Include secrets</b> to embed them.</li>
+                                <li>Enable <b>Include checkpoints</b> to carry over processing progress so imported pipelines can resume where they left off.</li>
+                                <li>Pipeline filter restricts the bundle to just the listed pipelines and the sources / vector stores / models / assistants they reference.</li>
+                                <li>Imports land pipelines in <b>paused</b> state by default &mdash; review and resume explicitly.</li>
+                                <li>On conflict, choose <b>skip</b> (safe), <b>overwrite</b> (replace), or <b>rename</b> (copy with new IDs).</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
         </main>
     </div>
 
@@ -1505,46 +1547,37 @@
 
     <!-- Export / Import Modals -->
     <div class="modal-overlay" id="export-modal">
-        <div class="modal">
+        <div class="modal modal-full">
             <div class="modal-header">
                 <h3 class="modal-title">Export Deployment</h3>
                 <button class="modal-close" onclick="closeModal('export-modal')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                 </button>
             </div>
-            <div class="modal-body">
-                <p style="color: var(--text-secondary); margin-bottom: 16px;">
-                    Download a JSON bundle that you can re-import later or on another deployment.
-                </p>
-                <div class="form-group">
-                    <label>Resources to include</label>
-                    <div style="display: flex; flex-wrap: wrap; gap: 10px 16px; padding: 8px 0;">
-                        <label><input type="checkbox" class="exp-rtype" value="sources" checked> Sources</label>
-                        <label><input type="checkbox" class="exp-rtype" value="destinations" checked> Destinations</label>
-                        <label><input type="checkbox" class="exp-rtype" value="pipelines" checked> Pipelines</label>
-                        <label><input type="checkbox" class="exp-rtype" value="models" checked> Models</label>
-                        <label><input type="checkbox" class="exp-rtype" value="assistants" checked> Assistants</label>
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden;">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <div style="background: var(--bg-tertiary); padding: 20px; border-right: 1px solid var(--border-primary); overflow-y: auto;">
+                        <h4 style="margin: 0 0 8px;">Options</h4>
+                        <p style="color: var(--text-tertiary); font-size: 0.88em; margin-bottom: 16px;">
+                            Pick exactly which items go into the bundle. A section with nothing selected is omitted entirely.
+                        </p>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                            <input type="checkbox" id="exp-secrets">
+                            <span>Include <b>secrets</b></span>
+                        </label>
+                        <small style="color: var(--text-tertiary); display: block; margin-bottom: 16px;">
+                            Secrets are redacted as <code>"***"</code> when unchecked.
+                        </small>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+                            <input type="checkbox" id="exp-checkpoints">
+                            <span>Include <b>checkpoints</b><br><small style="color:var(--text-tertiary);">Resume in-progress runs after restore</small></span>
+                        </label>
+                        <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                        <div id="exp-summary" style="color: var(--text-secondary); font-size: 0.88em;">Loading resources...</div>
                     </div>
-                </div>
-                <div class="form-group">
-                    <label style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="exp-checkpoints">
-                        <span>Include pipeline/source <b>checkpoints</b> (needed to resume in-progress runs)</span>
-                    </label>
-                </div>
-                <div class="form-group">
-                    <label style="display: flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="exp-secrets">
-                        <span>Include <b>secrets</b> (connection strings, API keys, passwords)</span>
-                    </label>
-                    <small style="color: var(--text-tertiary); display: block; margin-top: 4px;">
-                        Secrets are redacted as <code>"***"</code> when unchecked.
-                    </small>
-                </div>
-                <div class="form-group">
-                    <label>Filter by pipeline (optional)</label>
-                    <input type="text" id="exp-pipelines" placeholder="pip-123,pip-456 — leave blank for all" class="form-input">
-                    <small style="color: var(--text-tertiary);">Only exports the listed pipelines and their referenced sources, destinations, models &amp; assistants.</small>
+                    <div id="exp-picker" style="padding: 20px; overflow-y: auto;">
+                        <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">Loading...</div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -1555,30 +1588,42 @@
     </div>
 
     <div class="modal-overlay" id="import-modal">
-        <div class="modal">
+        <div class="modal modal-full">
             <div class="modal-header">
                 <h3 class="modal-title">Import Deployment</h3>
                 <button class="modal-close" onclick="closeModal('import-modal')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                 </button>
             </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label>Bundle file</label>
-                    <input type="file" id="imp-file" accept="application/json,.json" class="form-input">
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden;">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <div style="background: var(--bg-tertiary); padding: 20px; border-right: 1px solid var(--border-primary); overflow-y: auto;">
+                        <h4 style="margin: 0 0 8px;">Options</h4>
+                        <div class="form-group">
+                            <label>Bundle file</label>
+                            <input type="file" id="imp-file" accept="application/json,.json" class="form-input" onchange="onImportFileChosen()">
+                        </div>
+                        <div class="form-group">
+                            <label>On conflict</label>
+                            <select id="imp-on-conflict" class="form-input">
+                                <option value="skip" selected>skip — keep existing (safest)</option>
+                                <option value="overwrite">overwrite — replace existing</option>
+                                <option value="rename">rename — create copies with new IDs</option>
+                            </select>
+                        </div>
+                        <p style="color: var(--text-tertiary); font-size: 0.88em;">
+                            Imported pipelines always land in <b>paused</b> state.
+                        </p>
+                        <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                        <div id="imp-summary" style="color: var(--text-secondary); font-size: 0.88em;">Pick a file to preview its contents.</div>
+                    </div>
+                    <div style="padding: 20px; overflow-y: auto; display: flex; flex-direction: column;">
+                        <div id="imp-picker" style="flex: 1;">
+                            <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">Select a bundle file to preview &amp; choose items.</div>
+                        </div>
+                        <div id="imp-result" style="display:none; margin-top: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px; white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85em; max-height: 260px; overflow:auto;"></div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>On conflict</label>
-                    <select id="imp-on-conflict" class="form-input">
-                        <option value="skip" selected>skip — keep existing resources (safest)</option>
-                        <option value="overwrite">overwrite — replace existing resources</option>
-                        <option value="rename">rename — create copies with new IDs</option>
-                    </select>
-                </div>
-                <p style="color: var(--text-tertiary); font-size: 0.9em;">
-                    Imported pipelines are always created in the <b>paused</b> state; resume them explicitly after import.
-                </p>
-                <div id="imp-result" style="display:none; margin-top: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px; white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85em; max-height: 260px; overflow:auto;"></div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('import-modal')">Cancel</button>
@@ -2752,24 +2797,147 @@
         }
 
         // -------- Export / Import --------
-        function showExportModal() {
-            document.querySelectorAll('.exp-rtype').forEach(cb => cb.checked = true);
-            document.getElementById('exp-checkpoints').checked = false;
+        const EXP_TYPES = [
+            { key: 'sources',      label: 'Sources',      endpoint: '/api/sources',      listKey: 'sources' },
+            { key: 'destinations', label: 'Vector Stores',endpoint: '/api/destinations', listKey: 'destinations' },
+            { key: 'pipelines',    label: 'Pipelines',    endpoint: '/api/pipelines',    listKey: 'pipelines' },
+            { key: 'models',       label: 'Models',       endpoint: '/api/models',       listKey: 'models' },
+            { key: 'assistants',   label: 'Assistants',   endpoint: '/api/assistants',   listKey: 'assistants' },
+        ];
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function renderPickerSection(containerId, typeKey, label, items, opts) {
+            opts = opts || {};
+            const selected = opts.selected == null ? true : !!opts.selected;
+            const itemsHtml = items.length === 0
+                ? `<div style="padding: 12px; color: var(--text-tertiary); font-size: 0.9em;">No ${label.toLowerCase()} available.</div>`
+                : items.map((it, i) => {
+                    const id = it.id || ('' + i);
+                    const name = it.name || it.id || '(unnamed)';
+                    const sub = it.id && it.id !== name ? it.id : '';
+                    return `<label class="picker-item" style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:4px;">
+                        <input type="checkbox" class="picker-chk" data-type="${typeKey}" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" ${selected ? 'checked' : ''}>
+                        <span style="flex:1;">
+                            <span style="color: var(--text-primary);">${escapeHtml(name)}</span>
+                            ${sub ? `<small style="color: var(--text-tertiary); margin-left: 6px;">${escapeHtml(sub)}</small>` : ''}
+                        </span>
+                    </label>`;
+                }).join('');
+            return `
+                <div class="picker-section" data-type="${typeKey}" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
+                    <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);">
+                        <label style="display:flex; align-items:center; gap:8px; flex:1;">
+                            <input type="checkbox" class="picker-section-chk" data-type="${typeKey}" ${selected ? 'checked' : ''} onchange="pickerToggleSection('${containerId}', '${typeKey}', this.checked)">
+                            <b>${label}</b>
+                            <span class="picker-count" data-type="${typeKey}" style="color: var(--text-tertiary); font-size: 0.85em;"></span>
+                        </label>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="pickerSelectAll('${containerId}', '${typeKey}', true)">All</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="pickerSelectAll('${containerId}', '${typeKey}', false)">None</button>
+                    </div>
+                    <div class="picker-items" data-type="${typeKey}" style="padding: 6px 10px; max-height: 260px; overflow-y: auto;">
+                        ${itemsHtml}
+                    </div>
+                </div>`;
+        }
+
+        function pickerSelectAll(containerId, typeKey, value) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll(`.picker-chk[data-type="${typeKey}"]`).forEach(cb => cb.checked = value);
+            const sc = root.querySelector(`.picker-section-chk[data-type="${typeKey}"]`);
+            if (sc) sc.checked = value;
+            pickerUpdateCounts(containerId);
+        }
+
+        function pickerToggleSection(containerId, typeKey, value) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll(`.picker-chk[data-type="${typeKey}"]`).forEach(cb => cb.checked = value);
+            pickerUpdateCounts(containerId);
+        }
+
+        function pickerUpdateCounts(containerId) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll('.picker-section').forEach(sec => {
+                const t = sec.getAttribute('data-type');
+                const total = sec.querySelectorAll('.picker-chk').length;
+                const sel = sec.querySelectorAll('.picker-chk:checked').length;
+                const el = sec.querySelector(`.picker-count[data-type="${t}"]`);
+                if (el) el.textContent = total === 0 ? '(empty)' : `${sel}/${total} selected`;
+                const sc = sec.querySelector(`.picker-section-chk[data-type="${t}"]`);
+                if (sc) sc.checked = sel > 0 && sel === total;
+            });
+            // summary update
+            const summaryId = containerId === 'exp-picker' ? 'exp-summary' : 'imp-summary';
+            const summary = document.getElementById(summaryId);
+            if (summary) {
+                const parts = [];
+                root.querySelectorAll('.picker-section').forEach(sec => {
+                    const t = sec.getAttribute('data-type');
+                    const sel = sec.querySelectorAll('.picker-chk:checked').length;
+                    const label = (EXP_TYPES.find(x => x.key === t) || {}).label || t;
+                    if (sel > 0) parts.push(`${label}: ${sel}`);
+                });
+                summary.innerHTML = parts.length
+                    ? '<b>Selected:</b><br>' + parts.map(p => '&bull; ' + escapeHtml(p)).join('<br>')
+                    : '<i>Nothing selected.</i>';
+            }
+        }
+
+        async function showExportModal() {
             document.getElementById('exp-secrets').checked = false;
-            document.getElementById('exp-pipelines').value = '';
+            document.getElementById('exp-checkpoints').checked = false;
+            const picker = document.getElementById('exp-picker');
+            picker.innerHTML = '<div style="text-align:center; color: var(--text-tertiary); padding: 40px;">Loading resources...</div>';
             showModal('export-modal');
+            try {
+                const results = await Promise.all(EXP_TYPES.map(async t => {
+                    try {
+                        const res = await apiFetch(t.endpoint);
+                        if (!res.ok) return [];
+                        const data = await res.json();
+                        const items = Array.isArray(data) ? data : (data[t.listKey] || []);
+                        return items.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                    } catch (e) { return []; }
+                }));
+                picker.innerHTML = EXP_TYPES.map((t, i) =>
+                    renderPickerSection('exp-picker', t.key, t.label, results[i], { selected: true })
+                ).join('');
+                picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'), { once: false });
+                pickerUpdateCounts('exp-picker');
+            } catch (e) {
+                picker.innerHTML = `<div style="color: var(--error-color); padding: 20px;">Failed to load: ${escapeHtml(e.message)}</div>`;
+            }
         }
 
         async function runExport() {
-            const include = Array.from(document.querySelectorAll('.exp-rtype:checked')).map(cb => cb.value).join(',');
-            if (!include) { alert('Select at least one resource type.'); return; }
+            const root = document.getElementById('exp-picker');
+            const includeTypes = [];
+            const idsByType = {};
+            for (const t of EXP_TYPES) {
+                const sel = Array.from(root.querySelectorAll(`.picker-chk[data-type="${t.key}"]:checked`))
+                    .map(cb => cb.getAttribute('data-id'));
+                const total = root.querySelectorAll(`.picker-chk[data-type="${t.key}"]`).length;
+                if (sel.length === 0) continue;
+                includeTypes.push(t.key);
+                // If the user selected every item, don't send an id filter (server returns all)
+                if (sel.length < total) idsByType[t.key] = sel;
+            }
+            if (includeTypes.length === 0) { alert('Select at least one item.'); return; }
+
             const params = new URLSearchParams({
-                include,
+                include: includeTypes.join(','),
                 include_secrets: document.getElementById('exp-secrets').checked ? 'true' : 'false',
                 include_checkpoints: document.getElementById('exp-checkpoints').checked ? 'true' : 'false',
             });
-            const pids = document.getElementById('exp-pipelines').value.trim();
-            if (pids) params.set('pipeline_ids', pids);
+            const paramKey = {
+                sources: 'source_ids', destinations: 'destination_ids',
+                pipelines: 'pipeline_ids', models: 'model_ids', assistants: 'assistant_ids'
+            };
+            for (const [t, ids] of Object.entries(idsByType)) params.set(paramKey[t], ids.join(','));
 
             const btn = document.getElementById('export-run-btn');
             btn.disabled = true; btn.textContent = 'Exporting...';
@@ -2795,29 +2963,63 @@
             }
         }
 
+        let _importBundle = null;
+
         function showImportModal() {
             document.getElementById('imp-file').value = '';
             document.getElementById('imp-on-conflict').value = 'skip';
-            const res = document.getElementById('imp-result');
-            res.style.display = 'none';
-            res.textContent = '';
+            document.getElementById('imp-picker').innerHTML = '<div style="text-align:center; color: var(--text-tertiary); padding: 40px;">Select a bundle file to preview &amp; choose items.</div>';
+            document.getElementById('imp-summary').textContent = 'Pick a file to preview its contents.';
+            const r = document.getElementById('imp-result');
+            r.style.display = 'none'; r.textContent = '';
+            _importBundle = null;
             showModal('import-modal');
         }
 
-        async function runImport(dryRun) {
+        async function onImportFileChosen() {
             const fileInput = document.getElementById('imp-file');
-            if (!fileInput.files || !fileInput.files[0]) {
-                alert('Pick a bundle file first.');
-                return;
-            }
-            let bundle;
+            const picker = document.getElementById('imp-picker');
+            if (!fileInput.files || !fileInput.files[0]) return;
             try {
                 const text = await fileInput.files[0].text();
-                bundle = JSON.parse(text);
+                _importBundle = JSON.parse(text);
             } catch (e) {
-                alert('Invalid JSON file: ' + e.message);
+                picker.innerHTML = `<div style="color: var(--error-color); padding: 20px;">Invalid JSON: ${escapeHtml(e.message)}</div>`;
+                _importBundle = null;
                 return;
             }
+            const res = _importBundle.resources || {};
+            const sections = EXP_TYPES.map(t => {
+                const items = (res[t.key] || []).map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                return renderPickerSection('imp-picker', t.key, t.label, items, { selected: true });
+            });
+            // checkpoints summary
+            const cps = Array.isArray(_importBundle.checkpoints) ? _importBundle.checkpoints.length : 0;
+            const headerInfo = `
+                <div style="margin-bottom: 12px; color: var(--text-secondary); font-size: 0.9em;">
+                    Exported at: ${escapeHtml(_importBundle.exported_at || '—')}
+                    &bull; secrets: ${_importBundle.includes_secrets ? '<b>included</b>' : 'redacted'}
+                    &bull; checkpoints: ${cps}
+                </div>`;
+            picker.innerHTML = headerInfo + sections.join('');
+            pickerUpdateCounts('imp-picker');
+        }
+
+        async function runImport(dryRun) {
+            if (!_importBundle) { alert('Pick a bundle file first.'); return; }
+            const root = document.getElementById('imp-picker');
+            // Build filtered bundle based on checkboxes
+            const bundle = JSON.parse(JSON.stringify(_importBundle));
+            bundle.resources = bundle.resources || {};
+            for (const t of EXP_TYPES) {
+                const checked = new Set(Array.from(root.querySelectorAll(`.picker-chk[data-type="${t.key}"]:checked`))
+                    .map(cb => cb.getAttribute('data-id')));
+                const orig = (bundle.resources[t.key] || []);
+                bundle.resources[t.key] = orig.filter(x => checked.has(x.id));
+            }
+            const total = EXP_TYPES.reduce((n, t) => n + (bundle.resources[t.key] || []).length, 0);
+            if (total === 0) { alert('Select at least one item to import.'); return; }
+
             const onConflict = document.getElementById('imp-on-conflict').value;
             const resEl = document.getElementById('imp-result');
             resEl.style.display = 'block';
@@ -2834,10 +3036,7 @@
                     throw new Error(body.detail || ('HTTP ' + res.status));
                 }
                 resEl.textContent = formatImportSummary(body, dryRun);
-                if (!dryRun) {
-                    // Refresh the main pipelines view after a real import
-                    if (typeof refreshData === 'function') { try { refreshData(); } catch(_) {} }
-                }
+                if (!dryRun && typeof refreshData === 'function') { try { refreshData(); } catch(_) {} }
             } catch (e) {
                 resEl.textContent = 'Import failed: ' + e.message;
             }
