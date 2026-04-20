@@ -125,9 +125,16 @@ public class HealthEndpointService : BackgroundService
 
     private static (int, string) EvaluateReadiness()
     {
-        if (WorkerHeartbeat.HasReceivedFirstMessage)
-            return (200, "ready");
-        return (503, "not_ready — no successful receive yet");
+        // Readiness means: the worker is able to serve — it has successfully
+        // initialised its Service Bus client (or is deliberately idle) and the
+        // liveness heartbeat is fresh. It does NOT require that a message has
+        // actually been received, because an idle queue would then leave the
+        // pod 0/1 forever and helm --wait --atomic would hang.
+        if (!WorkerHeartbeat.IsReady)
+            return (503, "not_ready — worker still initialising");
+        if (!WorkerHeartbeat.IsHealthy(out var age))
+            return (503, $"not_ready — heartbeat stale ({age}s)");
+        return (200, WorkerHeartbeat.HasReceivedFirstMessage ? "ready" : "ready (idle)");
     }
 }
 
@@ -136,6 +143,7 @@ public static class WorkerHeartbeat
 {
     private static long _lastBeatTicks = DateTime.UtcNow.Ticks;
     private static int _hasReceivedFirstMessage; // 0/1
+    private static int _isReady;                 // 0/1 — worker is initialised and able to serve
     private static readonly DateTime _startedAt = DateTime.UtcNow;
 
     /// <summary>Grace period after startup during which liveness always passes.</summary>
@@ -148,6 +156,21 @@ public static class WorkerHeartbeat
     {
         Interlocked.Exchange(ref _lastBeatTicks, DateTime.UtcNow.Ticks);
     }
+
+    /// <summary>
+    /// Mark the worker as ready to serve. Call this once the Service Bus
+    /// receiver is created (or the deliberately-idle path is entered), not
+    /// when a message is first received — otherwise idle clusters never
+    /// become Ready and helm --wait will hang.
+    /// </summary>
+    public static void MarkReady()
+    {
+        Interlocked.CompareExchange(ref _isReady, 1, 0);
+        Beat();
+    }
+
+    public static bool IsReady =>
+        Interlocked.CompareExchange(ref _isReady, 0, 0) == 1;
 
     public static void MarkReceivedFirstMessage()
     {
