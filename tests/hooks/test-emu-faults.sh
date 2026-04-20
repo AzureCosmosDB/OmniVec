@@ -6,11 +6,19 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 HARNESS="$REPO_ROOT/tests/emu/run-azd-up.sh"
 
 PASS=0; FAIL=0
-ok()  { PASS=$((PASS+1)); printf "  OK  %s\n" "$1"; }
-bad() { FAIL=$((FAIL+1)); printf "  FAIL %s -- %s\n" "$1" "$2"; }
+COUNTS="$(mktemp)"
+printf '0 0\n' > "$COUNTS"
+_inc() {
+    # $1 = field (1=pass, 2=fail); atomic-ish since suite runs serially.
+    read _p _f < "$COUNTS"
+    if [ "$1" = "1" ]; then _p=$((_p+1)); else _f=$((_f+1)); fi
+    printf '%d %d\n' "$_p" "$_f" > "$COUNTS"
+}
+ok()  { _inc 1; printf "  OK  %s\n" "$1"; }
+bad() { _inc 2; printf "  FAIL %s -- %s\n" "$1" "$2"; }
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" "$COUNTS"' EXIT
 chmod +x "$REPO_ROOT/tests/emu/bin"/* "$HARNESS" 2>/dev/null || true
 
 # Keep retries fast for tests
@@ -91,5 +99,28 @@ export OMNIVEC_RETRY_ATTEMPTS=4
     fi
 )
 
+# ── Scenario 5: CrashLoopBackOff regression — worker never becomes ready ────
+# Reproduces the live-cluster bug we shipped PR #81/#82 for.
+(
+    OMNIVEC_EMU_STATE="$TMP/s5"
+    export OMNIVEC_EMU_STATE
+    mkdir -p "$OMNIVEC_EMU_STATE"
+    export OMNIVEC_EMU_CRASHLOOP_DEPLOY=omnivec-dotnet-worker
+    LOG="$TMP/s5.log"
+    sh "$HARNESS" >"$LOG" 2>&1
+    rc=$?
+    # Harness should fail (rc != 0) AND the hook logs should surface the
+    # CrashLoopBackOff or the UPGRADE FAILED banner so the user is never
+    # left staring at a silent hang.
+    if [ "$rc" -ne 0 ] \
+       && grep -qE 'UPGRADE FAILED|CrashLoopBackOff|BackOff|context deadline exceeded' "$LOG"; then
+        ok "CrashLoopBackOff surfaces a visible failure (no silent hang)"
+    else
+        bad "CrashLoopBackOff surfaces a visible failure (no silent hang)" "rc=$rc; tail:"
+        tail -15 "$LOG" | sed 's/^/    /'
+    fi
+)
+
+read PASS FAIL < "$COUNTS"
 printf "\n%d passed, %d failed\n" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

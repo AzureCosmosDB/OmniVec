@@ -57,10 +57,12 @@ case "$verb" in
         chart=""
         ns="default"
         flags=""
+        wait_flag=false
         while [ $# -gt 0 ]; do
             case "$1" in
                 --install) shift ;;
-                --wait|--atomic|--create-namespace|--force|--reset-values|--reuse-values) shift ;;
+                --wait|--atomic) wait_flag=true; shift ;;
+                --create-namespace|--force|--reset-values|--reuse-values) shift ;;
                 --timeout|--kube-context|--kubeconfig|--values|-f|--set|--set-string|--version|-o|--output)
                     flags="$flags $1=$2"; shift 2 ;;
                 -n|--namespace) ns=$2; shift 2 ;;
@@ -85,17 +87,38 @@ EOF
 
         # Synthesise deployments + pods in emulated kubernetes state so
         # subsequent kubectl calls see a healthy cluster.
+        # CrashLoopBackOff fault: when OMNIVEC_EMU_CRASHLOOP_DEPLOY names a
+        # component, synthesise it with readyReplicas=0 and pods in
+        # CrashLoopBackOff, plus a warning event. This mirrors the real
+        # worker regression we saw on 2026-04-20 where helm --wait blocked
+        # ~25 min because deployment ready count never caught up.
+        crash_name=${OMNIVEC_EMU_CRASHLOOP_DEPLOY:-}
         nsdir=$(emu_dir "k8s/ns/$ns")
-        mkdir -p "$nsdir/deployments" "$nsdir/pods" "$nsdir/services"
+        mkdir -p "$nsdir/deployments" "$nsdir/pods" "$nsdir/services" "$nsdir/events"
+        any_crashed=false
         for comp_spec in $OMNIVEC_COMPONENTS; do
             comp=${comp_spec%:*}
             replicas=${comp_spec##*:}
+            if [ -n "$crash_name" ] && [ "$comp" = "$crash_name" ]; then
+                ready=0
+                avail=0
+                pod_status=CrashLoopBackOff
+                pod_ready=0/1
+                pod_restarts=12
+                any_crashed=true
+            else
+                ready=$replicas
+                avail=$replicas
+                pod_status=Running
+                pod_ready=1/1
+                pod_restarts=0
+            fi
             cat > "$nsdir/deployments/$comp" <<D_EOF
 name=$comp
 namespace=$ns
 replicas=$replicas
-readyReplicas=$replicas
-availableReplicas=$replicas
+readyReplicas=$ready
+availableReplicas=$avail
 updatedReplicas=$replicas
 image=emu/$comp:latest
 D_EOF
@@ -107,14 +130,21 @@ D_EOF
 name=$suffix
 namespace=$ns
 deployment=$comp
-status=Running
-ready=1/1
-restarts=0
+status=$pod_status
+ready=$pod_ready
+restarts=$pod_restarts
 age=1m
 node=aks-system-xyz
 P_EOF
                 i=$((i + 1))
             done
+            if [ -n "$crash_name" ] && [ "$comp" = "$crash_name" ]; then
+                # Surface warning events kubectl will pick up.
+                {
+                    printf 'Warning\tBackOff\tBack-off restarting failed container in pod %s-xxxxx\n' "$comp"
+                    printf 'Warning\tUnhealthy\tStartup probe failed: Get "http://10.224.0.42:8080/healthz": dial tcp connection refused\n'
+                } >> "$nsdir/events/warnings"
+            fi
         done
 
         # Synthesise a LoadBalancer service for omnivec-web (the only one
@@ -129,6 +159,20 @@ clusterIP=10.0.42.1
 externalIP=20.42.42.42
 port=80
 S_EOF
+        fi
+
+        # If we synthesised a CrashLoopBackOff deployment AND the caller
+        # asked helm to --wait/--atomic, mimic the real failure mode:
+        # mark release as failed and exit 1 so the hooks' retry/rollback
+        # logic can be regressed.
+        if [ "$any_crashed" = "true" ] && [ "$wait_flag" = "true" ]; then
+            sed -i.bak 's/^status=.*/status=failed/' "$RELEASES/$name" 2>/dev/null
+            rm -f "$RELEASES/$name.bak"
+            cat >&2 <<ERR
+Error: UPGRADE FAILED: release $name failed, and has been rolled back due to atomic being set: context deadline exceeded
+  pre-upgrade hooks failed: timed out waiting for the condition
+ERR
+            exit 1
         fi
 
         # Emit a canonical helm success banner.
