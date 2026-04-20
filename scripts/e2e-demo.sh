@@ -12,6 +12,88 @@
 
 set -eu
 
+# ─── Help ────────────────────────────────────────────────────────────────────
+show_help() {
+  cat <<'EOF'
+OmniVec End-to-End Demo — Fully Automated (Linux/macOS/WSL)
+
+Provisions OmniVec on Azure (via azd up), registers an Azure OpenAI embedding
+model, creates source/destination/pipeline, ingests sample docs, and verifies
+both queue-mode and inline-mode embedding flows end-to-end.
+
+USAGE:
+  ./scripts/e2e-demo.sh [OPTIONS]
+
+MODES (mutually exclusive; default = full provision + demo):
+  --existing            Run against an already-provisioned azd environment
+                        (skips steps 1-2: azd up). Requires --env.
+  --cleanup             Delete test resources (OmniVec entities + azd env).
+                        Requires --env.
+
+OPTIONS:
+  -h, --help            Show this help and exit.
+  --from-step N         Start at step N (1-12). Auto-resumes from last
+                        successful step via .e2e-checkpoint if present.
+  --env NAME            azd environment name (e.g. my-omnivec).
+  --token TOKEN         OmniVec admin token (skips auto-discovery).
+  --endpoint URL        Azure OpenAI endpoint
+                        (e.g. https://my-aoai.openai.azure.com).
+  --key KEY             Azure OpenAI API key.
+  --deployment NAME     Embedding deployment name
+                        (default: text-embedding-3-small).
+  --dims N              Embedding dimensions (default: 1536).
+  --registry-token T    Token for the shared image registry (optional;
+                        anonymous pull is tried first).
+  -q, --quiet           Minimal output (one line per step).
+
+ENVIRONMENT VARIABLES (used when flag is not passed):
+  AOAI_ENDPOINT, AOAI_KEY, AOAI_DEPLOYMENT, AOAI_DIMS
+  OMNIVEC_SHARED_REGISTRY_TOKEN
+
+EXAMPLES:
+  # Full fresh deployment + demo
+  ./scripts/e2e-demo.sh \
+      --endpoint https://my-aoai.openai.azure.com \
+      --key $AOAI_KEY
+
+  # Run demo against an existing deployment
+  ./scripts/e2e-demo.sh --existing --env my-omnivec \
+      --endpoint https://my-aoai.openai.azure.com --key $AOAI_KEY
+
+  # Resume after a failure (auto-detects last successful step)
+  ./scripts/e2e-demo.sh
+
+  # Skip ahead manually
+  ./scripts/e2e-demo.sh --from-step 8
+
+  # Clean up everything
+  ./scripts/e2e-demo.sh --cleanup --env my-omnivec
+
+STEPS (12 total):
+   1. Prerequisite check (az, azd, kubectl)
+   2. Provision OmniVec infra via `azd up`
+   3. Connect to AKS, fetch admin token
+   4. Wait for API health
+   5. Collect Azure OpenAI credentials (or --endpoint/--key)
+   6. Register embedding model
+   7. Create source (blob) + destination (blob)
+   8. Create pipeline
+   9. Upload sample documents
+  10. Verify queue-mode embeddings land in destination
+  11. Verify inline-mode embeddings patched back to source
+  12. Vector search smoke test
+
+Windows users: use the PowerShell variant instead:
+  pwsh scripts/e2e-demo.ps1 -h
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|help) show_help; exit 0 ;;
+  esac
+done
+
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 FROM_STEP=1
 QUIET=false

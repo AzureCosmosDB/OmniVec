@@ -7,13 +7,14 @@
 #   pwsh scripts/e2e-pgvector-demo.ps1 -Existing -EnvName my-omnivec     # Against existing deployment
 #   pwsh scripts/e2e-pgvector-demo.ps1 -Cleanup -EnvName my-omnivec      # Delete test resources
 #
-# Requires: az, azd, kubectl, psql (PostgreSQL client)
+# Requires: az, azd, kubectl (SQL runs via `az postgres flexible-server execute`, no local psql needed)
 
 param(
     [int]$FromStep = 1,
     [switch]$Quiet,
     [switch]$Existing,
     [switch]$Cleanup,
+    [Alias('h','?')][switch]$Help,
     [string]$EnvName,
     [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
@@ -22,6 +23,76 @@ param(
     [int]$AoaiDims = $(if ($env:AOAI_DIMS) { [int]$env:AOAI_DIMS } else { 1536 }),
     [string]$PgAdminPassword
 )
+
+if ($Help) {
+@'
+OmniVec E2E Demo — PostgreSQL + pgvector (Windows / pwsh 7+)
+
+Provisions an Azure PostgreSQL Flexible Server with the pgvector extension,
+registers an Azure OpenAI embedding model, creates source/destination tables,
+runs a pipeline, and verifies vector similarity search.
+
+USAGE:
+  pwsh scripts/e2e-pgvector-demo.ps1 [OPTIONS]
+
+MODES (mutually exclusive; default = run against an existing OmniVec deployment):
+  -Existing               Run against an already-provisioned azd env
+                          (this is also the default). Requires -EnvName.
+  -Cleanup                Delete PG server + OmniVec test entities.
+                          Requires -EnvName.
+
+OPTIONS:
+  -h, -Help               Show this help and exit.
+  -FromStep N             Start at step N (1-10). Auto-resumes from last
+                          successful step via .e2e-pgvector-checkpoint.
+  -EnvName NAME           azd environment name.
+  -AdminToken TOKEN       OmniVec admin token (skips auto-discovery).
+  -PgAdminPassword PW     PostgreSQL admin password
+                          (default: auto-generated OmniVec-Demo-NNNN!).
+  -AoaiEndpoint URL       Azure OpenAI endpoint.
+  -AoaiKey KEY            Azure OpenAI API key.
+  -AoaiDeployment NAME    Embedding deployment (default: text-embedding-3-small).
+  -AoaiDims N             Embedding dimensions (default: 1536).
+  -Quiet                  Minimal output.
+
+ENVIRONMENT VARIABLES (used when flag is not passed):
+  OMNIVEC_ADMIN_TOKEN, AOAI_ENDPOINT, AOAI_KEY, AOAI_DEPLOYMENT, AOAI_DIMS
+
+REQUIREMENTS:
+  az, azd, kubectl  (SQL runs via `az postgres flexible-server execute` —
+  no local psql client needed.)
+
+EXAMPLES:
+  # Default: run against an existing OmniVec deployment
+  pwsh scripts/e2e-pgvector-demo.ps1 -EnvName my-omnivec `
+      -AoaiEndpoint https://my-aoai.openai.azure.com -AoaiKey $env:AOAI_KEY
+
+  # Resume after a failure (auto-detects last successful step)
+  pwsh scripts/e2e-pgvector-demo.ps1 -EnvName my-omnivec
+
+  # Skip ahead manually
+  pwsh scripts/e2e-pgvector-demo.ps1 -EnvName my-omnivec -FromStep 6
+
+  # Clean up (delete PG server + demo entities)
+  pwsh scripts/e2e-pgvector-demo.ps1 -Cleanup -EnvName my-omnivec
+
+STEPS (10 total):
+   1. Parse config, collect AOAI credentials
+   2. Resolve AKS cluster + RG from azd env (fallback to discovery)
+   3. Provision Azure PostgreSQL Flexible Server + enable pgvector
+   4. Create database, source/destination tables, sample rows
+   5. Register Azure OpenAI embedding model in OmniVec
+   6. Create PG source + PG destination in OmniVec
+   7. Create pipeline
+   8. Verify embeddings populated in destination table
+   9. Vector similarity search smoke test
+  10. Summary + cleanup hints
+
+Linux/macOS/WSL: use the shell variant instead:
+  ./scripts/e2e-pgvector-demo.sh --help
+'@ | Write-Host
+    exit 0
+}
 
 # Require PowerShell 7+ (uses `e ANSI escape + relies on pwsh native-stderr handling).
 if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -74,6 +145,31 @@ function Resolve-NativeExe {
 $AzExe  = Resolve-NativeExe 'az'
 $AzdExe = Resolve-NativeExe 'azd'
 
+# ─── PG SQL helper using az (no local psql required) ───────────────────────
+# Uses `az postgres flexible-server execute` so the script works on any box
+# with the Azure CLI, without needing the psql client installed. Requires the
+# `rdbms-connect` az extension, which az auto-installs on first use.
+function Invoke-PgSql {
+    param(
+        [Parameter(Mandatory)][string]$Server,
+        [Parameter(Mandatory)][string]$AdminUser,
+        [Parameter(Mandatory)][string]$AdminPassword,
+        [string]$Database = 'postgres',
+        [Parameter(Mandatory)][string]$Query
+    )
+    $out = & $AzExe postgres flexible-server execute `
+        --name $Server `
+        --admin-user $AdminUser `
+        --admin-password $AdminPassword `
+        --database-name $Database `
+        --querytext $Query 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "psql via az failed ($LASTEXITCODE): $out"
+        return $null
+    }
+    return $out
+}
+
 # ─── Banner ──────────────────────────────────────────────────────────────────
 Write-Host "`e[32m╔══════════════════════════════════════════════════════════╗`e[0m"
 Write-Host "`e[32m║  OmniVec E2E Demo — PostgreSQL + pgvector               ║`e[0m"
@@ -94,6 +190,12 @@ if (-not $AoaiKey) {
 if (-not $PgAdminPassword) {
     $PgAdminPassword = "OmniVec-Demo-$(Get-Random -Minimum 1000 -Maximum 9999)!"
     LogOk "Generated PG admin password: $PgAdminPassword"
+}
+
+# ─── Default to Existing mode when no flag given (provisioning steps 1-2 are stubbed) ──
+if (-not $Existing -and -not $Cleanup) {
+    Log "`n  No mode flag given; defaulting to -Existing (against an already-provisioned azd env)."
+    $Existing = $true
 }
 
 # ─── Existing deployment mode ────────────────────────────────────────────────
@@ -187,7 +289,26 @@ if ($Cleanup) {
 if ($FromStep -le 3) {
     LogStep 3 "Provisioning Azure PostgreSQL Flexible Server..."
 
+    # Robust AKS_CLUSTER discovery — azd env var may be empty if the env was
+    # created by a different tool; fall back to discovering it from the RG.
+    if (-not $AKS_CLUSTER -or $AKS_CLUSTER.Trim() -eq '') {
+        if (-not $RESOURCE_GROUP) {
+            $RESOURCE_GROUP = "rg-omnivec-$EnvName"
+        }
+        $aksRaw = & $AzExe aks list --resource-group $RESOURCE_GROUP --query "[?starts_with(name,'omnivec-aks-')].name | [0]" -o tsv 2>$null
+        $AKS_CLUSTER = if ($aksRaw) { "$aksRaw".Trim() } else { '' }
+        if (-not $AKS_CLUSTER) {
+            LogErr "Could not determine AKS cluster name in RG '$RESOURCE_GROUP'. Set AZURE_AKS_CLUSTER_NAME in azd env, or pass -EnvName with -Existing."
+            exit 1
+        }
+        LogOk "Discovered AKS cluster: $AKS_CLUSTER"
+    }
+
     $INSTANCE_TOKEN = ($AKS_CLUSTER -replace 'omnivec-aks-','')
+    if (-not $INSTANCE_TOKEN -or $INSTANCE_TOKEN.Trim() -eq '') {
+        LogErr "Empty instance token derived from AKS cluster '$AKS_CLUSTER'. Aborting to avoid creating malformed resource."
+        exit 1
+    }
     $PG_SERVER = "omnivec-pgdemo-$INSTANCE_TOKEN"
     $PG_ADMIN = "omnivecadmin"
 
@@ -257,6 +378,10 @@ if ($FromStep -le 4) {
 
     if (-not $PG_HOST) {
         $INSTANCE_TOKEN = ($AKS_CLUSTER -replace 'omnivec-aks-','')
+        if (-not $INSTANCE_TOKEN -or $INSTANCE_TOKEN.Trim() -eq '') {
+            LogErr "Empty instance token derived from AKS cluster '$AKS_CLUSTER'. Aborting."
+            exit 1
+        }
         $PG_SERVER = "omnivec-pgdemo-$INSTANCE_TOKEN"
         $PG_HOST = "$PG_SERVER.postgres.database.azure.com"
         $PG_PORT = 5432
@@ -264,11 +389,10 @@ if ($FromStep -le 4) {
         $PG_ADMIN = "omnivecadmin"
     }
 
-    $env:PGPASSWORD = $PgAdminPassword
-
-    # Create database
+    # Create database (via az; no local psql needed)
     Log "  Creating database: $PG_DB"
-    psql -h $PG_HOST -p $PG_PORT -U $PG_ADMIN -d postgres -c "CREATE DATABASE $PG_DB;" 2>$null
+    Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+        -Database 'postgres' -Query "CREATE DATABASE $PG_DB;" | Out-Null
     LogOk "Database created."
 
     # Enable vector extension and create tables
@@ -300,7 +424,8 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
 "@
-    psql -h $PG_HOST -p $PG_PORT -U $PG_ADMIN -d $PG_DB -c $sql 2>$null
+    Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+        -Database $PG_DB -Query $sql | Out-Null
     LogOk "Tables created: documents (source), embeddings (destination)"
 
     # Insert sample documents
@@ -311,11 +436,11 @@ CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embed
         "INSERT INTO documents (id, title, content, category) VALUES ('doc-003', 'Azure Blob Storage', 'Azure Blob Storage stores massive amounts of unstructured data like documents and images optimized for cloud scale.', 'storage') ON CONFLICT (id) DO NOTHING;"
     )
     foreach ($doc in $docs) {
-        psql -h $PG_HOST -p $PG_PORT -U $PG_ADMIN -d $PG_DB -c $doc 2>$null
+        Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+            -Database $PG_DB -Query $doc | Out-Null
     }
     LogOk "Inserted 3 sample documents."
 
-    $env:PGPASSWORD = $null
     Save-Checkpoint 4
 }
 
@@ -471,17 +596,22 @@ if ($FromStep -le 7) {
 if ($FromStep -le 8) {
     LogStep 8 "Verifying embeddings in pgvector table..."
 
-    if (-not $PG_HOST) {
+    if (-not $PG_SERVER) {
         $INSTANCE_TOKEN = ($AKS_CLUSTER -replace 'omnivec-aks-','')
-        $PG_HOST = "omnivec-pgdemo-$INSTANCE_TOKEN.postgres.database.azure.com"
+        if (-not $INSTANCE_TOKEN -or $INSTANCE_TOKEN.Trim() -eq '') {
+            LogErr "Empty instance token derived from AKS cluster '$AKS_CLUSTER'. Aborting."
+            exit 1
+        }
+        $PG_SERVER = "omnivec-pgdemo-$INSTANCE_TOKEN"
         $PG_DB = "omnivec_demo"
         $PG_ADMIN = "omnivecadmin"
     }
 
-    $env:PGPASSWORD = $PgAdminPassword
-    $count = psql -h $PG_HOST -p 5432 -U $PG_ADMIN -d $PG_DB -t -c "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>$null
-    $count = "$count".Trim()
-    $env:PGPASSWORD = $null
+    $rawCount = Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+        -Database $PG_DB -Query "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;"
+    # az execute returns rows as JSON-ish text; pull the first integer out.
+    $count = if ($rawCount) { ([regex]::Match("$rawCount", '\d+')).Value } else { '0' }
+    if (-not $count) { $count = '0' }
 
     if ([int]$count -ge 3) {
         LogOk "pgvector table has $count rows with embeddings!"
