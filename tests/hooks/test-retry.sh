@@ -59,5 +59,26 @@ _n=$(cat "$T3")
 [ "$_rc" -ne 0 ] && [ "$_n" = "3" ] && ok "gives up after max attempts" || bad "gives up after max attempts" "rc=$_rc calls=$_n"
 
 rm -f "$T" "$T2" "$T3"
+
+# ── 5. Excerpt is shown to stderr on transient retry ────────────────────────
+T4=$(mktemp); echo 0 > "$T4"
+flaky_with_msg() {
+    n=$(cat "$T4"); n=$((n+1)); echo "$n" > "$T4"
+    if [ "$n" -lt 2 ]; then
+        echo "kubectl error: 429 TooManyRequests" >&2
+        echo "  details: throttled by API server" >&2
+        return 1
+    fi
+    return 0
+}
+ERR=$(mktemp)
+retry_run "excerpt-test" -- flaky_with_msg >/dev/null 2>"$ERR"
+if grep -q '\-\-\-\- last output \-\-\-\-' "$ERR" && grep -q 'TooManyRequests' "$ERR"; then
+    ok "excerpt printed on transient retry"
+else
+    bad "excerpt printed on transient retry" "stderr did not contain excerpt"
+fi
+rm -f "$T4" "$ERR"
+
 printf "\n%d passed, %d failed\n" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
