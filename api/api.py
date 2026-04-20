@@ -5006,6 +5006,10 @@ def export_bundle(
     include_secrets: bool = False,
     include_checkpoints: bool = False,
     pipeline_ids: str = "",
+    source_ids: str = "",
+    destination_ids: str = "",
+    model_ids: str = "",
+    assistant_ids: str = "",
     download: bool = False,
 ):
     """Export OmniVec deployment data as a JSON bundle.
@@ -5015,7 +5019,11 @@ def export_bundle(
       - include_secrets: if true, keep connection strings / api keys / passwords
       - include_checkpoints: if true, append all (or pipeline-scoped) checkpoints
       - pipeline_ids: csv; when set, only export these pipelines plus the sources,
-        destinations, models, and assistants they reference
+        destinations, models, and assistants they reference (unless overridden by
+        an explicit per-type *_ids filter below)
+      - source_ids / destination_ids / model_ids / assistant_ids: csv; when set,
+        filter that type to exactly those IDs (overrides pipeline-driven auto
+        inclusion for that type)
       - download: if true, send as attachment
     """
     store = get_store()
@@ -5024,7 +5032,14 @@ def export_bundle(
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown resource type(s): {sorted(unknown)}")
 
-    pipeline_filter = {p.strip() for p in pipeline_ids.split(",") if p.strip()}
+    def _csv_set(v: str) -> set:
+        return {x.strip() for x in (v or "").split(",") if x.strip()}
+
+    pipeline_filter = _csv_set(pipeline_ids)
+    src_filter = _csv_set(source_ids)
+    dst_filter = _csv_set(destination_ids)
+    mdl_filter = _csv_set(model_ids)
+    ast_filter = _csv_set(assistant_ids)
 
     resources: dict[str, list[dict]] = {k: [] for k in _EXPORT_RESOURCE_TYPES}
 
@@ -5040,12 +5055,12 @@ def export_bundle(
 
     ref_src, ref_dst, ref_mdl = _collect_pipeline_refs(all_pipelines)
 
-    def _filter_by_ids(docs, allowed):
-        return [d for d in docs if not pipeline_filter or d.get("id") in allowed]
-
     if "sources" in wanted:
         docs = [_strip_internal(d) for d in store.list("source")]
-        docs = _filter_by_ids(docs, ref_src)
+        if src_filter:
+            docs = [d for d in docs if d.get("id") in src_filter]
+        elif pipeline_filter:
+            docs = [d for d in docs if d.get("id") in ref_src]
         if not include_secrets:
             for d in docs:
                 if isinstance(d.get("config"), dict):
@@ -5054,7 +5069,10 @@ def export_bundle(
 
     if "destinations" in wanted:
         docs = [_strip_internal(d) for d in store.list("destination")]
-        docs = _filter_by_ids(docs, ref_dst)
+        if dst_filter:
+            docs = [d for d in docs if d.get("id") in dst_filter]
+        elif pipeline_filter:
+            docs = [d for d in docs if d.get("id") in ref_dst]
         if not include_secrets:
             for d in docs:
                 if isinstance(d.get("config"), dict):
@@ -5063,7 +5081,9 @@ def export_bundle(
 
     if "models" in wanted:
         docs = [_strip_internal(d) for d in store.list("docgrok_model")]
-        if pipeline_filter:
+        if mdl_filter:
+            docs = [d for d in docs if d.get("id") in mdl_filter or d.get("name") in mdl_filter]
+        elif pipeline_filter:
             docs = [d for d in docs if d.get("id") in ref_mdl or d.get("name") in ref_mdl]
         if not include_secrets:
             docs = [_redact_model_doc(d) for d in docs]
@@ -5071,7 +5091,9 @@ def export_bundle(
 
     if "assistants" in wanted:
         docs = [_strip_internal(d) for d in store.list("assistant")]
-        if pipeline_filter:
+        if ast_filter:
+            docs = [d for d in docs if d.get("id") in ast_filter]
+        elif pipeline_filter:
             # Assistants referencing any exported destination / model
             kept_dst = {d["id"] for d in resources.get("destinations", [])}
             kept_mdl = {d["id"] for d in resources.get("models", [])}
@@ -5082,20 +5104,28 @@ def export_bundle(
             ]
         resources["assistants"] = docs
 
+    active_filter: dict[str, list[str]] = {}
+    if pipeline_filter: active_filter["pipeline_ids"] = sorted(pipeline_filter)
+    if src_filter:      active_filter["source_ids"] = sorted(src_filter)
+    if dst_filter:      active_filter["destination_ids"] = sorted(dst_filter)
+    if mdl_filter:      active_filter["model_ids"] = sorted(mdl_filter)
+    if ast_filter:      active_filter["assistant_ids"] = sorted(ast_filter)
+
     bundle: dict[str, Any] = {
         "omnivec_export_version": _EXPORT_VERSION,
         "exported_at": datetime.utcnow().isoformat() + "Z",
         "includes_secrets": bool(include_secrets),
         "includes_checkpoints": bool(include_checkpoints),
-        "filter": {"pipeline_ids": sorted(pipeline_filter)} if pipeline_filter else None,
+        "filter": active_filter or None,
         "resources": resources,
     }
 
     if include_checkpoints:
         cp_docs = [_strip_internal(d) for d in store.list("checkpoint")]
-        if pipeline_filter:
-            # Scope checkpoints to the sources referenced by the filtered pipelines
-            cp_docs = [c for c in cp_docs if c.get("source_id") in ref_src]
+        # Scope checkpoints to the source_ids actually in the exported bundle
+        exported_src_ids = {d["id"] for d in resources.get("sources", [])}
+        if exported_src_ids and (src_filter or pipeline_filter):
+            cp_docs = [c for c in cp_docs if c.get("source_id") in exported_src_ids]
         bundle["checkpoints"] = cp_docs
     else:
         bundle["checkpoints"] = []
