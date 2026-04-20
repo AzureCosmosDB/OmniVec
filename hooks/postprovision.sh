@@ -458,13 +458,13 @@ export KUBE_CONTEXT
 # Some azd/heartbeat wrappers reset $KUBECONFIG between hook phases, so we cannot
 # rely solely on the env var.
 kubectl_omnivec() {
-  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" "$@"
+  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" "$@"  # stdin-ok: callers supply </dev/null
 }
 
 # Sanity check before first kubectl call — surface config issues clearly.
-if ! kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts "$KUBE_CONTEXT" >/dev/null 2>&1; then
+if ! kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts "$KUBE_CONTEXT" </dev/null >/dev/null 2>&1; then
   printf "${RED}Context '%s' not found in %s. Kubeconfig contents:${NC}\n" "$KUBE_CONTEXT" "$OMNIVEC_KUBECONFIG"
-  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts 2>&1 || true
+  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" config get-contexts </dev/null 2>&1 || true
   ls -la "$OMNIVEC_KUBECONFIG" "$HOME/.kube/config" 2>&1 || true
   exit 1
 fi
