@@ -663,9 +663,45 @@ run_helm_deploy() {
                 --set "azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}"
   fi
 
-  set -- "$@" --wait --timeout 10m --atomic
+  # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
+  # strips the release metadata but can leave Deployments/Services behind (they
+  # have finalizers or take time to delete). Next run sees "release not found"
+  # + orphaned resources → fresh install conflicts on AlreadyExists → --atomic
+  # times out → uninstall again → infinite loop. Without --atomic, a failed
+  # upgrade just leaves a release in `status=failed` that the next upgrade can
+  # retry cleanly.
+  set -- "$@" --wait --timeout 10m
 
   "$@"
+}
+
+# Adopt orphaned resources when no helm release exists but the workload does.
+# Caused by a previous --atomic timeout that wiped the release secret while
+# the Deployments/Services persisted. We relabel them with Helm ownership so
+# the next `helm install` takes them over instead of erroring on AlreadyExists.
+adopt_orphaned_resources() {
+  _existing=$(kubectl_omnivec get deploy -n omnivec -o name </dev/null 2>/dev/null | head -1)
+  if [ -z "$_existing" ]; then
+    return 0
+  fi
+  printf "${YELLOW}No Helm release found but resources exist in omnivec ns — adopting them for Helm ownership...${NC}\n"
+  _adopt_kinds="deploy svc sa cm secret hpa ingress serviceaccount"
+  # NOTE: exclude the auto-generated storage secret (omnivec-storage) — it is
+  # created by postprovision itself and would conflict with helm-managed ones.
+  for _kind in $_adopt_kinds; do
+    kubectl_omnivec get "$_kind" -n omnivec -o name </dev/null 2>/dev/null | while read -r _res; do
+      [ -z "$_res" ] && continue
+      case "$_res" in
+        secret/omnivec-storage|secret/sh.helm.*|secret/default-token-*) continue ;;
+      esac
+      kubectl_omnivec annotate "$_res" -n omnivec --overwrite \
+        meta.helm.sh/release-name=omnivec \
+        meta.helm.sh/release-namespace=omnivec </dev/null >/dev/null 2>&1 || true
+      kubectl_omnivec label "$_res" -n omnivec --overwrite \
+        app.kubernetes.io/managed-by=Helm </dev/null >/dev/null 2>&1 || true
+    done
+  done
+  printf "${GREEN}Adoption annotations applied — helm install will take ownership.${NC}\n"
 }
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
@@ -688,8 +724,14 @@ if [ -n "$_helm_phase" ]; then
   printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
 fi
 
+# If no release exists but resources do (orphaned from a prior --atomic
+# uninstall), adopt them so `helm install` can take ownership cleanly.
+if [ -z "$_helm_state" ]; then
+  adopt_orphaned_resources
+fi
+
 # ── Skip helm upgrade if nothing has changed ────────────────────────────────
-# Rationale: helm upgrade --install --wait --atomic takes 1-2 minutes even
+# Rationale: helm upgrade --install --wait takes 1-2 minutes even
 # when the computed manifest is identical to the live one. We avoid that cost
 # when:
 #   1. the release is currently 'deployed' (healthy, not pending/failed),
@@ -743,13 +785,13 @@ if [ "$SKIP_HELM" = "true" ]; then
   helm_rc=0
 else
   # Execute (d1: retry on transient ARM / Helm errors)
-  # While helm waits (can take 1-3 minutes with --wait --atomic), show a
+  # While helm waits (can take 1-3 minutes with --wait), show a
   # focused heartbeat so the user sees WHAT helm is blocked on. We surface:
   #   - deployments with ready != desired (the primary `helm --wait` target)
   #   - services of type LoadBalancer still waiting for external IP
   #   - the 5 most recent warning/error events
   # If everything is green, a single line tells the user helm itself is just
-  # finalising (common: 15-30s post-ready wait for atomic).
+  # finalising (common: 15-30s post-ready wait).
   OMNIVEC_RETRY_HEARTBEAT_SEC=${OMNIVEC_HELM_HEARTBEAT_SEC:-20}
   OMNIVEC_RETRY_HEARTBEAT_CMD='
 KC="kubectl --context '"$KUBE_CONTEXT"' --kubeconfig '"$OMNIVEC_KUBECONFIG"' -n omnivec"
@@ -771,7 +813,7 @@ _events=$($KC get events --sort-by=.lastTimestamp -o "jsonpath={range .items[?(@
     printf "%s\n" "$_events" | awk "{printf \"      %s\n\", substr(\$0,1,120)}"
   fi
   if [ -z "$_not_ready$_not_ready_all$_pending_lb$_events" ]; then
-    printf "    all resources ready — helm is finalising (atomic wait, typically 15-30s)\n"
+    printf "    all resources ready — helm is finalising (wait, typically 15-30s)\n"
   fi
 }'
   export OMNIVEC_RETRY_HEARTBEAT_SEC OMNIVEC_RETRY_HEARTBEAT_CMD
