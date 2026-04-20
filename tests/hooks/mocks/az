@@ -1,0 +1,81 @@
+#!/bin/sh
+# Mock `az` CLI - canned responses for the subset hooks actually use.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/_record.sh"
+_mock_record az "$@"
+
+# Find --query and -o/--output if present.
+_q=""; _out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --query) _q="$2"; shift 2 ;;
+        -o|--output) _out="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+_cmd="${OMNIVEC_AZ_FIRST_TWO:-}"
+# Recover sub-command from full original argv via recorded log.
+_line=$(tail -1 "${OMNIVEC_MOCK_LOG:-/dev/null}" 2>/dev/null)
+
+case "$_line" in
+    *' account show '*)
+        printf '{"id":"00000000-0000-0000-0000-000000000000","name":"mock-sub","tenantId":"00000000-0000-0000-0000-000000000001","user":{"name":"mock@example.com"}}\n'
+        exit 0
+        ;;
+    *' provider show '*)
+        # preflight_require_providers checks registrationState
+        printf 'Registered\n'
+        exit 0
+        ;;
+    *' provider register '*)
+        exit 0
+        ;;
+    *' vm list-sizes '*)
+        # preflight_sku_vcpus needs vCPUs for a SKU
+        printf '[{"name":"Standard_B4ms","numberOfCores":4,"memoryInMb":16384}]\n'
+        exit 0
+        ;;
+    *' vm list-usage '*)
+        # quota check - pretend plenty of headroom
+        printf '[{"name":{"value":"standardBsFamily"},"limit":100,"currentValue":10}]\n'
+        exit 0
+        ;;
+    *' group exists '*)
+        printf 'false\n'
+        exit 0
+        ;;
+    *' group show '*)
+        printf '{"name":"rg-mock","location":"centralus"}\n'
+        exit 0
+        ;;
+    *' storage account check-name '*)
+        printf '{"nameAvailable":true}\n'
+        exit 0
+        ;;
+    *' cosmosdb check-name-exists '*|*' cognitiveservices account list '*|*' keyvault check-name '*)
+        printf 'false\n'
+        exit 0
+        ;;
+    *' deployment group list '*)
+        printf '[]\n'
+        exit 0
+        ;;
+    *' aks install-cli '*)
+        exit 0
+        ;;
+    *' aks get-credentials '*)
+        exit 0
+        ;;
+    *' acr '*)
+        # ACR token/login - just succeed.
+        exit 0
+        ;;
+    *' --version'*|*'version'*)
+        printf 'azure-cli 2.66.0 (mock)\n'
+        exit 0
+        ;;
+esac
+
+# Default: succeed quietly with empty output.
+exit 0
