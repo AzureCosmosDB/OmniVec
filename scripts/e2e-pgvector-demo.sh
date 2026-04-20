@@ -610,6 +610,14 @@ if [ "$FROM_STEP" -le 7 ]; then
   PIP_ID=$(echo "$PIP_RESP" | grep -o '"id":"pip-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
   log_ok "Pipeline created: $PIP_ID"
 
+  # Pipelines are created in `paused` status. The SourceWatcherManager only
+  # reconciles watchers for active pipelines, so resume explicitly.
+  if api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null 2>&1; then
+    log_ok "Pipeline activated (resume)."
+  else
+    log_warn "Pipeline resume failed — watcher may not engage."
+  fi
+
   # Trigger source sync to kick the changefeed processor
   log "  Triggering source sync..."
   api_post "/api/sources/$SOURCE_ID/sync" "{}" >/dev/null 2>&1 || true
