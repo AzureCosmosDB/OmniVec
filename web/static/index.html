@@ -3073,6 +3073,36 @@
                 }
                 resEl.textContent = formatImportSummary(body, dryRun);
                 if (!dryRun && typeof refreshData === 'function') { try { refreshData(); } catch(_) {} }
+
+                if (!dryRun) {
+                    // Decide whether to auto-close the modal. Keep it open if
+                    // there were any per-resource errors so the user can see
+                    // what failed; close otherwise so the dialog doesn't
+                    // linger after a successful apply.
+                    const s = body.summary || {};
+                    const hasErrors = Object.values(s).some(r => r && Array.isArray(r.errors) && r.errors.length > 0);
+                    const warns = (body.warnings || []).length;
+                    if (!hasErrors) {
+                        const order = ['sources','destinations','models','assistants','pipelines','checkpoints'];
+                        const totals = { created: 0, overwritten: 0, skipped: 0, renamed: 0 };
+                        for (const k of order) {
+                            const r = s[k]; if (!r) continue;
+                            totals.created += r.created || 0;
+                            totals.overwritten += r.overwritten || 0;
+                            totals.skipped += r.skipped || 0;
+                            totals.renamed += r.renamed || 0;
+                        }
+                        closeModal('import-modal');
+                        const parts = [];
+                        if (totals.created) parts.push(totals.created + ' created');
+                        if (totals.overwritten) parts.push(totals.overwritten + ' overwritten');
+                        if (totals.renamed) parts.push(totals.renamed + ' renamed');
+                        if (totals.skipped) parts.push(totals.skipped + ' skipped');
+                        const msg = 'Import complete: ' + (parts.join(', ') || 'nothing to import') +
+                                    (warns ? ' (' + warns + ' warning' + (warns === 1 ? '' : 's') + ')' : '');
+                        alert(msg);
+                    }
+                }
             } catch (e) {
                 resEl.textContent = 'Import failed: ' + e.message;
             }
