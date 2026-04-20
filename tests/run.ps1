@@ -39,6 +39,37 @@ if ($testFiles.Count -eq 0) {
 }
 
 $totalFail = 0
+
+# Python API tests (shell-agnostic — run once).
+$pyTests = Get-ChildItem -Path (Join-Path $RepoRoot 'tests\api') -Filter 'test_*.py' -ErrorAction SilentlyContinue
+if ($pyTests) {
+    $py = $null
+    foreach ($candidate in 'python3','python') {
+        if (Get-Command $candidate -ErrorAction SilentlyContinue) { $py = (Get-Command $candidate).Source; break }
+    }
+    if (-not $py) {
+        Write-Host ">>> skipping python api tests (no python interpreter)" -ForegroundColor Yellow
+    } else {
+        & $py -c "import fastapi, httpx" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ">>> skipping python api tests (fastapi/httpx not installed)" -ForegroundColor Yellow
+        } else {
+            Write-Host ""
+            Write-Host "========== python api tests ==========" -ForegroundColor Cyan
+            foreach ($t in $pyTests) {
+                Write-Host ""
+                Write-Host ("--- {0} ---" -f $t.Name) -ForegroundColor Cyan
+                & $py $t.FullName
+                $rc = $LASTEXITCODE
+                if ($rc -ne 0) {
+                    $totalFail++
+                    Write-Host ("*** FAILED python api test (exit {0})" -f $rc) -ForegroundColor Red
+                }
+            }
+        }
+    }
+}
+
 foreach ($sh in $shellsToTry) {
     $shBin = (Get-Command $sh).Source
     Write-Host ""
