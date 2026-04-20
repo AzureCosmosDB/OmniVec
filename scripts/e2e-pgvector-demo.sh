@@ -8,7 +8,7 @@
 #   ./scripts/e2e-pgvector-demo.sh --existing --env my-omnivec              # Against existing deployment
 #   ./scripts/e2e-pgvector-demo.sh --cleanup --env my-omnivec               # Delete test resources
 #
-# Requires: az, azd, kubectl, psql (PostgreSQL client), curl
+# Requires: az, azd, kubectl, curl (SQL runs inside a throwaway AKS pod, no local psql needed)
 
 set +e  # Don't exit on errors — we handle them explicitly
 
@@ -51,7 +51,7 @@ ENVIRONMENT VARIABLES (used when flag is not passed):
 
 REQUIREMENTS:
   az, azd, kubectl, curl
-  (SQL runs via `az postgres flexible-server execute` — no local psql needed.)
+  (SQL runs inside a throwaway postgres:16-alpine pod in AKS — no local psql needed.)
 
 EXAMPLES:
   # Default: run against an existing OmniVec deployment
@@ -147,21 +147,93 @@ api_get()    { curl -sf --max-time 30 -H "Authorization: Bearer $ADMIN_TOKEN" "$
 api_post()   { curl -sf --max-time 30 -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d "$2" "$SERVER_URL$1"; }
 api_delete() { curl -sf --max-time 10 -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" "$SERVER_URL$1" 2>/dev/null || true; }
 
+# ─── PG SQL helper via throwaway kubectl pod (no local psql required) ────────
+# Runs psql inside a one-shot postgres:16-alpine pod in the AKS cluster. The
+# pod's egress is an Azure IP (covered by the AllowAzure firewall rule in
+# step 3), so this works without a local psql client. SQL is base64-encoded
+# to sidestep JSON/shell escaping.
+_PG_HOST_IP=""
+
+pg_resolve_ip() {
+  # Resolve the PG host IP from the local box, retrying for DNS propagation
+  # after a fresh flex server create (up to 120s).
+  _host="$1"; _waited=0; _timeout=120
+  while [ "$_waited" -lt "$_timeout" ]; do
+    _ip=""
+    if command -v getent >/dev/null 2>&1; then
+      _ip=$(getent hosts "$_host" 2>/dev/null | awk '{print $1; exit}')
+    fi
+    if [ -z "$_ip" ] && command -v dig >/dev/null 2>&1; then
+      _ip=$(dig +short "$_host" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)
+    fi
+    if [ -z "$_ip" ] && command -v nslookup >/dev/null 2>&1; then
+      _ip=$(nslookup "$_host" 2>/dev/null | awk '/^Address: / {print $2; exit}')
+    fi
+    if [ -n "$_ip" ]; then
+      printf '%s' "$_ip"
+      return 0
+    fi
+    sleep 5; _waited=$((_waited + 5))
+  done
+  return 1
+}
+
+pg_exec() {
+  # pg_exec <database> <sql>
+  _db="$1"; _sql="$2"
+  : "${PG_HOST:?PG_HOST not set}"
+  : "${PG_PORT:=5432}"
+  : "${PG_ADMIN:?PG_ADMIN not set}"
+  : "${PG_ADMIN_PASSWORD:?PG_ADMIN_PASSWORD not set}"
+
+  if [ -z "$_PG_HOST_IP" ]; then
+    log "  Resolving $PG_HOST ..."
+    _PG_HOST_IP=$(pg_resolve_ip "$PG_HOST") || {
+      log_err "Could not resolve $PG_HOST within 120s (DNS propagation lag?)."
+      return 1
+    }
+    log "  -> $_PG_HOST_IP"
+  fi
+
+  _sql_b64=$(printf '%s' "$_sql" | base64 | tr -d '\r\n ')
+  _pod="ov-pgclient-$(date +%s%N 2>/dev/null || date +%s)-$$"
+
+  _overrides=$(cat <<JSON
+{"apiVersion":"v1","spec":{"restartPolicy":"Never","hostAliases":[{"ip":"$_PG_HOST_IP","hostnames":["$PG_HOST"]}],"containers":[{"name":"psql","image":"postgres:16-alpine","env":[{"name":"PGPASSWORD","value":"$PG_ADMIN_PASSWORD"},{"name":"PGSSLMODE","value":"require"},{"name":"SQL_B64","value":"$_sql_b64"}],"command":["sh","-c","echo \"\$SQL_B64\" | base64 -d | psql -h $PG_HOST -p $PG_PORT -U $PG_ADMIN -d $_db -v ON_ERROR_STOP=1 -t -A -f -"]}]}}
+JSON
+)
+
+  if ! kubectl run "$_pod" --namespace default --image=postgres:16-alpine --restart=Never --overrides="$_overrides" >/dev/null 2>&1; then
+    log_err "kubectl run failed for pod $_pod"
+    return 1
+  fi
+
+  _waited=0; _phase=""
+  while [ "$_waited" -lt 120 ]; do
+    _phase=$(kubectl get pod "$_pod" -n default -o jsonpath='{.status.phase}' 2>/dev/null)
+    [ "$_phase" = "Succeeded" ] || [ "$_phase" = "Failed" ] && break
+    sleep 2; _waited=$((_waited + 2))
+  done
+
+  _logs=$(kubectl logs "$_pod" -n default 2>&1)
+  kubectl delete pod "$_pod" -n default --grace-period=0 --force >/dev/null 2>&1 || true
+
+  if [ "$_phase" != "Succeeded" ]; then
+    log_err "PG SQL failed (pod phase=$_phase, db=$_db):"
+    echo "$_logs" >&2
+    return 1
+  fi
+  printf '%s' "$_logs"
+  return 0
+}
+
 # ─── Check prerequisites ─────────────────────────────────────────────────────
-if ! command -v psql >/dev/null 2>&1; then
-  log "  psql not found — installing PostgreSQL client..."
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1
-  elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y postgresql >/dev/null 2>&1
-  elif command -v brew >/dev/null 2>&1; then
-    brew install libpq >/dev/null 2>&1 && export PATH="/usr/local/opt/libpq/bin:$PATH"
-  fi
-  if ! command -v psql >/dev/null 2>&1; then
-    die "psql (PostgreSQL client) is required. Install: sudo apt-get install postgresql-client"
-  fi
-  log_ok "psql installed."
-fi
+# No local psql required — SQL runs inside a throwaway kubectl pod
+# (see pg_exec above). All we need is az, azd, kubectl, curl.
+for _tool in az azd kubectl curl; do
+  command -v "$_tool" >/dev/null 2>&1 || die "$_tool is required but not found in PATH."
+done
+
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
 printf "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}\n"
@@ -313,19 +385,18 @@ if [ "$FROM_STEP" -le 3 ]; then
       --admin-password "$PG_ADMIN_PASSWORD" 2>&1 | tail -2
     # Wait for password to propagate
     sleep 5
-    # Verify connection works
-    export PGPASSWORD="$PG_ADMIN_PASSWORD"
-    export PGSSLMODE="require"
-    if psql -h "$PG_SERVER.postgres.database.azure.com" -p 5432 -U "$PG_ADMIN" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+    # Verify connection works (via pg_exec inside an AKS pod)
+    PG_HOST="$PG_SERVER.postgres.database.azure.com"; PG_PORT=5432
+    if pg_exec postgres "SELECT 1;" >/dev/null 2>&1; then
       log_ok "Password reset verified — connection works."
     else
       log_warn "Password reset may need more time. Waiting 15s..."
       sleep 15
-      if ! psql -h "$PG_SERVER.postgres.database.azure.com" -p 5432 -U "$PG_ADMIN" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+      _PG_HOST_IP=""  # force re-resolve after the wait
+      if ! pg_exec postgres "SELECT 1;" >/dev/null 2>&1; then
         die "Cannot connect to PostgreSQL after password reset. Try running with --pg-password <original-password>"
       fi
     fi
-    unset PGPASSWORD PGSSLMODE
   else
     # Try deployment location first, then fallback regions
     PG_LOCATION="${AZURE_LOCATION:-$(azd_get AZURE_LOCATION)}"
@@ -404,18 +475,14 @@ if [ "$FROM_STEP" -le 4 ]; then
     PG_DB="omnivec_demo"
   fi
 
-  export PGPASSWORD="$PG_ADMIN_PASSWORD"
-  export PGSSLMODE="require"
-
   log "  Creating database: $PG_DB"
   # Drop if exists (clean slate for re-runs)
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d postgres -c "DROP DATABASE IF EXISTS $PG_DB;" 2>/dev/null || true
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d postgres -c "CREATE DATABASE $PG_DB;" 2>/dev/null || true
+  pg_exec postgres "DROP DATABASE IF EXISTS $PG_DB;" >/dev/null 2>&1 || true
+  pg_exec postgres "CREATE DATABASE $PG_DB;" >/dev/null || die "Failed to create database $PG_DB."
   log_ok "Database created (clean)."
 
   log "  Creating tables..."
-  if ! psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
-CREATE EXTENSION IF NOT EXISTS vector;
+  _tbl_sql="CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
@@ -437,25 +504,19 @@ CREATE TABLE IF NOT EXISTS embeddings (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
-" 2>&1; then
-    die "Failed to create tables. Check that PostgreSQL server $PG_HOST is reachable and psql is installed."
-  fi
+CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);"
+  pg_exec "$PG_DB" "$_tbl_sql" >/dev/null || die "Failed to create tables."
   log_ok "Tables created: documents (source), embeddings (destination)"
 
   log "  Inserting sample documents..."
-  if ! psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -c "
-INSERT INTO documents (id, title, content, category) VALUES
+  _ins_sql="INSERT INTO documents (id, title, content, category) VALUES
   ('doc-001', 'Azure Cosmos DB', 'Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling.', 'database'),
   ('doc-002', 'Azure Kubernetes Service', 'AKS simplifies deploying managed Kubernetes clusters in Azure by offloading operational overhead.', 'compute'),
   ('doc-003', 'Azure Blob Storage', 'Azure Blob Storage stores massive amounts of unstructured data like documents and images optimized for cloud scale.', 'storage')
-ON CONFLICT (id) DO NOTHING;
-" 2>&1; then
-    die "Failed to insert documents."
-  fi
+ON CONFLICT (id) DO NOTHING;"
+  pg_exec "$PG_DB" "$_ins_sql" >/dev/null || die "Failed to insert documents."
   log_ok "Inserted 3 sample documents."
 
-  unset PGPASSWORD
   save_checkpoint 4
 fi
 
@@ -565,13 +626,11 @@ if [ "$FROM_STEP" -le 7 ]; then
 
   _waited=0
   _embedded=0
-  export PGPASSWORD="$PG_ADMIN_PASSWORD"
-  export PGSSLMODE="require"
   while [ "$_waited" -lt 180 ]; do
     sleep 15
     _waited=$((_waited + 15))
     # Check pgvector table directly — more reliable than API stats for PG pipelines
-    _embedded=$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_ADMIN" -d "$PG_DB" -t -c "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
+    _embedded=$(pg_exec "$PG_DB" "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
     _embedded=${_embedded:-0}
     if [ "$_embedded" -ge 3 ] 2>/dev/null; then
       log_ok "Queue mode: $_embedded documents embedded in pgvector!"
@@ -579,7 +638,6 @@ if [ "$FROM_STEP" -le 7 ]; then
     fi
     log "  Waiting... ($_embedded/3 embedded, ${_waited}s)"
   done
-  unset PGPASSWORD PGSSLMODE
 
   if [ "$_embedded" -lt 3 ] 2>/dev/null; then
     log_warn "Only $_embedded/3 documents embedded after 180s"
@@ -602,10 +660,8 @@ if [ "$FROM_STEP" -le 8 ]; then
     PG_DB="omnivec_demo"
   fi
 
-  export PGPASSWORD="$PG_ADMIN_PASSWORD"
-  export PGSSLMODE="require"
-  _count=$(psql -h "$PG_HOST" -p 5432 -U "$PG_ADMIN" -d "$PG_DB" -t -c "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
-  unset PGPASSWORD PGSSLMODE
+  export PG_PORT=5432
+  _count=$(pg_exec "$PG_DB" "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
 
   if [ "$_count" -ge 3 ] 2>/dev/null; then
     log_ok "pgvector table has $_count rows with embeddings!"
