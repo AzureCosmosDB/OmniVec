@@ -46,6 +46,9 @@ scripts/bench_embedding_rs/target/
 # .NET build output
 bin/
 obj/
+# …but keep emulator shims for hooks tests
+!tests/emu/bin/
+!tests/emu/bin/**
 
 # Build artifacts
 *.tar.gz

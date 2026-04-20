@@ -1,0 +1,165 @@
+#!/bin/sh
+# tests/emu/bin/helm - stateful emulator of helm.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/../lib/_common.sh"
+emu_enter helm "$@"
+
+ROOT="$OMNIVEC_EMU_STATE/helm"
+RELEASES="$ROOT/releases"
+mkdir -p "$RELEASES"
+
+# Standard OmniVec release components. When helm upgrade runs, it synthesises
+# these deployments + pods in the target namespace so kubectl get deploy/pods
+# reflects realistic state.
+OMNIVEC_COMPONENTS='omnivec-api:2 omnivec-web:2 omnivec-controller:1 omnivec-cosmos-changefeed:3 omnivec-dotnet-worker:1 docgrok:1 docgrok-controller:1'
+
+verb=${1:-}
+case "$verb" in
+    version)
+        echo 'version.BuildInfo{Version:"v3.16.2 (emu)"}' ;;
+    list|ls)
+        printf 'NAME    NAMESPACE  REVISION  STATUS    CHART     APP VERSION\n'
+        for f in "$RELEASES"/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            status=$(grep '^status=' "$f" | cut -d= -f2)
+            ns=$(grep '^namespace=' "$f" | cut -d= -f2)
+            printf '%s  %s  1  %s  omnivec-0.1  1.0\n' "$name" "$ns" "$status"
+        done ;;
+    dependency)
+        # helm dependency build CHART - no-op
+        exit 0 ;;
+    status)
+        shift
+        name=${1:-omnivec}
+        # parse -n NS / --namespace NS
+        ns="default"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -n|--namespace) ns=$2; shift 2 ;;
+                --kube-context|--kubeconfig) shift 2 ;;
+                -o|--output) shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        rf="$RELEASES/$name"
+        if [ ! -f "$rf" ]; then
+            echo "Error: release: not found" >&2
+            exit 1
+        fi
+        status=$(grep '^status=' "$rf" | cut -d= -f2)
+        printf '{"name":"%s","info":{"status":"%s"},"namespace":"%s"}\n' "$name" "$status" "$ns" ;;
+    upgrade|install)
+        # helm upgrade --install <release> <chart> [opts]
+        shift
+        # First two positional args (skipping flags) are release name + chart.
+        name=""
+        chart=""
+        ns="default"
+        flags=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --install) shift ;;
+                --wait|--atomic|--create-namespace|--force|--reset-values|--reuse-values) shift ;;
+                --timeout|--kube-context|--kubeconfig|--values|-f|--set|--set-string|--version|-o|--output)
+                    flags="$flags $1=$2"; shift 2 ;;
+                -n|--namespace) ns=$2; shift 2 ;;
+                -*) shift ;;
+                *)
+                    if [ -z "$name" ]; then name=$1
+                    elif [ -z "$chart" ]; then chart=$1
+                    fi
+                    shift ;;
+            esac
+        done
+        [ -z "$name" ] && name=omnivec
+
+        # Record release
+        cat > "$RELEASES/$name" <<EOF
+name=$name
+namespace=$ns
+chart=$chart
+status=deployed
+revision=1
+EOF
+
+        # Synthesise deployments + pods in emulated kubernetes state so
+        # subsequent kubectl calls see a healthy cluster.
+        nsdir=$(emu_dir "k8s/ns/$ns")
+        mkdir -p "$nsdir/deployments" "$nsdir/pods" "$nsdir/services"
+        for comp_spec in $OMNIVEC_COMPONENTS; do
+            comp=${comp_spec%:*}
+            replicas=${comp_spec##*:}
+            cat > "$nsdir/deployments/$comp" <<D_EOF
+name=$comp
+namespace=$ns
+replicas=$replicas
+readyReplicas=$replicas
+availableReplicas=$replicas
+updatedReplicas=$replicas
+image=emu/$comp:latest
+D_EOF
+            i=0
+            while [ $i -lt "$replicas" ]; do
+                suffix=$(printf '%s-%x%x%x%x%x' "$comp" \
+                    $((RANDOM % 16)) $((RANDOM % 16)) $((RANDOM % 16)) $((RANDOM % 16)) $((RANDOM % 16)) 2>/dev/null || echo "$comp-$i")
+                cat > "$nsdir/pods/$suffix" <<P_EOF
+name=$suffix
+namespace=$ns
+deployment=$comp
+status=Running
+ready=1/1
+restarts=0
+age=1m
+node=aks-system-xyz
+P_EOF
+                i=$((i + 1))
+            done
+        done
+
+        # Synthesise a LoadBalancer service for omnivec-web (the only one
+        # postprovision.sh polls for an external IP). Without this the
+        # hook would poll forever and make emulator runs take minutes.
+        if [ "$ns" = "omnivec" ]; then
+            cat > "$nsdir/services/omnivec-web" <<S_EOF
+name=omnivec-web
+namespace=$ns
+type=LoadBalancer
+clusterIP=10.0.42.1
+externalIP=20.42.42.42
+port=80
+S_EOF
+        fi
+
+        # Emit a canonical helm success banner.
+        cat <<BANNER
+Release "$name" has been upgraded. Happy Helming!
+NAME: $name
+LAST DEPLOYED: $(date 2>/dev/null || echo "now")
+NAMESPACE: $ns
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+BANNER
+        ;;
+    rollback)
+        shift
+        name=${1:-omnivec}
+        rf="$RELEASES/$name"
+        if [ -f "$rf" ]; then
+            sed -i.bak 's/^status=.*/status=deployed/' "$rf" 2>/dev/null
+            rm -f "$rf.bak"
+        fi
+        echo "Rollback was a success! Happy Helming!" ;;
+    uninstall|delete)
+        shift
+        name=${1:-omnivec}
+        rm -f "$RELEASES/$name"
+        # Also wipe synthesised k8s state
+        rm -rf "$OMNIVEC_EMU_STATE/k8s/ns/omnivec" 2>/dev/null
+        echo "release \"$name\" uninstalled" ;;
+    history|get|template|lint|search|repo|show)
+        exit 0 ;;
+    *)
+        exit 0 ;;
+esac

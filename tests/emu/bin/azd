@@ -1,0 +1,51 @@
+#!/bin/sh
+# tests/emu/bin/azd - stateful emulator of the azd CLI.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/../lib/_common.sh"
+emu_enter azd "$@"
+
+case "${1:-}" in
+    version) echo "azd version 1.11.0 (emu)" ;;
+    env)
+        case "${2:-}" in
+            set)
+                # azd env set KEY VALUE
+                [ -n "${3:-}" ] || exit 1
+                emu_set "azd-env" "$3" "${4:-}"
+                ;;
+            get-value)
+                val=$(emu_get "azd-env" "${3:-}")
+                printf '%s\n' "$val"
+                ;;
+            get-values)
+                _d="$OMNIVEC_EMU_STATE/azd-env"
+                if [ -d "$_d" ]; then
+                    for k in $(ls "$_d" 2>/dev/null); do
+                        v=$(cat "$_d/$k" 2>/dev/null)
+                        # escape double quotes in value
+                        v_esc=$(printf '%s' "$v" | sed 's/"/\\"/g')
+                        printf '%s="%s"\n' "$k" "$v_esc"
+                    done
+                fi
+                ;;
+            list)
+                printf 'NAME            DEFAULT  LOCAL  REMOTE\n'
+                printf '%s  true     true   false\n' "${AZURE_ENV_NAME:-emu-env}"
+                ;;
+            new|select|refresh)
+                # no-op for emulator
+                exit 0
+                ;;
+            *)
+                exit 0 ;;
+        esac
+        ;;
+    provision|deploy|down|up)
+        # no-op; harness drives these phases directly
+        exit 0 ;;
+    hooks)
+        # azd hooks run <phase>
+        exit 0 ;;
+    *)
+        exit 0 ;;
+esac
