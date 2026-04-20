@@ -3,6 +3,11 @@
 *.sh            text eol=lf
 hooks/lib/*     text eol=lf
 tests/**/*.sh   text eol=lf
+# Extensionless shell stubs that live in $PATH (mock CLIs for tests).
+tests/hooks/mocks/azd     text eol=lf
+tests/hooks/mocks/az      text eol=lf
+tests/hooks/mocks/kubectl text eol=lf
+tests/hooks/mocks/helm    text eol=lf
 scripts/*.sh    text eol=lf
 Dockerfile*     text eol=lf
 *.yaml          text eol=lf

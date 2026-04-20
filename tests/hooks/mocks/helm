@@ -1,0 +1,17 @@
+#!/bin/sh
+# Mock `helm`.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/_record.sh"
+_mock_record helm "$@"
+
+case "${1:-}" in
+    version)
+        printf 'v3.16.2 (mock)\n'
+        exit 0
+        ;;
+    list)
+        printf 'NAME\tNAMESPACE\tREVISION\tSTATUS\n'
+        exit 0
+        ;;
+esac
+exit 0
