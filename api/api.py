@@ -5450,11 +5450,6 @@ async def import_bundle(
         }
 
     # Apply writes
-    # For external embedding models we must also register with DocGrok so they
-    # appear in GET /api/models (which is sourced from the DocGrok registry for
-    # non-chat models). Chat models are surfaced via the CosmosDB fallback and
-    # don't need DocGrok registration.
-    model_docs_to_register: list[dict] = []
     for doc_type, item in to_write:
         try:
             doc = {**item, "doc_type": doc_type}
@@ -5481,12 +5476,6 @@ async def import_bundle(
                         f"model's credentials via PUT /api/models/{doc.get('id')} "
                         f"before use"
                     )
-                # Remember models that need DocGrok registration after the write
-                if (doc.get("model_category") or "embedding") != "chat" \
-                        and str(doc.get("id", "")).startswith("mdl-ext-"):
-                    # Keep the plaintext key (if any) around for the registration
-                    # call only; the persisted doc above has already been scrubbed.
-                    model_docs_to_register.append({**doc, "_plain_api_key": api_key_value})
             store.upsert(doc)
         except Exception as e:
             rtype = next((k for k, v in _EXPORT_RESOURCE_TYPES.items() if v == doc_type), doc_type)
@@ -5498,52 +5487,94 @@ async def import_bundle(
         except Exception as e:
             summary["checkpoints"]["errors"].append(f"{cp.get('id')}: {e}")
 
-    # Register imported external embedding models with DocGrok so they show up
-    # in GET /api/models immediately (list_models reads from the DocGrok
-    # registry for non-chat models). Best-effort: a registration failure is
-    # reported as a warning — DocGrok will also rehydrate from CosmosDB on its
-    # next restart, so the model isn't lost either way.
-    for mdoc in model_docs_to_register:
-        mid = mdoc.get("id", "")
-        plain_key = mdoc.pop("_plain_api_key", "") or ""
-        # If the plaintext key wasn't in the bundle but we already have one in
-        # Key Vault (e.g. re-import over an existing model), fetch it so the
-        # DocGrok registration is functional.
-        if (not plain_key or plain_key == "***") and mdoc.get("api_key_source") == "keyvault":
-            try:
-                from keyvault_client import get_model_api_key
-                plain_key = get_model_api_key(mid) or ""
-            except Exception:
-                plain_key = ""
-        reg_payload = {
-            "id": mid,
-            "name": mdoc.get("name", ""),
-            "type": mdoc.get("type", "azure-openai"),
-            "endpoint": mdoc.get("endpoint", ""),
-            "deployment": mdoc.get("deployment", "") or mdoc.get("name", ""),
-            "api_key": plain_key,
-            "api_version": mdoc.get("api_version", "2024-06-01"),
-            "embedding_dim": int(mdoc.get("embedding_dim", 1536) or 1536),
-        }
-        auth_type = mdoc.get("auth_type") or ("managed-identity" if not plain_key else "key")
-        if auth_type == "managed-identity":
-            reg_payload["auth_type"] = "managed-identity"
-            if mdoc.get("client_id"):
-                reg_payload["client_id"] = mdoc["client_id"]
+    # Ensure every external embedding model in the bundle is registered with
+    # DocGrok so it shows up in GET /api/models (list_models is sourced from
+    # DocGrok's in-memory registry for non-chat models).
+    #
+    # This runs for ALL bundle models — including skipped ones — because a
+    # skipped model may already exist in Cosmos but still be missing from
+    # DocGrok (e.g. after a DocGrok restart, or after a pre-fix import that
+    # only wrote to Cosmos). We first ask DocGrok what it already knows, then
+    # register only the gaps, so re-imports are idempotent and don't clobber
+    # live api_key state in the registry.
+    bundle_models = resources.get("models") or []
+    if bundle_models:
+        # Rewrite ids in the bundle-level view too, for rename mode.
+        effective_models: list[dict] = []
+        for m in bundle_models:
+            if not isinstance(m, dict):
+                continue
+            mid = id_map.get(m.get("id"), m.get("id"))
+            effective_models.append({**m, "id": mid})
+
+        existing_reg_ids: set = set()
         try:
-            resp = await http_client.post(
-                f"{DOCGROK_URL}/admin/models/registry", json=reg_payload
-            )
-            if resp.status_code >= 400:
-                warnings.append(
-                    f"models/{mid}: DocGrok registration returned "
-                    f"{resp.status_code}: {resp.text[:200]}"
-                )
+            resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry")
+            if resp.status_code < 400:
+                reg_body = resp.json() or {}
+                for rm in reg_body.get("models", []) or []:
+                    if isinstance(rm, dict) and rm.get("id"):
+                        existing_reg_ids.add(rm["id"])
         except Exception as e:
-            warnings.append(
-                f"models/{mid}: DocGrok registration failed ({e}); the model "
-                f"will appear after the next DocGrok restart"
-            )
+            warnings.append(f"DocGrok registry probe failed ({e}); will attempt all registrations")
+
+        for m in effective_models:
+            mid = m.get("id") or ""
+            category = m.get("model_category") or "embedding"
+            if category == "chat":
+                continue
+            if not str(mid).startswith("mdl-ext-"):
+                continue
+            if mid in existing_reg_ids:
+                continue
+
+            # Prefer the freshly-written Cosmos doc (authoritative — has
+            # api_key_source=keyvault and no plaintext key after our scrub).
+            try:
+                cosmos_doc = store.get(mid, "docgrok_model") or {}
+            except Exception:
+                cosmos_doc = {}
+            merged = {**m, **{k: v for k, v in cosmos_doc.items() if v is not None}}
+
+            plain_key = m.get("api_key") or ""
+            if plain_key == "***":
+                plain_key = ""
+            if not plain_key and merged.get("api_key_source") == "keyvault":
+                try:
+                    from keyvault_client import get_model_api_key
+                    plain_key = get_model_api_key(mid) or ""
+                except Exception:
+                    plain_key = ""
+
+            reg_payload = {
+                "id": mid,
+                "name": merged.get("name", ""),
+                "type": merged.get("type", "azure-openai"),
+                "endpoint": merged.get("endpoint", ""),
+                "deployment": merged.get("deployment", "") or merged.get("name", ""),
+                "api_key": plain_key,
+                "api_version": merged.get("api_version", "2024-06-01"),
+                "embedding_dim": int(merged.get("embedding_dim", 1536) or 1536),
+            }
+            auth_type = merged.get("auth_type") or ("managed-identity" if not plain_key else "key")
+            if auth_type == "managed-identity":
+                reg_payload["auth_type"] = "managed-identity"
+                if merged.get("client_id"):
+                    reg_payload["client_id"] = merged["client_id"]
+            try:
+                resp = await http_client.post(
+                    f"{DOCGROK_URL}/admin/models/registry", json=reg_payload
+                )
+                if resp.status_code >= 400:
+                    warnings.append(
+                        f"models/{mid}: DocGrok registration returned "
+                        f"{resp.status_code}: {resp.text[:200]}"
+                    )
+            except Exception as e:
+                warnings.append(
+                    f"models/{mid}: DocGrok registration failed ({e}); the model "
+                    f"will appear after the next DocGrok restart"
+                )
 
     return {
         "success": True,
