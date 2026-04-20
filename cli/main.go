@@ -40,6 +40,7 @@ func main() {
 		newStatusCmd(),
 		newSettingsCmd(),
 		newConfigCmd(),
+		newAdminCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
