@@ -145,42 +145,70 @@ function Resolve-NativeExe {
 $AzExe  = Resolve-NativeExe 'az'
 $AzdExe = Resolve-NativeExe 'azd'
 
-# ─── PG SQL helper using az (no local psql required) ───────────────────────
-# Uses `az postgres flexible-server execute` so the script works on any box
-# with the Azure CLI, without needing the psql client installed. Requires the
-# `rdbms-connect` az extension, which az auto-installs on first use.
+# ─── PG SQL helper via throwaway kubectl pod (no local psql, no az extensions) ─
+# Runs psql inside a one-shot postgres:16-alpine pod in the AKS cluster. The
+# pod has network access to the Azure PostgreSQL Flexible Server (both in
+# Azure) and avoids any dependency on local psql or the fragile
+# `rdbms-connect` az extension. Requires only kubectl (already required).
 function Invoke-PgSql {
     param(
-        [Parameter(Mandatory)][string]$Server,
+        [Parameter(Mandatory)][string]$PgHost,
         [Parameter(Mandatory)][string]$AdminUser,
         [Parameter(Mandatory)][string]$AdminPassword,
         [string]$Database = 'postgres',
-        [Parameter(Mandatory)][string]$Query
+        [int]$Port = 5432,
+        [Parameter(Mandatory)][string]$Query,
+        [string]$Namespace = 'default'
     )
-    # Ensure the rdbms-connect extension is installed (it provides `execute`).
-    if (-not $script:_rdbmsConnectChecked) {
-        $have = & $AzExe extension list --query "[?name=='rdbms-connect'].name | [0]" -o tsv 2>$null
-        if (-not $have) {
-            Log "  Installing az extension: rdbms-connect (first run only)..."
-            & $AzExe extension add --name rdbms-connect --only-show-errors --yes 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                LogErr "Failed to install 'rdbms-connect' az extension. Install manually: az extension add --name rdbms-connect"
-                throw "rdbms-connect install failed"
-            }
+    $suffix = [Guid]::NewGuid().ToString('N').Substring(0,8)
+    $podName = "ov-pgclient-$suffix"
+
+    $overrides = @{
+        apiVersion = 'v1'
+        spec = @{
+            restartPolicy = 'Never'
+            containers = @(@{
+                name  = 'psql'
+                image = 'postgres:16-alpine'
+                env = @(
+                    @{ name = 'PGPASSWORD'; value = $AdminPassword }
+                    @{ name = 'PGSSLMODE';  value = 'require' }
+                )
+                command = @('psql','-h',$PgHost,'-p',"$Port",'-U',$AdminUser,
+                            '-d',$Database,'-v','ON_ERROR_STOP=1','-t','-A','-c',$Query)
+            })
         }
-        $script:_rdbmsConnectChecked = $true
-    }
-    $out = & $AzExe postgres flexible-server execute `
-        --name $Server `
-        --admin-user $AdminUser `
-        --admin-password $AdminPassword `
-        --database-name $Database `
-        --querytext $Query 2>&1
+    } | ConvertTo-Json -Depth 10 -Compress
+
+    # Create pod (overrides fully define the container; trailing image arg is a
+    # kubectl requirement but gets replaced by the overrides spec).
+    $createOut = & kubectl run $podName `
+        --namespace $Namespace `
+        --image=postgres:16-alpine `
+        --restart=Never `
+        --overrides=$overrides 2>&1
     if ($LASTEXITCODE -ne 0) {
-        LogErr "PG SQL failed ($LASTEXITCODE): $out"
-        throw "PG SQL execution failed (database=$Database)"
+        LogErr "kubectl run failed: $createOut"
+        throw "Failed to launch psql pod"
     }
-    return $out
+
+    # Wait for completion (pod exits after psql finishes)
+    $timeoutSec = 120
+    $waited = 0
+    $phase = ''
+    while ($waited -lt $timeoutSec) {
+        $phase = (& kubectl get pod $podName -n $Namespace -o jsonpath='{.status.phase}' 2>$null)
+        if ($phase -eq 'Succeeded' -or $phase -eq 'Failed') { break }
+        Start-Sleep -Seconds 2; $waited += 2
+    }
+    $logs = (& kubectl logs $podName -n $Namespace 2>&1) -join "`n"
+    & kubectl delete pod $podName -n $Namespace --grace-period=0 --force 2>&1 | Out-Null
+
+    if ($phase -ne 'Succeeded') {
+        LogErr "PG SQL failed (pod phase=$phase, db=$Database):`n$logs"
+        throw "PG SQL execution failed"
+    }
+    return $logs
 }
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
@@ -427,7 +455,7 @@ if ($FromStep -le 4) {
 
     # Create database (via az; no local psql needed)
     Log "  Creating database: $PG_DB"
-    Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+    Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
         -Database 'postgres' -Query "CREATE DATABASE $PG_DB;" | Out-Null
     LogOk "Database created."
 
@@ -460,7 +488,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embedding vector_cosine_ops);
 "@
-    Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+    Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
         -Database $PG_DB -Query $sql | Out-Null
     LogOk "Tables created: documents (source), embeddings (destination)"
 
@@ -472,7 +500,7 @@ CREATE INDEX IF NOT EXISTS embeddings_vector_idx ON embeddings USING hnsw (embed
         "INSERT INTO documents (id, title, content, category) VALUES ('doc-003', 'Azure Blob Storage', 'Azure Blob Storage stores massive amounts of unstructured data like documents and images optimized for cloud scale.', 'storage') ON CONFLICT (id) DO NOTHING;"
     )
     foreach ($doc in $docs) {
-        Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+        Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
             -Database $PG_DB -Query $doc | Out-Null
     }
     LogOk "Inserted 3 sample documents."
@@ -653,9 +681,8 @@ if ($FromStep -le 8) {
         $PG_ADMIN = "omnivecadmin"
     }
 
-    $rawCount = Invoke-PgSql -Server $PG_SERVER -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
+    $rawCount = Invoke-PgSql -PgHost $PG_HOST -AdminUser $PG_ADMIN -AdminPassword $PgAdminPassword `
         -Database $PG_DB -Query "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;"
-    # az execute returns rows as JSON-ish text; pull the first integer out.
     $count = if ($rawCount) { ([regex]::Match("$rawCount", '\d+')).Value } else { '0' }
     if (-not $count) { $count = '0' }
 
