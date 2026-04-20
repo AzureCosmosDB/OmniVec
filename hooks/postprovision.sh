@@ -261,13 +261,11 @@ FIRST_IMAGE=$(echo "$IMAGES" | awk '{print $1}')
 SKIP_IMPORT=${OMNIVEC_SKIP_IMPORT:-$(get_azd_value "OMNIVEC_SKIP_IMPORT")}
 
 # Auth-test helper: skip the unconditional auth-test re-import when the
-# first image already exists locally and either (a) the user asked us to
-# preserve local, or (b) it already matches the shared digest.
+# first image already exists locally. Default policy is "prefer local" —
+# re-import only if the user explicitly asked via OMNIVEC_FORCE_IMPORT.
 _auth_test_can_skip() {
   if [ "$FORCE_IMPORT" = "true" ]; then return 1; fi
-  if ! image_exists "$FIRST_IMAGE" "latest"; then return 1; fi
-  if [ "$SKIP_IMPORT" = "true" ] || [ "$SKIP_IMPORT" = "1" ]; then return 0; fi
-  if image_up_to_date "$FIRST_IMAGE" "latest"; then return 0; fi
+  if image_exists "$FIRST_IMAGE" "latest"; then return 0; fi
   return 1
 }
 
@@ -342,17 +340,14 @@ else
       printf "  ${GREEN}${image}:latest already imported (auth test).${NC}\n"
       continue
     fi
-    if [ "$FORCE_IMPORT" != "true" ] && image_up_to_date "$image" "latest"; then
-      printf "  ${GREEN}${image}:latest up to date (digest match), skipping.${NC}\n"
+    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
+      # Default policy: local image wins. Re-import only when the user
+      # explicitly sets OMNIVEC_FORCE_IMPORT=true. This prevents the
+      # shared-registry :latest (which may lag behind hotfixes) from
+      # clobbering locally built / patched images on every azd up.
+      printf "  ${GREEN}${image}:latest already present locally, preserving (set OMNIVEC_FORCE_IMPORT=true to overwrite).${NC}\n"
       skip_count=$((skip_count + 1))
       continue
-    elif [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
-      if [ "$SKIP_IMPORT" = "true" ] || [ "$SKIP_IMPORT" = "1" ]; then
-        printf "  ${GREEN}${image}:latest exists locally, preserving (OMNIVEC_SKIP_IMPORT=true).${NC}\n"
-        skip_count=$((skip_count + 1))
-        continue
-      fi
-      printf "  ${CYAN}${image}:latest exists but digest differs, re-importing (set OMNIVEC_SKIP_IMPORT=true to keep local).${NC}\n"
     fi
 
     printf "  ${CYAN}Importing ${image}:latest...${NC}\n"
