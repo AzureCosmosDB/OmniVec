@@ -1,0 +1,270 @@
+#!/bin/sh
+# tests/emu/bin/kubectl - stateful emulator of kubectl.
+# Supports the subset of verbs/resources used by hooks/postprovision.sh.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/../lib/_common.sh"
+emu_enter kubectl "$@"
+
+# ── Flag parsing ────────────────────────────────────────────────────────────
+NS="default"
+OUT=""
+JSONPATH=""
+SELECTOR=""
+TAIL=""
+TIMEOUT=""
+OVERWRITE=""
+FROM_LIT=""
+PARGS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|--namespace) NS=$2; shift 2 ;;
+        -o|--output)
+            case "$2" in
+                jsonpath=*)  OUT=jsonpath; JSONPATH=${2#jsonpath=}; shift 2 ;;
+                jsonpath)    OUT=jsonpath; JSONPATH=$3; shift 3 ;;
+                *)           OUT=$2; shift 2 ;;
+            esac ;;
+        --context|--kubeconfig|--sort-by) shift 2 ;;
+        -l|--selector) SELECTOR=$2; shift 2 ;;
+        --tail=*)    TAIL=${1#--tail=}; shift ;;
+        --tail)      TAIL=$2; shift 2 ;;
+        --timeout=*) TIMEOUT=${1#--timeout=}; shift ;;
+        --timeout)   TIMEOUT=$2; shift 2 ;;
+        --overwrite) OVERWRITE=1; shift ;;
+        --from-literal=*) FROM_LIT="$FROM_LIT ${1#--from-literal=}"; shift ;;
+        --all|--no-headers|--ignore-not-found|--force|--recursive|--wait=true|--wait=false|-A|--all-namespaces) shift ;;
+        -f|--filename) shift 2 ;;
+        --dry-run=*) shift ;;
+        --type=*|--image=*) shift ;;
+        -*) shift ;;
+        *)  PARGS="$PARGS $1"; shift ;;
+    esac
+done
+set -- $PARGS
+verb=${1:-}; kind=${2:-}; name=${3:-}
+
+NSDIR="$OMNIVEC_EMU_STATE/k8s/ns/$NS"
+
+_ensure_ns() {
+    mkdir -p "$NSDIR/deployments" "$NSDIR/pods" "$NSDIR/services" \
+             "$NSDIR/secrets" "$NSDIR/configmaps" "$NSDIR/events"
+    [ -f "$NSDIR/_meta" ] || printf 'name=%s\nphase=Active\n' "$NS" > "$NSDIR/_meta"
+}
+
+_pod_line() {
+    _f=$1
+    nm=$(grep '^name=' "$_f" | cut -d= -f2)
+    st=$(grep '^status=' "$_f" | cut -d= -f2)
+    rd=$(grep '^ready=' "$_f" | cut -d= -f2)
+    rs=$(grep '^restarts=' "$_f" | cut -d= -f2)
+    ag=$(grep '^age=' "$_f" | cut -d= -f2)
+    printf '%-50s %-8s %-10s %-5s %s\n' "$nm" "$rd" "$st" "$rs" "$ag"
+}
+
+_deploy_line() {
+    _f=$1
+    nm=$(grep '^name=' "$_f" | cut -d= -f2)
+    rep=$(grep '^replicas=' "$_f" | cut -d= -f2)
+    rdy=$(grep '^readyReplicas=' "$_f" | cut -d= -f2)
+    avl=$(grep '^availableReplicas=' "$_f" | cut -d= -f2)
+    printf '%-40s %s/%s  %s  %s  1m\n' "$nm" "$rdy" "$rep" "$rep" "$avl"
+}
+
+# ── Handle common JSONPath queries used by the hooks ────────────────────────
+_handle_jsonpath() {
+    _kind=$1
+    _dir="$NSDIR/$2"
+    [ -d "$_dir" ] || return 0
+
+    case "$JSONPATH" in
+        *'availableReplicas==0'*|*'readyReplicas<@.spec.replicas'*|*'!@.status.readyReplicas'*)
+            # list deployments that are NOT fully ready
+            for f in "$_dir"/*; do
+                [ -f "$f" ] || continue
+                nm=$(grep '^name=' "$f" | cut -d= -f2)
+                rep=$(grep '^replicas=' "$f" | cut -d= -f2)
+                rdy=$(grep '^readyReplicas=' "$f" | cut -d= -f2)
+                rdy=${rdy:-0}
+                if [ "${rdy:-0}" -lt "${rep:-1}" ]; then
+                    printf '%s %s/%s\n' "$nm" "$rdy" "$rep"
+                fi
+            done ;;
+        *'status.loadBalancer.ingress[0].ip'*|*'loadBalancer.ingress'*)
+            # Direct IP query — either for a specific service (kubectl get svc NAME
+            # -o jsonpath=...) or for all. RESOURCE_NAME is set by the caller if
+            # a specific one was requested.
+            if [ -n "${RESOURCE_NAME:-}" ]; then
+                sf="$_dir/$RESOURCE_NAME"
+                [ -f "$sf" ] && grep '^externalIP=' "$sf" | cut -d= -f2
+            else
+                for f in "$_dir"/*; do
+                    [ -f "$f" ] || continue
+                    ty=$(grep '^type=' "$f" | cut -d= -f2)
+                    [ "$ty" = "LoadBalancer" ] && grep '^externalIP=' "$f" | cut -d= -f2
+                done
+            fi ;;
+        *'spec.type=="LoadBalancer"'*|*'LoadBalancer'*)
+            for f in "$_dir"/*; do
+                [ -f "$f" ] || continue
+                nm=$(grep '^name=' "$f" | cut -d= -f2)
+                ty=$(grep '^type=' "$f" | cut -d= -f2)
+                ip=$(grep '^externalIP=' "$f" | cut -d= -f2)
+                [ "$ty" = "LoadBalancer" ] && printf '%s %s\n' "$nm" "$ip"
+            done ;;
+        *'type=="Warning"'*)
+            _ef="$NSDIR/events/warnings"
+            [ -f "$_ef" ] && cat "$_ef" ;;
+        *)
+            # Generic fallback: print names
+            for f in "$_dir"/*; do
+                [ -f "$f" ] || continue
+                grep '^name=' "$f" | cut -d= -f2
+            done ;;
+    esac
+}
+
+case "$verb" in
+    version)
+        case "$OUT" in
+            json) printf '{"clientVersion":{"gitVersion":"v1.30.0-emu"}}\n' ;;
+            *)    printf 'Client Version: v1.30.0 (emu)\nServer Version: v1.30.5 (emu)\n' ;;
+        esac ;;
+    cluster-info)
+        echo "Kubernetes control plane is running at https://emu-aks.emu.local:443" ;;
+    config)
+        exit 0 ;;
+    create)
+        _ensure_ns
+        case "$kind" in
+            namespace|ns)
+                tgt=$name
+                [ -z "$tgt" ] && tgt=$NS
+                ndir="$OMNIVEC_EMU_STATE/k8s/ns/$tgt"
+                if [ -d "$ndir" ]; then
+                    echo "Error from server (AlreadyExists): namespaces \"$tgt\" already exists" >&2
+                    exit 1
+                fi
+                mkdir -p "$ndir"
+                printf 'name=%s\nphase=Active\n' "$tgt" > "$ndir/_meta"
+                echo "namespace/$tgt created" ;;
+            secret)
+                # `kubectl create secret generic <name> --from-literal=k=v ...`
+                sname=$name
+                [ -z "$sname" ] && sname=${4:-secret}
+                _ensure_ns
+                cat > "$NSDIR/secrets/$sname" <<EOF
+name=$sname
+namespace=$NS
+data=$FROM_LIT
+EOF
+                echo "secret/$sname created" ;;
+            deployment|deploy)
+                _ensure_ns
+                cat > "$NSDIR/deployments/$name" <<EOF
+name=$name
+namespace=$NS
+replicas=1
+readyReplicas=1
+availableReplicas=1
+EOF
+                echo "deployment.apps/$name created" ;;
+            *)
+                echo "${kind}/${name:-obj} created" ;;
+        esac ;;
+    apply|replace)
+        _ensure_ns
+        echo "resource configured" ;;
+    label|annotate)
+        # label/annotate namespace omnivec k=v [--overwrite]
+        _ensure_ns
+        echo "${kind}/${name:-$NS} ${verb}ed" ;;
+    delete)
+        case "$kind" in
+            namespace|ns) rm -rf "$OMNIVEC_EMU_STATE/k8s/ns/${name:-$NS}" ;;
+            pod|pods)     [ -n "$name" ] && rm -f "$NSDIR/pods/$name" ;;
+            deployment|deploy) [ -n "$name" ] && rm -f "$NSDIR/deployments/$name" ;;
+            secret|secrets)    [ -n "$name" ] && rm -f "$NSDIR/secrets/$name" ;;
+            service|svc)       [ -n "$name" ] && rm -f "$NSDIR/services/$name" ;;
+        esac
+        echo "${kind}/${name:-x} deleted" ;;
+    get)
+        _ensure_ns
+        if [ "$OUT" = "jsonpath" ]; then
+            RESOURCE_NAME="$name"
+            case "$kind" in
+                deploy|deployment|deployments) _handle_jsonpath deploy deployments ;;
+                svc|service|services)          _handle_jsonpath svc services ;;
+                events|ev)                     _handle_jsonpath events events ;;
+                pod|pods)                      _handle_jsonpath pods pods ;;
+                *)                             : ;;
+            esac
+            exit 0
+        fi
+        case "$kind" in
+            nodes|node)
+                printf 'NAME              STATUS   ROLES           AGE   VERSION\n'
+                printf 'aks-sys-001       Ready    control-plane   1h    v1.30.5-emu\n'
+                printf 'aks-sys-002       Ready    <none>          1h    v1.30.5-emu\n' ;;
+            ns|namespace|namespaces)
+                printf 'NAME              STATUS   AGE\n'
+                for n in $(ls "$OMNIVEC_EMU_STATE/k8s/ns" 2>/dev/null); do
+                    printf '%-18s Active  1h\n' "$n"
+                done ;;
+            pods|pod)
+                for f in "$NSDIR/pods"/*; do
+                    [ -f "$f" ] || continue
+                    if [ -n "$SELECTOR" ]; then
+                        dep=$(grep '^deployment=' "$f" | cut -d= -f2)
+                        key=${SELECTOR#app=}
+                        [ "$dep" = "$key" ] || continue
+                    fi
+                    _pod_line "$f"
+                done ;;
+            deploy|deployment|deployments)
+                printf 'NAME                                       READY   UP-TO-DATE  AVAILABLE  AGE\n'
+                for f in "$NSDIR/deployments"/*; do
+                    [ -f "$f" ] || continue
+                    _deploy_line "$f"
+                done ;;
+            svc|service|services)
+                printf 'NAME     TYPE         CLUSTER-IP   EXTERNAL-IP  PORT(S)  AGE\n'
+                for f in "$NSDIR/services"/*; do
+                    [ -f "$f" ] || continue
+                    nm=$(grep '^name=' "$f" | cut -d= -f2)
+                    ty=$(grep '^type=' "$f" | cut -d= -f2)
+                    ip=$(grep '^externalIP=' "$f" | cut -d= -f2)
+                    printf '%-8s %-12s 10.0.0.1     %-12s 80/TCP   1m\n' "$nm" "$ty" "${ip:-<pending>}"
+                done ;;
+            secret|secrets)
+                printf 'NAME   TYPE     DATA  AGE\n'
+                for f in "$NSDIR/secrets"/*; do
+                    [ -f "$f" ] || continue
+                    nm=$(grep '^name=' "$f" | cut -d= -f2)
+                    printf '%-8s Opaque   1     1m\n' "$nm"
+                done ;;
+            events|ev)
+                printf 'LAST SEEN   TYPE      REASON    OBJECT      MESSAGE\n' ;;
+            *)
+                exit 0 ;;
+        esac ;;
+    describe)
+        printf 'Name: %s\nNamespace: %s\nEvents: <none>\n' "${name:-obj}" "$NS" ;;
+    logs)
+        # kubectl logs POD
+        printf '[%s] ready\n' "${kind:-pod}"
+        [ -n "$TAIL" ] && printf '[%s] tail=%s\n' "${kind:-pod}" "$TAIL" ;;
+    rollout)
+        # kubectl rollout restart deployment [-n X]  | rollout status deployment/X
+        case "$kind" in
+            status)
+                tgt=${name:-deployment}
+                printf 'deployment "%s" successfully rolled out\n' "$tgt" ;;
+            restart)
+                echo "deployment.apps restarted" ;;
+            *)  echo "rollout $kind $name" ;;
+        esac ;;
+    exec|port-forward|cp|top|scale|wait|auth)
+        exit 0 ;;
+    *)
+        exit 0 ;;
+esac

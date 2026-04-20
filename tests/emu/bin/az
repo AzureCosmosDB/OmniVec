@@ -1,0 +1,217 @@
+#!/bin/sh
+# tests/emu/bin/az - stateful emulator of the Azure CLI.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/../lib/_common.sh"
+emu_enter az "$@"
+
+# Parse out --query and -o/--output flags; keep positional args in $PARGS.
+_q=""
+_out=""
+PARGS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --query)       _q=$2; shift 2 ;;
+        -o|--output)   _out=$2; shift 2 ;;
+        --subscription|--resource-group|-g|--name|-n|--namespace|--tags|--operation|--file|--registry|--image|--context|--source|--username|--password|--location|-l|--vm-size|--node-count|--kubernetes-version|--install-location|--kubelogin-install-location)
+            # Most flags take a value; preserve as positional-like args for matching.
+            PARGS="$PARGS $1=$2"
+            shift 2 ;;
+        --force|--overwrite-existing|--no-logs|--yes|-y)
+            PARGS="$PARGS $1"
+            shift ;;
+        -*)
+            # Unknown flag; try to swallow with optional value
+            if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then
+                PARGS="$PARGS $1=$2"; shift 2
+            else
+                PARGS="$PARGS $1"; shift
+            fi ;;
+        *)
+            PARGS="$PARGS $1"; shift ;;
+    esac
+done
+
+_emit() {
+    # _emit <value> - print as tsv (default) or json if requested
+    if [ "$_out" = "json" ]; then
+        printf '"%s"\n' "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+_arg() {
+    # _arg <flag-name> - extract value of "--flag=value" from PARGS
+    printf '%s' "$PARGS" | tr ' ' '\n' | awk -F= -v k="$1" '$1==k {print $2; exit}'
+}
+
+# Dispatch on positional verbs recorded while parsing flags:
+set -- $PARGS
+# $1 may be "--flag=val" entries; strip those to find first positional verb.
+VERBS=""
+for a in "$@"; do
+    case "$a" in
+        --*) : ;;
+        *)   VERBS="$VERBS $a" ;;
+    esac
+done
+set -- $VERBS
+
+case "${1:-}" in
+    version)
+        printf '{"azure-cli":"2.60.0 (emu)"}\n' ;;
+    account)
+        case "${2:-}" in
+            show)
+                case "$_q" in
+                    name)      _emit "emu-subscription" ;;
+                    id)        _emit "00000000-0000-0000-0000-000000000000" ;;
+                    tenantId)  _emit "11111111-1111-1111-1111-111111111111" ;;
+                    *)         printf '{"id":"00000000-0000-0000-0000-000000000000","name":"emu-subscription","tenantId":"11111111-1111-1111-1111-111111111111","state":"Enabled"}\n' ;;
+                esac
+                ;;
+            list)
+                printf '[{"id":"00000000-0000-0000-0000-000000000000","name":"emu-subscription","isDefault":true}]\n' ;;
+            set)
+                exit 0 ;;
+            *) exit 0 ;;
+        esac ;;
+    login|logout)
+        exit 0 ;;
+    provider)
+        case "${2:-}" in
+            register|show)
+                _ns=$(_arg --namespace)
+                case "$_q" in
+                    *registrationState*) _emit "Registered" ;;
+                    *) printf '{"namespace":"%s","registrationState":"Registered"}\n' "$_ns" ;;
+                esac ;;
+            list)
+                printf '[]\n' ;;
+            *) exit 0 ;;
+        esac ;;
+    group)
+        rg=$(_arg --name)
+        [ -z "$rg" ] && rg=$(_arg -g)
+        case "${2:-}" in
+            create)
+                emu_set "arm/groups" "$rg" "{\"name\":\"$rg\",\"id\":\"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/$rg\"}"
+                _emit "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/$rg" ;;
+            show)
+                if ! emu_has "arm/groups" "$rg"; then
+                    emu_set "arm/groups" "$rg" "{\"name\":\"$rg\"}"
+                fi
+                case "$_q" in
+                    *id*) _emit "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/$rg" ;;
+                    *)    printf '{"name":"%s","id":"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/%s","location":"eastus2"}\n' "$rg" "$rg" ;;
+                esac ;;
+            exists)
+                if emu_has "arm/groups" "$rg"; then echo true; else echo false; fi ;;
+            delete)
+                emu_del "arm/groups" "$rg" ;;
+            *) exit 0 ;;
+        esac ;;
+    tag)
+        case "${2:-}" in
+            update|list|create|delete) exit 0 ;;
+            *) exit 0 ;;
+        esac ;;
+    acr)
+        acr_name=$(_arg --registry)
+        [ -z "$acr_name" ] && acr_name=$(_arg --name)
+        case "${2:-}" in
+            build)
+                img=$(_arg --image)
+                [ -n "$img" ] && emu_set "arm/acr/$acr_name/images" "$(emu_safe "$img")" "built"
+                echo "Run ID: emu-$(date +%s)" ;;
+            import)
+                img=$(_arg --image)
+                src=$(_arg --source)
+                [ -n "$img" ] && emu_set "arm/acr/$acr_name/images" "$(emu_safe "$img")" "imported-from-$src"
+                ;;
+            login)
+                echo "Login Succeeded" ;;
+            show)
+                printf '{"name":"%s","loginServer":"%s.azurecr.io","sku":{"name":"Standard"}}\n' "$acr_name" "$acr_name" ;;
+            repository)
+                case "${3:-}" in
+                    list)
+                        # List unique repos from imported/built images
+                        _d="$OMNIVEC_EMU_STATE/arm/acr/$acr_name/images"
+                        if [ -d "$_d" ]; then
+                            ls "$_d" 2>/dev/null | awk -F_ '{print $1}' | sort -u
+                        else
+                            printf '[]\n'
+                        fi ;;
+                    show-manifests|show-tags)
+                        printf '[{"digest":"sha256:deadbeef","tags":["latest"]}]\n' ;;
+                    *) exit 0 ;;
+                esac ;;
+            check-health)
+                echo "health ok" ;;
+            *) exit 0 ;;
+        esac ;;
+    aks)
+        aks_name=$(_arg --name)
+        rg=$(_arg --resource-group)
+        [ -z "$rg" ] && rg=$(_arg -g)
+        case "${2:-}" in
+            get-credentials)
+                kc=$(_arg --file)
+                [ -z "$kc" ] && kc="${HOME:-/tmp}/.kube/config"
+                mkdir -p "$(dirname "$kc")"
+                cat > "$kc" <<KUBECONFIG
+apiVersion: v1
+kind: Config
+clusters:
+- name: $aks_name
+  cluster:
+    server: https://emu-aks.emu.local:443
+contexts:
+- name: $aks_name
+  context:
+    cluster: $aks_name
+    user: emu-admin
+current-context: $aks_name
+users:
+- name: emu-admin
+  user:
+    token: emu-token
+KUBECONFIG
+                echo "Merged \"$aks_name\" as current context in $kc" >&2 ;;
+            install-cli)
+                # Pretend kubelogin/kubectl are installed; tests already have kubectl emu on PATH.
+                loc=$(_arg --install-location)
+                [ -n "$loc" ] && mkdir -p "$(dirname "$loc")" && : > "$loc" 2>/dev/null || true
+                ;;
+            show)
+                printf '{"name":"%s","powerState":{"code":"Running"},"provisioningState":"Succeeded","kubernetesVersion":"1.30.5"}\n' "$aks_name" ;;
+            *) exit 0 ;;
+        esac ;;
+    cosmosdb)
+        case "${2:-}" in
+            show) printf '{"name":"%s","documentEndpoint":"https://emu-cosmos.documents.azure.com:443/"}\n' "$(_arg --name)" ;;
+            *) exit 0 ;;
+        esac ;;
+    keyvault)
+        case "${2:-}" in
+            show)   printf '{"name":"%s","properties":{"vaultUri":"https://%s.vault.azure.net/"}}\n' "$(_arg --name)" "$(_arg --name)" ;;
+            secret) exit 0 ;;
+            *) exit 0 ;;
+        esac ;;
+    storage)
+        case "${2:-}" in
+            account) printf '{"name":"%s","primaryEndpoints":{"blob":"https://%s.blob.core.windows.net/"}}\n' "$(_arg --name)" "$(_arg --name)" ;;
+            *) exit 0 ;;
+        esac ;;
+    servicebus)
+        case "${2:-}" in
+            namespace) printf '{"name":"%s","serviceBusEndpoint":"https://%s.servicebus.windows.net:443/"}\n' "$(_arg --name)" "$(_arg --name)" ;;
+            *) exit 0 ;;
+        esac ;;
+    monitor|log-analytics|extension|bicep|deployment)
+        exit 0 ;;
+    *)
+        # Unknown command: succeed silently so hook flows are robust to drift.
+        exit 0 ;;
+esac
