@@ -63,3 +63,6 @@ id_mappings.json
 # Windows
 nul
 .lock-hash
+
+helm/omnivec/.last-deploy-fingerprint
+
