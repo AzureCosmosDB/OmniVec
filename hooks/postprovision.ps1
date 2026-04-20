@@ -401,6 +401,10 @@ $OMNIVEC_KUBECONFIG = Join-Path $HOME ".kube" "omnivec-$env:AZURE_ENV_NAME"
 $env:KUBECONFIG = $OMNIVEC_KUBECONFIG
 
 az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --file $OMNIVEC_KUBECONFIG --overwrite-existing
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`e[31mFailed to fetch AKS credentials for cluster $AKS_CLUSTER`e[0m"
+    exit 1
+}
 Write-Host "`e[32mConnected to AKS cluster: $AKS_CLUSTER`e[0m"
 
 # =============================================================================
@@ -410,9 +414,11 @@ Write-Host "`e[32mConnected to AKS cluster: $AKS_CLUSTER`e[0m"
 Write-Host "`n`e[33mPhase 3: Creating namespaces and secrets...`e[0m"
 
 kubectl --context $KUBE_CONTEXT create namespace omnivec --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+if ($LASTEXITCODE -ne 0) { Write-Host "`e[31mFailed to create namespace omnivec`e[0m"; exit 1 }
 kubectl --context $KUBE_CONTEXT create namespace docgrok --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
-kubectl --context $KUBE_CONTEXT label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite
-kubectl --context $KUBE_CONTEXT annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite
+if ($LASTEXITCODE -ne 0) { Write-Host "`e[31mFailed to create namespace docgrok`e[0m"; exit 1 }
+kubectl --context $KUBE_CONTEXT label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite | Out-Null
+kubectl --context $KUBE_CONTEXT annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite | Out-Null
 
 if ($ENABLE_BLOB_SOURCE -eq "true" -and $STORAGE_ACCOUNT) {
     kubectl --context $KUBE_CONTEXT create secret generic omnivec-storage `

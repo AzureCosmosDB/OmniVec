@@ -201,11 +201,21 @@ build_image() {
 
   printf "  ${CYAN}Building ${name}:${tag}...${NC}\n"
   if [ "$BUILD_MODE" = "docker" ]; then
-    docker build -t "${ACR_LOGIN_SERVER}/${name}:${tag}" -f "$dockerfile" "$context"
-    docker push "${ACR_LOGIN_SERVER}/${name}:${tag}"
+    if ! docker build -t "${ACR_LOGIN_SERVER}/${name}:${tag}" -f "$dockerfile" "$context"; then
+      printf "${RED}docker build failed for ${name}:${tag}${NC}\n"
+      exit 1
+    fi
+    if ! docker push "${ACR_LOGIN_SERVER}/${name}:${tag}"; then
+      printf "${RED}docker push failed for ${name}:${tag}${NC}\n"
+      exit 1
+    fi
   else
-    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs </dev/null 2>/dev/null || \
-    az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" </dev/null
+    if ! az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs </dev/null 2>/dev/null; then
+      if ! az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" </dev/null; then
+        printf "${RED}az acr build failed for ${name}:${tag}${NC}\n"
+        exit 1
+      fi
+    fi
   fi
   printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
 }
@@ -472,11 +482,14 @@ KUBE_CONTEXT="${AKS_CLUSTER}"
 OMNIVEC_KUBECONFIG="$HOME/.kube/omnivec-${AZURE_ENV_NAME:-omnivec}"
 export KUBECONFIG="$OMNIVEC_KUBECONFIG"
 
-az aks get-credentials \
+if ! az aks get-credentials \
   --resource-group "$RESOURCE_GROUP" \
   --name "$AKS_CLUSTER" \
   --file "$OMNIVEC_KUBECONFIG" \
-  --overwrite-existing >/dev/null
+  --overwrite-existing >/dev/null; then
+  printf "${RED}Failed to fetch AKS credentials for cluster $AKS_CLUSTER${NC}\n"
+  exit 1
+fi
 
 # Also materialize to the default kubeconfig path so kubectl finds the context
 # even if $KUBECONFIG is reset by the outer runner (azd / heartbeat wrappers).
@@ -562,7 +575,10 @@ if [ -n "$CURRENT_HASH" ] && [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
   printf "  ${GREEN}Helm dependencies up to date, skipping.${NC}\n"
 else
   printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
-  helm dependency build "$CHART_DIR" </dev/null 2>/dev/null
+  if ! helm dependency build "$CHART_DIR" </dev/null; then
+    printf "  ${RED}helm dependency build failed.${NC}\n"
+    exit 1
+  fi
   if [ -n "$CURRENT_HASH" ]; then
     echo "$CURRENT_HASH" > "$LOCK_HASH_FILE"
   fi
