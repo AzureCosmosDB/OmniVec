@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 # OmniVec — Hook Test Harness
 # Tests preprovision.ps1 and postprovision.ps1 by mocking external commands.
 # Usage: pwsh scripts/test-hooks.ps1

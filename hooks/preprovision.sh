@@ -60,28 +60,106 @@ acquire_lock
 
 # Helper: safely read an azd env value, returns empty string on failure
 azd_get() {
-  _val=$(azd env get-value "$1" 2>/dev/null) && printf '%s' "$_val" | tr -d '\r' || printf ''
+  _val=$(azd env get-value "$1" < /dev/null 2>/dev/null) && printf '%s' "$_val" | tr -d '\r' || printf ''
+}
+
+# Helper: can we actually prompt the user right now?
+# Tries /dev/tty first (most reliable: even if stdin is redirected, the hook
+# may still have a controlling terminal we can write prompts to). Falls back
+# to stdin-is-a-tty. Respects OMNIVEC_FORCE_NO_TTY for tests / CI simulation.
+_can_prompt() {
+  [ -n "${OMNIVEC_FORCE_NO_TTY:-}" ] && return 1
+  if [ -e /dev/tty ] && ( : >/dev/tty ) 2>/dev/null && ( : </dev/tty ) 2>/dev/null; then
+    return 0
+  fi
+  [ -t 0 ] && return 0
+  return 1
 }
 
 # Helper: read user input from TTY (works in hook context where stdin may be redirected)
+# Returns empty string when no TTY is available — callers must fall back to
+# defaults OR pre-check with _can_prompt to fast-fail before calling this.
 read_input() {
   _prompt=$1
   _input=""
-  if [ -t 0 ]; then
-    printf '%b' "$_prompt"
-    read -r _input || true
-  elif [ -w /dev/tty ] 2>/dev/null && printf "" > /dev/tty 2>/dev/null; then
-    printf '%b' "$_prompt" > /dev/tty
-    read -r _input < /dev/tty || true
-  else
-    # No TTY — try reading from stdin directly
-    read -r _input 2>/dev/null || _input=""
+  if _can_prompt; then
+    if [ -e /dev/tty ] && ( : >/dev/tty ) 2>/dev/null; then
+      printf '%b' "$_prompt" > /dev/tty
+      read -r _input < /dev/tty 2>/dev/null || true
+    else
+      printf '%b' "$_prompt"
+      read -r _input || true
+    fi
   fi
   printf '%s' "$_input"
 }
 
+# a2: Detect non-interactive mode from several common sources. Users (and CI)
+# commonly set one of these; we honor any of them.
+is_noninteractive() {
+  case "${OMNIVEC_NONINTERACTIVE:-}${AZD_NONINTERACTIVE:-}${CI:-}${GITHUB_ACTIONS:-}" in
+    '') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# a2: Apply Quick-start defaults to azd env. Used when non-interactive and no
+# preset config exists, to give a predictable fallback instead of silently
+# accepting empty/garbage input.
+apply_quickstart_defaults() {
+  printf "  ${GREEN}Applying Quick-start defaults (non-interactive mode).${NC}\n"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
+  azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
+  azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
+  azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
+  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true" < /dev/null
+}
+
+# a2: Fail fast when we would need to prompt but can't. Far better than a
+# silent 10-minute deploy with surprise defaults.
+require_tty_or_preset() {
+  if _can_prompt; then
+    return 0
+  fi
+  if is_noninteractive; then
+    apply_quickstart_defaults
+    printf "\n${GREEN}Pre-provision checks passed (non-interactive). Proceeding with Bicep deployment...${NC}\n"
+    exit 0
+  fi
+  printf "\n${RED}ERROR: No TTY and no configuration found.${NC}\n" >&2
+  printf "  azd hooks run this script without an interactive terminal (common in CI,\n" >&2
+  printf "  Docker, nohup, or piped shells), and no configuration has been pre-set.\n" >&2
+  printf "\n  Fix with ONE of:\n" >&2
+  printf "    1) Run interactively:  azd up  (from a real terminal)\n" >&2
+  printf "    2) Accept defaults:    OMNIVEC_NONINTERACTIVE=1 azd up\n" >&2
+  printf "    3) Pre-set config, e.g.:\n" >&2
+  printf "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms\n" >&2
+  printf "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2\n" >&2
+  printf "         azd env set OMNIVEC_GPU_NODE_COUNT 0\n" >&2
+  printf "         azd env set OMNIVEC_ENABLE_BLOB_SOURCE true\n" >&2
+  printf "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless\n" >&2
+  exit 1
+}
+
 DEPLOYMENT_DETECTED=false
 IN_PLACE_UPDATE=false
+
+# ── Source hardening libraries ──────────────────────────────────────────────
+SCRIPT_DIR_INIT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/heartbeat.sh
+. "$SCRIPT_DIR_INIT/lib/heartbeat.sh" 2>/dev/null || true
+# shellcheck source=lib/preflight.sh
+. "$SCRIPT_DIR_INIT/lib/preflight.sh" 2>/dev/null || true
+
+# Extend the existing EXIT trap to also emit a slowest-step summary on failure.
+_preprov_exit() {
+  _rc=$?
+  [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary
+  release_lock
+  exit "$_rc"
+}
+trap '_preprov_exit' EXIT INT TERM
 
 
 
@@ -99,7 +177,12 @@ KUBECTL_DIR="${HOME}/.azure-kubectl"
 if ! command -v kubectl >/dev/null 2>&1; then
   printf "  ${YELLOW}kubectl not found — installing to ${KUBECTL_DIR}...${NC}\n"
   mkdir -p "$KUBECTL_DIR"
-  az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
+  if command -v wait_with_heartbeat >/dev/null 2>&1; then
+    wait_with_heartbeat "Installing kubectl (az aks install-cli)" \
+      az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" </dev/null 2>/dev/null || true
+  else
+    az aks install-cli --install-location "$KUBECTL_DIR/kubectl" --kubelogin-install-location "$KUBECTL_DIR/kubelogin" < /dev/null 2>/dev/null || true
+  fi
   chmod +x "$KUBECTL_DIR/kubectl" "$KUBECTL_DIR/kubelogin" 2>/dev/null || true
   export PATH="$KUBECTL_DIR:$PATH"
   if ! command -v kubectl >/dev/null 2>&1; then
@@ -116,7 +199,15 @@ if ! command -v helm >/dev/null 2>&1; then
   HELM_INSTALL_DIR="${HOME}/.local/bin"
   mkdir -p "$HELM_INSTALL_DIR"
   export PATH="$HELM_INSTALL_DIR:$PATH"
-  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR="$HELM_INSTALL_DIR" USE_SUDO="false" sh 2>/dev/null || true
+  # d4: Pin helm version by default for deterministic installs. Override via
+  # HELM_VERSION=v3.x.y. Unset/empty ⇒ get-helm-3 grabs "latest" (legacy).
+  HELM_VERSION="${HELM_VERSION:-v3.16.2}"
+  if command -v wait_with_heartbeat >/dev/null 2>&1; then
+    wait_with_heartbeat "Installing helm ${HELM_VERSION}" sh -c \
+      "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 </dev/null | HELM_INSTALL_DIR='$HELM_INSTALL_DIR' DESIRED_VERSION='$HELM_VERSION' USE_SUDO=false sh </dev/null 2>/dev/null" || true
+  else
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 </dev/null | HELM_INSTALL_DIR="$HELM_INSTALL_DIR" DESIRED_VERSION="$HELM_VERSION" USE_SUDO="false" sh </dev/null 2>/dev/null || true
+  fi
   if ! command -v helm >/dev/null 2>&1; then
     printf "  ${RED}Failed to install helm. Install manually: https://helm.sh/docs/intro/install/${NC}\n"
     exit 1
@@ -133,24 +224,29 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 if [ ! -f "$REPO_ROOT/docgrok/Dockerfile" ]; then
   printf "  ${YELLOW}Initializing git submodules...${NC}\n"
-  (cd "$REPO_ROOT" && git submodule update --init --recursive 2>/dev/null) || true
+  (cd "$REPO_ROOT" && git submodule update --init --recursive </dev/null 2>/dev/null) || true
 fi
 
 # ── Validate Azure login ────────────────────────────────────────────────────
 
 printf "\n${YELLOW}Checking Azure login...${NC}\n"
-if ! az account show >/dev/null 2>&1; then
+if ! az account show < /dev/null >/dev/null 2>&1; then
   printf "${RED}Not logged into Azure. Run 'az login' first.${NC}\n"
   exit 1
 fi
 
-SUBSCRIPTION=$(az account show --query name -o tsv)
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+SUBSCRIPTION=$(az account show --query name -o tsv < /dev/null)
+SUBSCRIPTION_ID=$(az account show --query id -o tsv < /dev/null)
 printf "${GREEN}Logged in to subscription: ${SUBSCRIPTION} (${SUBSCRIPTION_ID})${NC}\n"
+
+# ── c1: Ensure required resource providers are registered ───────────────────
+if command -v preflight_require_providers >/dev/null 2>&1; then
+  preflight_require_providers || true
+fi
 
 # ── Check for existing deployment (RG exists + config present = update in-place) ─
 RG_NAME="rg-omnivec-${AZURE_ENV_NAME}"
-RG_EXISTS=$(az group exists --name "$RG_NAME" 2>/dev/null || echo "false")
+RG_EXISTS=$(az group exists --name "$RG_NAME" < /dev/null 2>/dev/null || echo "false")
 RG_EXISTS=$(printf '%s' "$RG_EXISTS" | tr -d '\r\n ')
 
 if [ "$RG_EXISTS" = "true" ]; then
@@ -165,10 +261,10 @@ if [ "$RG_EXISTS" = "true" ]; then
     "omnivec-build:OMNIVEC_BUILD_MODE"; do
     _tag=$(echo "$_pair" | cut -d: -f1)
     _env=$(echo "$_pair" | cut -d: -f2)
-    _val=$(az group show --name "$RG_NAME" --query "tags.\"$_tag\"" -o tsv 2>/dev/null || true)
+    _val=$(az group show --name "$RG_NAME" --query "tags.\"$_tag\"" -o tsv < /dev/null 2>/dev/null || true)
     _val=$(printf '%s' "$_val" | tr -d '\r\n')
     if [ -n "$_val" ]; then
-      azd env set "$_env" "$_val" 2>/dev/null
+      azd env set "$_env" "$_val" < /dev/null 2>/dev/null
       printf "  ${_env} = ${_val}\n"
     fi
   done
@@ -185,6 +281,11 @@ if [ -n "$_existing_vm" ]; then
 fi
 
 # ── Fresh deploy: offer auto-defaults or interactive ─────────────────────────
+# a2: If we have no preset config AND no TTY, fail fast with a clear error
+# (or auto-apply Quick-start if OMNIVEC_NONINTERACTIVE / CI is set).
+# Must run BEFORE the first read_input.
+require_tty_or_preset
+
 echo ""
 printf "${YELLOW}No configuration found. Choose setup mode:${NC}\n"
 echo "  1) Quick start — use recommended defaults (fastest, no GPU)"
@@ -195,12 +296,12 @@ setup_mode=${setup_mode:-1}
 
 if [ "$setup_mode" = "1" ]; then
   printf "\n${GREEN}Applying recommended defaults:${NC}\n"
-  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms"
-  azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2"
-  azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
-  azd env set OMNIVEC_GPU_NODE_COUNT      "0"
-  azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless"
-  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true"
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
+  azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
+  azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
+  azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
+  azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
+  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true" < /dev/null
   echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_B4ms"
   echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
   echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
@@ -232,11 +333,11 @@ else
   case "$meta_choice" in
     2)
       printf "${GREEN}Using CosmosDB Provisioned for metadata storage.${NC}\n"
-      azd env set OMNIVEC_METADATA_STORE "cosmosdb-provisioned"
+      azd env set OMNIVEC_METADATA_STORE "cosmosdb-provisioned" < /dev/null
       ;;
     *)
       printf "${GREEN}Using CosmosDB Serverless for metadata storage.${NC}\n"
-      azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
+      azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless" < /dev/null
       ;;
   esac
 fi
@@ -260,11 +361,11 @@ else
   case "$blob_choice" in
     1)
       printf "${GREEN}Blob source enabled.${NC}\n"
-      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
+      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true" < /dev/null
       ;;
     *)
       printf "${GREEN}Blob source disabled.${NC}\n"
-      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "false"
+      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "false" < /dev/null
       ;;
   esac
 fi
@@ -281,7 +382,7 @@ LOCATION="${AZURE_LOCATION:-centralus}"
 validate_sku() {
   _sku=$1
   _result=$(az vm list-skus --location "$LOCATION" --size "$_sku" --resource-type virtualMachines \
-    --query "[?name=='$_sku' && (restrictions==null || restrictions[0]==null)].name" -o tsv 2>/dev/null || true)
+    --query "[?name=='$_sku' && (restrictions==null || restrictions[0]==null)].name" -o tsv < /dev/null 2>/dev/null || true)
   _result=$(printf '%s' "$_result" | tr -d '\r\n ')
   [ -n "$_result" ] && [ "$_result" = "$_sku" ]
 }
@@ -404,10 +505,10 @@ if [ -z "$SYS_SKU" ]; then
 fi
 
 # Store in azd env for Bicep parameter substitution
-azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "$SYS_SKU"
-azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count"
-azd env set OMNIVEC_GPU_NODE_VM_SIZE "$GPU_SKU"
-azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count"
+azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "$SYS_SKU" < /dev/null
+azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count" < /dev/null
+azd env set OMNIVEC_GPU_NODE_VM_SIZE "$GPU_SKU" < /dev/null
+azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count" < /dev/null
 
 # ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
 printf "\n${CYAN}Sanitizing environment values...${NC}\n"
@@ -416,7 +517,7 @@ for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NOD
   if [ -n "$raw" ]; then
     clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [ "$raw" != "$clean" ]; then
-      azd env set "$key" "$clean"
+      azd env set "$key" "$clean" < /dev/null
       printf "  ${YELLOW}Cleaned ${key}: removed hidden characters${NC}\n"
     fi
   fi
@@ -425,3 +526,21 @@ done
 printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
 printf "${CYAN}Environment: ${AZURE_ENV_NAME}${NC}\n"
 printf "${CYAN}Each installation gets a unique resource token derived from (subscription + resource group + env name).${NC}\n"
+
+# ── b4/c2: Final preflight — quota + blob-flip guard + re-sanitize ──────────
+if command -v preflight_blob_flip_guard >/dev/null 2>&1; then
+  _want_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
+  preflight_blob_flip_guard "$RG_NAME" "${_want_blob:-true}" || exit 1
+fi
+if command -v preflight_vcpu_quota >/dev/null 2>&1; then
+  _sys_sku=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
+  _sys_count=$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)
+  _gpu_sku=$(azd_get OMNIVEC_GPU_NODE_VM_SIZE)
+  _gpu_count=$(azd_get OMNIVEC_GPU_NODE_COUNT)
+  preflight_vcpu_quota "$LOCATION" "$_sys_sku" "$_sys_count" "$_gpu_sku" "$_gpu_count" || true
+fi
+if command -v preflight_sanitize_env >/dev/null 2>&1; then
+  for _k in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE; do
+    preflight_sanitize_env "$_k" || true
+  done
+fi

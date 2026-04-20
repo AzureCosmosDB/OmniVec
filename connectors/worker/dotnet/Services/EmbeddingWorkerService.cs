@@ -78,6 +78,10 @@ public class EmbeddingWorkerService : BackgroundService
         {
             try
             {
+                // Heartbeat: we're alive and about to receive. Keeps liveness probe happy
+                // even when the subscription is empty.
+                WorkerHeartbeat.Beat();
+
                 // Pull a batch of messages
                 var sbMessages = await receiver.ReceiveMessagesAsync(
                     _options.EmbedBatchSize,
@@ -85,6 +89,9 @@ public class EmbeddingWorkerService : BackgroundService
                     ct);
 
                 if (sbMessages.Count == 0) continue;
+
+                // First message received ever → mark ready.
+                WorkerHeartbeat.MarkReceivedFirstMessage();
 
                 // Deserialize and pair with SB messages
                 var items = new List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)>();

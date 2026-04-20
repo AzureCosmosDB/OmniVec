@@ -19,17 +19,36 @@ param kubernetesVersion string = '1.33'
 @description('VM size for AKS system node pool')
 param systemNodeVmSize string = 'Standard_D4s_v3'
 
-@description('Initial system node count')
-param systemNodeCount int = 2
+@description('Initial system node count. Kept as string so azd env substitution (which always produces a string, even for ints) never breaks ARM type-coercion. Parsed/defaulted below.')
+param systemNodeCount string = '2'
 
 @description('VM size for AKS GPU node pool')
 param gpuNodeVmSize string = 'Standard_NC6s_v3'
 
-@description('Initial GPU node count (0 to skip GPU pool)')
-param gpuNodeCount int = 4
+@description('Initial GPU node count (0 to skip GPU pool). String for the same reason as systemNodeCount.')
+param gpuNodeCount string = '0'
 
-@description('Enable blob storage as a document source (creates Storage Account, Service Bus, Event Grid)')
-param enableBlobSource bool = true
+@description('Enable blob storage as a document source (creates Storage Account, Service Bus, Event Grid). String form: "true"/"false"/"1"/"0"/"yes"/"no" (case-insensitive). Empty -> defaults to true.')
+param enableBlobSource string = 'true'
+
+// =============================================================================
+// PARAMETER NORMALIZATION
+// Defense in depth: azd env values can carry BOM (U+FEFF), CR, or whitespace
+// from copy-paste or editor mis-saves. Hooks sanitize too, but Bicep
+// normalizes one more time before int/bool coercion so a stray byte never
+// manifests as an "InvalidTemplate" 10 minutes into a deploy.
+// =============================================================================
+
+var _sysCountClean  = trim(replace(replace(systemNodeCount, '\u{FEFF}', ''), '\r', ''))
+var _gpuCountClean  = trim(replace(replace(gpuNodeCount,    '\u{FEFF}', ''), '\r', ''))
+var _blobClean      = toLower(trim(replace(replace(enableBlobSource, '\u{FEFF}', ''), '\r', '')))
+
+var systemNodeCountInt   = empty(_sysCountClean) ? 2 : int(_sysCountClean)
+var gpuNodeCountInt      = empty(_gpuCountClean) ? 0 : int(_gpuCountClean)
+// Empty -> preserves prior default (true). Explicit false-tokens -> false. Anything else -> true.
+var enableBlobSourceBool = empty(_blobClean)
+  ? true
+  : !(_blobClean == 'false' || _blobClean == '0' || _blobClean == 'no')
 
 // =============================================================================
 // NAMING (must be computed before resource group to avoid circular dependency)
@@ -99,7 +118,7 @@ module keyvault 'modules/keyvault.bicep' = {
 }
 
 // 4. Storage Account (only when blob source is enabled)
-module storage 'modules/storage.bicep' = if (enableBlobSource) {
+module storage 'modules/storage.bicep' = if (enableBlobSourceBool) {
   name: 'storage'
   scope: rg
   params: {
@@ -111,7 +130,7 @@ module storage 'modules/storage.bicep' = if (enableBlobSource) {
 }
 
 // 4. Service Bus (only when blob source is enabled)
-module servicebus 'modules/servicebus.bicep' = if (enableBlobSource) {
+module servicebus 'modules/servicebus.bicep' = if (enableBlobSourceBool) {
   name: 'servicebus'
   scope: rg
   params: {
@@ -123,7 +142,7 @@ module servicebus 'modules/servicebus.bicep' = if (enableBlobSource) {
 }
 
 // 5. Event Grid (only when blob source is enabled)
-module eventgrid 'modules/eventgrid.bicep' = if (enableBlobSource) {
+module eventgrid 'modules/eventgrid.bicep' = if (enableBlobSourceBool) {
   name: 'eventgrid'
   scope: rg
   params: {
@@ -144,6 +163,7 @@ module appinsights 'modules/appinsights.bicep' = {
     appInsightsName: '${prefix}-insights-${resourceToken}'
     location: location
     tags: tags
+    principalId: aks.outputs.kubeletObjectId
   }
 }
 
@@ -168,9 +188,9 @@ module aks 'modules/aks.bicep' = {
     tags: tags
     kubernetesVersion: kubernetesVersion
     systemNodeVmSize: systemNodeVmSize
-    systemNodeCount: systemNodeCount
+    systemNodeCount: systemNodeCountInt
     gpuNodeVmSize: gpuNodeVmSize
-    gpuNodeCount: gpuNodeCount
+    gpuNodeCount: gpuNodeCountInt
   }
 }
 
@@ -213,12 +233,12 @@ output AZURE_ACR_LOGIN_SERVER string = acr.outputs.loginServer
 output AZURE_ACR_NAME string = acr.outputs.registryName
 output AZURE_COSMOS_ENDPOINT string = cosmosdb.outputs.endpoint
 output AZURE_COSMOS_ACCOUNT_NAME string = cosmosdb.outputs.accountName
-output AZURE_ENABLE_BLOB_SOURCE string = enableBlobSource ? 'true' : 'false'
-output AZURE_STORAGE_ACCOUNT_NAME string = enableBlobSource ? storage!.outputs.accountName : ''
-output AZURE_STORAGE_BLOB_ENDPOINT string = enableBlobSource ? storage!.outputs.primaryBlobEndpoint : ''
-output AZURE_STORAGE_QUEUE_ENDPOINT string = enableBlobSource ? storage!.outputs.queueEndpoint : ''
-output AZURE_SERVICEBUS_NAMESPACE string = enableBlobSource ? servicebus!.outputs.namespaceName : ''
-output AZURE_SERVICEBUS_ENDPOINT string = enableBlobSource ? servicebus!.outputs.endpoint : ''
+output AZURE_ENABLE_BLOB_SOURCE string = enableBlobSourceBool ? 'true' : 'false'
+output AZURE_STORAGE_ACCOUNT_NAME string = enableBlobSourceBool ? storage!.outputs.accountName : ''
+output AZURE_STORAGE_BLOB_ENDPOINT string = enableBlobSourceBool ? storage!.outputs.primaryBlobEndpoint : ''
+output AZURE_STORAGE_QUEUE_ENDPOINT string = enableBlobSourceBool ? storage!.outputs.queueEndpoint : ''
+output AZURE_SERVICEBUS_NAMESPACE string = enableBlobSourceBool ? servicebus!.outputs.namespaceName : ''
+output AZURE_SERVICEBUS_ENDPOINT string = enableBlobSourceBool ? servicebus!.outputs.endpoint : ''
 output AZURE_IDENTITY_CLIENT_ID string = identity.outputs.clientId
 output AZURE_KEYVAULT_URI string = keyvault.outputs.vaultUri
 output AZURE_APPINSIGHTS_CONNECTION_STRING string = appinsights.outputs.connectionString

@@ -1,4 +1,4 @@
-# OmniVec — postprovision hook (PowerShell)
+﻿# OmniVec — postprovision hook (PowerShell)
 # Pushes images to ACR, configures AKS, creates K8s secrets, deploys via Helm
 
 $ErrorActionPreference = "Stop"

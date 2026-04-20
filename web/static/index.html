@@ -910,6 +910,16 @@
                         Deployments
                     </a>
                 </div>
+
+                <div class="nav-section">
+                    <div class="nav-section-title">Deployment</div>
+                    <a class="nav-item" onclick="showSection('deployment')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Import / Export
+                    </a>
+                </div>
             </nav>
 
             <div class="sidebar-footer">
@@ -1308,12 +1318,6 @@
                 <header class="header">
                     <h2 class="header-title">Metrics</h2>
                     <div class="header-actions">
-                        <button class="btn btn-secondary" onclick="clearMetrics()">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                                <path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                            </svg>
-                            Clear Metrics
-                        </button>
                         <button class="btn btn-ghost" onclick="loadMetricsSection()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/></svg>
                             Refresh
@@ -1455,6 +1459,46 @@
                 </div>
             </section>
 
+            <section id="section-deployment" class="section" style="display: none;">
+                <header class="header">
+                    <h2 class="header-title">Import / Export</h2>
+                </header>
+                <div class="content">
+                    <div class="card" style="margin-bottom: 24px;">
+                        <div class="card-body">
+                            <h3 class="card-title">Backup / migrate deployment</h3>
+                            <p style="color: var(--text-secondary); margin: 8px 0 16px;">
+                                Export sources, vector stores, pipelines, models, and assistants as a JSON bundle and import them back here
+                                or into another OmniVec deployment. You choose which resource types to include; pipelines/source checkpoints
+                                can be bundled so in-progress runs resume after restore.
+                            </p>
+                            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                                <button class="btn btn-primary" onclick="showExportModal()">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                    Export deployment
+                                </button>
+                                <button class="btn btn-secondary" onclick="showImportModal()">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                    Import bundle
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-body">
+                            <h3 class="card-title">Tips</h3>
+                            <ul style="color: var(--text-secondary); line-height: 1.8; padding-left: 20px; margin: 8px 0;">
+                                <li>Secrets (connection strings, API keys, passwords) are redacted as <code>"***"</code> by default &mdash; toggle <b>Include secrets</b> to embed them.</li>
+                                <li>Enable <b>Include checkpoints</b> to carry over processing progress so imported pipelines can resume where they left off.</li>
+                                <li>Pipeline filter restricts the bundle to just the listed pipelines and the sources / vector stores / models / assistants they reference.</li>
+                                <li>Imports land pipelines in <b>paused</b> state by default &mdash; review and resume explicitly.</li>
+                                <li>On conflict, choose <b>skip</b> (safe), <b>overwrite</b> (replace), or <b>rename</b> (copy with new IDs).</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
         </main>
     </div>
 
@@ -1497,6 +1541,94 @@
                     </button>
                     <button class="btn btn-primary" onclick="saveSourceFromDetail()">Save Changes</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export / Import Modals -->
+    <div class="modal-overlay" id="export-modal">
+        <div class="modal modal-full">
+            <div class="modal-header">
+                <h3 class="modal-title">Export Deployment</h3>
+                <button class="modal-close" onclick="closeModal('export-modal')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden;">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <div style="background: var(--bg-tertiary); padding: 20px; border-right: 1px solid var(--border-primary); overflow-y: auto;">
+                        <h4 style="margin: 0 0 8px;">Options</h4>
+                        <p style="color: var(--text-tertiary); font-size: 0.88em; margin-bottom: 16px;">
+                            Pick exactly which items go into the bundle. A section with nothing selected is omitted entirely.
+                        </p>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                            <input type="checkbox" id="exp-secrets">
+                            <span>Include <b>secrets</b></span>
+                        </label>
+                        <small style="color: var(--text-tertiary); display: block; margin-bottom: 16px;">
+                            Secrets are redacted as <code>"***"</code> when unchecked.
+                        </small>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+                            <input type="checkbox" id="exp-checkpoints">
+                            <span>Include <b>checkpoints</b><br><small style="color:var(--text-tertiary);">Resume in-progress runs after restore</small></span>
+                        </label>
+                        <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                        <div id="exp-summary" style="color: var(--text-secondary); font-size: 0.88em;">Loading resources...</div>
+                    </div>
+                    <div id="exp-picker" style="padding: 20px; overflow-y: auto;">
+                        <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">Loading...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('export-modal')">Cancel</button>
+                <button class="btn btn-primary" id="export-run-btn" onclick="runExport()">Download bundle</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="import-modal">
+        <div class="modal modal-full">
+            <div class="modal-header">
+                <h3 class="modal-title">Import Deployment</h3>
+                <button class="modal-close" onclick="closeModal('import-modal')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden;">
+                <div style="display: grid; grid-template-columns: 320px 1fr; height: 100%;">
+                    <div style="background: var(--bg-tertiary); padding: 20px; border-right: 1px solid var(--border-primary); overflow-y: auto;">
+                        <h4 style="margin: 0 0 8px;">Options</h4>
+                        <div class="form-group">
+                            <label>Bundle file</label>
+                            <input type="file" id="imp-file" accept="application/json,.json" class="form-input" onchange="onImportFileChosen()">
+                        </div>
+                        <div class="form-group">
+                            <label>On conflict</label>
+                            <select id="imp-on-conflict" class="form-input">
+                                <option value="skip" selected>skip — keep existing (safest)</option>
+                                <option value="overwrite">overwrite — replace existing</option>
+                                <option value="rename">rename — create copies with new IDs</option>
+                            </select>
+                        </div>
+                        <p style="color: var(--text-tertiary); font-size: 0.88em;">
+                            Imported pipelines always land in <b>paused</b> state.
+                        </p>
+                        <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                        <div id="imp-summary" style="color: var(--text-secondary); font-size: 0.88em;">Pick a file to preview its contents.</div>
+                    </div>
+                    <div style="padding: 20px; overflow-y: auto; display: flex; flex-direction: column;">
+                        <div id="imp-picker" style="flex: 1;">
+                            <div style="text-align: center; color: var(--text-tertiary); padding: 40px;">Select a bundle file to preview &amp; choose items.</div>
+                        </div>
+                        <div id="imp-result" style="display:none; margin-top: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px; white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85em; max-height: 260px; overflow:auto;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('import-modal')">Cancel</button>
+                <button class="btn btn-secondary" onclick="runImport(true)">Dry run</button>
+                <button class="btn btn-primary" onclick="runImport(false)">Apply import</button>
             </div>
         </div>
     </div>
@@ -2051,6 +2183,18 @@
 
                             <!-- Mode: Select Existing -->
                             <div id="pl-dest-existing-section">
+                                <div class="form-group" style="margin-bottom: 12px;">
+                                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); border: 2px solid transparent;" id="pl-dest-same-as-source-label">
+                                        <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()" style="width: 18px; height: 18px;">
+                                        <div>
+                                            <div style="font-weight: 500; font-size: 13px;">Write vectors back to source container</div>
+                                            <div style="font-size: 12px; color: var(--text-tertiary);">Embeds vectors directly into source documents (inline mode). No separate destination needed.</div>
+                                        </div>
+                                    </label>
+                                </div>
+                                <div id="pl-dest-same-as-source-info" style="display: none; margin-bottom: 12px; padding: 10px 14px; background: var(--info-muted); border: 1px solid var(--info); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary);">
+                                    <strong>Note:</strong> The managed identity needs <strong>Cosmos DB Built-in Data Contributor</strong> role (read + write) on the source container.
+                                </div>
                                 <div class="form-group">
                                     <label class="form-label">Vector Store</label>
                                     <div style="display: flex; gap: 8px;">
@@ -2064,19 +2208,19 @@
                                 <div id="pl-dest-existing-test-result" style="margin-top: 8px;"></div>
                                 <div class="form-group" id="pl-dest-vector-policy-group" style="display: none; margin-top: 12px;">
                                     <label class="form-label">Vector Embedding Policy</label>
-                                    <select class="form-input" id="pl-dest-vector-policy"></select>
+                                    <div style="display: flex; gap: 8px;">
+                                        <select class="form-input" id="pl-dest-vector-policy" style="flex: 1;"></select>
+                                        <button type="button" class="btn btn-secondary" onclick="loadVectorPoliciesForDest()" style="white-space: nowrap;" title="Refresh embedding policies">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                                            Refresh
+                                        </button>
+                                    </div>
                                     <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
                                         Select which vector embedding field to use for this pipeline
                                     </small>
                                     <div id="pl-dest-vector-policy-warning" style="display: none; margin-top: 8px; padding: 8px 12px; background: var(--warning-muted, rgba(255,204,0,0.1)); border: 1px solid var(--warning); border-radius: var(--radius-sm); font-size: 12px; color: var(--warning);">
                                         ⚠ No vector policies found on destination. Test the connection or check vector indexing configuration.
                                     </div>
-                                </div>
-                                <div class="form-group" style="margin-top: 12px;">
-                                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                        <input type="checkbox" id="pl-dest-same-as-source" onchange="toggleDestSameAsSource()">
-                                        <span style="font-size: 13px; color: var(--text-secondary);">Same as source (write vectors to the source container)</span>
-                                    </label>
                                 </div>
                                 <div id="pl-dest-same-container-indicator" style="display: none; margin-top: 12px; padding: 10px 14px; background: rgba(34,197,94,0.08); border: 1px solid var(--success); border-radius: var(--radius-sm); font-size: 13px; color: var(--success);">
                                     ✓ Source and destination are the same container (inline mode recommended)
@@ -2664,6 +2808,318 @@
             showModal('destination-modal');
         }
 
+        // -------- Export / Import --------
+        const EXP_TYPES = [
+            { key: 'sources',      label: 'Sources',      endpoint: '/api/sources',      listKey: 'sources' },
+            { key: 'destinations', label: 'Vector Stores',endpoint: '/api/destinations', listKey: 'destinations' },
+            { key: 'pipelines',    label: 'Pipelines',    endpoint: '/api/pipelines',    listKey: 'pipelines' },
+            { key: 'models',       label: 'Models',       endpoint: '/api/models',       listKey: 'models' },
+            { key: 'assistants',   label: 'Assistants',   endpoint: '/api/assistants',   listKey: 'assistants' },
+        ];
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function renderPickerSection(containerId, typeKey, label, items, opts) {
+            opts = opts || {};
+            const selected = opts.selected == null ? true : !!opts.selected;
+            const itemsHtml = items.length === 0
+                ? `<div style="padding: 12px; color: var(--text-tertiary); font-size: 0.9em;">No ${label.toLowerCase()} available.</div>`
+                : items.map((it, i) => {
+                    const id = it.id || ('' + i);
+                    const name = it.name || it.id || '(unnamed)';
+                    const sub = it.id && it.id !== name ? it.id : '';
+                    return `<label class="picker-item" style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:4px;">
+                        <input type="checkbox" class="picker-chk" data-type="${typeKey}" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" ${selected ? 'checked' : ''}>
+                        <span style="flex:1;">
+                            <span style="color: var(--text-primary);">${escapeHtml(name)}</span>
+                            ${sub ? `<small style="color: var(--text-tertiary); margin-left: 6px;">${escapeHtml(sub)}</small>` : ''}
+                        </span>
+                    </label>`;
+                }).join('');
+            return `
+                <div class="picker-section" data-type="${typeKey}" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
+                    <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);">
+                        <label style="display:flex; align-items:center; gap:8px; flex:1;">
+                            <input type="checkbox" class="picker-section-chk" data-type="${typeKey}" ${selected ? 'checked' : ''} onchange="pickerToggleSection('${containerId}', '${typeKey}', this.checked)">
+                            <b>${label}</b>
+                            <span class="picker-count" data-type="${typeKey}" style="color: var(--text-tertiary); font-size: 0.85em;"></span>
+                        </label>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="pickerSelectAll('${containerId}', '${typeKey}', true)">All</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="pickerSelectAll('${containerId}', '${typeKey}', false)">None</button>
+                    </div>
+                    <div class="picker-items" data-type="${typeKey}" style="padding: 6px 10px; max-height: 260px; overflow-y: auto;">
+                        ${itemsHtml}
+                    </div>
+                </div>`;
+        }
+
+        function pickerSelectAll(containerId, typeKey, value) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll(`.picker-chk[data-type="${typeKey}"]`).forEach(cb => cb.checked = value);
+            const sc = root.querySelector(`.picker-section-chk[data-type="${typeKey}"]`);
+            if (sc) sc.checked = value;
+            pickerUpdateCounts(containerId);
+        }
+
+        function pickerToggleSection(containerId, typeKey, value) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll(`.picker-chk[data-type="${typeKey}"]`).forEach(cb => cb.checked = value);
+            pickerUpdateCounts(containerId);
+        }
+
+        function pickerUpdateCounts(containerId) {
+            const root = document.getElementById(containerId);
+            root.querySelectorAll('.picker-section').forEach(sec => {
+                const t = sec.getAttribute('data-type');
+                const total = sec.querySelectorAll('.picker-chk').length;
+                const sel = sec.querySelectorAll('.picker-chk:checked').length;
+                const el = sec.querySelector(`.picker-count[data-type="${t}"]`);
+                if (el) el.textContent = total === 0 ? '(empty)' : `${sel}/${total} selected`;
+                const sc = sec.querySelector(`.picker-section-chk[data-type="${t}"]`);
+                if (sc) sc.checked = sel > 0 && sel === total;
+            });
+            // summary update
+            const summaryId = containerId === 'exp-picker' ? 'exp-summary' : 'imp-summary';
+            const summary = document.getElementById(summaryId);
+            if (summary) {
+                const parts = [];
+                root.querySelectorAll('.picker-section').forEach(sec => {
+                    const t = sec.getAttribute('data-type');
+                    const sel = sec.querySelectorAll('.picker-chk:checked').length;
+                    const label = (EXP_TYPES.find(x => x.key === t) || {}).label || t;
+                    if (sel > 0) parts.push(`${label}: ${sel}`);
+                });
+                summary.innerHTML = parts.length
+                    ? '<b>Selected:</b><br>' + parts.map(p => '&bull; ' + escapeHtml(p)).join('<br>')
+                    : '<i>Nothing selected.</i>';
+            }
+        }
+
+        async function showExportModal() {
+            document.getElementById('exp-secrets').checked = false;
+            document.getElementById('exp-checkpoints').checked = false;
+            const picker = document.getElementById('exp-picker');
+            const runBtn = document.getElementById('export-run-btn');
+            // Disable Download until everything is loaded
+            runBtn.disabled = true;
+            const origBtnText = 'Download bundle';
+            runBtn.textContent = 'Loading resources…';
+            // Render placeholder sections immediately so user sees structure
+            picker.innerHTML = EXP_TYPES.map(t => `
+                <div class="picker-section" data-type="${t.key}" data-loaded="0" style="margin-bottom: 14px; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden;">
+                    <div style="display:flex; align-items:center; gap:10px; padding: 10px 14px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary);">
+                        <b style="flex:1;">${t.label}</b>
+                        <span style="color: var(--text-tertiary); font-size: 0.85em;" class="picker-placeholder-status">queued…</span>
+                    </div>
+                    <div class="picker-items" data-type="${t.key}" style="padding: 12px; color: var(--text-tertiary); font-size: 0.9em;">Waiting…</div>
+                </div>
+            `).join('');
+            showModal('export-modal');
+
+            // Load one type at a time, render as each completes
+            try {
+                for (const t of EXP_TYPES) {
+                    const sec = picker.querySelector(`.picker-section[data-type="${t.key}"]`);
+                    if (!sec) continue;
+                    const statusEl = sec.querySelector('.picker-placeholder-status');
+                    const itemsEl = sec.querySelector('.picker-items');
+                    if (statusEl) statusEl.textContent = 'loading…';
+                    if (itemsEl) itemsEl.textContent = 'Loading…';
+                    let items = [];
+                    try {
+                        const res = await apiFetch(t.endpoint);
+                        if (res.ok) {
+                            const data = await res.json();
+                            const raw = Array.isArray(data) ? data : (data[t.listKey] || []);
+                            items = raw.map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                        }
+                    } catch (_) { /* ignore, show empty */ }
+                    sec.outerHTML = renderPickerSection('exp-picker', t.key, t.label, items, { selected: true });
+                    pickerUpdateCounts('exp-picker');
+                }
+                picker.addEventListener('change', () => pickerUpdateCounts('exp-picker'));
+                pickerUpdateCounts('exp-picker');
+            } finally {
+                runBtn.disabled = false;
+                runBtn.textContent = origBtnText;
+            }
+        }
+
+        async function runExport() {
+            const root = document.getElementById('exp-picker');
+            const includeTypes = [];
+            const idsByType = {};
+            for (const t of EXP_TYPES) {
+                const sel = Array.from(root.querySelectorAll(`.picker-chk[data-type="${t.key}"]:checked`))
+                    .map(cb => cb.getAttribute('data-id'));
+                const total = root.querySelectorAll(`.picker-chk[data-type="${t.key}"]`).length;
+                if (sel.length === 0) continue;
+                includeTypes.push(t.key);
+                // If the user selected every item, don't send an id filter (server returns all)
+                if (sel.length < total) idsByType[t.key] = sel;
+            }
+            if (includeTypes.length === 0) { alert('Select at least one item.'); return; }
+
+            const params = new URLSearchParams({
+                include: includeTypes.join(','),
+                include_secrets: document.getElementById('exp-secrets').checked ? 'true' : 'false',
+                include_checkpoints: document.getElementById('exp-checkpoints').checked ? 'true' : 'false',
+            });
+            const paramKey = {
+                sources: 'source_ids', destinations: 'destination_ids',
+                pipelines: 'pipeline_ids', models: 'model_ids', assistants: 'assistant_ids'
+            };
+            for (const [t, ids] of Object.entries(idsByType)) params.set(paramKey[t], ids.join(','));
+
+            const btn = document.getElementById('export-run-btn');
+            btn.disabled = true; btn.textContent = 'Exporting...';
+            try {
+                const res = await apiFetch('/api/admin/export?' + params.toString());
+                if (!res.ok) {
+                    const err = await res.text();
+                    throw new Error(err || ('HTTP ' + res.status));
+                }
+                const bundle = await res.json();
+                const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+                const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `omnivec-export-${ts}.json`;
+                document.body.appendChild(a); a.click(); a.remove();
+                URL.revokeObjectURL(a.href);
+                closeModal('export-modal');
+            } catch (e) {
+                alert('Export failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = 'Download bundle';
+            }
+        }
+
+        let _importBundle = null;
+
+        function showImportModal() {
+            document.getElementById('imp-file').value = '';
+            document.getElementById('imp-on-conflict').value = 'skip';
+            document.getElementById('imp-picker').innerHTML = '<div style="text-align:center; color: var(--text-tertiary); padding: 40px;">Select a bundle file to preview &amp; choose items.</div>';
+            document.getElementById('imp-summary').textContent = 'Pick a file to preview its contents.';
+            const r = document.getElementById('imp-result');
+            r.style.display = 'none'; r.textContent = '';
+            _importBundle = null;
+            showModal('import-modal');
+        }
+
+        async function onImportFileChosen() {
+            const fileInput = document.getElementById('imp-file');
+            const picker = document.getElementById('imp-picker');
+            if (!fileInput.files || !fileInput.files[0]) return;
+            try {
+                const text = await fileInput.files[0].text();
+                _importBundle = JSON.parse(text);
+            } catch (e) {
+                picker.innerHTML = `<div style="color: var(--error-color); padding: 20px;">Invalid JSON: ${escapeHtml(e.message)}</div>`;
+                _importBundle = null;
+                return;
+            }
+            const res = _importBundle.resources || {};
+            const sections = EXP_TYPES.map(t => {
+                const items = (res[t.key] || []).map(x => ({ id: x.id, name: x.name || x.id || '(unnamed)' }));
+                return renderPickerSection('imp-picker', t.key, t.label, items, { selected: true });
+            });
+            // checkpoints summary
+            const cps = Array.isArray(_importBundle.checkpoints) ? _importBundle.checkpoints.length : 0;
+            const headerInfo = `
+                <div style="margin-bottom: 12px; color: var(--text-secondary); font-size: 0.9em;">
+                    Exported at: ${escapeHtml(_importBundle.exported_at || '—')}
+                    &bull; secrets: ${_importBundle.includes_secrets ? '<b>included</b>' : 'redacted'}
+                    &bull; checkpoints: ${cps}
+                </div>`;
+            picker.innerHTML = headerInfo + sections.join('');
+            pickerUpdateCounts('imp-picker');
+        }
+
+        async function runImport(dryRun) {
+            if (!_importBundle) { alert('Pick a bundle file first.'); return; }
+            const root = document.getElementById('imp-picker');
+            // Build filtered bundle based on checkboxes
+            const bundle = JSON.parse(JSON.stringify(_importBundle));
+            bundle.resources = bundle.resources || {};
+            for (const t of EXP_TYPES) {
+                const checked = new Set(Array.from(root.querySelectorAll(`.picker-chk[data-type="${t.key}"]:checked`))
+                    .map(cb => cb.getAttribute('data-id')));
+                const orig = (bundle.resources[t.key] || []);
+                bundle.resources[t.key] = orig.filter(x => checked.has(x.id));
+            }
+            const total = EXP_TYPES.reduce((n, t) => n + (bundle.resources[t.key] || []).length, 0);
+            if (total === 0) { alert('Select at least one item to import.'); return; }
+
+            const onConflict = document.getElementById('imp-on-conflict').value;
+            const resEl = document.getElementById('imp-result');
+            resEl.style.display = 'block';
+            resEl.textContent = (dryRun ? 'Dry run' : 'Importing') + '...';
+            try {
+                const qs = new URLSearchParams({ on_conflict: onConflict, dry_run: dryRun ? 'true' : 'false' });
+                const res = await apiFetch('/api/admin/import?' + qs.toString(), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(bundle),
+                });
+                const body = await res.json();
+                if (!res.ok) {
+                    throw new Error(body.detail || ('HTTP ' + res.status));
+                }
+                resEl.textContent = formatImportSummary(body, dryRun);
+                if (!dryRun && typeof refreshData === 'function') { try { refreshData(); } catch(_) {} }
+            } catch (e) {
+                resEl.textContent = 'Import failed: ' + e.message;
+            }
+        }
+
+        function formatImportSummary(body, dryRun) {
+            const lines = [];
+            lines.push((dryRun ? 'DRY RUN' : 'IMPORTED') + '  on_conflict=' + (body.on_conflict || '?'));
+            lines.push('');
+            const order = ['sources','destinations','models','assistants','pipelines','checkpoints'];
+            const s = body.summary || {};
+            lines.push('Resource       Created  Overwritten  Skipped  Renamed');
+            for (const k of order) {
+                const r = s[k];
+                if (!r) continue;
+                lines.push(
+                    k.padEnd(14) +
+                    String(r.created || 0).padStart(9) +
+                    String(r.overwritten || 0).padStart(13) +
+                    String(r.skipped || 0).padStart(9) +
+                    String(r.renamed || 0).padStart(9)
+                );
+            }
+            const warns = body.warnings || [];
+            if (warns.length) {
+                lines.push('');
+                lines.push('Warnings (' + warns.length + '):');
+                for (const w of warns) lines.push('  - ' + w);
+            }
+            for (const k of order) {
+                const r = s[k];
+                if (r && r.errors && r.errors.length) {
+                    lines.push('');
+                    lines.push('Errors in ' + k + ':');
+                    for (const e of r.errors) lines.push('  - ' + e);
+                }
+            }
+            const idMap = body.id_map || {};
+            const keys = Object.keys(idMap);
+            if (keys.length) {
+                lines.push('');
+                lines.push('Renamed IDs:');
+                for (const k of keys) lines.push('  ' + k + ' -> ' + idMap[k]);
+            }
+            return lines.join('\n');
+        }
+
         async function showAddPipelineModal() {
             document.getElementById('pipeline-form').reset();
             // Ensure models are loaded for Single Model dropdown
@@ -3006,6 +3462,47 @@
                     `}
                 `;
             } else if (currentDetailTab === 'auth') {
+                if (source.type === 'postgresql' || source.type === 'mssql') {
+                    const isPg = source.type === 'postgresql';
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
+                        <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
+                            <div style="width: 48px; height: 48px; background: rgba(59,130,246,0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="24" height="24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; font-size: 16px;">${isPg ? 'PostgreSQL' : 'SQL Server'} Credentials</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Username and password for database access</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" id="detail-pg-user" value="${config.user || ''}" placeholder="${isPg ? 'postgres' : 'sa'}" oninput="markSourceDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-input" id="detail-pg-password" value="${config.password || ''}" placeholder="Enter password" oninput="markSourceDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SSL Mode</label>
+                            <select class="form-input" id="detail-pg-ssl-mode" onchange="markSourceDetailDirty()">
+                                <option value="require" ${(config.ssl_mode || 'require') === 'require' ? 'selected' : ''}>Require (recommended)</option>
+                                <option value="verify-full" ${config.ssl_mode === 'verify-full' ? 'selected' : ''}>Verify Full</option>
+                                <option value="prefer" ${config.ssl_mode === 'prefer' ? 'selected' : ''}>Prefer</option>
+                                <option value="disable" ${config.ssl_mode === 'disable' ? 'selected' : ''}>Disable</option>
+                            </select>
+                        </div>
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px; margin-top: 16px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Troubleshooting</p>
+                            <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Verify the username has read access to the table</li>
+                                <li>Check that the database firewall allows connections from this service</li>
+                                ${isPg ? '<li>For Azure PostgreSQL: ensure "Allow access to Azure services" is enabled</li>' : ''}
+                                <li>If using SSL, ensure the server certificate is valid</li>
+                            </ul>
+                        </div>
+                    `;
+                } else {
                 const authLabel = authType === 'managed-identity' ? 'Managed Identity' : 'Connection String';
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -3061,6 +3558,7 @@
                         </div>
                     `}
                 `;
+                }
             } else if (currentDetailTab === 'health') {
                 const sh = getHealthFor('sources', source.id);
                 if (!sh) {
@@ -3144,13 +3642,21 @@
                 config.endpoint = editedSourceData.endpoint || source.config.endpoint;
                 config.database = editedSourceData.database || source.config.database;
                 config.container = editedSourceData.container || source.config.container;
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                config.host = editedSourceData.host || source.config?.host || '';
+                config.port = editedSourceData.port || source.config?.port || 5432;
+                config.database = editedSourceData.database || source.config?.database || '';
+                config.table = editedSourceData.table || source.config?.table || '';
+                config.user = editedSourceData.user || source.config?.user || '';
+                config.password = editedSourceData.password || source.config?.password || '';
+                config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
             }
 
             try {
                 const res = await apiFetch('/api/sources/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: source.type, config })
+                    body: JSON.stringify({ type: source.type, config, source_id: source.id })
                 });
                 const data = await res.json();
 
@@ -3199,6 +3705,25 @@
                 if (endpointEl) editedSourceData.endpoint = endpointEl.value;
                 if (dbEl) editedSourceData.database = dbEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                const hostEl = document.getElementById('detail-pg-host');
+                const portEl = document.getElementById('detail-pg-port');
+                const dbEl = document.getElementById('detail-pg-database');
+                const tableEl = document.getElementById('detail-pg-table');
+                const idColEl = document.getElementById('detail-pg-id-column');
+                const tsColEl = document.getElementById('detail-pg-ts-column');
+                const userEl = document.getElementById('detail-pg-user');
+                const passEl = document.getElementById('detail-pg-password');
+                const sslEl = document.getElementById('detail-pg-ssl-mode');
+                if (hostEl) editedSourceData.host = hostEl.value;
+                if (portEl) editedSourceData.port = parseInt(portEl.value) || 5432;
+                if (dbEl) editedSourceData.database = dbEl.value;
+                if (tableEl) editedSourceData.table = tableEl.value;
+                if (idColEl) editedSourceData.id_column = idColEl.value;
+                if (tsColEl) editedSourceData.timestamp_column = tsColEl.value;
+                if (userEl) editedSourceData.user = userEl.value;
+                if (passEl) editedSourceData.password = passEl.value;
+                if (sslEl) editedSourceData.ssl_mode = sslEl.value;
             }
         }
 
@@ -3225,6 +3750,16 @@
                 config.endpoint = editedSourceData.endpoint || source.config?.endpoint || '';
                 config.database = editedSourceData.database || source.config?.database || '';
                 config.container = editedSourceData.container || source.config?.container || '';
+            } else if (source.type === 'postgresql' || source.type === 'mssql') {
+                config.host = editedSourceData.host || source.config?.host || '';
+                config.port = editedSourceData.port || source.config?.port || 5432;
+                config.database = editedSourceData.database || source.config?.database || '';
+                config.table = editedSourceData.table || source.config?.table || '';
+                config.id_column = editedSourceData.id_column || source.config?.id_column || 'id';
+                config.timestamp_column = editedSourceData.timestamp_column || source.config?.timestamp_column || 'updated_at';
+                config.user = editedSourceData.user || source.config?.user || '';
+                config.password = editedSourceData.password || source.config?.password || '';
+                config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
             }
 
             try {
@@ -3489,6 +4024,51 @@
                     </div>
                 `;
             } else if (currentDestDetailTab === 'auth') {
+                if (dest.type === 'pgvector') {
+                    configPanel.innerHTML = `
+                        <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
+                        <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
+                            <div style="width: 48px; height: 48px; background: rgba(59,130,246,0.1); border-radius: 12px; display: flex; align-items: center; justify-content: center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="2" width="24" height="24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight: 600; font-size: 16px;">PostgreSQL Credentials</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Username and password for database access</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" id="dest-detail-pg-user" value="${config.user || ''}" placeholder="postgres" oninput="markDestDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-input" id="dest-detail-pg-password" value="${config.password || ''}" placeholder="Enter password" oninput="markDestDetailDirty()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SSL Mode</label>
+                            <select class="form-input" id="dest-detail-pg-ssl-mode" onchange="markDestDetailDirty()">
+                                <option value="require" ${(config.ssl_mode || 'require') === 'require' ? 'selected' : ''}>Require (recommended)</option>
+                                <option value="verify-full" ${config.ssl_mode === 'verify-full' ? 'selected' : ''}>Verify Full</option>
+                                <option value="prefer" ${config.ssl_mode === 'prefer' ? 'selected' : ''}>Prefer</option>
+                                <option value="disable" ${config.ssl_mode === 'disable' ? 'selected' : ''}>Disable</option>
+                            </select>
+                        </div>
+                        <button type="button" class="btn btn-secondary" onclick="testDestDetailConnection()" id="dest-detail-test-btn" style="width: 100%; justify-content: center; padding: 12px; margin-top: 8px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                            Test Connection
+                        </button>
+                        <div id="dest-detail-test-result" style="margin-top: 12px;"></div>
+                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 16px; font-size: 13px; margin-top: 16px;">
+                            <p style="margin: 0 0 8px 0; font-weight: 500;">Troubleshooting</p>
+                            <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); line-height: 1.8;">
+                                <li>Verify the username has read/write access to the table</li>
+                                <li>Check that the database firewall allows connections from this service</li>
+                                <li>For Azure PostgreSQL: ensure "Allow access to Azure services" is enabled</li>
+                                <li>Ensure the pgvector extension is installed (<code>CREATE EXTENSION vector</code>)</li>
+                            </ul>
+                        </div>
+                    `;
+                } else {
                 const authLabel = authType === 'managed-identity' ? 'Managed Identity' : 'API Key';
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -3543,15 +4123,22 @@
                         </div>
                     `}
                 `;
+                } // end else (non-pgvector dest auth)
             } else if (currentDestDetailTab === 'vector') {
+                const isPgVector = dest.type === 'pgvector';
+                const vecTitle = isPgVector ? 'Vector Columns' : 'Vector Configuration';
+                const vecDesc = isPgVector
+                    ? 'Discover vector columns in your PostgreSQL table. Columns with the <code>vector</code> type will be listed.'
+                    : 'Vector index details are read from the destination when you test the connection.';
+                const btnLabel = isPgVector ? 'Discover Vector Columns' : 'Fetch Embedding Policies';
                 configPanel.innerHTML = `
-                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">Vector Configuration</h4>
-                    <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">Vector index details are read from the destination when you test the connection.</p>
+                    <h4 style="margin: 0 0 20px 0; font-size: 16px;">${vecTitle}</h4>
+                    <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">${vecDesc}</p>
                     <button type="button" class="btn btn-secondary" onclick="testDestinationFromDetail()" style="width: 100%; justify-content: center; padding: 12px;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
                         </svg>
-                        Fetch Embedding Policies
+                        ${btnLabel}
                     </button>
                     <div id="dest-detail-vector-result" style="margin-top: 16px;"></div>
                 `;
@@ -3614,6 +4201,9 @@
                 const vecColEl = document.getElementById('dest-detail-pg-vector-col');
                 const contentColEl = document.getElementById('dest-detail-pg-content-col');
                 const dimsEl = document.getElementById('dest-detail-pg-dimensions');
+                const userEl = document.getElementById('dest-detail-pg-user');
+                const passEl = document.getElementById('dest-detail-pg-password');
+                const sslEl = document.getElementById('dest-detail-pg-ssl-mode');
                 if (hostEl) editedDestData.host = hostEl.value;
                 if (portEl) editedDestData.port = parseInt(portEl.value) || 5432;
                 if (dbEl) editedDestData.database = dbEl.value;
@@ -3621,6 +4211,9 @@
                 if (vecColEl) editedDestData.vector_column = vecColEl.value;
                 if (contentColEl) editedDestData.content_column = contentColEl.value;
                 if (dimsEl) editedDestData.vector_dimensions = parseInt(dimsEl.value) || 1536;
+                if (userEl) editedDestData.user = userEl.value;
+                if (passEl) editedDestData.password = passEl.value;
+                if (sslEl) editedDestData.ssl_mode = sslEl.value;
             }
         }
 
@@ -3647,17 +4240,20 @@
                 config.host = editedDestData.host || dest.config?.host || '';
                 config.port = editedDestData.port || dest.config?.port || 5432;
                 config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
             }
 
             try {
                 const res = await apiFetch('/api/destinations/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: dest.type, config })
+                    body: JSON.stringify({ type: dest.type, config, destination_id: dest.id })
                 });
                 const data = await res.json();
-
-                let html = '';
                 if (data.success) {
                     let details = '';
                     const vi = data.vector_indexes || data.result?.vector_indexes || [];
@@ -3706,18 +4302,32 @@
             if (resultDiv) resultDiv.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">Testing connection...</div>';
 
             // Get current form values
-            const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
-            const database = document.getElementById('dest-detail-database')?.value || dest.config?.database || '';
-            const container = document.getElementById('dest-detail-container')?.value || dest.config?.container || '';
-
             const authType = dest.config?.auth_type || 'managed-identity';
-            const config = { auth_type: authType, endpoint, database, container };
+            let config = { auth_type: authType };
+
+            if (dest.type === 'pgvector') {
+                captureDestTabData();
+                config.host = editedDestData.host || dest.config?.host || '';
+                config.port = editedDestData.port || dest.config?.port || 5432;
+                config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+            } else {
+                // CosmosDB and other types
+                const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
+                const database = document.getElementById('dest-detail-database')?.value || dest.config?.database || '';
+                const container = document.getElementById('dest-detail-container')?.value || dest.config?.container || '';
+                config = { auth_type: authType, endpoint, database, container };
+            }
 
             try {
                 const res = await apiFetch('/api/destinations/test-connection', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: dest.type, config })
+                    body: JSON.stringify({ type: dest.type, config, destination_id: dest.id })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -3767,6 +4377,19 @@
                 config.endpoint = editedDestData.endpoint || dest.config?.endpoint || '';
                 config.database = editedDestData.database || dest.config?.database || '';
                 config.container = editedDestData.container || dest.config?.container || '';
+            } else if (dest.type === 'pgvector') {
+                config.host = editedDestData.host || dest.config?.host || '';
+                config.port = editedDestData.port || dest.config?.port || 5432;
+                config.database = editedDestData.database || dest.config?.database || '';
+                config.table = editedDestData.table || dest.config?.table || 'vectors';
+                config.vector_column = editedDestData.vector_column || dest.config?.vector_column || 'embedding';
+                config.content_column = editedDestData.content_column || dest.config?.content_column || 'content';
+                config.vector_dimensions = editedDestData.vector_dimensions || dest.config?.vector_dimensions || 1536;
+                config.user = editedDestData.user || dest.config?.user || '';
+                config.password = editedDestData.password || dest.config?.password || '';
+                config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+                // Preserve discovered vector_indexes
+                if (dest.config?.vector_indexes) config.vector_indexes = dest.config.vector_indexes;
             } else if (dest.type === 'pinecone') {
                 config.index = editedDestData.index || dest.config?.index || '';
                 config.environment = editedDestData.environment || dest.config?.environment || '';
@@ -4119,12 +4742,16 @@
                     </div>
 
                     <div class="form-group" style="margin-top: 16px;">
-                        <label class="form-label">Embedding Policy Path</label>
+                        <label class="form-label">${destType === 'pgvector' ? 'Vector Column' : 'Embedding Policy Path'}</label>
                         <div style="padding: 10px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px;">
-                            /${pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>'}
+                            ${destType === 'pgvector'
+                                ? (pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">embedding</span>')
+                                : '/' + (pipeline.vector_index_path || '<span style="color: var(--text-tertiary);">not set</span>')}
                         </div>
                         <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                            The vector embedding path in the destination container. Cannot be changed after creation.
+                            ${destType === 'pgvector'
+                                ? 'The vector column in the destination table where embeddings are stored. Cannot be changed after creation.'
+                                : 'The vector embedding path in the destination container. Cannot be changed after creation.'}
                         </small>
                     </div>
                 `;
@@ -4808,6 +5435,14 @@
             if (plDestName) plDestName.value = '';
             const sameAsSource = document.getElementById('pl-dest-same-as-source');
             if (sameAsSource) sameAsSource.checked = false;
+            // Reset same-as-source visual state
+            const sameLabel = document.getElementById('pl-dest-same-as-source-label');
+            if (sameLabel) { sameLabel.style.borderColor = 'transparent'; sameLabel.style.background = 'var(--bg-tertiary)'; }
+            const sameInfo = document.getElementById('pl-dest-same-as-source-info');
+            if (sameInfo) sameInfo.style.display = 'none';
+            // Restore destination dropdown visibility
+            const destDropdownGroup = document.getElementById('pipeline-destination')?.closest('.form-group');
+            if (destDropdownGroup) destDropdownGroup.style.display = '';
         }
 
         // ── Inline Source/Destination Creation in Pipeline Modal ──
@@ -4867,7 +5502,12 @@
                 if (data.success) {
                     resultDiv.innerHTML = `<span style="color: var(--success); font-size: 13px;">Connected</span>`;
                     // Populate vector policies from test result
-                    const vi = data.result?.vector_indexes || [];
+                    const vi = data.vector_indexes || data.result?.vector_indexes || [];
+                    if (vi.length > 0) {
+                        // Update cached policies on the destination object
+                        const dest = destinations.find(d => d.id === destId);
+                        if (dest && dest.config) dest.config.vector_indexes = vi;
+                    }
                     populateVectorPolicyDropdown(vi);
                 } else {
                     resultDiv.innerHTML = `<span style="color: var(--error); font-size: 13px;">Failed: ${data.error}</span>`;
@@ -4877,22 +5517,51 @@
             }
         }
 
-        function loadVectorPoliciesForDest() {
+        async function loadVectorPoliciesForDest() {
             const destId = document.getElementById('pipeline-destination').value;
             if (!destId) {
                 document.getElementById('pl-dest-vector-policy-group').style.display = 'none';
                 return;
             }
-            // Try to load from destination's stored config first
+
             const dest = destinations.find(d => d.id === destId);
-            const vi = dest?.config?.vector_indexes || [];
-            if (vi.length > 0) {
-                populateVectorPolicyDropdown(vi);
+            const cachedVi = dest?.config?.vector_indexes || [];
+            const group = document.getElementById('pl-dest-vector-policy-group');
+            const select = document.getElementById('pl-dest-vector-policy');
+            group.style.display = 'block';
+
+            // Update label based on dest type (pgvector vs cosmos)
+            const isPg = dest?.type === 'pgvector';
+            const labelEl = document.querySelector('#pl-dest-vector-policy-group .form-label');
+            if (labelEl) labelEl.textContent = isPg ? 'Vector Column' : 'Vector Embedding Policy';
+            const smallEl = document.querySelector('#pl-dest-vector-policy-group small');
+            if (smallEl) smallEl.textContent = isPg
+                ? 'Select which vector column to use for storing embeddings'
+                : 'Select which vector embedding field to use for this pipeline';
+
+            // Show cached while fetching live
+            if (cachedVi.length > 0) {
+                populateVectorPolicyDropdown(cachedVi);
             } else {
-                // No cached policies — show the dropdown prompting user to test
-                const group = document.getElementById('pl-dest-vector-policy-group');
-                group.style.display = 'block';
-                const select = document.getElementById('pl-dest-vector-policy');
+                select.innerHTML = '<option value="">Loading embedding policies...</option>';
+            }
+
+            // Always fetch live to get latest policies
+            try {
+                const res = await apiFetch(`/api/destinations/${destId}/test`, { method: 'POST' });
+                if (res.ok) {
+                    const data = await res.json();
+                    const policies = data.vector_indexes || data.result?.vector_indexes || [];
+                    if (policies.length > 0) {
+                        if (dest && dest.config) dest.config.vector_indexes = policies;
+                        populateVectorPolicyDropdown(policies);
+                        return;
+                    }
+                }
+            } catch (_) {}
+
+            // If live fetch failed and no cache, show warning
+            if (cachedVi.length === 0) {
                 select.innerHTML = '<option value="">— Test connection to load policies —</option>';
                 document.getElementById('pl-dest-vector-policy-warning').style.display = 'block';
             }
@@ -4930,70 +5599,122 @@
             const destSelect = document.getElementById('pipeline-destination');
             const processingModeSelect = document.getElementById('pipeline-processing-mode');
             const resultDiv = document.getElementById('pl-dest-existing-test-result');
+            const infoDiv = document.getElementById('pl-dest-same-as-source-info');
+            const label = document.getElementById('pl-dest-same-as-source-label');
+
+            // Hide/show destination selection when same-as-source is checked
+            const destDropdownGroup = destSelect?.closest('.form-group');
+            const testBtn = destDropdownGroup?.querySelector('.btn-secondary');
+
             if (checked) {
-                // Find destination matching the selected source's config
+                label.style.borderColor = 'var(--accent-primary)';
+                label.style.background = 'var(--accent-muted)';
+
+                // Validate source is selected and not blob
                 const sourceId = document.getElementById('pipeline-source-select').value;
                 const source = sources.find(s => s.id === sourceId);
-                if (source && source.config) {
-                    // Find a destination with matching endpoint/database/container
-                    const match = destinations.find(d =>
-                        d.config?.endpoint === source.config.endpoint &&
-                        d.config?.database === source.config.database &&
-                        d.config?.container === source.config.container
-                    );
-                    if (match) {
-                        destSelect.value = match.id;
-                        // Auto-select inline mode when source = destination
+                if (!source) {
+                    resultDiv.innerHTML = '<span style="color: var(--error); font-size: 13px;">Please select a source first.</span>';
+                    document.getElementById('pl-dest-same-as-source').checked = false;
+                    label.style.borderColor = 'transparent';
+                    label.style.background = 'var(--bg-tertiary)';
+                    return;
+                }
+                if (source.type === 'azure-blob') {
+                    resultDiv.innerHTML = '<span style="color: var(--error); font-size: 13px;">Blob sources cannot be used as destinations. Select a different destination.</span>';
+                    document.getElementById('pl-dest-same-as-source').checked = false;
+                    label.style.borderColor = 'transparent';
+                    label.style.background = 'var(--bg-tertiary)';
+                    return;
+                }
+
+                // Hide destination dropdown (auto-fill from source)
+                if (destDropdownGroup) destDropdownGroup.style.display = 'none';
+                infoDiv.style.display = 'block';
+
+                // Determine destination type from source type
+                const destTypeMap = { 'cosmosdb': 'cosmosdb-vector', 'postgresql': 'pgvector', 'mssql': 'mssql' };
+                const destType = destTypeMap[source.type] || 'cosmosdb-vector';
+
+                // Find existing destination matching source config
+                const match = destinations.find(d => {
+                    if (source.type === 'cosmosdb') {
+                        return d.type === 'cosmosdb-vector' &&
+                            d.config?.endpoint === source.config.endpoint &&
+                            d.config?.database === source.config.database &&
+                            d.config?.container === source.config.container;
+                    } else {
+                        return d.type === destType &&
+                            d.config?.host === source.config.host &&
+                            d.config?.database === source.config.database &&
+                            d.config?.table === source.config.table;
+                    }
+                });
+
+                if (match) {
+                    destSelect.value = match.id;
+                    if (processingModeSelect) processingModeSelect.value = 'inline';
+                    resultDiv.innerHTML =
+                        `<span style="color: var(--success); font-size: 13px;">✓ Using: ${match.name} (inline mode)</span>`;
+                    loadVectorPoliciesForDest();
+                    updateSameContainerIndicator();
+                    return;
+                }
+
+                // No match — auto-create destination from source config
+                resultDiv.innerHTML = '<span style="color: var(--text-secondary); font-size: 13px;">Creating destination from source config...</span>';
+                try {
+                    const destConfig = { auth_type: source.config.auth_type || 'managed-identity' };
+                    if (source.type === 'cosmosdb') {
+                        destConfig.endpoint = source.config.endpoint;
+                        destConfig.database = source.config.database;
+                        destConfig.container = source.config.container;
+                        if (source.config.client_id) destConfig.client_id = source.config.client_id;
+                    } else {
+                        destConfig.host = source.config.host;
+                        destConfig.port = source.config.port;
+                        destConfig.database = source.config.database;
+                        destConfig.table = source.config.table;
+                        if (source.config.user) destConfig.user = source.config.user;
+                        if (source.config.password) destConfig.password = source.config.password;
+                        if (source.config.ssl_mode) destConfig.ssl_mode = source.config.ssl_mode;
+                    }
+
+                    const destData = { name: source.name + ' (vectors)', type: destType, config: destConfig };
+                    const res = await apiFetch('/api/destinations', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(destData)
+                    });
+                    if (res.ok) {
+                        const newDest = await res.json();
+                        destinations.push(newDest.destination || newDest);
+                        const dest = newDest.destination || newDest;
+                        const option = document.createElement('option');
+                        option.value = dest.id;
+                        option.textContent = dest.name;
+                        destSelect.appendChild(option);
+                        destSelect.value = dest.id;
                         if (processingModeSelect) processingModeSelect.value = 'inline';
                         resultDiv.innerHTML =
-                            `<span style="color: var(--success); font-size: 13px;">Matched: ${match.name} (using inline mode)</span>`;
+                            `<span style="color: var(--success); font-size: 13px;">✓ Created: ${dest.name} (inline mode)</span>`;
                         loadVectorPoliciesForDest();
                         updateSameContainerIndicator();
-                        return;
-                    }
-                    // No match found - create destination from source config
-                    resultDiv.innerHTML = '<span style="color: var(--text-secondary); font-size: 13px;">Creating destination from source...</span>';
-                    try {
-                        const destData = {
-                            name: source.name + ' (vector)',
-                            type: 'cosmosdb-vector',
-                            config: {
-                                endpoint: source.config.endpoint,
-                                database: source.config.database,
-                                container: source.config.container,
-                                auth_type: source.config.auth_type || 'managed-identity',
-                            }
-                        };
-                        const res = await apiFetch('/api/destinations', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(destData)
-                        });
-                        if (res.ok) {
-                            const newDest = await res.json();
-                            // Add to destinations array and refresh dropdown
-                            destinations.push(newDest.destination);
-                            const option = document.createElement('option');
-                            option.value = newDest.destination.id;
-                            option.textContent = newDest.destination.name;
-                            destSelect.appendChild(option);
-                            destSelect.value = newDest.destination.id;
-                            // Auto-select inline mode
-                            if (processingModeSelect) processingModeSelect.value = 'inline';
-                            resultDiv.innerHTML =
-                                `<span style="color: var(--success); font-size: 13px;">Created: ${newDest.destination.name} (using inline mode)</span>`;
-                            updateSameContainerIndicator();
-                        } else {
-                            const err = await res.json();
-                            resultDiv.innerHTML =
-                                `<span style="color: var(--error); font-size: 13px;">Failed to create destination: ${err.detail || 'Unknown error'}</span>`;
-                        }
-                    } catch (err) {
+                    } else {
+                        const err = await res.json();
                         resultDiv.innerHTML =
-                            `<span style="color: var(--error); font-size: 13px;">Error: ${err.message}</span>`;
+                            `<span style="color: var(--error); font-size: 13px;">Failed: ${err.detail || 'Unknown error'}</span>`;
                     }
+                } catch (err) {
+                    resultDiv.innerHTML =
+                        `<span style="color: var(--error); font-size: 13px;">Error: ${err.message}</span>`;
                 }
             } else {
+                // Unchecked — show normal destination form
+                label.style.borderColor = 'transparent';
+                label.style.background = 'var(--bg-tertiary)';
+                if (destDropdownGroup) destDropdownGroup.style.display = '';
+                infoDiv.style.display = 'none';
                 resultDiv.innerHTML = '';
                 updateSameContainerIndicator();
             }
@@ -5437,6 +6158,19 @@
             `;
 
             configDiv.innerHTML = sourceSpecificHtml + contentFieldsHtml;
+
+            // Show/hide "same as source" checkbox based on source type
+            const sameAsSourceLabel = document.getElementById('pl-dest-same-as-source-label');
+            if (sameAsSourceLabel) {
+                // Hide for blob sources — they can't be destinations
+                sameAsSourceLabel.style.display = source.type === 'azure-blob' ? 'none' : 'flex';
+                // Uncheck if source changed
+                const cb = document.getElementById('pl-dest-same-as-source');
+                if (cb && cb.checked) {
+                    cb.checked = false;
+                    toggleDestSameAsSource();
+                }
+            }
         }
 
         // API calls
@@ -5517,7 +6251,9 @@
                     vector_column: formData.get('vector_column') || 'embedding',
                     vector_dimensions: parseInt(formData.get('vector_dimensions')) || 1024,
                     index_type: formData.get('index_type') || 'ivfflat',
-                    ssl_mode: 'require'
+                    user: formData.get('user') || '',
+                    password: formData.get('password') || '',
+                    ssl_mode: formData.get('ssl_mode') || 'require'
                 };
             }
 
@@ -6009,6 +6745,14 @@
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
                 config.container = formData.get('container');
+            } else if (type === 'postgresql' || type === 'mssql') {
+                config.host = formData.get('host');
+                config.port = parseInt(formData.get('port')) || 5432;
+                config.database = formData.get('database');
+                config.table = formData.get('table');
+                config.user = formData.get('user') || '';
+                config.password = formData.get('password') || '';
+                config.ssl_mode = formData.get('ssl_mode') || 'require';
             }
 
             if (authType === 'connection-string') {
@@ -6311,6 +7055,25 @@
                             <option value="hnsw">HNSW (faster, more memory)</option>
                         </select>
                     </div>
+                    <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                    <h5 style="margin: 0 0 12px 0; font-size: 14px;">Authentication</h5>
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-input" name="user" placeholder="postgres">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-input" name="password" placeholder="Enter password">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">SSL Mode</label>
+                        <select class="form-input" name="ssl_mode">
+                            <option value="require" selected>Require (recommended)</option>
+                            <option value="verify-full">Verify Full</option>
+                            <option value="prefer">Prefer</option>
+                            <option value="disable">Disable</option>
+                        </select>
+                    </div>
                 `;
             } else if (type === 'pinecone') {
                 container.innerHTML = `
@@ -6365,9 +7128,24 @@
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
                 config.container = formData.get('container');
-            }
-
-            if (!config.endpoint || !config.database || !config.container) {
+                if (!config.endpoint || !config.database || !config.container) {
+                    resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
+                    return;
+                }
+            } else if (type === 'pgvector') {
+                config.host = formData.get('host') || '';
+                config.port = parseInt(formData.get('port')) || 5432;
+                config.database = formData.get('database') || '';
+                config.table = formData.get('table') || 'vectors';
+                config.user = formData.get('user') || '';
+                config.password = formData.get('password') || '';
+                config.vector_column = formData.get('vector_column') || 'embedding';
+                config.ssl_mode = formData.get('ssl_mode') || 'require';
+                if (!config.host || !config.database) {
+                    resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Host and Database</div>`;
+                    return;
+                }
+            } else {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
                 return;
             }
@@ -8256,17 +9034,6 @@
                 metricsEnd = ed.value + 'T' + (et && et.value ? et.value : '23:59') + ':00';
                 metricsRange = 'custom';
                 loadMetricsSection();
-            }
-        }
-
-        async function clearMetrics() {
-            if (!confirm('Clear all metrics? This cannot be undone.')) return;
-            try {
-                await apiFetch('/api/metrics', { method: 'DELETE' });
-                showNotification('Metrics cleared', 'success');
-                loadMetricsSection();
-            } catch (e) {
-                showNotification('Error: ' + e.message, 'error');
             }
         }
 

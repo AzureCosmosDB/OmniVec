@@ -739,7 +739,31 @@ async def get_metrics():
     rows = await asyncio.to_thread(_run_kql, kql, timedelta(days=7))
 
     if rows is None:
-        # App Insights not configured
+        # App Insights not configured — fallback to CosmosDB inline metrics
+        try:
+            store = get_store()
+            doc = store.get("global", "metrics")
+            if doc and doc.get("pipelines"):
+                total_processed = doc.get("events_processed", 0)
+                total_failed = doc.get("events_failed", 0)
+                total_time_ms = 0.0
+                for pdata in doc["pipelines"].values():
+                    total_time_ms += pdata.get("total_time_ms", 0.0)
+                avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
+                return {
+                    "events_processed": total_processed,
+                    "events_failed": total_failed,
+                    "avg_processing_time_ms": avg_lat,
+                    "throughput_docs_per_sec": 0,
+                    "search_queries": 0,
+                    "latency": {"embedding": {"avg": avg_lat, "p95": None}, "search": {}, "request": {}},
+                    "tokens": {"total": 0},
+                    "skipped": {"total": 0},
+                    "errors": {"total": total_failed},
+                    "source": "cosmos_inline",
+                }
+        except Exception:
+            pass
         return {
             "events_processed": 0,
             "events_failed": 0,
@@ -751,7 +775,6 @@ async def get_metrics():
             "skipped": {"total": 0},
             "errors": {"total": 0},
             "source": "unavailable",
-            "message": "App Insights not configured. Deploy with azd up to enable metrics.",
         }
 
     m = {}
@@ -856,6 +879,90 @@ async def get_changefeed_metrics():
 
 # â”€â”€ timeseries metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
+def _build_cosmos_metrics_buckets(granularity, gran_seconds, start_dt, end_dt, pipeline_id):
+    """Build time-series buckets from CosmosDB-stored inline metrics when App Insights is unavailable."""
+    from collections import defaultdict
+
+    store = get_store()
+    doc = store.get("global", "metrics")
+    if not doc:
+        return []
+
+    pipelines_data = doc.get("pipelines", {})
+    if not pipelines_data:
+        return []
+
+    # Collect all recent entries from matching pipelines
+    entries = []
+    for pid, pdata in pipelines_data.items():
+        if pipeline_id and pid != pipeline_id:
+            continue
+        for entry in pdata.get("recent", []):
+            t_str = entry.get("t", "")
+            n = entry.get("n", 0)
+            if t_str:
+                try:
+                    t_dt = datetime.fromisoformat(t_str)
+                    if start_dt <= t_dt <= end_dt:
+                        entries.append((t_dt, n))
+                except (ValueError, TypeError):
+                    pass
+
+    if not entries:
+        # No recent data - create a single summary bucket from totals
+        total_processed = 0
+        total_time_ms = 0.0
+        for pid, pdata in pipelines_data.items():
+            if pipeline_id and pid != pipeline_id:
+                continue
+            total_processed += pdata.get("processed", 0)
+            total_time_ms += pdata.get("total_time_ms", 0.0)
+        if total_processed > 0:
+            avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
+            return [{
+                "t": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:00"),
+                "processed": total_processed,
+                "failed": 0,
+                "throughput": round(total_processed / gran_seconds, 1),
+                "avg_latency_ms": avg_lat,
+            }]
+        return []
+
+    # Bucket entries by granularity
+    bucket_map = defaultdict(lambda: {"processed": 0, "failed": 0})
+    for t_dt, n in entries:
+        if granularity == "minute":
+            key = t_dt.strftime("%Y-%m-%dT%H:%M:00")
+        elif granularity == "hour":
+            key = t_dt.strftime("%Y-%m-%dT%H:00:00")
+        else:  # day
+            key = t_dt.strftime("%Y-%m-%dT00:00:00")
+        bucket_map[key]["processed"] += n
+
+    # Also gather total time for avg latency
+    total_time_ms = 0.0
+    total_processed = 0
+    for pid, pdata in pipelines_data.items():
+        if pipeline_id and pid != pipeline_id:
+            continue
+        total_time_ms += pdata.get("total_time_ms", 0.0)
+        total_processed += pdata.get("processed", 0)
+    avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
+
+    buckets = []
+    for t_str in sorted(bucket_map.keys()):
+        b = bucket_map[t_str]
+        buckets.append({
+            "t": t_str,
+            "processed": b["processed"],
+            "failed": b["failed"],
+            "throughput": round(b["processed"] / gran_seconds, 1) if b["processed"] > 0 else 0.0,
+            "avg_latency_ms": avg_lat,
+        })
+
+    return buckets
+
 @app.get("/api/metrics/timeseries")
 async def get_metrics_timeseries(
     granularity: str = "hour",
@@ -894,14 +1001,20 @@ async def get_metrics_timeseries(
     rows = await asyncio.to_thread(_run_kql, kql, (start_dt, end_dt))
 
     if rows is None:
+        # Fallback: build buckets from CosmosDB inline metrics
+        try:
+            buckets = _build_cosmos_metrics_buckets(
+                granularity, gran_seconds, start_dt, end_dt, pipeline_id
+            )
+        except Exception:
+            buckets = []
         return {
             "granularity": granularity,
             "start": start_iso,
             "end": end_iso,
             "pipeline_id": pipeline_id,
-            "source": "unavailable",
-            "buckets": [],
-            "message": "App Insights not configured. Deploy with azd up to enable metrics.",
+            "source": "cosmos_inline",
+            "buckets": buckets,
         }
 
     buckets = []
@@ -1033,6 +1146,10 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    # Preserve stored password if masked value was sent
+    for sensitive_key in _SENSITIVE_CONFIG_KEYS:
+        if clean_config.get(sensitive_key) == "***":
+            clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
     source.name = req.name.strip()
     source.type = req.type
     source.config = clean_config
@@ -1136,11 +1253,22 @@ async def test_source(source_id: str):
 class TestConnectionRequest(BaseModel):
     type: str
     config: dict
+    source_id: Optional[str] = None
 
 
 @app.post("/api/sources/test-connection")
 async def test_source_connection_before_save(req: TestConnectionRequest):
     """Test source connection before saving (used by UI)."""
+    # If password is masked, look up real password from stored config
+    if req.source_id and req.config.get("password") == "***":
+        store = get_store()
+        try:
+            doc = store.get(req.source_id, partition_key="source")
+            stored_pw = doc.get("config", {}).get("password", "")
+            if stored_pw:
+                req.config["password"] = stored_pw
+        except Exception:
+            pass
     try:
         if req.type == "azure-blob":
             from azure.storage.blob import BlobServiceClient
@@ -1259,6 +1387,18 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
             error_msg = "Resource not found. Check the account URL, database, or container name."
         elif "InvalidAuthenticationInfo" in error_msg:
             error_msg = "Authentication failed. Check your credentials or managed identity configuration."
+        elif "Connection refused" in error_msg or "[Errno 111]" in error_msg:
+            error_msg = "Connection refused. Check that the host and port are correct, the database server is running, and the firewall allows connections from this service."
+        elif "no PostgreSQL user name" in error_msg:
+            error_msg = "No PostgreSQL username provided. Please enter your database username in the Authentication tab."
+        elif "password authentication failed" in error_msg:
+            error_msg = "Password authentication failed. Check that the username and password are correct."
+        elif "does not exist" in error_msg and "database" in error_msg.lower():
+            error_msg = f"Database not found. Verify the database name is correct. Original error: {error_msg}"
+        elif "could not translate host name" in error_msg or "Name or service not known" in error_msg:
+            error_msg = "Cannot resolve hostname. Check that the host address is correct."
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            error_msg = "Connection timed out. Check that the host is reachable and the firewall allows connections."
 
         return {"success": False, "error": error_msg}
 
@@ -1443,9 +1583,14 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
         raise HTTPException(status_code=400, detail=f"Destination name '{req.name.strip()}' already exists")
 
     destination = _destination_from_doc(doc)
+    clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    # Preserve stored password if masked value was sent
+    for sensitive_key in _SENSITIVE_CONFIG_KEYS:
+        if clean_config.get(sensitive_key) == "***":
+            clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
     destination.name = req.name
     destination.type = req.type
-    destination.config = req.config
+    destination.config = clean_config
     destination.enabled = req.enabled
     destination.updated_at = datetime.utcnow()
 
@@ -1534,11 +1679,22 @@ async def test_destination(dest_id: str):
 class TestDestConnectionRequest(BaseModel):
     type: str
     config: dict
+    destination_id: Optional[str] = None
 
 
 @app.post("/api/destinations/test-connection")
 async def test_destination_connection_before_save(req: TestDestConnectionRequest):
     """Test destination connection before saving (used by UI)."""
+    # If password is masked, look up real password from stored config
+    if req.destination_id and req.config.get("password") == "***":
+        store = get_store()
+        try:
+            doc = store.get(req.destination_id, partition_key="destination")
+            stored_pw = doc.get("config", {}).get("password", "")
+            if stored_pw:
+                req.config["password"] = stored_pw
+        except Exception:
+            pass
     try:
         if req.type == "cosmosdb-vector":
             from azure.cosmos import CosmosClient
@@ -1687,6 +1843,18 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             error_msg = "Resource not found. Check the endpoint, database, or container name."
         elif "InvalidAuthenticationInfo" in error_msg:
             error_msg = "Authentication failed. Check your credentials or managed identity configuration."
+        elif "Connection refused" in error_msg or "[Errno 111]" in error_msg:
+            error_msg = "Connection refused. Check that the host and port are correct, the database server is running, and the firewall allows connections from this service."
+        elif "no PostgreSQL user name" in error_msg:
+            error_msg = "No PostgreSQL username provided. Please enter your database username in the Authentication tab."
+        elif "password authentication failed" in error_msg:
+            error_msg = "Password authentication failed. Check that the username and password are correct."
+        elif "does not exist" in error_msg and "database" in error_msg.lower():
+            error_msg = f"Database not found. Verify the database name is correct. Original error: {error_msg}"
+        elif "could not translate host name" in error_msg or "Name or service not known" in error_msg:
+            error_msg = "Cannot resolve hostname. Check that the host address is correct."
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            error_msg = "Connection timed out. Check that the host is reachable and the firewall allows connections."
 
         return {"success": False, "error": error_msg}
 
@@ -1911,6 +2079,7 @@ def pause_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     pipeline.status = PipelineStatus.PAUSED
+    pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
     return {"success": True}
 
@@ -1925,6 +2094,7 @@ def resume_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     pipeline.status = PipelineStatus.ACTIVE
+    pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
     return {"success": True}
 
@@ -4304,6 +4474,92 @@ def _get_pg_stats_cached(source, pipeline, store):
         return None
 
 
+def _get_blob_embed_count_pg(dest_cfg, pipeline_id, reset_at):
+    """Count rows in a pgvector destination table for a given pipeline since reset_at.
+
+    Used when source.type == AZURE_BLOB and destination.type == pgvector.
+    Returns int (row count) or None on failure. Resilient to missing
+    cfp_generation / embedded_at columns on older tables.
+    """
+    import asyncio
+    from health_checker import _connect_pg
+
+    table = dest_cfg.get("table", "")
+    schema = dest_cfg.get("schema_name", dest_cfg.get("schema", "public"))
+    if not table:
+        return None
+
+    async def _q():
+        conn = await _connect_pg(dest_cfg)
+        try:
+            # Prefer pipeline_id + embedded_at filter; fall back gracefully.
+            try:
+                return await conn.fetchval(
+                    f'SELECT COUNT(*) FROM "{schema}"."{table}" '
+                    f'WHERE pipeline_id = $1 AND embedded_at >= $2::timestamptz',
+                    pipeline_id, reset_at)
+            except Exception:
+                try:
+                    return await conn.fetchval(
+                        f'SELECT COUNT(*) FROM "{schema}"."{table}" WHERE pipeline_id = $1',
+                        pipeline_id)
+                except Exception:
+                    return await conn.fetchval(
+                        f'SELECT COUNT(*) FROM "{schema}"."{table}" WHERE embedding IS NOT NULL')
+        finally:
+            await conn.close()
+
+    try:
+        return asyncio.run(_q())
+    except Exception as e:
+        logger.warning(f"pgvector blob embed count failed: {e}")
+        return None
+
+
+def _get_blob_embed_count_mssql(dest_cfg, pipeline_id, reset_at):
+    """Count rows in an MSSQL destination table for a given pipeline since reset_at."""
+    try:
+        import pyodbc
+    except ImportError:
+        logger.warning("pyodbc not installed; cannot count mssql blob embeddings")
+        return None
+
+    host = dest_cfg.get("host", "")
+    database = dest_cfg.get("database", "")
+    user = dest_cfg.get("user", "")
+    password = dest_cfg.get("password", "")
+    port = dest_cfg.get("port", 1433)
+    table = dest_cfg.get("table", "")
+    schema = dest_cfg.get("schema_name", dest_cfg.get("schema", "dbo"))
+    if not (host and database and table):
+        return None
+
+    conn_str = (
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={host},{port};"
+        f"DATABASE={database};UID={user};PWD={password};Encrypt=yes;TrustServerCertificate=yes;"
+    )
+    try:
+        cn = pyodbc.connect(conn_str, timeout=5)
+        cur = cn.cursor()
+        try:
+            cur.execute(
+                f"SELECT COUNT(*) FROM [{schema}].[{table}] "
+                f"WHERE pipeline_id = ? AND embedded_at >= ?",
+                pipeline_id, reset_at)
+            return cur.fetchone()[0]
+        except Exception:
+            cur.execute(
+                f"SELECT COUNT(*) FROM [{schema}].[{table}] WHERE pipeline_id = ?",
+                pipeline_id)
+            return cur.fetchone()[0]
+        finally:
+            cur.close()
+            cn.close()
+    except Exception as e:
+        logger.warning(f"mssql blob embed count failed: {e}")
+        return None
+
+
 _mssql_stats_cache: dict = {}  # key: (source_id, dest_table) -> (source_count, embed_count, timestamp)
 
 def _get_mssql_stats_cached(source, pipeline, store):
@@ -4486,7 +4742,7 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         if source_id:
             source_doc = store.get(source_id, "source")
             if source_doc:
-                source = _source_from_doc(source_doc)
+                source = _source_from_doc(source_doc, mask=False)
                 if source.type == SourceType.COSMOSDB:
                     src_endpoint = source.config.get("endpoint", "")
                     src_client = CosmosClient(src_endpoint, credential=DefaultAzureCredential())
@@ -4571,30 +4827,45 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                             blob_count += 1
                         source_doc_count = blob_count
 
-                    # Count embedded docs in destination CosmosDB container
+                    # Count embedded docs in the pipeline's destination store.
+                    # Dispatch by destination type: cosmosdb | pgvector | mssql.
                     if pipeline.destination_id:
                         dest_doc = store.get(pipeline.destination_id, "destination")
                         if dest_doc:
                             dest_cfg = dest_doc.get("config", {})
-                            dest_endpoint = dest_cfg.get("endpoint", "")
-                            if dest_endpoint:
-                                dest_client = CosmosClient(dest_endpoint, credential=DefaultAzureCredential())
-                                embed_container = dest_client.get_database_client(dest_cfg["database"]).get_container_client(dest_cfg["container"])
-                                reset_at = pipeline.reset_at or "1970-01-01T00:00:00"
-                                if hasattr(reset_at, 'isoformat'):
-                                    reset_at = reset_at.isoformat()
-                                reset_at = str(reset_at)
-                                count_query = (
-                                    "SELECT VALUE COUNT(1) FROM c "
-                                    "WHERE c.pipeline_id = @pid AND c.embedded_at >= @reset_at"
-                                )
-                                count_params = [
-                                    {"name": "@pid", "value": pipeline_id},
-                                    {"name": "@reset_at", "value": reset_at},
-                                ]
-                                result = list(embed_container.query_items(count_query, parameters=count_params, enable_cross_partition_query=True))
-                                if result:
-                                    embedded_count = result[0]
+                            dest_type = (dest_doc.get("type") or "").lower()
+                            reset_at = pipeline.reset_at or "1970-01-01T00:00:00"
+                            if hasattr(reset_at, 'isoformat'):
+                                reset_at = reset_at.isoformat()
+                            reset_at = str(reset_at)
+
+                            try:
+                                if dest_type in ("cosmosdb", "cosmos", "azure-cosmos-db"):
+                                    dest_endpoint = dest_cfg.get("endpoint", "")
+                                    if dest_endpoint:
+                                        dest_client = CosmosClient(dest_endpoint, credential=DefaultAzureCredential())
+                                        embed_container = dest_client.get_database_client(dest_cfg["database"]).get_container_client(dest_cfg["container"])
+                                        count_query = (
+                                            "SELECT VALUE COUNT(1) FROM c "
+                                            "WHERE c.pipeline_id = @pid AND c.embedded_at >= @reset_at"
+                                        )
+                                        count_params = [
+                                            {"name": "@pid", "value": pipeline_id},
+                                            {"name": "@reset_at", "value": reset_at},
+                                        ]
+                                        result = list(embed_container.query_items(count_query, parameters=count_params, enable_cross_partition_query=True))
+                                        if result:
+                                            embedded_count = result[0]
+                                elif dest_type in ("pgvector", "postgresql", "postgres"):
+                                    ec = _get_blob_embed_count_pg(dest_cfg, pipeline_id, reset_at)
+                                    if ec is not None:
+                                        embedded_count = ec
+                                elif dest_type in ("mssql", "sqlserver", "sql-server"):
+                                    ec = _get_blob_embed_count_mssql(dest_cfg, pipeline_id, reset_at)
+                                    if ec is not None:
+                                        embedded_count = ec
+                            except Exception as ce:
+                                logger.warning(f"Blob embedded_count query failed (dest_type={dest_type}): {ce}")
 
                     docs_processed = embedded_count
                     if source_doc_count and source_doc_count > 0:
@@ -4777,6 +5048,395 @@ async def update_settings(payload: dict):
     store.upsert(doc)
 
     return {"success": True, "applied": applied}
+
+
+# =============================================================================
+# IMPORT / EXPORT (deployment bundles)
+# =============================================================================
+
+_EXPORT_VERSION = "1.0"
+
+# Resource types handled by export/import, with their CosmosDB doc_type
+_EXPORT_RESOURCE_TYPES = {
+    "sources": "source",
+    "destinations": "destination",
+    "pipelines": "pipeline",
+    "models": "docgrok_model",
+    "assistants": "assistant",
+}
+
+
+def _strip_internal(doc: dict) -> dict:
+    """Remove Cosmos internal fields (_rid, _etag, _self, ...) and doc_type."""
+    return {k: v for k, v in doc.items() if not k.startswith("_") and k != "doc_type"}
+
+
+def _redact_secrets_in_config(cfg: dict) -> dict:
+    """Replace sensitive values inside a config dict with '***'."""
+    if not isinstance(cfg, dict):
+        return cfg
+    out = {}
+    for k, v in cfg.items():
+        if any(s in k.lower() for s in _SENSITIVE_CONFIG_KEYS):
+            out[k] = "***" if v not in (None, "", 0) else v
+        else:
+            out[k] = v
+    return out
+
+
+def _redact_model_doc(doc: dict) -> dict:
+    """Redact sensitive fields from a docgrok_model doc."""
+    out = dict(doc)
+    for k in list(out.keys()):
+        if any(s in k.lower() for s in _SENSITIVE_CONFIG_KEYS):
+            if out[k] not in (None, "", 0):
+                out[k] = "***"
+    return out
+
+
+def _collect_pipeline_refs(pipelines: list[dict]) -> tuple[set, set, set]:
+    """Return (source_ids, destination_ids, model_refs) referenced by the given pipelines."""
+    src_ids, dst_ids, mdl_refs = set(), set(), set()
+    for p in pipelines:
+        for ps in p.get("sources", []) or []:
+            sid = ps.get("source_id") if isinstance(ps, dict) else None
+            if sid:
+                src_ids.add(sid)
+        if p.get("destination_id"):
+            dst_ids.add(p["destination_id"])
+        if p.get("docgrok_pipeline"):
+            mdl_refs.add(p["docgrok_pipeline"])
+    return src_ids, dst_ids, mdl_refs
+
+
+@app.get("/api/admin/export")
+def export_bundle(
+    include: str = "sources,destinations,pipelines,models,assistants",
+    include_secrets: bool = False,
+    include_checkpoints: bool = False,
+    pipeline_ids: str = "",
+    source_ids: str = "",
+    destination_ids: str = "",
+    model_ids: str = "",
+    assistant_ids: str = "",
+    download: bool = False,
+):
+    """Export OmniVec deployment data as a JSON bundle.
+
+    Query params:
+      - include: csv of {sources,destinations,pipelines,models,assistants}
+      - include_secrets: if true, keep connection strings / api keys / passwords
+      - include_checkpoints: if true, append all (or pipeline-scoped) checkpoints
+      - pipeline_ids: csv; when set, only export these pipelines plus the sources,
+        destinations, models, and assistants they reference (unless overridden by
+        an explicit per-type *_ids filter below)
+      - source_ids / destination_ids / model_ids / assistant_ids: csv; when set,
+        filter that type to exactly those IDs (overrides pipeline-driven auto
+        inclusion for that type)
+      - download: if true, send as attachment
+    """
+    store = get_store()
+    wanted = {t.strip() for t in include.split(",") if t.strip()}
+    unknown = wanted - set(_EXPORT_RESOURCE_TYPES.keys())
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown resource type(s): {sorted(unknown)}")
+
+    def _csv_set(v: str) -> set:
+        return {x.strip() for x in (v or "").split(",") if x.strip()}
+
+    pipeline_filter = _csv_set(pipeline_ids)
+    src_filter = _csv_set(source_ids)
+    dst_filter = _csv_set(destination_ids)
+    mdl_filter = _csv_set(model_ids)
+    ast_filter = _csv_set(assistant_ids)
+
+    resources: dict[str, list[dict]] = {k: [] for k in _EXPORT_RESOURCE_TYPES}
+
+    # Load pipelines first because filter is pipeline-driven
+    all_pipelines = [_strip_internal(d) for d in store.list("pipeline")]
+    if pipeline_filter:
+        all_pipelines = [p for p in all_pipelines if p.get("id") in pipeline_filter]
+        missing = pipeline_filter - {p.get("id") for p in all_pipelines}
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Pipeline(s) not found: {sorted(missing)}")
+    if "pipelines" in wanted:
+        resources["pipelines"] = all_pipelines
+
+    ref_src, ref_dst, ref_mdl = _collect_pipeline_refs(all_pipelines)
+
+    if "sources" in wanted:
+        docs = [_strip_internal(d) for d in store.list("source")]
+        if src_filter:
+            docs = [d for d in docs if d.get("id") in src_filter]
+        elif pipeline_filter:
+            docs = [d for d in docs if d.get("id") in ref_src]
+        if not include_secrets:
+            for d in docs:
+                if isinstance(d.get("config"), dict):
+                    d["config"] = _redact_secrets_in_config(d["config"])
+        resources["sources"] = docs
+
+    if "destinations" in wanted:
+        docs = [_strip_internal(d) for d in store.list("destination")]
+        if dst_filter:
+            docs = [d for d in docs if d.get("id") in dst_filter]
+        elif pipeline_filter:
+            docs = [d for d in docs if d.get("id") in ref_dst]
+        if not include_secrets:
+            for d in docs:
+                if isinstance(d.get("config"), dict):
+                    d["config"] = _redact_secrets_in_config(d["config"])
+        resources["destinations"] = docs
+
+    if "models" in wanted:
+        docs = [_strip_internal(d) for d in store.list("docgrok_model")]
+        if mdl_filter:
+            docs = [d for d in docs if d.get("id") in mdl_filter or d.get("name") in mdl_filter]
+        elif pipeline_filter:
+            docs = [d for d in docs if d.get("id") in ref_mdl or d.get("name") in ref_mdl]
+        if not include_secrets:
+            docs = [_redact_model_doc(d) for d in docs]
+        resources["models"] = docs
+
+    if "assistants" in wanted:
+        docs = [_strip_internal(d) for d in store.list("assistant")]
+        if ast_filter:
+            docs = [d for d in docs if d.get("id") in ast_filter]
+        elif pipeline_filter:
+            # Assistants referencing any exported destination / model
+            kept_dst = {d["id"] for d in resources.get("destinations", [])}
+            kept_mdl = {d["id"] for d in resources.get("models", [])}
+            docs = [
+                a for a in docs
+                if a.get("model_id") in kept_mdl
+                or any(did in kept_dst for did in a.get("destination_ids") or [])
+            ]
+        resources["assistants"] = docs
+
+    active_filter: dict[str, list[str]] = {}
+    if pipeline_filter: active_filter["pipeline_ids"] = sorted(pipeline_filter)
+    if src_filter:      active_filter["source_ids"] = sorted(src_filter)
+    if dst_filter:      active_filter["destination_ids"] = sorted(dst_filter)
+    if mdl_filter:      active_filter["model_ids"] = sorted(mdl_filter)
+    if ast_filter:      active_filter["assistant_ids"] = sorted(ast_filter)
+
+    bundle: dict[str, Any] = {
+        "omnivec_export_version": _EXPORT_VERSION,
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "includes_secrets": bool(include_secrets),
+        "includes_checkpoints": bool(include_checkpoints),
+        "filter": active_filter or None,
+        "resources": resources,
+    }
+
+    if include_checkpoints:
+        cp_docs = [_strip_internal(d) for d in store.list("checkpoint")]
+        # Scope checkpoints to the source_ids actually in the exported bundle
+        exported_src_ids = {d["id"] for d in resources.get("sources", [])}
+        if exported_src_ids and (src_filter or pipeline_filter):
+            cp_docs = [c for c in cp_docs if c.get("source_id") in exported_src_ids]
+        bundle["checkpoints"] = cp_docs
+    else:
+        bundle["checkpoints"] = []
+
+    headers = {}
+    if download:
+        fname = "omnivec-export-" + datetime.utcnow().strftime("%Y%m%d-%H%M%S") + ".json"
+        headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+    return JSONResponse(content=bundle, headers=headers)
+
+
+def _rewrite_ids(bundle_resources: dict, id_map: dict[str, str]) -> None:
+    """In-place rewrite of cross-references in a bundle's resources using id_map.
+
+    id_map maps OLD id -> NEW id (for sources, destinations, models, assistants,
+    pipelines). Callers populate it only for renamed resources.
+    """
+    if not id_map:
+        return
+    for p in bundle_resources.get("pipelines", []):
+        for ps in p.get("sources", []) or []:
+            if isinstance(ps, dict) and ps.get("source_id") in id_map:
+                ps["source_id"] = id_map[ps["source_id"]]
+        if p.get("destination_id") in id_map:
+            p["destination_id"] = id_map[p["destination_id"]]
+        if p.get("docgrok_pipeline") in id_map:
+            p["docgrok_pipeline"] = id_map[p["docgrok_pipeline"]]
+    for a in bundle_resources.get("assistants", []):
+        if a.get("model_id") in id_map:
+            a["model_id"] = id_map[a["model_id"]]
+        a["destination_ids"] = [id_map.get(d, d) for d in (a.get("destination_ids") or [])]
+
+
+def _new_suffixed_id(old_id: str) -> str:
+    """Generate a new id from an old one by appending -copy-<rand4>."""
+    suffix = secrets.token_hex(2)
+    if old_id:
+        return f"{old_id}-copy-{suffix}"
+    return f"copy-{suffix}"
+
+
+@app.post("/api/admin/import")
+def import_bundle(
+    payload: dict,
+    on_conflict: str = "skip",
+    dry_run: bool = False,
+):
+    """Import an OmniVec deployment bundle.
+
+    Query params:
+      - on_conflict: skip | overwrite | rename (default skip)
+      - dry_run: if true, no writes; response describes what would happen
+    """
+    if on_conflict not in ("skip", "overwrite", "rename"):
+        raise HTTPException(status_code=400, detail="on_conflict must be one of: skip, overwrite, rename")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Bundle must be a JSON object")
+
+    version = payload.get("omnivec_export_version")
+    if version and str(version).split(".")[0] != _EXPORT_VERSION.split(".")[0]:
+        raise HTTPException(status_code=400, detail=f"Unsupported bundle version: {version}")
+
+    resources = dict(payload.get("resources") or {})
+    # Deep-copy so we can safely rewrite ids without mutating caller's payload
+    import copy
+    resources = copy.deepcopy(resources)
+    checkpoints = payload.get("checkpoints") or []
+
+    store = get_store()
+
+    # Pre-load existing IDs per type to detect conflicts
+    existing: dict[str, set] = {}
+    for rtype, doc_type in _EXPORT_RESOURCE_TYPES.items():
+        try:
+            existing[rtype] = {d["id"] for d in store.list(doc_type) if d.get("id")}
+        except Exception:
+            existing[rtype] = set()
+
+    summary: dict[str, dict] = {rtype: {"created": 0, "overwritten": 0, "skipped": 0, "renamed": 0, "errors": []}
+                                for rtype in _EXPORT_RESOURCE_TYPES}
+    summary["checkpoints"] = {"created": 0, "overwritten": 0, "skipped": 0, "renamed": 0, "errors": []}
+    warnings: list[str] = []
+    id_map: dict[str, str] = {}  # old -> new (for rename mode)
+    to_write: list[tuple[str, dict]] = []  # (doc_type, doc)
+
+    # Stable order: sources/destinations/models first (referenced), then pipelines, then assistants
+    order = ["sources", "destinations", "models", "assistants", "pipelines"]
+    for rtype in order:
+        doc_type = _EXPORT_RESOURCE_TYPES[rtype]
+        items = resources.get(rtype) or []
+        for item in items:
+            if not isinstance(item, dict):
+                summary[rtype]["errors"].append("item is not an object")
+                continue
+            item_id = item.get("id")
+            if not item_id:
+                summary[rtype]["errors"].append("item missing id")
+                continue
+
+            # Redacted secret detection
+            if isinstance(item.get("config"), dict):
+                for k, v in item["config"].items():
+                    if v == "***":
+                        warnings.append(f"{rtype}/{item_id}: field '{k}' is redacted ('***'); resource may not function until updated")
+
+            conflict = item_id in existing.get(rtype, set())
+            if conflict:
+                if on_conflict == "skip":
+                    summary[rtype]["skipped"] += 1
+                    continue
+                elif on_conflict == "overwrite":
+                    summary[rtype]["overwritten"] += 1
+                elif on_conflict == "rename":
+                    new_id = _new_suffixed_id(item_id)
+                    # Ensure new_id doesn't also collide
+                    while new_id in existing.get(rtype, set()):
+                        new_id = _new_suffixed_id(item_id)
+                    id_map[item_id] = new_id
+                    item["id"] = new_id
+                    # Also rename to avoid unique-name constraint in most resources
+                    if item.get("name"):
+                        item["name"] = f"{item['name']}-copy-{new_id[-4:]}"
+                    summary[rtype]["renamed"] += 1
+                    existing[rtype].add(new_id)
+            else:
+                summary[rtype]["created"] += 1
+                existing[rtype].add(item_id)
+
+            # Pipelines: force paused on import so we never auto-start ingestion
+            if rtype == "pipelines":
+                item["status"] = "paused"
+
+            to_write.append((doc_type, item))
+
+    # Rewrite cross references after we know the id_map
+    if id_map:
+        _rewrite_ids(resources, id_map)
+        # Because to_write holds references into resources (same dicts), rewrites propagate
+
+    # Checkpoints
+    if checkpoints:
+        # Pre-load existing checkpoint IDs
+        try:
+            cp_existing = {d["id"] for d in store.list("checkpoint") if d.get("id")}
+        except Exception:
+            cp_existing = set()
+        cp_to_write = []
+        for cp in checkpoints:
+            if not isinstance(cp, dict) or not cp.get("id"):
+                summary["checkpoints"]["errors"].append("checkpoint missing id")
+                continue
+            # Rewrite source_id if its source was renamed
+            if cp.get("source_id") in id_map:
+                cp["source_id"] = id_map[cp["source_id"]]
+            cp_id = cp["id"]
+            conflict = cp_id in cp_existing
+            if conflict and on_conflict == "skip":
+                summary["checkpoints"]["skipped"] += 1
+                continue
+            if conflict and on_conflict == "overwrite":
+                summary["checkpoints"]["overwritten"] += 1
+            elif not conflict:
+                summary["checkpoints"]["created"] += 1
+            # rename for checkpoints: keep id (they're regenerated via source_id anyway)
+            cp["doc_type"] = "checkpoint"
+            cp_to_write.append(cp)
+    else:
+        cp_to_write = []
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "on_conflict": on_conflict,
+            "summary": summary,
+            "warnings": warnings,
+            "id_map": id_map,
+        }
+
+    # Apply writes
+    for doc_type, item in to_write:
+        try:
+            doc = {**item, "doc_type": doc_type}
+            store.upsert(doc)
+        except Exception as e:
+            rtype = next((k for k, v in _EXPORT_RESOURCE_TYPES.items() if v == doc_type), doc_type)
+            summary.setdefault(rtype, {}).setdefault("errors", []).append(f"{item.get('id')}: {e}")
+
+    for cp in cp_to_write:
+        try:
+            store.upsert(cp)
+        except Exception as e:
+            summary["checkpoints"]["errors"].append(f"{cp.get('id')}: {e}")
+
+    return {
+        "success": True,
+        "dry_run": False,
+        "on_conflict": on_conflict,
+        "summary": summary,
+        "warnings": warnings,
+        "id_map": id_map,
+    }
 
 
 # =============================================================================

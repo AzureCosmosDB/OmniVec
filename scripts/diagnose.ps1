@@ -1,4 +1,4 @@
-# OmniVec Deployment Diagnostics
+﻿# OmniVec Deployment Diagnostics
 # Comprehensive health check across infrastructure, pods, networking, auth,
 # images, pipelines, models, and common failure modes.
 #
@@ -15,6 +15,28 @@ param(
     [string]$AdminToken,
     [string]$Pipeline   # Optional: diagnose a single pipeline in depth
 )
+
+# Require PowerShell 7+ (uses `e ANSI escape + relies on pwsh native-stderr handling).
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwshCmd) {
+        $forwarded = @('-NoLogo', '-NoProfile', '-File', $PSCommandPath)
+        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+            if ($kv.Value -is [System.Management.Automation.SwitchParameter]) {
+                if ($kv.Value.IsPresent) { $forwarded += "-$($kv.Key)" }
+            } else {
+                $forwarded += "-$($kv.Key)"; $forwarded += "$($kv.Value)"
+            }
+        }
+        Write-Host "Relaunching under PowerShell 7 (pwsh)..." -ForegroundColor DarkGray
+        & $pwshCmd.Source @forwarded
+        exit $LASTEXITCODE
+    }
+    Write-Host "ERROR: This script requires PowerShell 7+ (pwsh)." -ForegroundColor Red
+    Write-Host "  Install pwsh: winget install --id Microsoft.PowerShell --source winget" -ForegroundColor Yellow
+    Write-Host "  Then run:     pwsh -File $PSCommandPath" -ForegroundColor Yellow
+    exit 1
+}
 
 if ($Help) {
     Write-Host @"
