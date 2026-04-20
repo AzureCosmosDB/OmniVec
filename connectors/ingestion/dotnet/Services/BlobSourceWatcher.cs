@@ -21,7 +21,7 @@ public class BlobSourceWatcher : ISourceWatcher
     private readonly ChangeFeedOptions _options;
     private readonly OmniVecApiClient _apiClient;
     private readonly ContentHasher _hasher;
-    private readonly ServiceBusPublisher _sbPublisher;
+    private readonly ServiceBusPublisher? _sbPublisher;
     private readonly ILogger<BlobSourceWatcher> _logger;
 
     private CancellationTokenSource? _cts;
@@ -58,8 +58,10 @@ public class BlobSourceWatcher : ISourceWatcher
         _options = options;
         _apiClient = apiClient;
         _hasher = hasher;
-        _sbPublisher = sbPublisher ?? throw new ArgumentNullException(nameof(sbPublisher),
-            "Blob sources require Service Bus (queue mode only)");
+        // Blob sources depend on Service Bus, but we must not throw here:
+        // SourceWatcherManager will detect a disabled publisher and skip CreateWatcher.
+        // Throwing would crash the entire ReconcileAsync pass and silently stall discovery.
+        _sbPublisher = sbPublisher;
         _logger = logger;
         Generation = generation ?? "0";
     }
@@ -73,6 +75,16 @@ public class BlobSourceWatcher : ISourceWatcher
 
     public async Task StartAsync(CancellationToken ct)
     {
+        // Blob sources require a working Service Bus publisher. If it's not configured,
+        // log a loud warning and stay idle rather than crashing the reconcile loop.
+        if (_sbPublisher is null || !_sbPublisher.IsEnabled)
+        {
+            _logger.LogWarning(
+                "Blob source {Source}: Service Bus publisher is not enabled — watcher will stay idle until SB is configured.",
+                _source.Name);
+            return;
+        }
+
         // Verify connection
         var client = CreateBlobServiceClient();
         var container = client.GetBlobContainerClient(_source.BlobContainer);
@@ -105,7 +117,7 @@ public class BlobSourceWatcher : ISourceWatcher
             try
             {
                 // Check backpressure before enumerating more
-                if (!await _sbPublisher.HasCapacityAsync(ct))
+                if (!await _sbPublisher!.HasCapacityAsync(ct))
                 {
                     _logger.LogInformation("Blob prefill paused (backpressure), waiting {Seconds}s",
                         _options.BackpressurePauseSeconds);
@@ -229,7 +241,7 @@ public class BlobSourceWatcher : ISourceWatcher
         if (newBlobs.Count > 0)
         {
             // Check backpressure before publishing
-            if (!await _sbPublisher.HasCapacityAsync(ct))
+            if (!await _sbPublisher!.HasCapacityAsync(ct))
             {
                 _logger.LogWarning("Blob live poll: {Count} new blobs found but backpressure active, will retry",
                     newBlobs.Count);
@@ -292,7 +304,7 @@ public class BlobSourceWatcher : ISourceWatcher
                 };
             }).ToList();
 
-            await _sbPublisher.PublishBatchAsync(messages, ct);
+            await _sbPublisher!.PublishBatchAsync(messages, ct);
         }
     }
 

@@ -12,15 +12,18 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.Configure<WorkerOptions>(
     builder.Configuration.GetSection("Worker"));
 
-// Service Bus client — only register when namespace is configured
+// Service Bus client — only register when namespace is configured.
+// If not configured, fail fast at startup so Kubernetes surfaces CrashLoopBackOff
+// instead of silently idling (old behavior returned null and awaited Task.Delay(Infinite)).
 builder.Services.AddSingleton(sp =>
 {
     var opts = sp.GetRequiredService<IOptions<WorkerOptions>>().Value;
     if (string.IsNullOrWhiteSpace(opts.ServiceBusNamespace))
     {
         var log = sp.GetRequiredService<ILogger<Program>>();
-        log.LogWarning("Service Bus namespace not configured — worker will start but cannot process queue messages");
-        return (ServiceBusClient?)null;
+        log.LogCritical("Worker__ServiceBusNamespace is not set — worker cannot process queue messages. Exiting so Kubernetes surfaces the failure.");
+        Environment.Exit(2);
+        throw new InvalidOperationException("Worker__ServiceBusNamespace is not set"); // unreachable; satisfies compiler
     }
     return new ServiceBusClient(opts.ServiceBusNamespace, new DefaultAzureCredential());
 });
@@ -45,6 +48,9 @@ builder.Services.AddHttpClient<MetricsReporter>((sp, client) =>
 builder.Services.AddSingleton<IDestinationWriter, CosmosDbDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, PostgresDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, MsSqlDestinationWriter>();
+
+// Health endpoint (must be a hosted service so it runs alongside the worker)
+builder.Services.AddHostedService<HealthEndpointService>();
 
 // Worker
 builder.Services.AddHostedService<EmbeddingWorkerService>();
