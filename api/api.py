@@ -4942,6 +4942,365 @@ async def update_settings(payload: dict):
 
 
 # =============================================================================
+# IMPORT / EXPORT (deployment bundles)
+# =============================================================================
+
+_EXPORT_VERSION = "1.0"
+
+# Resource types handled by export/import, with their CosmosDB doc_type
+_EXPORT_RESOURCE_TYPES = {
+    "sources": "source",
+    "destinations": "destination",
+    "pipelines": "pipeline",
+    "models": "docgrok_model",
+    "assistants": "assistant",
+}
+
+
+def _strip_internal(doc: dict) -> dict:
+    """Remove Cosmos internal fields (_rid, _etag, _self, ...) and doc_type."""
+    return {k: v for k, v in doc.items() if not k.startswith("_") and k != "doc_type"}
+
+
+def _redact_secrets_in_config(cfg: dict) -> dict:
+    """Replace sensitive values inside a config dict with '***'."""
+    if not isinstance(cfg, dict):
+        return cfg
+    out = {}
+    for k, v in cfg.items():
+        if any(s in k.lower() for s in _SENSITIVE_CONFIG_KEYS):
+            out[k] = "***" if v not in (None, "", 0) else v
+        else:
+            out[k] = v
+    return out
+
+
+def _redact_model_doc(doc: dict) -> dict:
+    """Redact sensitive fields from a docgrok_model doc."""
+    out = dict(doc)
+    for k in list(out.keys()):
+        if any(s in k.lower() for s in _SENSITIVE_CONFIG_KEYS):
+            if out[k] not in (None, "", 0):
+                out[k] = "***"
+    return out
+
+
+def _collect_pipeline_refs(pipelines: list[dict]) -> tuple[set, set, set]:
+    """Return (source_ids, destination_ids, model_refs) referenced by the given pipelines."""
+    src_ids, dst_ids, mdl_refs = set(), set(), set()
+    for p in pipelines:
+        for ps in p.get("sources", []) or []:
+            sid = ps.get("source_id") if isinstance(ps, dict) else None
+            if sid:
+                src_ids.add(sid)
+        if p.get("destination_id"):
+            dst_ids.add(p["destination_id"])
+        if p.get("docgrok_pipeline"):
+            mdl_refs.add(p["docgrok_pipeline"])
+    return src_ids, dst_ids, mdl_refs
+
+
+@app.get("/api/admin/export")
+def export_bundle(
+    include: str = "sources,destinations,pipelines,models,assistants",
+    include_secrets: bool = False,
+    include_checkpoints: bool = False,
+    pipeline_ids: str = "",
+    download: bool = False,
+):
+    """Export OmniVec deployment data as a JSON bundle.
+
+    Query params:
+      - include: csv of {sources,destinations,pipelines,models,assistants}
+      - include_secrets: if true, keep connection strings / api keys / passwords
+      - include_checkpoints: if true, append all (or pipeline-scoped) checkpoints
+      - pipeline_ids: csv; when set, only export these pipelines plus the sources,
+        destinations, models, and assistants they reference
+      - download: if true, send as attachment
+    """
+    store = get_store()
+    wanted = {t.strip() for t in include.split(",") if t.strip()}
+    unknown = wanted - set(_EXPORT_RESOURCE_TYPES.keys())
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown resource type(s): {sorted(unknown)}")
+
+    pipeline_filter = {p.strip() for p in pipeline_ids.split(",") if p.strip()}
+
+    resources: dict[str, list[dict]] = {k: [] for k in _EXPORT_RESOURCE_TYPES}
+
+    # Load pipelines first because filter is pipeline-driven
+    all_pipelines = [_strip_internal(d) for d in store.list("pipeline")]
+    if pipeline_filter:
+        all_pipelines = [p for p in all_pipelines if p.get("id") in pipeline_filter]
+        missing = pipeline_filter - {p.get("id") for p in all_pipelines}
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Pipeline(s) not found: {sorted(missing)}")
+    if "pipelines" in wanted:
+        resources["pipelines"] = all_pipelines
+
+    ref_src, ref_dst, ref_mdl = _collect_pipeline_refs(all_pipelines)
+
+    def _filter_by_ids(docs, allowed):
+        return [d for d in docs if not pipeline_filter or d.get("id") in allowed]
+
+    if "sources" in wanted:
+        docs = [_strip_internal(d) for d in store.list("source")]
+        docs = _filter_by_ids(docs, ref_src)
+        if not include_secrets:
+            for d in docs:
+                if isinstance(d.get("config"), dict):
+                    d["config"] = _redact_secrets_in_config(d["config"])
+        resources["sources"] = docs
+
+    if "destinations" in wanted:
+        docs = [_strip_internal(d) for d in store.list("destination")]
+        docs = _filter_by_ids(docs, ref_dst)
+        if not include_secrets:
+            for d in docs:
+                if isinstance(d.get("config"), dict):
+                    d["config"] = _redact_secrets_in_config(d["config"])
+        resources["destinations"] = docs
+
+    if "models" in wanted:
+        docs = [_strip_internal(d) for d in store.list("docgrok_model")]
+        if pipeline_filter:
+            docs = [d for d in docs if d.get("id") in ref_mdl or d.get("name") in ref_mdl]
+        if not include_secrets:
+            docs = [_redact_model_doc(d) for d in docs]
+        resources["models"] = docs
+
+    if "assistants" in wanted:
+        docs = [_strip_internal(d) for d in store.list("assistant")]
+        if pipeline_filter:
+            # Assistants referencing any exported destination / model
+            kept_dst = {d["id"] for d in resources.get("destinations", [])}
+            kept_mdl = {d["id"] for d in resources.get("models", [])}
+            docs = [
+                a for a in docs
+                if a.get("model_id") in kept_mdl
+                or any(did in kept_dst for did in a.get("destination_ids") or [])
+            ]
+        resources["assistants"] = docs
+
+    bundle: dict[str, Any] = {
+        "omnivec_export_version": _EXPORT_VERSION,
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "includes_secrets": bool(include_secrets),
+        "includes_checkpoints": bool(include_checkpoints),
+        "filter": {"pipeline_ids": sorted(pipeline_filter)} if pipeline_filter else None,
+        "resources": resources,
+    }
+
+    if include_checkpoints:
+        cp_docs = [_strip_internal(d) for d in store.list("checkpoint")]
+        if pipeline_filter:
+            # Scope checkpoints to the sources referenced by the filtered pipelines
+            cp_docs = [c for c in cp_docs if c.get("source_id") in ref_src]
+        bundle["checkpoints"] = cp_docs
+    else:
+        bundle["checkpoints"] = []
+
+    headers = {}
+    if download:
+        fname = "omnivec-export-" + datetime.utcnow().strftime("%Y%m%d-%H%M%S") + ".json"
+        headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+    return JSONResponse(content=bundle, headers=headers)
+
+
+def _rewrite_ids(bundle_resources: dict, id_map: dict[str, str]) -> None:
+    """In-place rewrite of cross-references in a bundle's resources using id_map.
+
+    id_map maps OLD id -> NEW id (for sources, destinations, models, assistants,
+    pipelines). Callers populate it only for renamed resources.
+    """
+    if not id_map:
+        return
+    for p in bundle_resources.get("pipelines", []):
+        for ps in p.get("sources", []) or []:
+            if isinstance(ps, dict) and ps.get("source_id") in id_map:
+                ps["source_id"] = id_map[ps["source_id"]]
+        if p.get("destination_id") in id_map:
+            p["destination_id"] = id_map[p["destination_id"]]
+        if p.get("docgrok_pipeline") in id_map:
+            p["docgrok_pipeline"] = id_map[p["docgrok_pipeline"]]
+    for a in bundle_resources.get("assistants", []):
+        if a.get("model_id") in id_map:
+            a["model_id"] = id_map[a["model_id"]]
+        a["destination_ids"] = [id_map.get(d, d) for d in (a.get("destination_ids") or [])]
+
+
+def _new_suffixed_id(old_id: str) -> str:
+    """Generate a new id from an old one by appending -copy-<rand4>."""
+    suffix = secrets.token_hex(2)
+    if old_id:
+        return f"{old_id}-copy-{suffix}"
+    return f"copy-{suffix}"
+
+
+@app.post("/api/admin/import")
+def import_bundle(
+    payload: dict,
+    on_conflict: str = "skip",
+    dry_run: bool = False,
+):
+    """Import an OmniVec deployment bundle.
+
+    Query params:
+      - on_conflict: skip | overwrite | rename (default skip)
+      - dry_run: if true, no writes; response describes what would happen
+    """
+    if on_conflict not in ("skip", "overwrite", "rename"):
+        raise HTTPException(status_code=400, detail="on_conflict must be one of: skip, overwrite, rename")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Bundle must be a JSON object")
+
+    version = payload.get("omnivec_export_version")
+    if version and str(version).split(".")[0] != _EXPORT_VERSION.split(".")[0]:
+        raise HTTPException(status_code=400, detail=f"Unsupported bundle version: {version}")
+
+    resources = dict(payload.get("resources") or {})
+    # Deep-copy so we can safely rewrite ids without mutating caller's payload
+    import copy
+    resources = copy.deepcopy(resources)
+    checkpoints = payload.get("checkpoints") or []
+
+    store = get_store()
+
+    # Pre-load existing IDs per type to detect conflicts
+    existing: dict[str, set] = {}
+    for rtype, doc_type in _EXPORT_RESOURCE_TYPES.items():
+        try:
+            existing[rtype] = {d["id"] for d in store.list(doc_type) if d.get("id")}
+        except Exception:
+            existing[rtype] = set()
+
+    summary: dict[str, dict] = {rtype: {"created": 0, "overwritten": 0, "skipped": 0, "renamed": 0, "errors": []}
+                                for rtype in _EXPORT_RESOURCE_TYPES}
+    summary["checkpoints"] = {"created": 0, "overwritten": 0, "skipped": 0, "renamed": 0, "errors": []}
+    warnings: list[str] = []
+    id_map: dict[str, str] = {}  # old -> new (for rename mode)
+    to_write: list[tuple[str, dict]] = []  # (doc_type, doc)
+
+    # Stable order: sources/destinations/models first (referenced), then pipelines, then assistants
+    order = ["sources", "destinations", "models", "assistants", "pipelines"]
+    for rtype in order:
+        doc_type = _EXPORT_RESOURCE_TYPES[rtype]
+        items = resources.get(rtype) or []
+        for item in items:
+            if not isinstance(item, dict):
+                summary[rtype]["errors"].append("item is not an object")
+                continue
+            item_id = item.get("id")
+            if not item_id:
+                summary[rtype]["errors"].append("item missing id")
+                continue
+
+            # Redacted secret detection
+            if isinstance(item.get("config"), dict):
+                for k, v in item["config"].items():
+                    if v == "***":
+                        warnings.append(f"{rtype}/{item_id}: field '{k}' is redacted ('***'); resource may not function until updated")
+
+            conflict = item_id in existing.get(rtype, set())
+            if conflict:
+                if on_conflict == "skip":
+                    summary[rtype]["skipped"] += 1
+                    continue
+                elif on_conflict == "overwrite":
+                    summary[rtype]["overwritten"] += 1
+                elif on_conflict == "rename":
+                    new_id = _new_suffixed_id(item_id)
+                    # Ensure new_id doesn't also collide
+                    while new_id in existing.get(rtype, set()):
+                        new_id = _new_suffixed_id(item_id)
+                    id_map[item_id] = new_id
+                    item["id"] = new_id
+                    # Also rename to avoid unique-name constraint in most resources
+                    if item.get("name"):
+                        item["name"] = f"{item['name']}-copy-{new_id[-4:]}"
+                    summary[rtype]["renamed"] += 1
+                    existing[rtype].add(new_id)
+            else:
+                summary[rtype]["created"] += 1
+                existing[rtype].add(item_id)
+
+            # Pipelines: force paused on import so we never auto-start ingestion
+            if rtype == "pipelines":
+                item["status"] = "paused"
+
+            to_write.append((doc_type, item))
+
+    # Rewrite cross references after we know the id_map
+    if id_map:
+        _rewrite_ids(resources, id_map)
+        # Because to_write holds references into resources (same dicts), rewrites propagate
+
+    # Checkpoints
+    if checkpoints:
+        # Pre-load existing checkpoint IDs
+        try:
+            cp_existing = {d["id"] for d in store.list("checkpoint") if d.get("id")}
+        except Exception:
+            cp_existing = set()
+        cp_to_write = []
+        for cp in checkpoints:
+            if not isinstance(cp, dict) or not cp.get("id"):
+                summary["checkpoints"]["errors"].append("checkpoint missing id")
+                continue
+            # Rewrite source_id if its source was renamed
+            if cp.get("source_id") in id_map:
+                cp["source_id"] = id_map[cp["source_id"]]
+            cp_id = cp["id"]
+            conflict = cp_id in cp_existing
+            if conflict and on_conflict == "skip":
+                summary["checkpoints"]["skipped"] += 1
+                continue
+            if conflict and on_conflict == "overwrite":
+                summary["checkpoints"]["overwritten"] += 1
+            elif not conflict:
+                summary["checkpoints"]["created"] += 1
+            # rename for checkpoints: keep id (they're regenerated via source_id anyway)
+            cp["doc_type"] = "checkpoint"
+            cp_to_write.append(cp)
+    else:
+        cp_to_write = []
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "on_conflict": on_conflict,
+            "summary": summary,
+            "warnings": warnings,
+            "id_map": id_map,
+        }
+
+    # Apply writes
+    for doc_type, item in to_write:
+        try:
+            doc = {**item, "doc_type": doc_type}
+            store.upsert(doc)
+        except Exception as e:
+            rtype = next((k for k, v in _EXPORT_RESOURCE_TYPES.items() if v == doc_type), doc_type)
+            summary.setdefault(rtype, {}).setdefault("errors", []).append(f"{item.get('id')}: {e}")
+
+    for cp in cp_to_write:
+        try:
+            store.upsert(cp)
+        except Exception as e:
+            summary["checkpoints"]["errors"].append(f"{cp.get('id')}: {e}")
+
+    return {
+        "success": True,
+        "dry_run": False,
+        "on_conflict": on_conflict,
+        "summary": summary,
+        "warnings": warnings,
+        "id_map": id_map,
+    }
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
