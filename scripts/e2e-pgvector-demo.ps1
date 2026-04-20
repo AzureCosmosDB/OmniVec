@@ -150,6 +150,26 @@ $AzdExe = Resolve-NativeExe 'azd'
 # pod has network access to the Azure PostgreSQL Flexible Server (both in
 # Azure) and avoids any dependency on local psql or the fragile
 # `rdbms-connect` az extension. Requires only kubectl (already required).
+#
+# To dodge DNS-propagation delays after creating a fresh Azure PG flexible
+# server, we resolve the host's IP from the local box (with retry) and
+# inject it as a hostAliases entry on the pod so the container bypasses
+# CoreDNS entirely.
+function Resolve-PgHostIp {
+    param([Parameter(Mandatory)][string]$PgHost, [int]$TimeoutSec = 120)
+    $waited = 0
+    while ($waited -lt $TimeoutSec) {
+        try {
+            $rec = Resolve-DnsName -Name $PgHost -Type A -ErrorAction Stop 2>$null |
+                   Where-Object { $_.IPAddress -and $_.IPAddress -match '^\d+\.\d+\.\d+\.\d+$' } |
+                   Select-Object -First 1
+            if ($rec -and $rec.IPAddress) { return $rec.IPAddress }
+        } catch {}
+        Start-Sleep -Seconds 5; $waited += 5
+    }
+    return $null
+}
+
 function Invoke-PgSql {
     param(
         [Parameter(Mandatory)][string]$PgHost,
@@ -160,6 +180,20 @@ function Invoke-PgSql {
         [Parameter(Mandatory)][string]$Query,
         [string]$Namespace = 'default'
     )
+    # Cache the resolved IP per-run.
+    if (-not $script:_pgHostIp -or $script:_pgHostIpFor -ne $PgHost) {
+        Log "  Resolving $PgHost ..."
+        $ip = Resolve-PgHostIp -PgHost $PgHost
+        if (-not $ip) {
+            LogErr "Could not resolve $PgHost within 120s (DNS propagation lag?)."
+            throw "DNS resolution failed for $PgHost"
+        }
+        Log "  -> $ip"
+        $script:_pgHostIp = $ip
+        $script:_pgHostIpFor = $PgHost
+    }
+    $ip = $script:_pgHostIp
+
     $suffix = [Guid]::NewGuid().ToString('N').Substring(0,8)
     $podName = "ov-pgclient-$suffix"
 
@@ -167,6 +201,7 @@ function Invoke-PgSql {
         apiVersion = 'v1'
         spec = @{
             restartPolicy = 'Never'
+            hostAliases = @(@{ ip = $ip; hostnames = @($PgHost) })
             containers = @(@{
                 name  = 'psql'
                 image = 'postgres:16-alpine'
@@ -180,8 +215,6 @@ function Invoke-PgSql {
         }
     } | ConvertTo-Json -Depth 10 -Compress
 
-    # Create pod (overrides fully define the container; trailing image arg is a
-    # kubectl requirement but gets replaced by the overrides spec).
     $createOut = & kubectl run $podName `
         --namespace $Namespace `
         --image=postgres:16-alpine `
@@ -192,7 +225,6 @@ function Invoke-PgSql {
         throw "Failed to launch psql pod"
     }
 
-    # Wait for completion (pod exits after psql finishes)
     $timeoutSec = 120
     $waited = 0
     $phase = ''
