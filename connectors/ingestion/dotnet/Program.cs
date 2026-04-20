@@ -38,6 +38,7 @@ builder.Services.AddHttpClient<OmniVecApiClient>((sp, client) =>
 
 // Services
 builder.Services.AddSingleton<LeaseContainerManager>();
+builder.Services.AddSingleton<BlobLeaseManager>();
 builder.Services.AddSingleton<ContentHasher>();
 builder.Services.AddSingleton<ServiceBusPublisher>();
 builder.Services.AddSingleton<SourceWatcherManager>();

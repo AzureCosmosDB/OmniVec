@@ -2073,6 +2073,7 @@ def pause_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     pipeline.status = PipelineStatus.PAUSED
+    pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
     return {"success": True}
 
@@ -2087,6 +2088,7 @@ def resume_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     pipeline.status = PipelineStatus.ACTIVE
+    pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
     return {"success": True}
 
@@ -4466,6 +4468,92 @@ def _get_pg_stats_cached(source, pipeline, store):
         return None
 
 
+def _get_blob_embed_count_pg(dest_cfg, pipeline_id, reset_at):
+    """Count rows in a pgvector destination table for a given pipeline since reset_at.
+
+    Used when source.type == AZURE_BLOB and destination.type == pgvector.
+    Returns int (row count) or None on failure. Resilient to missing
+    cfp_generation / embedded_at columns on older tables.
+    """
+    import asyncio
+    from health_checker import _connect_pg
+
+    table = dest_cfg.get("table", "")
+    schema = dest_cfg.get("schema_name", dest_cfg.get("schema", "public"))
+    if not table:
+        return None
+
+    async def _q():
+        conn = await _connect_pg(dest_cfg)
+        try:
+            # Prefer pipeline_id + embedded_at filter; fall back gracefully.
+            try:
+                return await conn.fetchval(
+                    f'SELECT COUNT(*) FROM "{schema}"."{table}" '
+                    f'WHERE pipeline_id = $1 AND embedded_at >= $2::timestamptz',
+                    pipeline_id, reset_at)
+            except Exception:
+                try:
+                    return await conn.fetchval(
+                        f'SELECT COUNT(*) FROM "{schema}"."{table}" WHERE pipeline_id = $1',
+                        pipeline_id)
+                except Exception:
+                    return await conn.fetchval(
+                        f'SELECT COUNT(*) FROM "{schema}"."{table}" WHERE embedding IS NOT NULL')
+        finally:
+            await conn.close()
+
+    try:
+        return asyncio.run(_q())
+    except Exception as e:
+        logger.warning(f"pgvector blob embed count failed: {e}")
+        return None
+
+
+def _get_blob_embed_count_mssql(dest_cfg, pipeline_id, reset_at):
+    """Count rows in an MSSQL destination table for a given pipeline since reset_at."""
+    try:
+        import pyodbc
+    except ImportError:
+        logger.warning("pyodbc not installed; cannot count mssql blob embeddings")
+        return None
+
+    host = dest_cfg.get("host", "")
+    database = dest_cfg.get("database", "")
+    user = dest_cfg.get("user", "")
+    password = dest_cfg.get("password", "")
+    port = dest_cfg.get("port", 1433)
+    table = dest_cfg.get("table", "")
+    schema = dest_cfg.get("schema_name", dest_cfg.get("schema", "dbo"))
+    if not (host and database and table):
+        return None
+
+    conn_str = (
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={host},{port};"
+        f"DATABASE={database};UID={user};PWD={password};Encrypt=yes;TrustServerCertificate=yes;"
+    )
+    try:
+        cn = pyodbc.connect(conn_str, timeout=5)
+        cur = cn.cursor()
+        try:
+            cur.execute(
+                f"SELECT COUNT(*) FROM [{schema}].[{table}] "
+                f"WHERE pipeline_id = ? AND embedded_at >= ?",
+                pipeline_id, reset_at)
+            return cur.fetchone()[0]
+        except Exception:
+            cur.execute(
+                f"SELECT COUNT(*) FROM [{schema}].[{table}] WHERE pipeline_id = ?",
+                pipeline_id)
+            return cur.fetchone()[0]
+        finally:
+            cur.close()
+            cn.close()
+    except Exception as e:
+        logger.warning(f"mssql blob embed count failed: {e}")
+        return None
+
+
 _mssql_stats_cache: dict = {}  # key: (source_id, dest_table) -> (source_count, embed_count, timestamp)
 
 def _get_mssql_stats_cached(source, pipeline, store):
@@ -4733,30 +4821,45 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                             blob_count += 1
                         source_doc_count = blob_count
 
-                    # Count embedded docs in destination CosmosDB container
+                    # Count embedded docs in the pipeline's destination store.
+                    # Dispatch by destination type: cosmosdb | pgvector | mssql.
                     if pipeline.destination_id:
                         dest_doc = store.get(pipeline.destination_id, "destination")
                         if dest_doc:
                             dest_cfg = dest_doc.get("config", {})
-                            dest_endpoint = dest_cfg.get("endpoint", "")
-                            if dest_endpoint:
-                                dest_client = CosmosClient(dest_endpoint, credential=DefaultAzureCredential())
-                                embed_container = dest_client.get_database_client(dest_cfg["database"]).get_container_client(dest_cfg["container"])
-                                reset_at = pipeline.reset_at or "1970-01-01T00:00:00"
-                                if hasattr(reset_at, 'isoformat'):
-                                    reset_at = reset_at.isoformat()
-                                reset_at = str(reset_at)
-                                count_query = (
-                                    "SELECT VALUE COUNT(1) FROM c "
-                                    "WHERE c.pipeline_id = @pid AND c.embedded_at >= @reset_at"
-                                )
-                                count_params = [
-                                    {"name": "@pid", "value": pipeline_id},
-                                    {"name": "@reset_at", "value": reset_at},
-                                ]
-                                result = list(embed_container.query_items(count_query, parameters=count_params, enable_cross_partition_query=True))
-                                if result:
-                                    embedded_count = result[0]
+                            dest_type = (dest_doc.get("type") or "").lower()
+                            reset_at = pipeline.reset_at or "1970-01-01T00:00:00"
+                            if hasattr(reset_at, 'isoformat'):
+                                reset_at = reset_at.isoformat()
+                            reset_at = str(reset_at)
+
+                            try:
+                                if dest_type in ("cosmosdb", "cosmos", "azure-cosmos-db"):
+                                    dest_endpoint = dest_cfg.get("endpoint", "")
+                                    if dest_endpoint:
+                                        dest_client = CosmosClient(dest_endpoint, credential=DefaultAzureCredential())
+                                        embed_container = dest_client.get_database_client(dest_cfg["database"]).get_container_client(dest_cfg["container"])
+                                        count_query = (
+                                            "SELECT VALUE COUNT(1) FROM c "
+                                            "WHERE c.pipeline_id = @pid AND c.embedded_at >= @reset_at"
+                                        )
+                                        count_params = [
+                                            {"name": "@pid", "value": pipeline_id},
+                                            {"name": "@reset_at", "value": reset_at},
+                                        ]
+                                        result = list(embed_container.query_items(count_query, parameters=count_params, enable_cross_partition_query=True))
+                                        if result:
+                                            embedded_count = result[0]
+                                elif dest_type in ("pgvector", "postgresql", "postgres"):
+                                    ec = _get_blob_embed_count_pg(dest_cfg, pipeline_id, reset_at)
+                                    if ec is not None:
+                                        embedded_count = ec
+                                elif dest_type in ("mssql", "sqlserver", "sql-server"):
+                                    ec = _get_blob_embed_count_mssql(dest_cfg, pipeline_id, reset_at)
+                                    if ec is not None:
+                                        embedded_count = ec
+                            except Exception as ce:
+                                logger.warning(f"Blob embedded_count query failed (dest_type={dest_type}): {ce}")
 
                     docs_processed = embedded_count
                     if source_doc_count and source_doc_count > 0:

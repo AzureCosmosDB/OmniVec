@@ -125,6 +125,21 @@ dotnetWorker:
     repository: omnivec-dotnet-worker
     tag: latest
     pullPolicy: Always
+  # Health/liveness HTTP port exposed by the worker (HealthEndpointService)
+  healthPort: 8080
+  probes:
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 6
+    startup:
+      failureThreshold: 30
   resources:
     requests:
       memory: "256Mi"
