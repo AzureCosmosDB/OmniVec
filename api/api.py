@@ -2137,10 +2137,12 @@ def run_pipeline(pipeline_id: str):
 
 @app.post("/api/pipelines/{pipeline_id}/reset")
 def reset_pipeline(pipeline_id: str):
-    """Reset a pipeline: pause it first, delete all jobs, then allow resume.
+    """Reset a pipeline: briefly pause, delete jobs, bump generation, restore prior status.
 
-    Sets reset_at which the .NET CFP service detects â€” it will automatically
+    Sets reset_at which the .NET CFP service detects — it will automatically
     delete its lease container and restart the change feed from the beginning.
+    Prior status (ACTIVE/PAUSED) is preserved so the user doesn't have to
+    manually resume after every reset.
     """
     store = get_store()
     doc = store.get(pipeline_id, "pipeline")
@@ -2148,6 +2150,7 @@ def reset_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    prior_status = pipeline.status
 
     # Force pause before reset to prevent race with active changefeed
     if pipeline.status == PipelineStatus.ACTIVE:
@@ -2198,7 +2201,7 @@ def reset_pipeline(pipeline_id: str):
         except Exception as e:
             logger.warning("Failed to clean up chunks for pipeline %s: %s", pipeline_id, e)
 
-    # Set reset_at â€” the .NET CFP service watches this and will delete its
+    # Set reset_at — the .NET CFP service watches this and will delete its
     # lease container + restart the change feed from the beginning
     # Generate new generation hash from context (source+dest+model+timestamp)
     import hashlib
@@ -2207,10 +2210,14 @@ def reset_pipeline(pipeline_id: str):
     gen_input = f"{source_ids}|{pipeline.destination_id}|{pipeline.docgrok_pipeline}|{reset_ts.isoformat()}"
     pipeline.generation = hashlib.sha256(gen_input.encode()).hexdigest()[:12]
     pipeline.reset_at = reset_ts
+    # Restore prior status so a reset on an ACTIVE pipeline stays ACTIVE.
+    # The CFP service keys off reset_at/generation changes, not status, so
+    # replay happens regardless. Leaving paused was a UX footgun.
+    pipeline.status = prior_status
     pipeline.updated_at = reset_ts
     store.upsert(_to_doc(pipeline, "pipeline"))
 
-    return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset â€” {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
+    return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset — {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
 
 
 @app.post("/api/pipelines/{pipeline_id}/metrics/inline")
