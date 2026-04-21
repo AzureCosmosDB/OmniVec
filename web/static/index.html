@@ -5400,7 +5400,11 @@
                 const data = await res.json();
                 showNotification(data.message || 'Pipeline reset', 'success');
                 await refreshData();
-                showPipelineDetail(currentPipelineId);
+                // Re-render the current tab in place instead of calling
+                // showPipelineDetail, which would reset the modal to the General
+                // tab and feel like the modal "re-opened".
+                const pipeline = pipelines.find(p => p.id === currentPipelineId);
+                if (pipeline) renderPipelineDetailTab(pipeline);
             } catch (err) {
                 showNotification('Error: ' + err.message, 'error');
             }
