@@ -1,0 +1,133 @@
+{{- if .Values.search.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-search
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-search
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.search.replicaCount }}
+  selector:
+    matchLabels:
+      app: omnivec-search
+  template:
+    metadata:
+      labels:
+        app: omnivec-search
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: search
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.search.image.repository }}:{{ .Values.search.image.tag }}
+          imagePullPolicy: {{ .Values.search.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DOCGROK_URL
+              value: {{ .Values.search.env.DOCGROK_URL | default .Values.api.env.DOCGROK_URL | quote }}
+            - name: COSMOS_ENDPOINT
+              value: {{ .Values.azure.cosmos.endpoint | quote }}
+            - name: COSMOS_DATABASE
+              value: {{ .Values.azure.cosmos.database | quote }}
+            - name: COSMOS_METADATA_CONTAINER
+              value: {{ .Values.azure.cosmos.metadataContainer | default "metadata" | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            - name: SEARCH_CORS_ORIGINS
+              value: {{ .Values.search.corsOrigins | default "*" | quote }}
+            - name: SEARCH_PER_INDEX_TIMEOUT_S
+              value: {{ .Values.search.perIndexTimeoutS | default 5 | quote }}
+            - name: SEARCH_TOTAL_TIMEOUT_S
+              value: {{ .Values.search.totalTimeoutS | default 15 | quote }}
+            - name: SEARCH_EMBED_TIMEOUT_S
+              value: {{ .Values.search.embedTimeoutS | default 10 | quote }}
+            - name: SEARCH_RATE_LIMIT_RPM
+              value: {{ .Values.search.rateLimitRpm | default 0 | quote }}
+            - name: SEARCH_ACCEPT_ADMIN_TOKEN
+              value: {{ .Values.search.acceptAdminToken | default "false" | quote }}
+            {{- if .Values.search.bootstrapToken }}
+            - name: OMNIVEC_SEARCH_TOKEN
+              value: {{ .Values.search.bootstrapToken | quote }}
+            {{- end }}
+            {{- if .Values.search.internalToken }}
+            - name: SEARCH_INTERNAL_TOKEN
+              value: {{ .Values.search.internalToken | quote }}
+            {{- end }}
+            {{- if .Values.azure.keyVault.uri }}
+            - name: KEY_VAULT_URI
+              value: {{ .Values.azure.keyVault.uri | quote }}
+            {{- end }}
+            {{- if .Values.azure.appInsights.connectionString }}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: {{ .Values.azure.appInsights.connectionString | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.search.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.search.probes.liveness.path }}
+              port: 8080
+            initialDelaySeconds: {{ .Values.search.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.search.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.search.probes.readiness.path }}
+              port: 8080
+            initialDelaySeconds: {{ .Values.search.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.search.probes.readiness.periodSeconds }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnivec-search
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-search
+  {{- if .Values.search.service.dnsLabel }}
+  annotations:
+    service.beta.kubernetes.io/azure-dns-label-name: {{ .Values.search.service.dnsLabel | quote }}
+  {{- end }}
+spec:
+  type: {{ .Values.search.service.type }}
+  ports:
+    - port: {{ .Values.search.service.port }}
+      targetPort: {{ .Values.search.service.targetPort }}
+      protocol: TCP
+  selector:
+    app: omnivec-search
+{{- if .Values.search.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: omnivec-search
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-search
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: omnivec-search
+  minReplicas: {{ .Values.search.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.search.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.search.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}
