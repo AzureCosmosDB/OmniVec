@@ -7,6 +7,25 @@ Write-Host "`n`e[32m+==========================================+`e[0m"
 Write-Host "`e[32m|     OmniVec - Pre-provision Checks       |`e[0m"
 Write-Host "`e[32m+==========================================+`e[0m"
 
+# -- Validate AZURE_ENV_NAME (Bicep @maxLength=20) -- fail fast, clear message
+$envName = "$env:AZURE_ENV_NAME"
+if ([string]::IsNullOrWhiteSpace($envName)) {
+    Write-Host "`n`e[31mERROR: AZURE_ENV_NAME is not set.`e[0m"
+    Write-Host "  Run: `e[36mazd env new <name>`e[0m (1-20 chars, lowercase alnum+dash)"
+    exit 1
+}
+if ($envName.Length -gt 20) {
+    Write-Host "`n`e[31mERROR: AZURE_ENV_NAME='$envName' is $($envName.Length) chars (max 20).`e[0m"
+    Write-Host "  Azure resource naming requires environmentName <= 20 chars."
+    Write-Host "  Fix with:  `e[36mazd env set AZURE_ENV_NAME <shorter-name>`e[0m"
+    Write-Host "  Or create a fresh env:  `e[36mazd env new <shorter-name>`e[0m"
+    exit 1
+}
+if ($envName -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') {
+    Write-Host "`n`e[33mWARNING: AZURE_ENV_NAME='$envName' may contain invalid characters.`e[0m"
+    Write-Host "  Recommended: lowercase letters, digits, and dashes (no leading/trailing dash)."
+}
+
 # -- Deployment lock: prevent concurrent azd up/down for the same env --
 $lockDir = Join-Path $HOME ".omnivec" "locks"
 if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
