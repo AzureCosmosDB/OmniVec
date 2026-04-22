@@ -296,23 +296,34 @@ setup_mode=${setup_mode:-1}
 
 if [ "$setup_mode" = "1" ]; then
   printf "\n${GREEN}Applying recommended defaults:${NC}\n"
+  # Honor a pre-set blob-source preference (either var name) so users can opt out
+  # of blob ingestion via `azd env set` before `azd up`.
+  _qs_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
+  if [ -z "$_qs_blob" ]; then
+    _qs_blob=$(azd_get AZURE_ENABLE_BLOB_SOURCE)
+  fi
+  _qs_blob=${_qs_blob:-true}
   azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
   azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
-  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true" < /dev/null
+  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "$_qs_blob" < /dev/null
   echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_B4ms"
   echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
   echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
   echo "  OMNIVEC_GPU_NODE_COUNT      = 0"
   echo "  OMNIVEC_METADATA_STORE      = cosmosdb-serverless"
-  echo "  OMNIVEC_ENABLE_BLOB_SOURCE  = true"
+  echo "  OMNIVEC_ENABLE_BLOB_SOURCE  = $_qs_blob"
   echo ""
   echo "  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
   echo "  GPU pool: none (use Azure OpenAI for embeddings)"
   echo "  Metadata: CosmosDB Serverless"
-  echo "  Blob source: enabled"
+  if [ "$_qs_blob" = "true" ]; then
+    echo "  Blob source: enabled"
+  else
+    echo "  Blob source: disabled (CosmosDB sources only)"
+  fi
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
 fi

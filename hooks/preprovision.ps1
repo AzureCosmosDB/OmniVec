@@ -270,13 +270,20 @@ $setupMode = Read-InputSafely -Prompt "Choice [1]" -Default "1"
 
 if ($setupMode -eq "1") {
     Write-Host "`n`e[32mApplying recommended defaults:`e[0m"
-    $defaults = @{
+    # Honor a pre-set blob-source preference (either var name)
+    $qsBlob = (& azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)
+    if (-not $qsBlob -or "$qsBlob" -match "ERROR") {
+        $qsBlob = (& azd env get-value AZURE_ENABLE_BLOB_SOURCE 2>$null)
+    }
+    if (-not $qsBlob -or "$qsBlob" -match "ERROR") { $qsBlob = "true" }
+    $qsBlob = "$qsBlob".Trim()
+    $defaults = [ordered]@{
         "OMNIVEC_SYSTEM_NODE_VM_SIZE" = "Standard_B4ms"
         "OMNIVEC_SYSTEM_NODE_COUNT"   = "2"
         "OMNIVEC_GPU_NODE_VM_SIZE"    = ""
         "OMNIVEC_GPU_NODE_COUNT"      = "0"
         "OMNIVEC_METADATA_STORE"      = "cosmosdb-serverless"
-        "OMNIVEC_ENABLE_BLOB_SOURCE"  = "true"
+        "OMNIVEC_ENABLE_BLOB_SOURCE"  = $qsBlob
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value
@@ -285,7 +292,11 @@ if ($setupMode -eq "1") {
     Write-Host "`n  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
     Write-Host "  GPU pool: none (use Azure OpenAI for embeddings)"
     Write-Host "  Metadata: CosmosDB Serverless"
-    Write-Host "  Blob source: enabled"
+    if ($qsBlob -eq "true") {
+        Write-Host "  Blob source: enabled"
+    } else {
+        Write-Host "  Blob source: disabled (CosmosDB sources only)"
+    }
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
 }
