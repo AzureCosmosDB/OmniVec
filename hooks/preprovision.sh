@@ -14,6 +14,31 @@ printf "${GREEN}╔════════════════════�
 printf "${GREEN}║     OmniVec — Pre-provision Checks       ║${NC}\n"
 printf "${GREEN}╚══════════════════════════════════════════╝${NC}\n"
 
+# ── Validate AZURE_ENV_NAME (Bicep @maxLength=20, must be alphanumeric/dash) ──
+# Fail fast with a clear message instead of a cryptic Bicep validation error
+# 10 minutes into provisioning.
+_env_name="${AZURE_ENV_NAME:-}"
+_env_len=${#_env_name}
+if [ -z "$_env_name" ]; then
+  printf "\n${RED}ERROR: AZURE_ENV_NAME is not set.${NC}\n" >&2
+  printf "  Run: ${CYAN}azd env new <name>${NC} (1-20 chars, lowercase alnum+dash)\n" >&2
+  exit 1
+fi
+if [ "$_env_len" -gt 20 ]; then
+  printf "\n${RED}ERROR: AZURE_ENV_NAME='${_env_name}' is ${_env_len} chars (max 20).${NC}\n" >&2
+  printf "  Azure resource naming requires environmentName <= 20 chars.\n" >&2
+  printf "  Fix with:  ${CYAN}azd env set AZURE_ENV_NAME <shorter-name>${NC}\n" >&2
+  printf "  Or create a fresh env:  ${CYAN}azd env new <shorter-name>${NC}\n" >&2
+  exit 1
+fi
+# Also match Bicep's expected pattern (lowercase letters, digits, dash; no leading/trailing dash)
+case "$_env_name" in
+  *[!a-z0-9-]*|-*|*-)
+    printf "\n${YELLOW}WARNING: AZURE_ENV_NAME='${_env_name}' may contain invalid characters.${NC}\n" >&2
+    printf "  Recommended: lowercase letters, digits, and dashes (no leading/trailing dash).\n" >&2
+    ;;
+esac
+
 # ── Deployment lock: prevent concurrent azd up/down for the same env ────────
 LOCK_DIR="${HOME}/.omnivec/locks"
 mkdir -p "$LOCK_DIR"
