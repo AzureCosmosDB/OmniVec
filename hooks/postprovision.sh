@@ -703,6 +703,22 @@ run_helm_deploy() {
     set -- "$@" --set "blobIngestor.enabled=false"
   fi
 
+  # Image tag channel: stable (default, for testers) or dev (for active work).
+  # Users select via: azd env set OMNIVEC_IMAGE_TAG dev
+  IMG_TAG=$(get_azd_value "OMNIVEC_IMAGE_TAG")
+  IMG_TAG=${IMG_TAG:-stable}
+  set -- "$@" \
+    --set "web.image.tag=${IMG_TAG}" \
+    --set "api.image.tag=${IMG_TAG}" \
+    --set "search.image.tag=${IMG_TAG}" \
+    --set "controller.image.tag=${IMG_TAG}" \
+    --set "changefeed.image.tag=${IMG_TAG}" \
+    --set "blobEnumerator.image.tag=${IMG_TAG}" \
+    --set "sourceWorker.image.tag=${IMG_TAG}" \
+    --set "blobWatcher.image.tag=${IMG_TAG}" \
+    --set "docgrok.docgrok.image.tag=${IMG_TAG}" \
+    --set "docgrok.pipelineWorker.image.tag=${IMG_TAG}"
+
   # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
   # strips the release metadata but can leave Deployments/Services behind (they
   # have finalizers or take time to delete). Next run sees "release not found"

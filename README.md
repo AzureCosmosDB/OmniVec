@@ -550,6 +550,34 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `hooks/` | azd lifecycle hooks (preprovision/postprovision) |
 | `scripts/` | Automation scripts (E2E demo, diagnostics) |
 
+## Release channels
+
+This repo uses two long-lived branches to separate rapid iteration from stable testing:
+
+| Branch | Purpose | Image tag | Who uses it |
+|--------|---------|-----------|-------------|
+| `main` | Stable releases | `:stable` + `:vX.Y.Z` | Testers, demos, customer-facing deployments |
+| `dev`  | Active development | `:dev` | Active development, internal dogfooding |
+
+**Default for `azd up` is `:stable`.** To opt into the dev channel:
+
+```sh
+azd env set OMNIVEC_IMAGE_TAG dev
+azd up
+```
+
+**Promoting dev → main:**
+1. Open a PR from `dev` → `main`, squash-merge when green.
+2. Tag the merge commit: `git tag vX.Y.Z && git push --tags`.
+3. The `build-and-push-images` workflow publishes `:stable` and `:vX.Y.Z` tags for all five images.
+
+**CI auto-builds** (`.github/workflows/build-images.yml`):
+- Push to `dev` → rebuild all images with `:dev` + `:sha-<short>` tags.
+- Push to `main` → rebuild with `:stable` + `:sha-<short>`.
+- Push tag `vX.Y.Z` → rebuild with `:stable` + `:vX.Y.Z`.
+
+Required repo secrets for OIDC auth to ACR: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
+
 ## License
 
 MIT
