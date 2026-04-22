@@ -39,6 +39,28 @@ case "$_env_name" in
     ;;
 esac
 
+# ── Repair .env if prior run left embedded newlines / stray quotes ──────────
+# Symptom: `loading .env: unexpected character "\"" in variable name near "...\n"`
+# Cause: a previous azd env set wrote a multi-line value; subsequent runs can't parse it.
+_env_file=".azure/${_env_name}/.env"
+if [ -f "$_env_file" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$_env_file" <<'PYEOF' || true
+import re, sys
+p = sys.argv[1]
+with open(p, 'r', encoding='utf-8', errors='replace') as f:
+    raw = f.read()
+# Collapse CR/LF/TAB inside any quoted value of form KEY="...".
+def clean(m):
+    k = m.group(1); v = re.sub(r'[\r\n\t]+', '', m.group(2)).strip()
+    return f'{k}="{v}"'
+repaired = re.sub(r'(?ms)^([A-Z_][A-Z0-9_]*)="([^"]*)"', clean, raw)
+if repaired != raw:
+    with open(p, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(repaired)
+    print('Repaired corrupt .env (stripped embedded whitespace from values).')
+PYEOF
+fi
+
 # ── Deployment lock: prevent concurrent azd up/down for the same env ────────
 LOCK_DIR="${HOME}/.omnivec/locks"
 mkdir -p "$LOCK_DIR"
@@ -83,9 +105,16 @@ trap 'release_lock' EXIT INT TERM
 
 acquire_lock
 
-# Helper: safely read an azd env value, returns empty string on failure
+# Helper: safely read an azd env value, returns empty string on failure.
+# azd env get-value returns exit 0 even for missing keys and prints
+# "ERROR: key not found..." to stdout, so we must filter that out.
 azd_get() {
-  _val=$(azd env get-value "$1" < /dev/null 2>/dev/null) && printf '%s' "$_val" | tr -d '\r' || printf ''
+  _val=$(azd env get-value "$1" < /dev/null 2>/dev/null) || _val=""
+  _val=$(printf '%s' "$_val" | tr -d '\r')
+  case "$_val" in
+    ERROR*|*"not found"*) _val="" ;;
+  esac
+  printf '%s' "$_val"
 }
 
 # Helper: can we actually prompt the user right now?
@@ -412,7 +441,7 @@ echo ""
 printf "${YELLOW}Configure AKS node pools:${NC}\n"
 echo ""
 
-LOCATION="${AZURE_LOCATION:-centralus}"
+LOCATION="${AZURE_LOCATION:-eastus2}"
 
 # Helper: validate a single SKU in the location
 validate_sku() {
