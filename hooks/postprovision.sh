@@ -69,8 +69,13 @@ get_azd_value() {
   val=$(eval echo "\${$key:-}")
   val=$(printf '%s' "$val" | tr -d '\r')
   if [ -n "$val" ]; then echo "$val"; return 0; fi
-  # Fallback: read from azd env store (use && to suppress stdout errors)
-  val=$(azd env get-value "$key" < /dev/null 2>/dev/null) && val=$(printf '%s' "$val" | tr -d '\r') || val=""
+  # Fallback: read from azd env store. azd returns exit 0 even for missing
+  # keys and prints "ERROR: key not found..." to stdout, so we must filter.
+  val=$(azd env get-value "$key" < /dev/null 2>/dev/null) || val=""
+  val=$(printf '%s' "$val" | tr -d '\r')
+  case "$val" in
+    ERROR*|*"not found"*) val="" ;;
+  esac
   if [ -n "$val" ]; then echo "$val"; return 0; fi
   echo ""
 }
@@ -186,6 +191,15 @@ if [ -z "$IMG_TAG" ]; then
   esac
   printf "${CYAN}Auto-detected branch '${_branch:-unknown}' -> image tag '${IMG_TAG}'${NC}\n" >&2
 fi
+# Validate IMG_TAG: must be a valid docker tag (alnum, dash, dot, underscore).
+# Prevents garbage values (e.g. error messages) from being spliced into commands.
+case "$IMG_TAG" in
+  *[!A-Za-z0-9._-]*|'')
+    printf "${RED}ERROR: OMNIVEC_IMAGE_TAG='%s' is not a valid image tag.${NC}\n" "$IMG_TAG" >&2
+    printf "${RED}Fix: azd env set OMNIVEC_IMAGE_TAG stable (or 'dev')${NC}\n" >&2
+    exit 1
+    ;;
+esac
 
 image_exists() {
   name=$1
@@ -337,6 +351,9 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
       if [ "$TOKEN_OK" = "false" ]; then
         printf "  ${YELLOW}Registry token required for import.${NC}\n"
         _new_token=$(read_input "  Enter token for $SHARED_REGISTRY (or Enter to build from source): ")
+        # Strip ALL whitespace (leading, trailing, and any embedded CR/LF/tabs/spaces from paste).
+        # Valid ACR tokens are base64-ish and contain no whitespace.
+        _new_token=$(printf '%s' "$_new_token" | tr -d '[:space:]')
         if [ -n "$_new_token" ]; then
           if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
             SHARED_REGISTRY_TOKEN="$_new_token"
