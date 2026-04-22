@@ -42,11 +42,19 @@ jobs:
             dockerfile: docgrok/pipeline-worker/Dockerfile
 
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout OmniVec (no submodules yet)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
-          token: ${{ secrets.SUBMODULES_PAT }}
+          submodules: false
+
+      - name: Init DocGrok submodule with PAT
+        env:
+          SUBMODULES_PAT: ${{ secrets.SUBMODULES_PAT }}
+        run: |
+          set -euo pipefail
+          # Rewrite submodule URL to include PAT for this clone only
+          git config --global url."https://x-access-token:${SUBMODULES_PAT}@github.com/AzureCosmosDB/DocGrok.git".insteadOf "https://github.com/AzureCosmosDB/DocGrok.git"
+          git submodule update --init --recursive
 
       - name: Compute tags
         id: tags
