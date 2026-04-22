@@ -450,6 +450,20 @@ else
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
   if [ "$import_count" -gt 0 ]; then IMAGES_CHANGED=true; fi
 
+  # Belt-and-suspenders: also alias each imported image as :latest in the env
+  # ACR so any helm deployment that still references the default tag: latest
+  # (i.e. a service whose --set override we forgot to add) still finds a valid
+  # manifest. Safe no-op when IMG_TAG=latest. Failures are non-fatal.
+  if [ "$IMG_TAG" != "latest" ]; then
+    for image in $IMAGES; do
+      if image_exists "$image" "$IMG_TAG"; then
+        az acr import --name "$ACR_NAME" \
+          --source "${ACR_NAME}.azurecr.io/${image}:${IMG_TAG}" \
+          --image "${image}:latest" --force >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+
   # If no images available from import, auto-fallback to build mode
   total_available=$((import_count + skip_count))
   if [ "$total_available" -eq 0 ]; then
@@ -732,6 +746,7 @@ run_helm_deploy() {
     --set "changefeed.image.tag=${IMG_TAG}" \
     --set "blobEnumerator.image.tag=${IMG_TAG}" \
     --set "sourceWorker.image.tag=${IMG_TAG}" \
+    --set "dotnetWorker.image.tag=${IMG_TAG}" \
     --set "blobWatcher.image.tag=${IMG_TAG}" \
     --set "docgrok.docgrok.image.tag=${IMG_TAG}" \
     --set "docgrok.pipelineWorker.image.tag=${IMG_TAG}"
