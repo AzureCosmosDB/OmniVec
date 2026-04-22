@@ -124,6 +124,11 @@ def _validate_token(token: str) -> Optional[dict]:
             if t.get("expires_at"):
                 if datetime.fromisoformat(t["expires_at"]) < datetime.utcnow():
                     return None
+            # Reject scope=search tokens on the admin API — search tokens must
+            # only be accepted by the standalone omnivec-search service.
+            tok_scope = (t.get("scope") or "").lower()
+            if tok_scope == "search":
+                return None
             return {"name": t.get("name", ""), "role": t.get("role", "user"), "id": t.get("id", "")}
     except Exception as e:
         logger.warning("Token validation error: %s", e)
@@ -414,6 +419,8 @@ EVENT_QUEUE: asyncio.Queue = None
 # =============================================================================
 
 DOCGROK_URL = os.getenv("DOCGROK_URL", "http://docgrok:80")
+SEARCH_SERVICE_URL = os.getenv("SEARCH_SERVICE_URL", "http://omnivec-search").rstrip("/")
+SEARCH_INTERNAL_TOKEN = os.getenv("SEARCH_INTERNAL_TOKEN", "")
 
 # HTTP Client
 http_client: Optional[httpx.AsyncClient] = None
@@ -486,6 +493,7 @@ async def health():
 class CreateTokenRequest(BaseModel):
     name: str
     role: str = "user"  # "admin" or "user"
+    scope: str = "admin"  # "admin" | "search" — controls which API the token can access
     expires_days: Optional[int] = None  # None = no expiry
 
 
@@ -513,11 +521,16 @@ async def create_token(req: CreateTokenRequest, request: Request):
     token_id = f"tok-{uuid.uuid4().hex[:8]}"
     now = datetime.utcnow().isoformat()
 
+    scope = (req.scope or "admin").lower()
+    if scope not in ("admin", "search"):
+        raise HTTPException(status_code=400, detail="scope must be 'admin' or 'search'")
+
     doc = {
         "id": token_id,
         "doc_type": "auth_token",
         "name": req.name,
         "role": req.role,
+        "scope": scope,
         "token_hash": _hash_token(token),
         "created_at": now,
         "created_by": auth.get("name", "unknown"),
@@ -533,6 +546,7 @@ async def create_token(req: CreateTokenRequest, request: Request):
         "id": token_id,
         "name": req.name,
         "role": req.role,
+        "scope": scope,
         "token": token,  # Only shown once at creation time
         "expires_at": doc.get("expires_at"),
         "message": "Save this token â€” it cannot be retrieved again."
@@ -540,19 +554,25 @@ async def create_token(req: CreateTokenRequest, request: Request):
 
 
 @app.get("/api/auth/tokens")
-async def list_tokens(request: Request):
-    """List all tokens (without the actual token values). Requires admin role."""
+async def list_tokens(request: Request, scope: Optional[str] = None):
+    """List all tokens (without the actual token values). Requires admin role.
+
+    Optional ?scope=admin|search to filter.
+    """
     auth = getattr(request.state, "auth", None)
     if not auth or auth.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
 
     store = get_store()
     tokens = store.query("SELECT * FROM c WHERE c.doc_type = 'auth_token'")
+    if scope:
+        tokens = [t for t in tokens if (t.get("scope") or "admin").lower() == scope.lower()]
     return {"tokens": [
         {
             "id": t["id"],
             "name": t.get("name"),
             "role": t.get("role"),
+            "scope": t.get("scope", "admin"),
             "created_at": t.get("created_at"),
             "created_by": t.get("created_by"),
             "expires_at": t.get("expires_at"),
@@ -2438,353 +2458,6 @@ def retry_job(job_id: str):
     return {"success": True, "message": f"Job reset to PENDING (retry {job.retry_count}/{MAX_MANUAL_RETRIES})"}
 
 
-# =============================================================================
-# PLAYGROUND - VECTOR SEARCH
-# =============================================================================
-
-class SearchRequest(BaseModel):
-    query: str
-    destination_ids: List[str] = []
-    top_k: int = 5
-    per_index_top_k: Optional[int] = None
-    merge_strategy: str = "interleave"  # "interleave" | "round_robin" | "per_index"
-    destination_id: Optional[str] = None  # backward compat
-
-    def __init__(self, **data):
-        if "destination_id" in data and "destination_ids" not in data:
-            data["destination_ids"] = [data.pop("destination_id")]
-        super().__init__(**data)
-        if self.top_k < 1:
-            self.top_k = 1
-        elif self.top_k > 100:
-            self.top_k = 100
-        if self.per_index_top_k is None:
-            self.per_index_top_k = self.top_k
-
-
-def _resolve_content_fields(content_field):
-    """Normalize content_field to a list of field names."""
-    if isinstance(content_field, list):
-        return content_field
-    if isinstance(content_field, str):
-        return [content_field]
-    return ["content"]
-
-
-def _extract_text_from_doc(doc: dict, content_field) -> str:
-    """Extract text from a document using one or more content fields, concatenated."""
-    fields = _resolve_content_fields(content_field)
-    parts = []
-    for f in fields:
-        val = doc.get(f)
-        if val and isinstance(val, str):
-            parts.append(val)
-    if parts:
-        return "\n\n".join(parts)
-    # Fallback to common field names
-    return doc.get("text") or doc.get("content") or ""
-
-
-def _extract_text_parts_from_doc(doc: dict, content_field) -> list:
-    """Extract labeled text parts from a document using one or more content fields."""
-    fields = _resolve_content_fields(content_field)
-    parts = []
-    for f in fields:
-        val = doc.get(f)
-        if val and isinstance(val, str):
-            parts.append({"field": f, "value": val})
-    if not parts:
-        fallback = doc.get("text") or doc.get("content") or ""
-        if fallback:
-            parts.append({"field": "content", "value": fallback})
-    return parts
-
-
-def _search_single_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
-    """Synchronous vector search on a single destination (CosmosDB or pgvector)."""
-    from models import DestinationType
-
-    # Check destination type and route to appropriate search function
-    if destination.type == DestinationType.PGVECTOR:
-        return _search_pgvector_index(destination, query_embedding, top_k, content_field, vector_field)
-    else:
-        return _search_cosmosdb_index(destination, query_embedding, top_k, content_field, vector_field)
-
-
-def _search_pgvector_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
-    """Synchronous vector search on a pgvector table."""
-    import asyncio
-    from connectors.postgres_connector import search_vectors
-
-    # Override vector_column in config if pipeline specifies a vector_index_path
-    search_config = dict(destination.config)
-    if vector_field:
-        search_config["vector_column"] = vector_field
-
-    raw_results = asyncio.run(
-        search_vectors(search_config, query_embedding, top_k)
-    )
-
-    results = []
-    for item in raw_results:
-        result = {
-            "id": item.get("id"),
-            "source": item.get("metadata", {}).get("source"),
-            "source_ref": item.get("metadata", {}).get("source_ref"),
-            "text": item.get("content", ""),
-            "metadata": item.get("metadata", {}),
-            "score": item.get("similarity", 0),
-            "distance": 1 - item.get("similarity", 0)
-        }
-        results.append(result)
-    return results
-
-
-def _search_cosmosdb_index(destination, query_embedding: list, top_k: int, content_field="content", vector_field=None) -> list:
-    """Synchronous vector search on a single CosmosDB container."""
-    from azure.cosmos import CosmosClient
-    from azure.identity import DefaultAzureCredential
-
-    credential = DefaultAzureCredential()
-    client = CosmosClient(destination.config["endpoint"], credential=credential)
-    database = client.get_database_client(destination.config["database"])
-    container = database.get_container_client(destination.config["container"])
-
-    # Use pipeline's vector_index_path, fall back to destination config, then default
-    vf = vector_field or destination.config.get("vector_field", "embedding")
-
-    validated = [float(x) for x in query_embedding]
-    embedding_str = "[" + ",".join(str(x) for x in validated) + "]"
-
-    query = f"""
-        SELECT TOP @top_k
-            c, VectorDistance(c.{vf}, {embedding_str}) as distance
-        FROM c
-        ORDER BY VectorDistance(c.{vf}, {embedding_str})
-    """
-
-    fields = _resolve_content_fields(content_field)
-    results = []
-    for item in container.query_items(
-        query=query,
-        parameters=[{"name": "@top_k", "value": top_k}],
-        enable_cross_partition_query=True
-    ):
-        distance = item.get("distance", 0)
-        doc = item.get("c", {})
-        text = _extract_text_from_doc(doc, content_field)
-        text_parts = _extract_text_parts_from_doc(doc, content_field)
-        # Build metadata from scalar fields
-        skip_fields = {"id", "text", "content", "source", "source_ref",
-                       "embedding", "metadata", "_rid", "_self", "_etag", "_attachments", "_ts",
-                       vf}
-        skip_fields.update(fields)
-        metadata = doc.get("metadata", {})
-        for k, v in doc.items():
-            if k not in skip_fields and not isinstance(v, (list, dict)):
-                metadata[k] = v
-        result = {
-            "id": doc.get("id"),
-            "source": doc.get("source"),
-            "source_ref": doc.get("source_ref") or doc.get("title") or doc.get("url"),
-            "text": text,
-            "metadata": metadata,
-            "score": 1 - distance,
-            "distance": distance
-        }
-        if len(text_parts) > 1:
-            result["text_parts"] = text_parts
-        results.append(result)
-    return results
-
-
-def _merge_results(index_results: list, strategy: str, top_k: int) -> list:
-    """Merge results from multiple indexes."""
-    if strategy == "round_robin":
-        merged = []
-        iterators = [iter(ir["results"]) for ir in index_results if ir.get("results")]
-        while len(merged) < top_k and iterators:
-            exhausted = []
-            for i, it in enumerate(iterators):
-                if len(merged) >= top_k:
-                    break
-                try:
-                    merged.append(next(it))
-                except StopIteration:
-                    exhausted.append(i)
-            for i in reversed(exhausted):
-                iterators.pop(i)
-        return merged
-    else:
-        # "interleave" (default) and "per_index": pool + sort by score
-        all_results = []
-        for ir in index_results:
-            all_results.extend(ir.get("results", []))
-        all_results.sort(key=lambda r: r["score"], reverse=True)
-        if strategy != "per_index":
-            all_results = all_results[:top_k]
-        return all_results
-
-
-@app.post("/api/playground/search")
-async def playground_search(req: SearchRequest):
-    """Search vectors across one or more indexes using query embedding."""
-    import time
-
-    _search_start = time.time()
-
-    if not req.destination_ids:
-        raise HTTPException(status_code=400, detail="No destination_ids provided")
-    if len(req.destination_ids) > 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 indexes per search")
-
-    store = get_store()
-
-    # Load all destinations and find their pipelines
-    pipeline_docs = await asyncio.to_thread(store.list, "pipeline")
-    dest_infos = []  # [(dest_id, destination, pipeline_doc)]
-    for dest_id in req.destination_ids:
-        doc = await asyncio.to_thread(store.get, dest_id, "destination")
-        if not doc:
-            continue
-        destination = _destination_from_doc(doc)
-        # Find pipeline for this destination
-        matched = None
-        for pd in pipeline_docs:
-            if pd.get("destination_id") == dest_id and pd.get("status") == "active":
-                matched = pd
-                break
-        if not matched:
-            for pd in pipeline_docs:
-                if pd.get("destination_id") == dest_id:
-                    matched = pd
-                    break
-        dest_infos.append((dest_id, destination, matched))
-
-    if not dest_infos:
-        raise HTTPException(status_code=404, detail="No valid destinations found")
-
-    # Group by embedding model and generate embeddings
-    from collections import defaultdict
-    model_groups = defaultdict(list)
-    for dest_id, dest, pip in dest_infos:
-        model_ref = pip["docgrok_pipeline"] if pip else None
-        model_groups[model_ref].append((dest_id, dest, pip))
-
-    embed_start = time.time()
-    embeddings = {}  # {model_ref: embedding_vector}
-    warnings = []
-
-    for model_ref in model_groups:
-        if model_ref is None:
-            for dest_id, _, _ in model_groups[model_ref]:
-                warnings.append(f"No pipeline for destination '{dest_id}', skipping")
-            continue
-        try:
-            if model_ref.startswith("mdl-"):
-                embed_body = {"model_id": model_ref, "text": req.query, "requestId": f"search-{int(time.time())}"}
-            else:
-                embed_body = {"pipeline": model_ref, "text": req.query, "requestId": f"search-{int(time.time())}"}
-
-            resp = await http_client.post(f"{DOCGROK_URL}/embed", json=embed_body, timeout=30.0)
-            if resp.status_code != 200:
-                warnings.append(f"Embedding failed for model {model_ref}: {resp.text[:100]}")
-                continue
-            embed_result = resp.json()
-            query_embedding = (embed_result.get("pages") or embed_result.get("output") or [[]])[0]
-            if query_embedding:
-                embeddings[model_ref] = query_embedding
-        except Exception as e:
-            warnings.append(f"Embedding error for {model_ref}: {str(e)[:100]}")
-
-    embed_time = int((time.time() - embed_start) * 1000)
-
-    if not embeddings:
-        raise HTTPException(status_code=503, detail="Failed to generate embeddings for any model")
-
-    if len(embeddings) > 1 and req.merge_strategy == "interleave":
-        warnings.append("Merging results across different embedding models â€” scores may not be directly comparable")
-
-    # Search all indexes in parallel
-    search_start = time.time()
-
-    # Resolve content_fields and vector_index_path per destination from pipeline config
-    source_content_fields = {}  # dest_id -> content_fields
-    dest_vector_fields = {}  # dest_id -> vector_index_path
-    for dest_id, dest, pip in dest_infos:
-        cf = ["content"]
-        if pip:
-            sources = pip.get("sources", [])
-            if sources:
-                src = sources[0] if isinstance(sources[0], dict) else sources[0].dict()
-                cf = src.get("content_fields", ["content"])
-            vip = pip.get("vector_index_path")
-            if vip:
-                dest_vector_fields[dest_id] = vip.lstrip("/")
-        source_content_fields[dest_id] = cf
-
-    async def search_one(dest_id, destination, model_ref):
-        try:
-            t0 = time.time()
-            cf = source_content_fields.get(dest_id, ["content"])
-            vf = dest_vector_fields.get(dest_id)
-            results = await asyncio.to_thread(
-                _search_single_index, destination, embeddings[model_ref], req.per_index_top_k, cf, vf
-            )
-            search_ms = int((time.time() - t0) * 1000)
-            for r in results:
-                r["index_id"] = dest_id
-                r["index_name"] = destination.name
-            return {"dest_id": dest_id, "dest_name": destination.name, "model_ref": model_ref,
-                    "results": results, "result_count": len(results), "search_time_ms": search_ms}
-        except Exception as e:
-            return {"dest_id": dest_id, "dest_name": destination.name, "model_ref": model_ref,
-                    "results": [], "result_count": 0, "error": str(e)[:200]}
-
-    search_tasks = []
-    for model_ref, dest_list in model_groups.items():
-        if model_ref not in embeddings:
-            continue
-        for dest_id, dest, pip in dest_list:
-            search_tasks.append(search_one(dest_id, dest, model_ref))
-
-    index_results = await asyncio.gather(*search_tasks)
-    total_search_time = int((time.time() - search_start) * 1000)
-
-    # Merge results
-    merged = _merge_results(list(index_results), req.merge_strategy, req.top_k)
-
-    # Build per-index metadata
-    indexes_searched = []
-    for ir in index_results:
-        entry = {"index_id": ir["dest_id"], "index_name": ir["dest_name"],
-                 "result_count": ir["result_count"], "search_time_ms": ir.get("search_time_ms", 0),
-                 "embedding_model": ir.get("model_ref", "")}
-        if "error" in ir:
-            entry["error"] = ir["error"]
-        indexes_searched.append(entry)
-
-    embedding_dims = len(next(iter(embeddings.values()))) if embeddings else 0
-
-    total_latency_ms = int((time.time() - _search_start) * 1000)
-    record_search(
-        latency_ms=total_latency_ms,
-        embed_latency_ms=embed_time,
-        tokens_used=0,  # TODO: parse from embed_result.get("usage", {}).get("total_tokens", 0)
-        results_count=len(merged),
-    )
-
-    return {
-        "query": req.query,
-        "results": merged,
-        "merge_strategy": req.merge_strategy,
-        "indexes_searched": indexes_searched,
-        "embedding_dims": embedding_dims,
-        "embedding_time_ms": embed_time,
-        "total_search_time_ms": total_search_time,
-        "warnings": warnings if warnings else None
-    }
-
 
 # =============================================================================
 # EVENT GRID WEBHOOK (Continuous Processing)
@@ -4057,7 +3730,7 @@ async def delete_assistant(assistant_id: str):
 
 @app.post("/api/assistants/{assistant_id}/chat")
 async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
-    """RAG chat: search relevant docs, then call chat model with context."""
+    """RAG chat: call the omnivec-search service, then invoke chat model with context."""
     import time
     store = get_store()
     doc = await asyncio.to_thread(store.get, assistant_id, "assistant")
@@ -4070,53 +3743,98 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
     if not model_doc:
         raise HTTPException(status_code=400, detail=f"Chat model '{assistant.model_id}' not found")
 
-    # Step 1: Find an embedding model from the pipeline for each destination
-    search_results = []
+    # Step 1: Build IndexSpec[] from destinations + matching pipelines, then
+    # delegate the actual vector search to the standalone omnivec-search service.
+    search_results: List[Dict[str, Any]] = []
+    indexes: List[Dict[str, Any]] = []
     if assistant.destination_ids:
         pipeline_docs = await asyncio.to_thread(store.list, "pipeline")
         for dest_id in assistant.destination_ids:
             dest_doc = await asyncio.to_thread(store.get, dest_id, "destination")
             if not dest_doc:
                 continue
-            destination = _destination_from_doc(dest_doc)
-            # Find pipeline with embedding model for this destination
-            matched_pip = None
-            for pd in pipeline_docs:
-                if pd.get("destination_id") == dest_id:
-                    matched_pip = pd
-                    break
+            # Find first pipeline targeting this destination
+            matched_pip = next((pd for pd in pipeline_docs if pd.get("destination_id") == dest_id), None)
             if not matched_pip:
                 continue
             model_ref = matched_pip.get("docgrok_pipeline")
             if not model_ref:
                 continue
-            # Generate embedding for the user query
+
+            # Content fields from the pipeline's first source
+            cf = ["content"]
+            sources = matched_pip.get("sources", [])
+            if sources and isinstance(sources[0], dict):
+                cf = sources[0].get("content_fields", ["content"]) or ["content"]
+
+            # Embedding policy routes to DocGrok by model or pipeline name
+            if model_ref.startswith("mdl-"):
+                embedding = {"policy": "model", "model_id": model_ref}
+            else:
+                embedding = {"policy": "pipeline", "pipeline": model_ref}
+
+            dtype = dest_doc.get("type")
+            cfg = dest_doc.get("config", {}) or {}
+            if dtype == "cosmosdb-vector":
+                vf = (matched_pip.get("vector_index_path") or "").lstrip("/") or cfg.get("vector_field", "embedding")
+                indexes.append({
+                    "id": dest_id,
+                    "store": {
+                        "type": "cosmosdb",
+                        "endpoint": cfg.get("endpoint", ""),
+                        "database": cfg.get("database", ""),
+                        "container": cfg.get("container", ""),
+                        "auth": {"mode": "managed_identity"},
+                    },
+                    "vector": {"field": vf, "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                    "embedding": embedding,
+                    "content_fields": cf,
+                })
+            elif dtype == "pgvector":
+                indexes.append({
+                    "id": dest_id,
+                    "store": {
+                        "type": "pgvector",
+                        "host": cfg.get("host", ""),
+                        "port": cfg.get("port", 5432),
+                        "database": cfg.get("database", ""),
+                        "user": cfg.get("user"),
+                        "password": cfg.get("password"),
+                        "ssl_mode": cfg.get("ssl_mode", "require"),
+                        "table": cfg.get("table", ""),
+                        "id_column": cfg.get("id_column", "id"),
+                        "content_column": cfg.get("content_column", "content"),
+                    },
+                    "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                    "embedding": embedding,
+                    "content_fields": cf,
+                })
+
+    if indexes:
+        if not SEARCH_INTERNAL_TOKEN:
+            logger.warning("SEARCH_INTERNAL_TOKEN not configured; assistant RAG cannot call search service")
+        else:
+            payload = {
+                "query": req.message,
+                "top_k": assistant.top_k,
+                "indexes": indexes,
+                "merge": {"strategy": "rrf"},
+                "include": {"vectors": False, "scores": True},
+                "request_id": f"ast-{int(time.time())}",
+            }
             try:
-                if model_ref.startswith("mdl-"):
-                    embed_body = {"model_id": model_ref, "text": req.message, "requestId": f"ast-{int(time.time())}"}
-                else:
-                    embed_body = {"pipeline": model_ref, "text": req.message, "requestId": f"ast-{int(time.time())}"}
-                resp = await http_client.post(f"{DOCGROK_URL}/embed", json=embed_body, timeout=30.0)
-                if resp.status_code != 200:
-                    continue
-                embed_result = resp.json()
-                query_embedding = (embed_result.get("pages") or embed_result.get("output") or [[]])[0]
-                if not query_embedding:
-                    continue
-                # Resolve content_fields from pipeline source
-                cf = ["content"]
-                sources = matched_pip.get("sources", [])
-                if sources:
-                    src = sources[0] if isinstance(sources[0], dict) else sources[0]
-                    cf = src.get("content_fields", ["content"]) if isinstance(src, dict) else getattr(src, "content_fields", ["content"])
-                # Use pipeline's vector_index_path for search
-                vf = matched_pip.get("vector_index_path", "").lstrip("/") or None
-                results = await asyncio.to_thread(
-                    _search_single_index, destination, query_embedding, assistant.top_k, cf, vf
+                sresp = await http_client.post(
+                    f"{SEARCH_SERVICE_URL}/search",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {SEARCH_INTERNAL_TOKEN}"},
+                    timeout=20.0,
                 )
-                search_results.extend(results)
+                if sresp.status_code == 200:
+                    search_results = sresp.json().get("results", []) or []
+                else:
+                    logger.warning(f"Assistant search service error {sresp.status_code}: {sresp.text[:200]}")
             except Exception as e:
-                logger.warning(f"Assistant search failed for {dest_id}: {e}")
+                logger.warning(f"Assistant search service call failed: {e}")
 
     # Step 2: Build context from search results
     context_parts = []
@@ -4882,7 +4600,7 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                             reset_at = str(reset_at)
 
                             try:
-                                if dest_type in ("cosmosdb", "cosmos", "azure-cosmos-db"):
+                                if dest_type in ("cosmosdb", "cosmos", "azure-cosmos-db", "cosmosdb-vector"):
                                     dest_endpoint = dest_cfg.get("endpoint", "")
                                     if dest_endpoint:
                                         dest_client = CosmosClient(dest_endpoint, credential=DefaultAzureCredential())

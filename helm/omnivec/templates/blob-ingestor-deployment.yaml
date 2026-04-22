@@ -1,26 +1,28 @@
-{{- if .Values.changefeed.enabled -}}
+{{- if .Values.blobIngestor.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: omnivec-cosmos-changefeed
+  name: omnivec-blob-ingestor
   namespace: {{ .Values.global.namespace }}
   labels:
-    app: omnivec-cosmos-changefeed
+    app: omnivec-blob-ingestor
     {{- include "omnivec.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.changefeed.replicaCount }}
+  replicas: {{ .Values.blobIngestor.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app: omnivec-cosmos-changefeed
+      app: omnivec-blob-ingestor
   template:
     metadata:
       labels:
-        app: omnivec-cosmos-changefeed
+        app: omnivec-blob-ingestor
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
       containers:
-        - name: changefeed
+        - name: blob-ingestor
           image: {{ .Values.global.imageRegistry }}/{{ .Values.changefeed.image.repository }}:{{ .Values.changefeed.image.tag }}
           imagePullPolicy: {{ .Values.changefeed.image.pullPolicy }}
           env:
@@ -33,9 +35,9 @@ spec:
             - name: ChangeFeed__DocGrokBaseUrl
               value: "http://docgrok.omnivec.svc.cluster.local:80"
             - name: ChangeFeed__EnableCosmosSources
-              value: "true"
-            - name: ChangeFeed__EnableBlobSources
               value: "false"
+            - name: ChangeFeed__EnableBlobSources
+              value: "true"
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             {{- if .Values.azure.serviceBus.namespace }}
@@ -47,27 +49,5 @@ spec:
               value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
             {{- end }}
           resources:
-            {{- toYaml .Values.changefeed.resources | nindent 12 }}
-{{- if .Values.changefeed.autoscaling.enabled }}
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: omnivec-cosmos-changefeed
-  namespace: {{ .Values.global.namespace }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: omnivec-cosmos-changefeed
-  minReplicas: {{ .Values.changefeed.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.changefeed.autoscaling.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.changefeed.autoscaling.targetCPUUtilizationPercentage }}
-{{- end }}
+            {{- toYaml .Values.blobIngestor.resources | nindent 12 }}
 {{- end }}
