@@ -26,6 +26,31 @@ if ($envName -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') {
     Write-Host "  Recommended: lowercase letters, digits, and dashes (no leading/trailing dash)."
 }
 
+# -- Repair .env if prior run left embedded newlines / stray quotes --
+# Symptom: `loading .env: unexpected character "\"" in variable name near "...\n"`
+# Cause: a previous azd env set wrote a multi-line value; subsequent runs can't parse it.
+$envFile = Join-Path (Get-Location) ".azure/$envName/.env"
+if (Test-Path $envFile) {
+    try {
+        $raw = [System.IO.File]::ReadAllText($envFile)
+        # Collapse CR+LF variants inside quoted values. A well-formed entry is:
+        #   KEY="value"\n  — value itself contains no raw newline.
+        # Match KEY="...(possibly with newlines)..." and strip internal CR/LF/TAB.
+        $repaired = [regex]::Replace($raw, '(?ms)^([A-Z_][A-Z0-9_]*)="([^"]*)"', {
+            param($m)
+            $k = $m.Groups[1].Value
+            $v = ($m.Groups[2].Value -replace '[\r\n\t]+', '').Trim()
+            "${k}=`"${v}`""
+        })
+        if ($repaired -ne $raw) {
+            [System.IO.File]::WriteAllText($envFile, $repaired)
+            Write-Host "`e[33mRepaired corrupt .env (stripped embedded whitespace from values).`e[0m"
+        }
+    } catch {
+        Write-Host "`e[33mNote: could not pre-scan .env ($_). Continuing.`e[0m"
+    }
+}
+
 # -- Deployment lock: prevent concurrent azd up/down for the same env --
 $lockDir = Join-Path $HOME ".omnivec" "locks"
 if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
@@ -559,6 +584,17 @@ if (-not $SYS_SKU) {
     Write-Host "`e[31mNo system VM SKU selected. Cannot proceed.`e[0m"
     exit 1
 }
+
+# Strip any whitespace/quotes from values before writing — azd env set writes
+# values verbatim, and embedded newlines corrupt the .env file irrecoverably.
+function Clean-EnvValue($v) {
+    if ($null -eq $v) { return "" }
+    return (("$v") -replace '[\r\n\t]+', '' -replace '^"|"$', '').Trim()
+}
+$SYS_SKU  = Clean-EnvValue $SYS_SKU
+$GPU_SKU  = Clean-EnvValue $GPU_SKU
+$sysCount = Clean-EnvValue $sysCount
+$gpuCount = Clean-EnvValue $gpuCount
 
 # Store in azd env
 azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE $SYS_SKU
