@@ -241,37 +241,37 @@ build_image() {
 }
 
 build_all_images() {
-  build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "$IMG_TAG"
-  build_image "omnivec-search" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "$IMG_TAG"
-  build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "$IMG_TAG"
-  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "$IMG_TAG"
-  build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "$IMG_TAG"
+  build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest"
+  build_image "omnivec-search" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "latest"
+  build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
+  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
+  build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
   if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
-    build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "$IMG_TAG"
+    build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
   fi
   if [ -f "${ROOT_DIR}/docgrok/router/Dockerfile" ]; then
-    build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "$IMG_TAG"
+    build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
   fi
 }
 
 build_missing_images() {
   for image in "$@"; do
     case "$image" in
-      omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "$IMG_TAG" ;;
-      omnivec-search)           build_image "$image" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "$IMG_TAG" ;;
-      omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "$IMG_TAG" ;;
-      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "$IMG_TAG" ;;
-      omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "$IMG_TAG" ;;
+      omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest" ;;
+      omnivec-search)           build_image "$image" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "latest" ;;
+      omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
+      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
+      omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
       docgrok-pipeline-worker)
         if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
-          build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "$IMG_TAG"
+          build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
         else
           printf "  ${YELLOW}Skipping ${image}: source not present in repo.${NC}\n"
         fi
         ;;
       docgrok-router)
         if [ -f "${ROOT_DIR}/docgrok/router/Dockerfile" ]; then
-          build_image "$image" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "$IMG_TAG"
+          build_image "$image" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
         else
           printf "  ${YELLOW}Skipping ${image}: source not present in repo.${NC}\n"
         fi
@@ -299,7 +299,7 @@ SKIP_IMPORT=${OMNIVEC_SKIP_IMPORT:-$(get_azd_value "OMNIVEC_SKIP_IMPORT")}
 # re-import only if the user explicitly asked via OMNIVEC_FORCE_IMPORT.
 _auth_test_can_skip() {
   if [ "$FORCE_IMPORT" = "true" ]; then return 1; fi
-  if image_exists "$FIRST_IMAGE" "$IMG_TAG"; then return 0; fi
+  if image_exists "$FIRST_IMAGE" "latest"; then return 0; fi
   return 1
 }
 
@@ -311,12 +311,12 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
   # the auth test entirely — importing unconditionally here is what used
   # to clobber locally patched images.
   if _auth_test_can_skip; then
-    printf "  ${GREEN}${FIRST_IMAGE}:${IMG_TAG} already present locally, skipping auth test.${NC}\n"
+    printf "  ${GREEN}${FIRST_IMAGE}:latest already present locally, skipping auth test.${NC}\n"
     ANON_OK=true
   else
     # Try anonymous pull first
     printf "  ${CYAN}Testing anonymous pull (this may take 30-60s)...${NC}"
-    if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:${IMG_TAG}" --force >/dev/null 2>&1; then
+    if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
       printf " ${GREEN}✓ anonymous pull works${NC}\n"
       ANON_OK=true
       AUTH_IMPORTED=true
@@ -325,7 +325,7 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
       # Try stored token
       if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
         printf "  ${CYAN}Trying stored token...${NC}"
-        if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:${IMG_TAG}" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
+        if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
           printf " ${GREEN}✓ token works${NC}\n"
           TOKEN_OK=true
           AUTH_IMPORTED=true
@@ -338,7 +338,7 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
         printf "  ${YELLOW}Registry token required for import.${NC}\n"
         _new_token=$(read_input "  Enter token for $SHARED_REGISTRY (or Enter to build from source): ")
         if [ -n "$_new_token" ]; then
-          if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:${IMG_TAG}" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
+          if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
             SHARED_REGISTRY_TOKEN="$_new_token"
             azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null 2>/dev/null || true
             printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
@@ -378,25 +378,25 @@ else
     # First image — already handled by auth test (imported or preserved)
     if [ "$image" = "$FIRST_IMAGE" ]; then
       if [ "$AUTH_IMPORTED" = "true" ]; then
-        printf "  ${GREEN}${image}:${IMG_TAG} already imported (auth test).${NC}\n"
+        printf "  ${GREEN}${image}:latest already imported (auth test).${NC}\n"
         import_count=$((import_count + 1))
       else
-        printf "  ${GREEN}${image}:${IMG_TAG} already present locally, preserving (auth test).${NC}\n"
+        printf "  ${GREEN}${image}:latest already present locally, preserving (auth test).${NC}\n"
         skip_count=$((skip_count + 1))
       fi
       continue
     fi
-    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "$IMG_TAG"; then
+    if [ "$FORCE_IMPORT" != "true" ] && image_exists "$image" "latest"; then
       # Default policy: local image wins. Re-import only when the user
       # explicitly sets OMNIVEC_FORCE_IMPORT=true. This prevents the
       # shared-registry :latest (which may lag behind hotfixes) from
       # clobbering locally built / patched images on every azd up.
-      printf "  ${GREEN}${image}:${IMG_TAG} already present locally, preserving (set OMNIVEC_FORCE_IMPORT=true to overwrite).${NC}\n"
+      printf "  ${GREEN}${image}:latest already present locally, preserving (set OMNIVEC_FORCE_IMPORT=true to overwrite).${NC}\n"
       skip_count=$((skip_count + 1))
       continue
     fi
 
-    printf "  ${CYAN}Importing ${image}:${IMG_TAG}...${NC}\n"
+    printf "  ${CYAN}Importing ${image}:${IMG_TAG} as :latest...${NC}\n"
 
     # Run import in background (parallel)
     (
@@ -409,7 +409,7 @@ else
         import_error=$(az acr import \
             --name "$ACR_NAME" \
             --source "${SHARED_REGISTRY}/${image}:${IMG_TAG}" \
-            --image "${image}:${IMG_TAG}" \
+            --image "${image}:latest" \
             $AUTH_ARGS \
             --force 2>&1) && import_success=true || import_success=false
 
@@ -438,7 +438,7 @@ else
     if [ ! -f "$result_file" ]; then continue; fi
     result=$(cat "$result_file")
     if [ "$result" = "OK" ]; then
-      printf "  ${GREEN}${image}:${IMG_TAG} imported.${NC}\n"
+      printf "  ${GREEN}${image}:latest (from ${IMG_TAG}) imported.${NC}\n"
       import_count=$((import_count + 1))
     else
       printf "  ${RED}${image}:${IMG_TAG} import FAILED${NC}\n"
@@ -449,20 +449,6 @@ else
 
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
   if [ "$import_count" -gt 0 ]; then IMAGES_CHANGED=true; fi
-
-  # Belt-and-suspenders: also alias each imported image as :latest in the env
-  # ACR so any helm deployment that still references the default tag: latest
-  # (i.e. a service whose --set override we forgot to add) still finds a valid
-  # manifest. Safe no-op when IMG_TAG=latest. Failures are non-fatal.
-  if [ "$IMG_TAG" != "latest" ]; then
-    for image in $IMAGES; do
-      if image_exists "$image" "$IMG_TAG"; then
-        az acr import --name "$ACR_NAME" \
-          --source "${ACR_NAME}.azurecr.io/${image}:${IMG_TAG}" \
-          --image "${image}:latest" --force >/dev/null 2>&1 || true
-      fi
-    done
-  fi
 
   # If no images available from import, auto-fallback to build mode
   total_available=$((import_count + skip_count))
@@ -478,11 +464,11 @@ fi
 printf "\n${YELLOW}Verifying all required images exist in ACR...${NC}\n"
 MISSING_IMAGES=""
 for image in $IMAGES; do
-  if ! image_exists "$image" "$IMG_TAG"; then
-    printf "  ${RED}MISSING: ${image}:${IMG_TAG}${NC}\n"
+  if ! image_exists "$image" "latest"; then
+    printf "  ${RED}MISSING: ${image}:latest${NC}\n"
     MISSING_IMAGES="$MISSING_IMAGES $image"
   else
-    printf "  ${GREEN}OK: ${image}:${IMG_TAG}${NC}\n"
+    printf "  ${GREEN}OK: ${image}:latest${NC}\n"
   fi
 done
 
@@ -493,7 +479,7 @@ if [ -n "$MISSING_IMAGES" ]; then
 
   STILL_MISSING=""
   for image in $MISSING_IMAGES; do
-    if ! image_exists "$image" "$IMG_TAG"; then
+    if ! image_exists "$image" "latest"; then
       STILL_MISSING="$STILL_MISSING $image"
     fi
   done
@@ -645,7 +631,7 @@ if [ -z "$SEARCH_INTERNAL_TOKEN" ]; then
   printf "  ${GREEN}Generated new search internal token.${NC}\n"
 fi
 
-IMAGE_TAG="$IMG_TAG"
+IMAGE_TAG="latest"
 
 # Write helm values to a temp file (avoids fragile eval + string concatenation)
 HELM_VALUES_FILE=$(mktemp /tmp/omnivec-helm-values.XXXXXX.yaml)
@@ -737,19 +723,10 @@ run_helm_deploy() {
     set -- "$@" --set "blobIngestor.enabled=false"
   fi
 
-  # Image tag channel (IMG_TAG resolved earlier from OMNIVEC_IMAGE_TAG or git branch).
-  set -- "$@" \
-    --set "web.image.tag=${IMG_TAG}" \
-    --set "api.image.tag=${IMG_TAG}" \
-    --set "search.image.tag=${IMG_TAG}" \
-    --set "controller.image.tag=${IMG_TAG}" \
-    --set "changefeed.image.tag=${IMG_TAG}" \
-    --set "blobEnumerator.image.tag=${IMG_TAG}" \
-    --set "sourceWorker.image.tag=${IMG_TAG}" \
-    --set "dotnetWorker.image.tag=${IMG_TAG}" \
-    --set "blobWatcher.image.tag=${IMG_TAG}" \
-    --set "docgrok.docgrok.image.tag=${IMG_TAG}" \
-    --set "docgrok.pipelineWorker.image.tag=${IMG_TAG}"
+  # Image tags are NOT overridden here — postprovision imports every image
+  # into the env-specific ACR tagged :latest (regardless of source channel),
+  # so the default values.yaml (image.tag: latest) resolves correctly for
+  # every service, including any future one we forget to wire up.
 
   # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
   # strips the release metadata but can leave Deployments/Services behind (they
