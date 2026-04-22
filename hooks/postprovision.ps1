@@ -126,6 +126,7 @@ $FORCE_IMPORT = if ($env:OMNIVEC_FORCE_IMPORT) { $env:OMNIVEC_FORCE_IMPORT -eq "
 # Images to import/build
 $IMAGES = @(
     "omnivec-api",
+    "omnivec-search",
     "omnivec-web",
     "omnivec-changefeed",
     "omnivec-dotnet-worker",
@@ -194,6 +195,7 @@ function Build-Image {
 
 function Build-AllImages {
     Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest"
+    Build-Image -Name "omnivec-search" -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest"
     Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
     Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
     Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
@@ -212,6 +214,7 @@ function Build-MissingImages {
     foreach ($image in $Images) {
         switch ($image) {
             "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
+            "omnivec-search"          { Build-Image -Name $image -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest" }
             "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
             "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
             "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
@@ -475,6 +478,24 @@ if (-not $ADMIN_TOKEN) {
     Write-Host "  `e[32mUsing existing admin token.`e[0m"
 }
 
+# Generate search-service bootstrap + s2s tokens (distinct from admin token)
+$SEARCH_BOOTSTRAP_TOKEN = Get-AzdValue "OMNIVEC_SEARCH_TOKEN"
+if (-not $SEARCH_BOOTSTRAP_TOKEN) {
+    $bytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $SEARCH_BOOTSTRAP_TOKEN = [Convert]::ToBase64String($bytes) -replace '[+/=]','' | ForEach-Object { $_.Substring(0, [Math]::Min(44, $_.Length)) }
+    azd env set OMNIVEC_SEARCH_TOKEN $SEARCH_BOOTSTRAP_TOKEN
+    Write-Host "  `e[32mGenerated new search bootstrap token.`e[0m"
+}
+$SEARCH_INTERNAL_TOKEN = Get-AzdValue "SEARCH_INTERNAL_TOKEN"
+if (-not $SEARCH_INTERNAL_TOKEN) {
+    $bytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $SEARCH_INTERNAL_TOKEN = [Convert]::ToBase64String($bytes) -replace '[+/=]','' | ForEach-Object { $_.Substring(0, [Math]::Min(44, $_.Length)) }
+    azd env set SEARCH_INTERNAL_TOKEN $SEARCH_INTERNAL_TOKEN
+    Write-Host "  `e[32mGenerated new search internal token.`e[0m"
+}
+
 $IMAGE_TAG = "latest"
 
 $helmArgs = @(
@@ -494,6 +515,9 @@ $helmArgs = @(
     "--set", "docgrok.azure.cosmos.container=metadata",
     "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
     "--set", "api.adminToken=$ADMIN_TOKEN",
+    "--set", "search.image.tag=$IMAGE_TAG",
+    "--set", "search.bootstrapToken=$SEARCH_BOOTSTRAP_TOKEN",
+    "--set", "search.internalToken=$SEARCH_INTERNAL_TOKEN",
     "--set", "dotnetWorker.enabled=true",
     "--set", "web.service.dnsLabel=$INSTANCE_ID"
 )
@@ -519,9 +543,30 @@ if ($SB_ENDPOINT) {
 if ($ENABLE_BLOB_SOURCE -eq "true") {
     $helmArgs += @(
         "--set", "azure.storage.accountName=$STORAGE_ACCOUNT",
-        "--set", "azure.storage.blobEndpoint=$STORAGE_BLOB_ENDPOINT"
+        "--set", "azure.storage.blobEndpoint=$STORAGE_BLOB_ENDPOINT",
+        "--set", "blobIngestor.enabled=true"
     )
+} else {
+    $helmArgs += @("--set", "blobIngestor.enabled=false")
 }
+
+# Image tag channel: stable (default, for testers) or dev (for active work).
+# Users select via: azd env set OMNIVEC_IMAGE_TAG dev
+$imgTag = (& azd env get-value OMNIVEC_IMAGE_TAG 2>$null)
+if (-not $imgTag -or "$imgTag" -match "ERROR") { $imgTag = "stable" }
+$imgTag = "$imgTag".Trim()
+$helmArgs += @(
+    "--set", "web.image.tag=$imgTag",
+    "--set", "api.image.tag=$imgTag",
+    "--set", "search.image.tag=$imgTag",
+    "--set", "controller.image.tag=$imgTag",
+    "--set", "changefeed.image.tag=$imgTag",
+    "--set", "blobEnumerator.image.tag=$imgTag",
+    "--set", "sourceWorker.image.tag=$imgTag",
+    "--set", "blobWatcher.image.tag=$imgTag",
+    "--set", "docgrok.docgrok.image.tag=$imgTag",
+    "--set", "docgrok.pipelineWorker.image.tag=$imgTag"
+)
 
 $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
 # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which

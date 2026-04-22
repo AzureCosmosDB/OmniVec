@@ -1,0 +1,105 @@
+name: build-and-push-images
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag_override:
+        description: "Override tag to push (e.g. hotfix-2026-04-22). Leave empty to use branch/tag defaults."
+        required: false
+        default: ""
+
+env:
+  # Common source-of-truth registry. Every env-specific ACR imports from here.
+  REGISTRY: omnivecregistry.azurecr.io
+
+permissions:
+  contents: read
+  id-token: write  # required for OIDC federated auth to Azure
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: omnivec-api
+            context: .
+            dockerfile: Dockerfile
+          - image: omnivec-web
+            context: web
+            dockerfile: web/Dockerfile
+          - image: omnivec-changefeed
+            context: connectors/ingestion/dotnet
+            dockerfile: connectors/ingestion/dotnet/Dockerfile
+          - image: docgrok-router
+            context: docgrok/router
+            dockerfile: docgrok/router/Dockerfile
+          - image: docgrok-pipeline-worker
+            context: docgrok/pipeline-worker
+            dockerfile: docgrok/pipeline-worker/Dockerfile
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Compute tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TAGS=()
+          OVERRIDE="${{ github.event.inputs.tag_override }}"
+          if [ -n "$OVERRIDE" ]; then
+            TAGS+=("$OVERRIDE")
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            SEMVER="${GITHUB_REF#refs/tags/}"
+            TAGS+=("stable" "$SEMVER")
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            TAGS+=("stable")
+          elif [ "${GITHUB_REF_NAME}" = "dev" ]; then
+            TAGS+=("dev")
+          else
+            TAGS+=("${GITHUB_REF_NAME//\//-}")
+          fi
+          TAGS+=("sha-$SHORT_SHA")
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "${TAGS[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Computed tags for ${{ matrix.image }}:"
+          printf '  - %s\n' "${TAGS[@]}"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${REGISTRY%%.*}
+
+      - name: Build & push via az acr build
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_ARGS=()
+          while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            TAG_ARGS+=( --image "${{ matrix.image }}:$t" )
+          done <<< "${{ steps.tags.outputs.tags }}"
+          echo "Building with tags:"
+          printf '  %s\n' "${TAG_ARGS[@]}"
+          az acr build \
+            --registry ${REGISTRY%%.*} \
+            "${TAG_ARGS[@]}" \
+            --file "${{ matrix.dockerfile }}" \
+            "${{ matrix.context }}"
