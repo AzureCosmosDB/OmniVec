@@ -576,7 +576,7 @@ azd up
 - Push to `main` → rebuild with `:stable` + `:sha-<short>`.
 - Push tag `vX.Y.Z` → rebuild with `:stable` + `:vX.Y.Z`.
 
-Required repo secrets for OIDC auth to ACR: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
+Required repo secrets: `ACR_USERNAME`, `ACR_PASSWORD` (from an ACR scope-map token with `content/write` on the 5 repos).
 
 ## License
 
