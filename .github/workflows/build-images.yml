@@ -34,27 +34,15 @@ jobs:
           - image: omnivec-changefeed
             context: connectors/ingestion/dotnet
             dockerfile: connectors/ingestion/dotnet/Dockerfile
-          - image: docgrok-router
-            context: docgrok/router
-            dockerfile: docgrok/router/Dockerfile
-          - image: docgrok-pipeline-worker
-            context: docgrok/pipeline-worker
-            dockerfile: docgrok/pipeline-worker/Dockerfile
+          # docgrok-router and docgrok-pipeline-worker are built manually for now;
+          # their submodule (AzureCosmosDB/DocGrok) requires a PAT that is blocked
+          # by org policy. Re-enable once a deploy key or approved token is in place.
 
     steps:
-      - name: Checkout OmniVec (no submodules yet)
+      - name: Checkout OmniVec
         uses: actions/checkout@v4
         with:
           submodules: false
-
-      - name: Init DocGrok submodule with PAT
-        env:
-          SUBMODULES_PAT: ${{ secrets.SUBMODULES_PAT }}
-        run: |
-          set -euo pipefail
-          # Rewrite submodule URL to include PAT for this clone only
-          git config --global url."https://x-access-token:${SUBMODULES_PAT}@github.com/AzureCosmosDB/DocGrok.git".insteadOf "https://github.com/AzureCosmosDB/DocGrok.git"
-          git submodule update --init --recursive
 
       - name: Compute tags
         id: tags
