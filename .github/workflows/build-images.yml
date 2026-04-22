@@ -34,15 +34,31 @@ jobs:
           - image: omnivec-changefeed
             context: connectors/ingestion/dotnet
             dockerfile: connectors/ingestion/dotnet/Dockerfile
-          # docgrok-router and docgrok-pipeline-worker are built manually for now;
-          # their submodule (AzureCosmosDB/DocGrok) requires a PAT that is blocked
-          # by org policy. Re-enable once a deploy key or approved token is in place.
+          - image: docgrok-router
+            context: docgrok/router
+            dockerfile: docgrok/router/Dockerfile
+            needs_submodule: true
+          - image: docgrok-pipeline-worker
+            context: docgrok/pipeline-worker
+            dockerfile: docgrok/pipeline-worker/Dockerfile
+            needs_submodule: true
 
     steps:
+      - name: Start SSH agent with DocGrok deploy key
+        if: matrix.needs_submodule
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DOCGROK_DEPLOY_KEY }}
+
+      - name: Rewrite github.com URLs to SSH for submodule fetch
+        if: matrix.needs_submodule
+        run: |
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+
       - name: Checkout OmniVec
         uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: ${{ matrix.needs_submodule && 'recursive' || 'false' }}
 
       - name: Compute tags
         id: tags
