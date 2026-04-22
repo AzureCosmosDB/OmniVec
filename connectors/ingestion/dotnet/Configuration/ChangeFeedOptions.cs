@@ -49,4 +49,10 @@ public class ChangeFeedOptions
 
     /// <summary>Page size for blob enumeration (number of blobs per page)</summary>
     public int BlobEnumerationPageSize { get; set; } = 500;
+
+    /// <summary>When true, this process watches Cosmos change-feed sources (default: true).</summary>
+    public bool EnableCosmosSources { get; set; } = true;
+
+    /// <summary>When true, this process watches Azure Blob sources (default: true).</summary>
+    public bool EnableBlobSources { get; set; } = true;
 }

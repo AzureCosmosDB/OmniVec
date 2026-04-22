@@ -73,6 +73,58 @@ api:
     DOCGROK_URL: "http://docgrok:80"
 
 # =============================================================================
+# OMNIVEC SEARCH (Standalone multi-index vector search — externally exposed)
+# =============================================================================
+search:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: omnivec-search
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: LoadBalancer     # external public IP
+    port: 80
+    targetPort: 8080
+    dnsLabel: ""           # optional: <label>.<region>.cloudapp.azure.com
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+  probes:
+    liveness:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    readiness:
+      path: /ready
+      initialDelaySeconds: 5
+      periodSeconds: 10
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  # Bootstrap/root search token (plaintext in values is fine for demos;
+  # in production wire via --set or a Secret). Distinct from api.adminToken.
+  bootstrapToken: ""
+  # Internal s2s token — shared with api deployment via api.searchInternalToken.
+  # api.py uses this to call search-svc for assistant RAG. Distinct from bootstrapToken.
+  internalToken: ""
+  # If true, accept tokens with scope=admin on search endpoints (not recommended).
+  acceptAdminToken: "false"
+  corsOrigins: "*"
+  perIndexTimeoutS: 5
+  totalTimeoutS: 15
+  embedTimeoutS: 10
+  rateLimitRpm: 0          # 0 = disabled
+  env:
+    DOCGROK_URL: ""        # optional override; defaults to api.env.DOCGROK_URL
+
+# =============================================================================
 # OMNIVEC CONTROLLER (bookkeeper — single replica)
 # =============================================================================
 controller:
@@ -114,6 +166,22 @@ changefeed:
     minReplicas: 15
     maxReplicas: 15
     targetCPUUtilizationPercentage: 70
+
+# =============================================================================
+# Blob Ingestor - Dedicated single-replica deployment for azure-blob sources.
+# Runs the same image as changefeed but with EnableBlobSources=true,
+# EnableCosmosSources=false. Keeps blob enumeration off the Cosmos CFP scale unit.
+# =============================================================================
+blobIngestor:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
 
 # =============================================================================
 # DOTNET WORKER (.NET Service Bus worker for queue-mode embedding)
@@ -304,9 +372,9 @@ docgrok:
         memory: "512Mi"
         cpu: "500m"
 
-  # Pipeline Worker (PDF → OCR → Embedding via router)
+  # Pipeline Worker (PDF → OCR → Embedding via router; also handles text blobs)
   pipelineWorker:
-    enabled: false
+    enabled: true
     replicaCount: 1
     image:
       repository: docgrok-pipeline-worker
@@ -317,11 +385,11 @@ docgrok:
       targetPort: 8080
     resources:
       requests:
-        memory: "8Gi"
-        cpu: "2"
+        memory: "1Gi"
+        cpu: "250m"
       limits:
-        memory: "12Gi"
-        cpu: "4"
+        memory: "4Gi"
+        cpu: "2"
     env:
       DOCGROK_ROUTER_URL: "http://docgrok:80"
       DEFAULT_MODEL_ID: ""
