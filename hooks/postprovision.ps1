@@ -367,6 +367,18 @@ if ($DO_BUILD) {
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
     $script:imagesChanged = $importCount -gt 0
 
+    # Belt-and-suspenders: alias imported images as :latest in env ACR so
+    # any helm service whose tag override we forgot still resolves.
+    if ($IMG_TAG -ne "latest") {
+        foreach ($image in $IMAGES) {
+            if (Test-ImageExists -Name $image -Tag $IMG_TAG) {
+                az acr import --name $ACR_NAME `
+                    --source "$ACR_NAME.azurecr.io/${image}:$IMG_TAG" `
+                    --image "${image}:latest" --force 2>&1 | Out-Null
+            }
+        }
+    }
+
     # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
     if ($totalAvailable -eq 0) {
@@ -575,6 +587,7 @@ $helmArgs += @(
     "--set", "changefeed.image.tag=$IMG_TAG",
     "--set", "blobEnumerator.image.tag=$IMG_TAG",
     "--set", "sourceWorker.image.tag=$IMG_TAG",
+    "--set", "dotnetWorker.image.tag=$IMG_TAG",
     "--set", "blobWatcher.image.tag=$IMG_TAG",
     "--set", "docgrok.docgrok.image.tag=$IMG_TAG",
     "--set", "docgrok.pipelineWorker.image.tag=$IMG_TAG"
