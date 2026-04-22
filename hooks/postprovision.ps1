@@ -447,7 +447,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "`e[31mFailed to create namespace docgrok`
 kubectl --context $KUBE_CONTEXT label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite | Out-Null
 kubectl --context $KUBE_CONTEXT annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite | Out-Null
 
-if ($ENABLE_BLOB_SOURCE -eq "true" -and $STORAGE_ACCOUNT) {
+if ($ENABLE_BLOB_SOURCE -eq "true") {
     kubectl --context $KUBE_CONTEXT create secret generic omnivec-storage `
         --namespace omnivec `
         --from-literal=account-name="$STORAGE_ACCOUNT" `
@@ -555,6 +555,12 @@ if ($KEYVAULT_URI) {
 if ($APPINSIGHTS_CS) {
     $helmArgs += @(
         "--set", "azure.appInsights.connectionString=$APPINSIGHTS_CS"
+    )
+}
+
+if ($LOG_ANALYTICS_WS) {
+    $helmArgs += @(
+        "--set", "azure.appInsights.workspaceId=$LOG_ANALYTICS_WS"
     )
 }
 
