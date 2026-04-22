@@ -367,9 +367,6 @@ if ($DO_BUILD) {
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
     $script:imagesChanged = $importCount -gt 0
 
-        }
-    }
-
     # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
     if ($totalAvailable -eq 0) {
