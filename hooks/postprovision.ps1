@@ -337,19 +337,19 @@ if ($DO_BUILD) {
         $imagesToImport += $image
 
         $job = Start-Job -ScriptBlock {
-            param($ACR, $SHARED, $IMG, $USER, $TOKEN)
+            param($ACR, $SHARED, $IMG, $TAG, $USER, $TOKEN)
             $authArgs = @()
             if ($TOKEN) { $authArgs = @("--username", $USER, "--password", $TOKEN) }
-            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:$IMG_TAG" --image "${IMG}:latest" @authArgs --force 2>&1
+            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:${TAG}" --image "${IMG}:latest" @authArgs --force 2>&1
             if ($LASTEXITCODE -eq 0) { return "OK" }
             # Retry once on transient errors
             if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist|InvalidHostName|could not be resolved") {
                 Start-Sleep -Seconds 2
-                az acr import --name $ACR --source "${SHARED}/${IMG}:$IMG_TAG" --image "${IMG}:latest" @authArgs --force 2>&1
+                az acr import --name $ACR --source "${SHARED}/${IMG}:${TAG}" --image "${IMG}:latest" @authArgs --force 2>&1
                 if ($LASTEXITCODE -eq 0) { return "OK" }
             }
             return "FAIL: $importError"
-        } -ArgumentList $ACR_NAME, $SHARED_REGISTRY, $image, $SHARED_REGISTRY_USER, $SHARED_REGISTRY_TOKEN
+        } -ArgumentList $ACR_NAME, $SHARED_REGISTRY, $image, $IMG_TAG, $SHARED_REGISTRY_USER, $SHARED_REGISTRY_TOKEN
 
         $importJobs += @{ Image = $image; Job = $job }
     }
