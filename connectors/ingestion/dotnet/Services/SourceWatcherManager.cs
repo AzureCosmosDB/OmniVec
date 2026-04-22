@@ -92,6 +92,14 @@ public class SourceWatcherManager : IAsyncDisposable
         List<Pipeline> activePipelines,
         CancellationToken ct)
     {
+        // Filter by source-type toggles so each deployment owns a subset of sources.
+        // Blob enumeration runs in its own single-replica deployment; Cosmos CFP scales independently.
+        desiredSources = desiredSources.Where(s =>
+        {
+            bool isBlob = string.Equals(s.Type, "azure-blob", StringComparison.OrdinalIgnoreCase);
+            return isBlob ? _options.EnableBlobSources : _options.EnableCosmosSources;
+        }).ToList();
+
         var desiredIds = desiredSources.Select(s => s.Id).ToHashSet();
         var currentIds = _watchers.Keys.ToHashSet();
 

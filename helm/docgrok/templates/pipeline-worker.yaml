@@ -17,7 +17,9 @@ spec:
       labels:
         app: docgrok-pipeline-worker
         component: pipeline-worker
+        azure.workload.identity/use: "true"
     spec:
+      serviceAccountName: docgrok-sa
       containers:
       - name: pipeline-worker
         image: {{ .Values.global.imageRegistry }}/{{ .Values.pipelineWorker.image.repository }}:{{ .Values.pipelineWorker.image.tag }}
@@ -31,18 +33,26 @@ spec:
           value: {{ .Values.pipelineWorker.env.DOCGROK_ROUTER_URL | quote }}
         - name: DEFAULT_MODEL_ID
           value: {{ .Values.pipelineWorker.env.DEFAULT_MODEL_ID | quote }}
+        {{- if .Values.azure.workloadIdentity.clientId }}
+        - name: AZURE_CLIENT_ID
+          value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /health
             port: 8080
           initialDelaySeconds: 120
-          periodSeconds: 30
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 5
         readinessProbe:
           httpGet:
             path: /health
             port: 8080
           initialDelaySeconds: 60
-          periodSeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
 ---
 apiVersion: v1
 kind: Service
