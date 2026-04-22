@@ -138,7 +138,7 @@ $IMAGES = @(
 # 1. Explicit OMNIVEC_IMAGE_TAG (azd env) wins.
 # 2. Auto-detect from current git branch: dev -> dev, main -> stable.
 # 3. Fallback -> stable.
-$IMG_TAG = (& azd env get-value OMNIVEC_IMAGE_TAG 2>$null)
+$IMG_TAG = Get-AzdValue "OMNIVEC_IMAGE_TAG"
 if ([string]::IsNullOrWhiteSpace($IMG_TAG)) {
     $_branch = ""
     try { $_branch = (git -C "$PSScriptRoot\.." rev-parse --abbrev-ref HEAD 2>$null) } catch {}
@@ -148,6 +148,12 @@ if ([string]::IsNullOrWhiteSpace($IMG_TAG)) {
         default { $IMG_TAG = "stable" }
     }
     Write-Host "`e[36mAuto-detected branch '$($_branch -replace '^$','unknown')' -> image tag '$IMG_TAG'`e[0m"
+}
+# Validate: docker tag = alnum + . _ -
+if ($IMG_TAG -notmatch '^[A-Za-z0-9._-]+$') {
+    Write-Host "`e[31mERROR: OMNIVEC_IMAGE_TAG='$IMG_TAG' is not a valid image tag.`e[0m"
+    Write-Host "`e[31mFix: azd env set OMNIVEC_IMAGE_TAG stable  (or 'dev')`e[0m"
+    exit 1
 }
 
 function Test-ImageExists {
@@ -281,7 +287,9 @@ if (-not $DO_BUILD) {
         # Prompt for token if nothing worked
         if (-not $tokenOk) {
             Write-Host "  `e[33mRegistry token required for import.`e[0m"
-            $newToken = (Read-Host "  Enter token for $SHARED_REGISTRY (or Enter to build from source)").Trim()
+            $newToken = (Read-Host "  Enter token for $SHARED_REGISTRY (or Enter to build from source)")
+            # Strip ALL whitespace (paste can inject CR/LF/tabs/spaces). Valid tokens have none.
+            $newToken = ("$newToken" -replace '\s', '')
             if ($newToken) {
                 $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
                 if ($LASTEXITCODE -eq 0) {

@@ -608,13 +608,14 @@ $envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVE
 foreach ($key in $envKeys) {
     $ErrorActionPreference = "SilentlyContinue"
     $raw = azd env get-value $key 2>$null
+    $ec = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
-    if ($raw) {
-        $clean = $raw -replace '[\t\r]','' -replace '^\xEF\xBB\xBF','' -replace '^\s+|\s+$',''
-        if ($clean -ne $raw) {
-            azd env set $key $clean
-            Write-Host "  `e[33mCleaned ${key}: removed hidden characters`e[0m"
-        }
+    # Skip missing keys or azd error-text responses
+    if ($ec -ne 0 -or -not $raw -or "$raw" -match "^\s*ERROR" -or "$raw" -match "not found") { continue }
+    $clean = $raw -replace '[\t\r\n]','' -replace '^\xEF\xBB\xBF','' -replace '^"|"$','' -replace '^\s+|\s+$',''
+    if ($clean -ne $raw) {
+        azd env set $key $clean
+        Write-Host "  `e[33mCleaned ${key}: removed hidden characters`e[0m"
     }
 }
 
