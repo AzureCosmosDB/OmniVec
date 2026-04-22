@@ -210,17 +210,17 @@ function Build-Image {
 }
 
 function Build-AllImages {
-    Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag $IMG_TAG
-    Build-Image -Name "omnivec-search" -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag $IMG_TAG
-    Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag $IMG_TAG
-    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag $IMG_TAG
-    Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag $IMG_TAG
+    Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest"
+    Build-Image -Name "omnivec-search" -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest"
+    Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
+    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
+    Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
 
     if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
-        Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag $IMG_TAG
+        Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
     }
     if (Test-Path "$RootDir/docgrok/router/Dockerfile") {
-        Build-Image -Name "docgrok-router" -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag $IMG_TAG
+        Build-Image -Name "docgrok-router" -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest"
     }
 }
 
@@ -229,21 +229,21 @@ function Build-MissingImages {
 
     foreach ($image in $Images) {
         switch ($image) {
-            "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag $IMG_TAG }
-            "omnivec-search"          { Build-Image -Name $image -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag $IMG_TAG }
-            "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag $IMG_TAG }
-            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag $IMG_TAG }
-            "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag $IMG_TAG }
+            "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
+            "omnivec-search"          { Build-Image -Name $image -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest" }
+            "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
+            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
+            "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
             "docgrok-pipeline-worker" {
                 if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
-                    Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag $IMG_TAG
+                    Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
                 } else {
                     Write-Host "  `e[33mSkipping ${image}: source not present in repo.`e[0m"
                 }
             }
             "docgrok-router" {
                 if (Test-Path "$RootDir/docgrok/router/Dockerfile") {
-                    Build-Image -Name $image -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag $IMG_TAG
+                    Build-Image -Name $image -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest"
                 } else {
                     Write-Host "  `e[33mSkipping ${image}: source not present in repo.`e[0m"
                 }
@@ -261,7 +261,7 @@ if (-not $DO_BUILD) {
     $anonOk = $false
     $tokenOk = $false
     Write-Host "  `e[36mTesting anonymous pull...`e[0m" -NoNewline
-    $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):$IMG_TAG" --force 2>&1
+    $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --force 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host " `e[32m✓ anonymous pull works`e[0m"
         $anonOk = $true
@@ -270,7 +270,7 @@ if (-not $DO_BUILD) {
         # Try with stored token
         if ($SHARED_REGISTRY_TOKEN) {
             Write-Host "  `e[36mTrying stored token...`e[0m" -NoNewline
-            $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):$IMG_TAG" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force 2>&1
+            $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Host " `e[32m✓ token works`e[0m"
                 $tokenOk = $true
@@ -283,7 +283,7 @@ if (-not $DO_BUILD) {
             Write-Host "  `e[33mRegistry token required for import.`e[0m"
             $newToken = (Read-Host "  Enter token for $SHARED_REGISTRY (or Enter to build from source)").Trim()
             if ($newToken) {
-                $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):$IMG_TAG" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
+                $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
                 if ($LASTEXITCODE -eq 0) {
                     $SHARED_REGISTRY_TOKEN = $newToken
                     azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $newToken 2>$null
@@ -317,27 +317,27 @@ if ($DO_BUILD) {
     $imagesToImport = @()
 
     foreach ($image in $IMAGES) {
-        if (-not $FORCE_IMPORT -and (Test-ImageUpToDate -Name $image -Tag $IMG_TAG)) {
-            Write-Host "  `e[32m${image}:$IMG_TAG up to date (digest match), skipping.`e[0m"
+        if (-not $FORCE_IMPORT -and (Test-ImageUpToDate -Name $image -Tag "latest")) {
+            Write-Host "  `e[32m${image}:latest up to date (digest match), skipping.`e[0m"
             $skipCount++
             continue
-        } elseif (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag $IMG_TAG)) {
-            Write-Host "  `e[36m${image}:$IMG_TAG exists but digest differs, re-importing...`e[0m"
+        } elseif (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
+            Write-Host "  `e[36m${image}:latest exists but digest differs, re-importing...`e[0m"
         }
 
-        Write-Host "  `e[36mImporting ${image}:$IMG_TAG...`e[0m"
+        Write-Host "  `e[36mImporting ${image}:$IMG_TAG as :latest...`e[0m"
         $imagesToImport += $image
 
         $job = Start-Job -ScriptBlock {
             param($ACR, $SHARED, $IMG, $USER, $TOKEN)
             $authArgs = @()
             if ($TOKEN) { $authArgs = @("--username", $USER, "--password", $TOKEN) }
-            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:$IMG_TAG" --image "${IMG}:$IMG_TAG" @authArgs --force 2>&1
+            $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:$IMG_TAG" --image "${IMG}:latest" @authArgs --force 2>&1
             if ($LASTEXITCODE -eq 0) { return "OK" }
             # Retry once on transient errors
             if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist|InvalidHostName|could not be resolved") {
                 Start-Sleep -Seconds 2
-                az acr import --name $ACR --source "${SHARED}/${IMG}:$IMG_TAG" --image "${IMG}:$IMG_TAG" @authArgs --force 2>&1
+                az acr import --name $ACR --source "${SHARED}/${IMG}:$IMG_TAG" --image "${IMG}:latest" @authArgs --force 2>&1
                 if ($LASTEXITCODE -eq 0) { return "OK" }
             }
             return "FAIL: $importError"
@@ -356,16 +356,19 @@ if ($DO_BUILD) {
         $result = Receive-Job $entry.Job
         Remove-Job $entry.Job
         if ($result -eq "OK") {
-            Write-Host "  `e[32m$($entry.Image):$IMG_TAG imported.`e[0m"
+            Write-Host "  `e[32m$($entry.Image):latest (from $IMG_TAG) imported.`e[0m"
             $importCount++
         } else {
-            Write-Host "  `e[31m$($entry.Image):$IMG_TAG import FAILED`e[0m"
+            Write-Host "  `e[31m$($entry.Image):latest (from $IMG_TAG) import FAILED`e[0m"
             Write-Host "  `e[31m$result`e[0m"
         }
     }
 
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
     $script:imagesChanged = $importCount -gt 0
+
+        }
+    }
 
     # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
@@ -380,11 +383,11 @@ if ($DO_BUILD) {
 Write-Host "`n`e[33mVerifying all required images exist in ACR...`e[0m"
 $missingImages = @()
 foreach ($image in $IMAGES) {
-    if (-not (Test-ImageExists -Name $image -Tag $IMG_TAG)) {
-        Write-Host "  `e[31mMISSING: ${image}:$IMG_TAG`e[0m"
+    if (-not (Test-ImageExists -Name $image -Tag "latest")) {
+        Write-Host "  `e[31mMISSING: ${image}:latest`e[0m"
         $missingImages += $image
     } else {
-        Write-Host "  `e[32mOK: ${image}:$IMG_TAG`e[0m"
+        Write-Host "  `e[32mOK: ${image}:latest`e[0m"
     }
 }
 
@@ -394,7 +397,7 @@ if ($missingImages.Count -gt 0) {
 
     $stillMissing = @()
     foreach ($image in $missingImages) {
-        if (-not (Test-ImageExists -Name $image -Tag $IMG_TAG)) {
+        if (-not (Test-ImageExists -Name $image -Tag "latest")) {
             $stillMissing += $image
         }
     }
@@ -512,7 +515,7 @@ if (-not $SEARCH_INTERNAL_TOKEN) {
     Write-Host "  `e[32mGenerated new search internal token.`e[0m"
 }
 
-$IMAGE_TAG = $IMG_TAG
+$IMAGE_TAG = "latest"
 
 $helmArgs = @(
     "upgrade", "--install", "omnivec", "$RootDir/helm/omnivec",
@@ -566,19 +569,9 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
     $helmArgs += @("--set", "blobIngestor.enabled=false")
 }
 
-# Image tag channel (IMG_TAG resolved earlier from OMNIVEC_IMAGE_TAG or git branch).
-$helmArgs += @(
-    "--set", "web.image.tag=$IMG_TAG",
-    "--set", "api.image.tag=$IMG_TAG",
-    "--set", "search.image.tag=$IMG_TAG",
-    "--set", "controller.image.tag=$IMG_TAG",
-    "--set", "changefeed.image.tag=$IMG_TAG",
-    "--set", "blobEnumerator.image.tag=$IMG_TAG",
-    "--set", "sourceWorker.image.tag=$IMG_TAG",
-    "--set", "blobWatcher.image.tag=$IMG_TAG",
-    "--set", "docgrok.docgrok.image.tag=$IMG_TAG",
-    "--set", "docgrok.pipelineWorker.image.tag=$IMG_TAG"
-)
+# Image tags are NOT overridden here — postprovision imports every image
+# into the env-specific ACR tagged :latest (from OMNIVEC_IMAGE_TAG / branch),
+# so the default values.yaml (image.tag: latest) resolves for every service.
 
 $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
 # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
