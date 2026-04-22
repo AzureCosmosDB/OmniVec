@@ -165,7 +165,7 @@ OMNIVEC_BUILD=${OMNIVEC_BUILD:-false}
 FORCE_IMPORT=${OMNIVEC_FORCE_IMPORT:-false}
 
 # Images to import/build
-IMAGES="omnivec-api omnivec-web omnivec-changefeed omnivec-dotnet-worker docgrok-pipeline-worker docgrok-router"
+IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet-worker docgrok-pipeline-worker docgrok-router"
 
 image_exists() {
   name=$1
@@ -222,6 +222,7 @@ build_image() {
 
 build_all_images() {
   build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest"
+  build_image "omnivec-search" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "latest"
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
   build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
   build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
@@ -237,6 +238,7 @@ build_missing_images() {
   for image in "$@"; do
     case "$image" in
       omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest" ;;
+      omnivec-search)           build_image "$image" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "latest" ;;
       omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
       omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
       omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
@@ -595,6 +597,20 @@ else
   printf "  ${GREEN}Using existing admin token.${NC}\n"
 fi
 
+# Generate search-service bootstrap + s2s tokens (distinct from admin token)
+SEARCH_BOOTSTRAP_TOKEN=$(get_azd_value "OMNIVEC_SEARCH_TOKEN")
+if [ -z "$SEARCH_BOOTSTRAP_TOKEN" ]; then
+  SEARCH_BOOTSTRAP_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 44)
+  azd env set OMNIVEC_SEARCH_TOKEN "$SEARCH_BOOTSTRAP_TOKEN" </dev/null
+  printf "  ${GREEN}Generated new search bootstrap token.${NC}\n"
+fi
+SEARCH_INTERNAL_TOKEN=$(get_azd_value "SEARCH_INTERNAL_TOKEN")
+if [ -z "$SEARCH_INTERNAL_TOKEN" ]; then
+  SEARCH_INTERNAL_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 44)
+  azd env set SEARCH_INTERNAL_TOKEN "$SEARCH_INTERNAL_TOKEN" </dev/null
+  printf "  ${GREEN}Generated new search internal token.${NC}\n"
+fi
+
 IMAGE_TAG="latest"
 
 # Write helm values to a temp file (avoids fragile eval + string concatenation)
@@ -611,6 +627,11 @@ api:
   image:
     tag: "${IMAGE_TAG}"
   adminToken: "${ADMIN_TOKEN}"
+search:
+  image:
+    tag: "${IMAGE_TAG}"
+  bootstrapToken: "${SEARCH_BOOTSTRAP_TOKEN}"
+  internalToken: "${SEARCH_INTERNAL_TOKEN}"
 controller:
   image:
     tag: "${IMAGE_TAG}"
@@ -676,7 +697,10 @@ run_helm_deploy() {
 
   if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
     set -- "$@" --set "azure.storage.accountName=${STORAGE_ACCOUNT}" \
-                --set "azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}"
+                --set "azure.storage.blobEndpoint=${STORAGE_BLOB_ENDPOINT}" \
+                --set "blobIngestor.enabled=true"
+  else
+    set -- "$@" --set "blobIngestor.enabled=false"
   fi
 
   # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
