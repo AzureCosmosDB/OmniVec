@@ -28,12 +28,18 @@ jobs:
           - image: omnivec-api
             context: .
             dockerfile: Dockerfile
+          - image: omnivec-search
+            context: .
+            dockerfile: search/Dockerfile
           - image: omnivec-web
             context: web
             dockerfile: web/Dockerfile
           - image: omnivec-changefeed
             context: connectors/ingestion/dotnet
             dockerfile: connectors/ingestion/dotnet/Dockerfile
+          - image: omnivec-dotnet-worker
+            context: connectors/worker/dotnet
+            dockerfile: connectors/worker/dotnet/Dockerfile
           - image: docgrok-router
             context: docgrok/router
             dockerfile: docgrok/router/Dockerfile
