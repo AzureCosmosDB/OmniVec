@@ -359,7 +359,7 @@ DEMO_RG="rg-omnivec-demo-${ENV_EFFECTIVE}"
 ENV_HASH=$(printf '%s' "$ENV_EFFECTIVE" | md5sum 2>/dev/null | cut -c1-10)
 [ -z "$ENV_HASH" ] && ENV_HASH=$(printf '%s' "$ENV_EFFECTIVE" | shasum 2>/dev/null | cut -c1-10)
 DEMO_SA="omnivecdemo${ENV_HASH}"
-DEMO_LOC="${DEMO_SA_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)}"
+DEMO_LOC="${DEMO_SA_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null | tr -d '\r\n')}"
 [ -z "$DEMO_LOC" ] && DEMO_LOC="eastus2"
 
 log_step "1b" "Preparing dedicated demo RG+SA ($DEMO_RG / $DEMO_SA)"
