@@ -28,4 +28,25 @@ public class WorkerOptions
 
     /// <summary>Auto-lock renewal duration for long-running processing</summary>
     public int MaxLockRenewalMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Maximum estimated tokens per /embed/batch call. Batches are packed
+    /// up to this budget using a script-aware estimator. Default 6000 leaves
+    /// ~25% headroom under the common 8191-token limit (text-embedding-3-*,
+    /// ada-002). Lower this for models with smaller context (e.g. BGE-base = 512).
+    /// </summary>
+    public int MaxBatchTokens { get; set; } = 6000;
+
+    /// <summary>
+    /// Maximum estimated tokens for a single text. Messages exceeding this
+    /// are truncated (if TruncateOversized=true) or dead-lettered. Default
+    /// 7500 = soft per-input ceiling for 8191-token models.
+    /// </summary>
+    public int MaxSingleTextTokens { get; set; } = 7500;
+
+    /// <summary>
+    /// If true, oversized single texts are truncated (by chars, proportional to
+    /// estimated tokens) and embedded. If false, they are dead-lettered.
+    /// </summary>
+    public bool TruncateOversized { get; set; } = true;
 }

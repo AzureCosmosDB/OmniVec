@@ -58,8 +58,21 @@ public class DocGrokClient
                     continue;
                 }
 
+                // Non-retryable 4xx (400 context length, 413 payload too large, etc.).
+                // Surface as a typed exception so the worker can bisect/dead-letter
+                // instead of abandoning the whole batch into a redelivery loop.
+                if ((int)resp.StatusCode >= 400)
+                {
+                    var body = await resp.Content.ReadAsStringAsync(ct);
+                    throw new EmbeddingClientException(
+                        (int)resp.StatusCode,
+                        body,
+                        $"Embed returned {(int)resp.StatusCode} {resp.StatusCode}: {Truncate(body, 500)}");
+                }
+
                 break;
             }
+            catch (EmbeddingClientException) { throw; }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
@@ -94,8 +107,11 @@ public class DocGrokClient
         return results;
     }
 
+    private static string Truncate(string s, int max)
+        => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s.Substring(0, max) + "…");
+
     /// <summary>
-    /// Process a blob/PDF via DocGrok router. Passes blob reference URLs to the router,
+    /// Process a blob/PDF via DocGrok router.Passes blob reference URLs to the router,
     /// which routes to the pipeline-worker for OCR/chunking/embedding.
     /// Returns a list of (chunkText, embedding) pairs — one per chunk.
     /// </summary>
