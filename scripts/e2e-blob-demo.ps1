@@ -66,9 +66,75 @@ Write-Host "`e[32m╚═══════════════════�
 if (-not $SamplesDir) {
     $SamplesDir = Join-Path $PSScriptRoot "samples\blob-txt"
 }
-if (-not (Test-Path $SamplesDir)) {
-    LogErr "Samples directory not found: $SamplesDir"
-    exit 1
+
+function Ensure-Samples {
+    param([string]$Dir)
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    @'
+Azure Cosmos DB Overview
+
+Azure Cosmos DB is a fully managed, globally distributed, multi-model database
+service built for modern app development. It provides turnkey global
+distribution across any number of Azure regions, elastic scale-out of both
+throughput and storage, and single-digit-millisecond read and write latencies
+at the 99th percentile. Cosmos DB offers multiple APIs including NoSQL (SQL),
+MongoDB, Cassandra, Gremlin (graph), and Table. Integrated vector search over
+the NoSQL API makes it a strong fit for retrieval-augmented generation (RAG)
+workloads where the application data and its embeddings live side-by-side.
+
+Key features:
+- Guaranteed low latency with five consistency levels
+- Automatic and instant scalability
+- Serverless and provisioned throughput modes
+- Native vector indexes: flat, quantizedFlat, diskANN
+- Change feed for event-driven processing
+'@ | Set-Content -Path (Join-Path $Dir "azure-cosmos-db.txt") -Encoding UTF8
+    @'
+Azure Blob Storage
+
+Azure Blob Storage is Microsoft's object storage solution for the cloud. Blob
+Storage is optimized for storing massive amounts of unstructured data such as
+text or binary files: documents, images, audio, video, logs, and backups.
+
+Access tiers:
+- Hot: Optimized for frequently accessed data
+- Cool: Lower storage cost, higher access cost; for infrequently accessed data
+- Archive: Lowest storage cost, highest access cost; for rarely accessed data
+
+Event Grid integration emits BlobCreated / BlobDeleted events that can drive
+real-time ingestion pipelines — for example, producing vector embeddings in
+Azure Cosmos DB or pgvector the moment a new document lands in a container.
+This is the foundation for OmniVec's blob-source ingestion path: Event Grid
+delivers the blob URL to the API, which creates a job; a worker downloads the
+file, chunks and embeds its text, and writes vectors to the configured
+destination store.
+'@ | Set-Content -Path (Join-Path $Dir "azure-blob-storage.txt") -Encoding UTF8
+    @'
+Azure Kubernetes Service (AKS)
+
+Azure Kubernetes Service simplifies deploying a managed Kubernetes cluster in
+Azure by offloading the operational overhead to Azure. As a hosted Kubernetes
+service, Azure handles critical tasks like health monitoring and maintenance.
+You only manage and maintain the agent nodes.
+
+Common AKS use cases include:
+- Running microservices with horizontal pod autoscaling (HPA)
+- Hosting web applications behind a LoadBalancer or ingress controller
+- Workload identity federation with Entra ID for passwordless Azure auth
+- GPU-backed ML inference pods using Kubernetes node pools with GPUs
+- Running stateful workloads via persistent volumes backed by Azure Disks
+  or Azure Files
+
+AKS integrates with Azure Monitor, Microsoft Entra ID, Azure Policy, and
+Azure Key Vault for end-to-end observability, identity, and secret management.
+'@ | Set-Content -Path (Join-Path $Dir "azure-kubernetes-service.txt") -Encoding UTF8
+}
+
+$hasTxt = (Test-Path $SamplesDir) -and (@(Get-ChildItem -Path $SamplesDir -Filter *.txt -ErrorAction SilentlyContinue).Count -gt 0)
+if (-not $hasTxt) {
+    LogWarn "Samples directory missing or empty — generating defaults at: $SamplesDir"
+    Ensure-Samples -Dir $SamplesDir
+    LogOk "Created 3 sample .txt files."
 }
 
 # ── Select azd environment ──────────────────────────────────────────────────
