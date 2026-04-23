@@ -403,28 +403,25 @@ if [ -z "$IDENTITY_CID" ]; then
   log_err "No workload identity client id resolved from azd env"
   exit 1
 fi
-MI_PRINCIPAL=$(az ad sp show --id "$IDENTITY_CID" --query id -o tsv 2>/dev/null)
-DEMO_SA_ID=$(az storage account show --name "$DEMO_SA" --resource-group "$DEMO_RG" --query id -o tsv 2>/dev/null)
-if [ -z "$MI_PRINCIPAL" ] || [ -z "$DEMO_SA_ID" ]; then
-  log_err "Could not resolve MI principal id or demo SA id"
+DEMO_SA_ID=$(az storage account show --name "$DEMO_SA" --resource-group "$DEMO_RG" --query id -o tsv 2>/dev/null | tr -d '\r\n')
+if [ -z "$DEMO_SA_ID" ]; then
+  log_err "Could not resolve demo SA id"
   exit 1
 fi
-HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
-  --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null | tr -d '\r\n')
+# Use clientId (appId) as --assignee; CLI resolves to the SP. More reliable than
+# looking up SP objectId separately (which can 'Bad Request' on some tenants).
+HAS=$(az role assignment list --assignee "$IDENTITY_CID" --scope "$DEMO_SA_ID" \
+  --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | [0].id" -o tsv 2>/dev/null | tr -d '\r\n')
 if [ -z "$HAS" ]; then
-  log "Granting 'Storage Blob Data Contributor' to workload MI on $DEMO_SA..."
-  GRANT_ERR=$(az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
-       --assignee-principal-type ServicePrincipal \
+  log "Granting 'Storage Blob Data Contributor' to workload MI ($IDENTITY_CID)..."
+  GRANT_ERR=$(az role assignment create --assignee "$IDENTITY_CID" \
        --role "Storage Blob Data Contributor" \
        --scope "$DEMO_SA_ID" --only-show-errors 2>&1 >/dev/null) && GRANT_OK=1 || GRANT_OK=0
   if [ "$GRANT_OK" != "1" ]; then
-    # Re-check: the create may have failed because the role already exists (e.g. granted out-of-band).
     sleep 5
-    HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
-      --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null | tr -d '\r\n')
-    if [ -n "$HAS" ]; then
-      GRANT_OK=1
-    fi
+    HAS=$(az role assignment list --assignee "$IDENTITY_CID" --scope "$DEMO_SA_ID" \
+      --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | [0].id" -o tsv 2>/dev/null | tr -d '\r\n')
+    [ -n "$HAS" ] && GRANT_OK=1
   fi
   if [ "$GRANT_OK" = "1" ]; then
     log_ok "Role granted — waiting 30s for propagation"
@@ -433,8 +430,7 @@ if [ -z "$HAS" ]; then
     log_err "Could not grant role assignment:"
     echo "$GRANT_ERR" | sed 's/^/    /' >&2
     echo "  Ask a subscription Owner to run:" >&2
-    echo "    az role assignment create --assignee-object-id $MI_PRINCIPAL \\" >&2
-    echo "      --assignee-principal-type ServicePrincipal \\" >&2
+    echo "    az role assignment create --assignee $IDENTITY_CID \\" >&2
     echo "      --role 'Storage Blob Data Contributor' --scope $DEMO_SA_ID" >&2
     exit 1
   fi
