@@ -199,7 +199,12 @@ def get_all_checkpoints(source_id: Optional[str] = None) -> list:
 
 
 def delete_source_checkpoints(source_id: str) -> int:
-    """Delete all checkpoints for a source. Returns count deleted."""
+    """Delete all checkpoints for a source. Returns count deleted.
+
+    Individual delete failures are logged (previously they were silently
+    swallowed, which masked permission/429 issues during cleanup).
+    NotFound is treated as success — the checkpoint was already gone.
+    """
     store = get_store()
     checkpoints = get_all_checkpoints(source_id)
     deleted = 0
@@ -207,7 +212,12 @@ def delete_source_checkpoints(source_id: str) -> int:
         try:
             store.delete(cp["id"], partition_key="checkpoint")
             deleted += 1
-        except Exception:
-            pass
+        except CosmosResourceNotFoundError:
+            deleted += 1  # already gone
+        except Exception as e:
+            logger.warning(
+                "Failed to delete checkpoint %s for source %s: %s",
+                cp.get("id"), source_id, e,
+            )
     logger.info("Deleted %d checkpoints for source %s", deleted, source_id)
     return deleted

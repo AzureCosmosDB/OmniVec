@@ -19,6 +19,8 @@ from collections import defaultdict, deque
 from datetime import datetime
 from typing import Optional
 
+from azure.cosmos.exceptions import CosmosHttpResponseError
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,7 +69,13 @@ def _get_container():
             _container = db.get_container_client(COSMOS_METADATA_CONTAINER)
             return _container
         except Exception as e:
-            logger.warning("Auth-token Cosmos init failed (store lookup disabled): %s", e)
+            # Client construction failed (bad endpoint, missing credential).
+            # We intentionally soft-fail so the API stays serviceable on its
+            # bootstrap admin token; log loudly so operators see the issue.
+            logger.error(
+                "Auth-token Cosmos init failed — token-store lookups disabled: %s",
+                e,
+            )
             return None
 
 
@@ -93,11 +101,23 @@ def _lookup_token_in_store(token_hash: str) -> Optional[dict]:
                 try:
                     if datetime.fromisoformat(t["expires_at"]) < datetime.utcnow():
                         return None
-                except Exception:
-                    pass
+                except ValueError as ve:
+                    logger.warning(
+                        "Malformed expires_at on auth_token: %s", ve,
+                    )
             return t
+    except CosmosHttpResponseError as exc:
+        # Cosmos transient/permanent failure. We return None so the caller
+        # falls back to the bootstrap token path rather than hard-failing
+        # every request, but log at ERROR so a monitoring alert fires on
+        # a persistent Cosmos outage.
+        logger.error(
+            "auth_token lookup Cosmos error (status=%s): %s",
+            getattr(exc, "status_code", None), exc,
+        )
     except Exception as e:
-        logger.warning("auth_token lookup error: %s", e)
+        # Catch-all for unexpected client-library errors. Still logged.
+        logger.error("auth_token lookup unexpected error: %s", e)
     return None
 
 
