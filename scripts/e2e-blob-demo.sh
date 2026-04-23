@@ -349,97 +349,6 @@ log_ok "Cosmos endpoint : $COSMOS_ENDPOINT"
 log_ok "API             : $SERVER_URL"
 if [ -n "$SEARCH_IP" ]; then log_ok "Search          : http://$SEARCH_IP"; else log_warn "omnivec-search external IP not yet available"; fi
 
-# ─── Ensure shared demo-assets storage account ──────────────────────────────
-# We use a dedicated RG + SA for demo uploads so we don't fight with the
-# deployment's hardened storage account RBAC (which may block self-grants).
-# Shared-key access is enabled on this SA only, and the OmniVec workload
-# managed identity is granted Storage Blob Data Reader so the controller can
-# read the samples.
-ASSETS_RG="${DEMO_ASSETS_RG:-rg-omnivec-assets}"
-ASSETS_SA="${DEMO_ASSETS_STORAGE_ACCOUNT:-$(azd_value DEMO_ASSETS_STORAGE_ACCOUNT)}"
-[ -z "${DEMO_ASSETS_RG:-}" ] && ASSETS_RG=$(azd_value DEMO_ASSETS_RG)
-[ -z "$ASSETS_RG" ] && ASSETS_RG="rg-omnivec-assets"
-
-ASSETS_LOC="${DEMO_ASSETS_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)}"
-[ -z "$ASSETS_LOC" ] && ASSETS_LOC="eastus2"
-
-log_step "1b" "Preparing shared demo-assets storage ($ASSETS_RG)"
-
-# Create RG if missing
-if ! az group show -n "$ASSETS_RG" >/dev/null 2>&1; then
-  log "Creating resource group $ASSETS_RG in $ASSETS_LOC..."
-  az group create -n "$ASSETS_RG" -l "$ASSETS_LOC" --only-show-errors >/dev/null
-  log_ok "Created RG: $ASSETS_RG"
-else
-  log_ok "Using existing RG: $ASSETS_RG"
-fi
-
-# Find or create a storage account in the assets RG
-if [ -z "$ASSETS_SA" ]; then
-  ASSETS_SA=$(az storage account list --resource-group "$ASSETS_RG" \
-    --query "[?starts_with(name,'omnivecassets')].name | [0]" -o tsv 2>/dev/null)
-fi
-if [ -z "$ASSETS_SA" ]; then
-  # Derive a stable 8-char suffix from the subscription so reruns are idempotent
-  SUB_ID=$(az account show --query id -o tsv 2>/dev/null)
-  SUFFIX=$(printf '%s' "$SUB_ID" | md5sum 2>/dev/null | cut -c1-8)
-  [ -z "$SUFFIX" ] && SUFFIX=$(printf '%s' "$SUB_ID" | shasum 2>/dev/null | cut -c1-8)
-  [ -z "$SUFFIX" ] && SUFFIX=$(date +%s | tail -c 9)
-  ASSETS_SA="omnivecassets$SUFFIX"
-  log "Creating storage account $ASSETS_SA..."
-  az storage account create \
-    --name "$ASSETS_SA" \
-    --resource-group "$ASSETS_RG" \
-    --location "$ASSETS_LOC" \
-    --sku Standard_LRS \
-    --kind StorageV2 \
-    --allow-shared-key-access true \
-    --allow-blob-public-access false \
-    --min-tls-version TLS1_2 \
-    --only-show-errors >/dev/null
-  log_ok "Created SA: $ASSETS_SA"
-else
-  log_ok "Using existing SA: $ASSETS_SA"
-  # Ensure shared-key is enabled on pre-existing account
-  az storage account update --name "$ASSETS_SA" --resource-group "$ASSETS_RG" \
-    --allow-shared-key-access true --only-show-errors >/dev/null 2>&1 || true
-fi
-
-# Persist to azd env for subsequent runs
-azd env set DEMO_ASSETS_RG "$ASSETS_RG" >/dev/null 2>&1 || true
-azd env set DEMO_ASSETS_STORAGE_ACCOUNT "$ASSETS_SA" >/dev/null 2>&1 || true
-
-# Grant OmniVec workload MI "Storage Blob Data Reader" on the assets SA so
-# the controller can enumerate/read blobs uploaded here.
-if [ -n "$IDENTITY_CID" ]; then
-  MI_PRINCIPAL=$(az ad sp show --id "$IDENTITY_CID" --query id -o tsv 2>/dev/null)
-  ASSETS_SA_ID=$(az storage account show --name "$ASSETS_SA" --resource-group "$ASSETS_RG" --query id -o tsv 2>/dev/null)
-  if [ -n "$MI_PRINCIPAL" ] && [ -n "$ASSETS_SA_ID" ]; then
-    HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$ASSETS_SA_ID" \
-      --role "Storage Blob Data Reader" --query "[0].id" -o tsv 2>/dev/null)
-    if [ -z "$HAS" ]; then
-      log "Granting 'Storage Blob Data Reader' to OmniVec workload identity on $ASSETS_SA..."
-      if az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
-           --assignee-principal-type ServicePrincipal \
-           --role "Storage Blob Data Reader" \
-           --scope "$ASSETS_SA_ID" --only-show-errors >/dev/null 2>&1; then
-        log_ok "Role granted — waiting 30s for propagation"
-        sleep 30
-      else
-        log_warn "Could not grant MI role (may need Owner). Controller may get 403 on blob reads."
-      fi
-    else
-      log_ok "Workload MI already has Storage Blob Data Reader"
-    fi
-  fi
-fi
-
-# Override the upload target to use the assets SA (shared-key auth, deterministic)
-STORAGE_ACCT="$ASSETS_SA"
-STORAGE_RG="$ASSETS_RG"
-BLOB_ENDPOINT="https://${ASSETS_SA}.blob.core.windows.net"
-log_ok "Upload target   : $BLOB_ENDPOINT"
-
 # ─── Validate API + token ───────────────────────────────────────────────────
 log_step 2 "Validating API + admin token"
 if ! curl -sS --max-time 10 "$SERVER_URL/health" >/dev/null; then
@@ -497,52 +406,167 @@ else
   log_ok "Re-using existing model: $MODEL_ID"
 fi
 
-# ─── Blob container + upload samples ────────────────────────────────────────
-log_step 4 "Preparing blob container + uploading samples ($FILE_TYPE)"
+# ─── Blob container + upload samples (in-cluster K8s Job) ───────────────────
+log_step 4 "Uploading samples via in-cluster Job ($FILE_TYPE)"
 
-# Assets SA always has shared-key enabled (we ensured it in step 1b).
-STORAGE_KEY=$(az storage account keys list --account-name "$STORAGE_ACCT" \
-  --resource-group "$STORAGE_RG" --query "[0].value" -o tsv 2>/dev/null)
-if [ -z "$STORAGE_KEY" ]; then
-  log_err "Could not read storage key for $STORAGE_ACCT"
-  exit 1
-fi
-AUTH_ARGS=(--account-key "$STORAGE_KEY")
-
-az storage container create --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
-  "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1 || true
-log_ok "Container ready: $CONTAINER"
-
-upload_one() {
-  local file="$1" out="" ec=0
-  for attempt in 1 2 3; do
-    out=$(az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
-      --name "$(basename "$file")" --file "$file" "${AUTH_ARGS[@]}" --overwrite --only-show-errors 2>&1)
-    ec=$?
-    if [ $ec -eq 0 ]; then return 0; fi
-    if [ $attempt -lt 3 ]; then
-      log_warn "Upload $(basename "$file") attempt $attempt/3 failed — retry in 5s"
-      sleep 5
-    fi
-  done
-  log_err "Upload failed for $(basename "$file"):"
-  echo "$out" >&2
-  return 1
-}
-
+# Count samples available locally before launching the job
 SAMPLE_COUNT=0
 for f in "$SAMPLES_DIR"/*."$FILE_TYPE"; do
   [ -e "$f" ] || continue
-  if ! upload_one "$f"; then
-    exit 1
-  fi
-  log_ok "Uploaded $(basename "$f")"
   SAMPLE_COUNT=$((SAMPLE_COUNT + 1))
 done
 if [ "$SAMPLE_COUNT" -eq 0 ]; then
   log_err "No .$FILE_TYPE samples in $SAMPLES_DIR"
   exit 1
 fi
+
+# Resolve the api pod's image + service account — we reuse them so the job
+# inherits workload-identity federation and has azure-storage-blob available.
+API_POD_UP=$(kubectl get pods -n omnivec -l app=omnivec-api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -z "$API_POD_UP" ]; then
+  log_err "No omnivec-api pod running — cluster not ready"
+  exit 1
+fi
+API_IMAGE=$(kubectl get pod -n omnivec "$API_POD_UP" -o jsonpath='{.spec.containers[0].image}' 2>/dev/null)
+API_SA=$(kubectl get pod -n omnivec "$API_POD_UP" -o jsonpath='{.spec.serviceAccountName}' 2>/dev/null)
+if [ -z "$API_IMAGE" ] || [ -z "$API_SA" ]; then
+  log_err "Could not resolve api image/serviceAccount"
+  exit 1
+fi
+
+# Sanitize container name for k8s object names (lowercase alnum + dashes, <=40 chars)
+SAFE_NAME=$(echo "$CONTAINER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-40 | sed 's/-$//')
+JOB_NAME="omnivec-e2e-upload-$SAFE_NAME"
+CM_NAME="omnivec-e2e-samples-$SAFE_NAME"
+
+# Delete previous run (idempotent — allows re-upload with fresh samples)
+kubectl delete job "$JOB_NAME" -n omnivec --ignore-not-found --wait=true >/dev/null 2>&1 || true
+kubectl delete configmap "$CM_NAME" -n omnivec --ignore-not-found >/dev/null 2>&1 || true
+
+# Stage samples into a ConfigMap (binary-safe — configmap auto-stores binary
+# files like PDFs under binaryData)
+log "Staging $SAMPLE_COUNT $FILE_TYPE file(s) into ConfigMap $CM_NAME..."
+CM_ARGS=()
+for f in "$SAMPLES_DIR"/*."$FILE_TYPE"; do
+  [ -e "$f" ] || continue
+  CM_ARGS+=(--from-file="$(basename "$f")=$f")
+done
+if ! kubectl create configmap "$CM_NAME" -n omnivec "${CM_ARGS[@]}" >/dev/null 2>&1; then
+  log_err "Failed to create ConfigMap $CM_NAME"
+  exit 1
+fi
+
+# Build the Job manifest. Python runs inside the job pod, uses DefaultAzureCredential
+# (federated via workload identity) → BlobServiceClient → upload_blob(overwrite=True).
+PY_UPLOAD=$(cat <<'PYEOF'
+import os, sys, pathlib
+from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient
+
+sa   = os.environ["SA_NAME"]
+cnt  = os.environ["CONTAINER_NAME"]
+cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
+svc  = BlobServiceClient(f"https://{sa}.blob.core.windows.net", credential=cred)
+cc   = svc.get_container_client(cnt)
+try:
+    cc.create_container()
+    print(f"container created: {cnt}")
+except Exception as e:
+    print(f"container exists or create skipped: {type(e).__name__}")
+
+uploaded = 0
+for p in sorted(pathlib.Path("/samples").iterdir()):
+    if not p.is_file() or p.name.startswith(".."):
+        continue
+    data = p.read_bytes()
+    cc.upload_blob(name=p.name, data=data, overwrite=True)
+    print(f"uploaded {p.name} ({len(data)} bytes)")
+    uploaded += 1
+
+if uploaded == 0:
+    print("ERROR: no samples found in /samples", file=sys.stderr)
+    sys.exit(2)
+print(f"OK: uploaded {uploaded} blob(s) to {sa}/{cnt}")
+PYEOF
+)
+
+# Extract storage account from the bicep-deployed SA (we use it, not assets SA)
+JOB_YAML=$(cat <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $JOB_NAME
+  namespace: omnivec
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: omnivec-e2e-upload
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: $API_SA
+      restartPolicy: Never
+      containers:
+      - name: uploader
+        image: $API_IMAGE
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SA_NAME
+          value: "$STORAGE_ACCT"
+        - name: CONTAINER_NAME
+          value: "$CONTAINER"
+        command: ["python", "/scripts/upload.py"]
+        volumeMounts:
+        - name: samples
+          mountPath: /samples
+        - name: script
+          mountPath: /scripts
+      volumes:
+      - name: samples
+        configMap:
+          name: $CM_NAME
+      - name: script
+        configMap:
+          name: $CM_NAME-script
+          defaultMode: 0755
+EOF
+)
+
+# Also stage the python script as a ConfigMap
+kubectl delete configmap "$CM_NAME-script" -n omnivec --ignore-not-found >/dev/null 2>&1 || true
+echo "$PY_UPLOAD" | kubectl create configmap "$CM_NAME-script" -n omnivec --from-file=upload.py=/dev/stdin >/dev/null
+
+# Apply the job
+echo "$JOB_YAML" | kubectl apply -f - >/dev/null
+log_ok "Job $JOB_NAME submitted"
+
+# Wait for completion (up to 5 min)
+log "Waiting for upload job to complete..."
+if kubectl wait --for=condition=complete --timeout=300s "job/$JOB_NAME" -n omnivec >/dev/null 2>&1; then
+  log_ok "Upload job completed"
+else
+  log_err "Upload job did not complete in 5 minutes"
+  kubectl logs -n omnivec "job/$JOB_NAME" --tail=100 2>&1 | sed 's/^/    /' >&2
+  exit 1
+fi
+
+# Check for failure (wait --for=failed also exits 0 if already failed)
+JOB_STATUS=$(kubectl get "job/$JOB_NAME" -n omnivec -o jsonpath='{.status.succeeded}' 2>/dev/null)
+if [ "$JOB_STATUS" != "1" ]; then
+  log_err "Upload job failed. Logs:"
+  kubectl logs -n omnivec "job/$JOB_NAME" --tail=100 2>&1 | sed 's/^/    /' >&2
+  exit 1
+fi
+
+# Print job output as confirmation
+kubectl logs -n omnivec "job/$JOB_NAME" 2>&1 | sed 's/^/  /'
+
+# Cleanup the configmaps (job itself auto-deletes via ttlSecondsAfterFinished)
+kubectl delete configmap "$CM_NAME" "$CM_NAME-script" -n omnivec --ignore-not-found >/dev/null 2>&1 || true
+
+log_ok "Container $CONTAINER populated with $SAMPLE_COUNT $FILE_TYPE file(s)"
 
 # ─── Cosmos database + vectors container ────────────────────────────────────
 log_step 5 "Ensuring Cosmos database + vectors container"
@@ -785,8 +809,12 @@ except Exception:
       [ -n "$id" ] && api_try DELETE "/api/$kind/$id" >/dev/null
     done
   done
+  # Delete the blob container via ARM (management plane) — no data-plane role needed
   az storage container delete --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
-    --account-key "$STORAGE_KEY" --only-show-errors >/dev/null 2>&1 || true
+    --auth-mode login --only-show-errors >/dev/null 2>&1 \
+    || az storage container-rm delete --storage-account "$STORAGE_ACCT" --name "$CONTAINER" \
+       --resource-group "$RESOURCE_GROUP" --yes --only-show-errors >/dev/null 2>&1 \
+    || true
   log_ok "Demo objects deleted"
 fi
 
