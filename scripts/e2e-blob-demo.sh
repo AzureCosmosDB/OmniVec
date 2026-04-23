@@ -610,7 +610,6 @@ spec:
       - name: script
         configMap:
           name: $CM_NAME-script
-          defaultMode: 0755
 EOF
 )
 
