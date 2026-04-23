@@ -349,34 +349,39 @@ log_ok "Cosmos endpoint : $COSMOS_ENDPOINT"
 log_ok "API             : $SERVER_URL"
 if [ -n "$SEARCH_IP" ]; then log_ok "Search          : http://$SEARCH_IP"; else log_warn "omnivec-search external IP not yet available"; fi
 
-# ─── Ensure per-deployment demo storage account (AAD-only, policy-compliant) ──
-# Create a dedicated SA inside the deployment's own RG so that:
-#   • it's scoped per-deployment (no cross-env conflicts)
-#   • `azd down` automatically removes it along with the rest of the RG
-#   • subscription policy passes (allowSharedKeyAccess=false)
-# The OmniVec workload identity is granted Storage Blob Data Contributor
-# so both this upload Job and the controller can access via MI.
-DEMO_SA="${DEMO_STORAGE_ACCOUNT:-$(azd_value DEMO_STORAGE_ACCOUNT)}"
+# ─── Ensure per-demo RG + SA (dynamically created, AAD-only, policy-compliant) ──
+# Create a DEDICATED resource group + storage account for this demo, separate
+# from the deployment RG. Stable name per env so reruns reuse the same SA.
+# Grant OmniVec workload MI "Storage Blob Data Contributor" on the demo SA.
 ENV_EFFECTIVE="${ENV_NAME:-$CURRENT}"
+DEMO_RG="rg-omnivec-demo-${ENV_EFFECTIVE}"
+# SA name must be 3-24 lowercase alphanumeric. Hash env name for determinism.
+ENV_HASH=$(printf '%s' "$ENV_EFFECTIVE" | md5sum 2>/dev/null | cut -c1-10)
+[ -z "$ENV_HASH" ] && ENV_HASH=$(printf '%s' "$ENV_EFFECTIVE" | shasum 2>/dev/null | cut -c1-10)
+DEMO_SA="omnivecdemo${ENV_HASH}"
+DEMO_LOC="${DEMO_SA_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)}"
+[ -z "$DEMO_LOC" ] && DEMO_LOC="eastus2"
 
-log_step "1b" "Preparing per-deployment demo storage (in $RESOURCE_GROUP)"
+log_step "1b" "Preparing dedicated demo RG+SA ($DEMO_RG / $DEMO_SA)"
 
-# Find or pick a demo SA in the deployment RG (prefix: omnivecdemo)
-if [ -z "$DEMO_SA" ]; then
-  DEMO_SA=$(az storage account list --resource-group "$RESOURCE_GROUP" \
-    --query "[?starts_with(name,'omnivecdemo')].name | [0]" -o tsv 2>/dev/null)
+# 1. Create demo RG (idempotent)
+if ! az group show -n "$DEMO_RG" >/dev/null 2>&1; then
+  log "Creating resource group $DEMO_RG in $DEMO_LOC..."
+  if ! az group create -n "$DEMO_RG" -l "$DEMO_LOC" --only-show-errors >/dev/null 2>&1; then
+    log_err "Failed to create resource group $DEMO_RG"
+    exit 1
+  fi
+  log_ok "Created RG: $DEMO_RG"
+else
+  log_ok "Using existing RG: $DEMO_RG"
 fi
-if [ -z "$DEMO_SA" ]; then
-  SUFFIX=$(printf '%s' "${ENV_EFFECTIVE}-$(date +%s%N)" | md5sum 2>/dev/null | cut -c1-10)
-  [ -z "$SUFFIX" ] && SUFFIX=$(printf '%s' "${ENV_EFFECTIVE}-$(date +%s%N)" | shasum 2>/dev/null | cut -c1-10)
-  [ -z "$SUFFIX" ] && SUFFIX=$(date +%s | tail -c 11)
-  DEMO_SA="omnivecdemo$SUFFIX"
-  DEMO_LOC="${DEMO_SA_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)}"
-  [ -z "$DEMO_LOC" ] && DEMO_LOC="eastus2"
-  log "Creating demo storage account $DEMO_SA in $RESOURCE_GROUP ($DEMO_LOC)..."
+
+# 2. Create demo SA (idempotent, AAD-only → passes subscription policy)
+if ! az storage account show --name "$DEMO_SA" --resource-group "$DEMO_RG" >/dev/null 2>&1; then
+  log "Creating demo storage account $DEMO_SA in $DEMO_RG ($DEMO_LOC)..."
   DEMO_ERR=$(az storage account create \
         --name "$DEMO_SA" \
-        --resource-group "$RESOURCE_GROUP" \
+        --resource-group "$DEMO_RG" \
         --location "$DEMO_LOC" \
         --sku Standard_LRS \
         --kind StorageV2 \
@@ -386,36 +391,28 @@ if [ -z "$DEMO_SA" ]; then
         --only-show-errors 2>&1 >/dev/null) || {
     log_err "Failed to create $DEMO_SA"
     echo "$DEMO_ERR" | sed 's/^/    /' >&2
-    echo "" >&2
-    echo "  Hints:" >&2
-    echo "   - Name collision: try deleting any soft-deleted SA with this prefix" >&2
-    echo "   - Region quota: try a different region with DEMO_SA_LOCATION=westus2" >&2
-    echo "   - Permissions: you need 'Contributor' on $RESOURCE_GROUP" >&2
     exit 1
   }
-  log_ok "Created SA: $DEMO_SA (will be removed by 'azd down')"
+  log_ok "Created SA: $DEMO_SA"
 else
   log_ok "Using existing demo SA: $DEMO_SA"
 fi
 
-azd env set DEMO_STORAGE_ACCOUNT "$DEMO_SA" >/dev/null 2>&1 || true
-
-# Grant OmniVec workload MI "Storage Blob Data Contributor" on the demo SA
+# 3. Grant OmniVec workload MI "Storage Blob Data Contributor" on the demo SA
 if [ -z "$IDENTITY_CID" ]; then
   log_err "No workload identity client id resolved from azd env"
   exit 1
 fi
 MI_PRINCIPAL=$(az ad sp show --id "$IDENTITY_CID" --query id -o tsv 2>/dev/null)
-DEMO_SA_ID=$(az storage account show --name "$DEMO_SA" --resource-group "$RESOURCE_GROUP" --query id -o tsv 2>/dev/null)
+DEMO_SA_ID=$(az storage account show --name "$DEMO_SA" --resource-group "$DEMO_RG" --query id -o tsv 2>/dev/null)
 if [ -z "$MI_PRINCIPAL" ] || [ -z "$DEMO_SA_ID" ]; then
   log_err "Could not resolve MI principal id or demo SA id"
   exit 1
 fi
-
 HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
   --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null)
 if [ -z "$HAS" ]; then
-  log "Granting 'Storage Blob Data Contributor' to workload identity on $DEMO_SA..."
+  log "Granting 'Storage Blob Data Contributor' to workload MI on $DEMO_SA..."
   if az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
        --assignee-principal-type ServicePrincipal \
        --role "Storage Blob Data Contributor" \
@@ -423,17 +420,17 @@ if [ -z "$HAS" ]; then
     log_ok "Role granted — waiting 30s for propagation"
     sleep 30
   else
-    log_err "Could not grant role assignment (need Owner or User Access Administrator)"
+    log_err "Could not grant role assignment (need Owner / User Access Administrator)"
     exit 1
   fi
 else
   log_ok "Workload MI already has Storage Blob Data Contributor on $DEMO_SA"
 fi
 
-# Retarget uploads + source to the demo SA
+# 4. Retarget uploads + OmniVec source to the demo SA
 STORAGE_ACCT="$DEMO_SA"
 BLOB_ENDPOINT="https://${DEMO_SA}.blob.core.windows.net"
-log_ok "Demo upload target : $BLOB_ENDPOINT"
+log_ok "Upload target: $BLOB_ENDPOINT"
 
 # ─── Validate API + token ───────────────────────────────────────────────────
 log_step 2 "Validating API + admin token"
