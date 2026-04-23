@@ -349,6 +349,86 @@ log_ok "Cosmos endpoint : $COSMOS_ENDPOINT"
 log_ok "API             : $SERVER_URL"
 if [ -n "$SEARCH_IP" ]; then log_ok "Search          : http://$SEARCH_IP"; else log_warn "omnivec-search external IP not yet available"; fi
 
+# ─── Ensure per-deployment demo storage account (AAD-only, policy-compliant) ──
+# Create a dedicated SA inside the deployment's own RG so that:
+#   • it's scoped per-deployment (no cross-env conflicts)
+#   • `azd down` automatically removes it along with the rest of the RG
+#   • subscription policy passes (allowSharedKeyAccess=false)
+# The OmniVec workload identity is granted Storage Blob Data Contributor
+# so both this upload Job and the controller can access via MI.
+DEMO_SA="${DEMO_STORAGE_ACCOUNT:-$(azd_value DEMO_STORAGE_ACCOUNT)}"
+ENV_EFFECTIVE="${ENV_NAME:-$CURRENT}"
+
+log_step "1b" "Preparing per-deployment demo storage (in $RESOURCE_GROUP)"
+
+# Find or pick a demo SA in the deployment RG (prefix: omnivecdemo)
+if [ -z "$DEMO_SA" ]; then
+  DEMO_SA=$(az storage account list --resource-group "$RESOURCE_GROUP" \
+    --query "[?starts_with(name,'omnivecdemo')].name | [0]" -o tsv 2>/dev/null)
+fi
+if [ -z "$DEMO_SA" ]; then
+  SUFFIX=$(printf '%s' "${ENV_EFFECTIVE}-$(date +%s%N)" | md5sum 2>/dev/null | cut -c1-10)
+  [ -z "$SUFFIX" ] && SUFFIX=$(printf '%s' "${ENV_EFFECTIVE}-$(date +%s%N)" | shasum 2>/dev/null | cut -c1-10)
+  [ -z "$SUFFIX" ] && SUFFIX=$(date +%s | tail -c 11)
+  DEMO_SA="omnivecdemo$SUFFIX"
+  DEMO_LOC=$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)
+  [ -z "$DEMO_LOC" ] && DEMO_LOC="eastus2"
+  log "Creating demo storage account $DEMO_SA in $RESOURCE_GROUP ($DEMO_LOC)..."
+  if ! az storage account create \
+        --name "$DEMO_SA" \
+        --resource-group "$RESOURCE_GROUP" \
+        --location "$DEMO_LOC" \
+        --sku Standard_LRS \
+        --kind StorageV2 \
+        --allow-shared-key-access false \
+        --allow-blob-public-access false \
+        --min-tls-version TLS1_2 \
+        --only-show-errors >/dev/null 2>&1; then
+    log_err "Failed to create $DEMO_SA (check policy/quota)"
+    exit 1
+  fi
+  log_ok "Created SA: $DEMO_SA (will be removed by 'azd down')"
+else
+  log_ok "Using existing demo SA: $DEMO_SA"
+fi
+
+azd env set DEMO_STORAGE_ACCOUNT "$DEMO_SA" >/dev/null 2>&1 || true
+
+# Grant OmniVec workload MI "Storage Blob Data Contributor" on the demo SA
+if [ -z "$IDENTITY_CID" ]; then
+  log_err "No workload identity client id resolved from azd env"
+  exit 1
+fi
+MI_PRINCIPAL=$(az ad sp show --id "$IDENTITY_CID" --query id -o tsv 2>/dev/null)
+DEMO_SA_ID=$(az storage account show --name "$DEMO_SA" --resource-group "$RESOURCE_GROUP" --query id -o tsv 2>/dev/null)
+if [ -z "$MI_PRINCIPAL" ] || [ -z "$DEMO_SA_ID" ]; then
+  log_err "Could not resolve MI principal id or demo SA id"
+  exit 1
+fi
+
+HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
+  --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null)
+if [ -z "$HAS" ]; then
+  log "Granting 'Storage Blob Data Contributor' to workload identity on $DEMO_SA..."
+  if az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+       --assignee-principal-type ServicePrincipal \
+       --role "Storage Blob Data Contributor" \
+       --scope "$DEMO_SA_ID" --only-show-errors >/dev/null 2>&1; then
+    log_ok "Role granted — waiting 30s for propagation"
+    sleep 30
+  else
+    log_err "Could not grant role assignment (need Owner or User Access Administrator)"
+    exit 1
+  fi
+else
+  log_ok "Workload MI already has Storage Blob Data Contributor on $DEMO_SA"
+fi
+
+# Retarget uploads + source to the demo SA
+STORAGE_ACCT="$DEMO_SA"
+BLOB_ENDPOINT="https://${DEMO_SA}.blob.core.windows.net"
+log_ok "Demo upload target : $BLOB_ENDPOINT"
+
 # ─── Validate API + token ───────────────────────────────────────────────────
 log_step 2 "Validating API + admin token"
 if ! curl -sS --max-time 10 "$SERVER_URL/health" >/dev/null; then
