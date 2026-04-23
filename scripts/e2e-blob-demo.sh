@@ -413,14 +413,20 @@ HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
   --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null)
 if [ -z "$HAS" ]; then
   log "Granting 'Storage Blob Data Contributor' to workload MI on $DEMO_SA..."
-  if az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+  GRANT_ERR=$(az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
        --assignee-principal-type ServicePrincipal \
        --role "Storage Blob Data Contributor" \
-       --scope "$DEMO_SA_ID" --only-show-errors >/dev/null 2>&1; then
+       --scope "$DEMO_SA_ID" --only-show-errors 2>&1 >/dev/null) && GRANT_OK=1 || GRANT_OK=0
+  if [ "$GRANT_OK" = "1" ]; then
     log_ok "Role granted — waiting 30s for propagation"
     sleep 30
   else
-    log_err "Could not grant role assignment (need Owner / User Access Administrator)"
+    log_err "Could not grant role assignment:"
+    echo "$GRANT_ERR" | sed 's/^/    /' >&2
+    echo "  Ask a subscription Owner to run:" >&2
+    echo "    az role assignment create --assignee-object-id $MI_PRINCIPAL \\" >&2
+    echo "      --assignee-principal-type ServicePrincipal \\" >&2
+    echo "      --role 'Storage Blob Data Contributor' --scope $DEMO_SA_ID" >&2
     exit 1
   fi
 else
