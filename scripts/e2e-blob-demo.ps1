@@ -312,14 +312,31 @@ LogOk "Container ready: $Container"
 $samples = Get-ChildItem -Path $SamplesDir -Filter *.txt
 if (-not $samples) { LogErr "No .txt samples in $SamplesDir"; exit 1 }
 foreach ($f in $samples) {
-    az storage blob upload `
+    $uploadOut = az storage blob upload `
         --account-name $STORAGE_ACCT `
         --container-name $Container `
         --name $f.Name `
         --file $f.FullName `
         @authArgs `
         --overwrite `
-        --only-show-errors | Out-Null
+        --only-show-errors 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        LogWarn "Upload failed for $($f.Name) (rc=$LASTEXITCODE). Waiting 30s for RBAC propagation and retrying..."
+        Start-Sleep -Seconds 30
+        $uploadOut = az storage blob upload `
+            --account-name $STORAGE_ACCT `
+            --container-name $Container `
+            --name $f.Name `
+            --file $f.FullName `
+            @authArgs `
+            --overwrite `
+            --only-show-errors 2>&1
+    }
+    if ($LASTEXITCODE -ne 0) {
+        LogErr "Upload failed for $($f.Name) after retry:"
+        Write-Host $uploadOut
+        exit 1
+    }
     LogOk "Uploaded $($f.Name)"
 }
 
@@ -389,6 +406,8 @@ $srcBody = @{
 }
 $src = Invoke-Api POST "/api/sources" $srcBody
 $SOURCE_ID = $src.source.id
+if (-not $SOURCE_ID) { $SOURCE_ID = $src.id }
+if (-not $SOURCE_ID) { LogErr "Source creation returned no id. Response: $($src | ConvertTo-Json -Depth 4)"; exit 1 }
 LogOk "Source: $SOURCE_ID"
 
 $dstBody = @{
@@ -406,6 +425,8 @@ $dstBody = @{
 }
 $dst = Invoke-Api POST "/api/destinations" $dstBody
 $DEST_ID = $dst.destination.id
+if (-not $DEST_ID) { $DEST_ID = $dst.id }
+if (-not $DEST_ID) { LogErr "Destination creation returned no id. Response: $($dst | ConvertTo-Json -Depth 4)"; exit 1 }
 LogOk "Destination: $DEST_ID"
 
 # ── DocGrok pipelines: register docgrok-text and docgrok-pdf (idempotent) ───
@@ -447,6 +468,8 @@ $pipBody = @{
 }
 $pipe = Invoke-Api POST "/api/pipelines" $pipBody
 $PIPE_ID = $pipe.pipeline.id
+if (-not $PIPE_ID) { $PIPE_ID = $pipe.id }
+if (-not $PIPE_ID) { LogErr "Pipeline creation returned no id. Response: $($pipe | ConvertTo-Json -Depth 4)"; exit 1 }
 LogOk "Pipeline: $PIPE_ID (queue mode)"
 
 # ── Activate pipeline and poll for vectors ──────────────────────────────────

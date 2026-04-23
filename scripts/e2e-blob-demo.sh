@@ -96,15 +96,40 @@ azd_value() {
 
 api_call() {
   # $1=method $2=path $3=body(optional)
-  local method="$1" path="$2" body="${3:-}"
+  # Writes response body to stdout; aborts the script on HTTP >= 400.
+  local method="$1" path="$2" body="${3:-}" tmp status
+  tmp=$(mktemp)
   if [ -n "$body" ]; then
-    curl -sS --max-time 60 -X "$method" "$SERVER_URL$path" \
+    status=$(curl -sS --max-time 60 -o "$tmp" -w "%{http_code}" -X "$method" "$SERVER_URL$path" \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       -H "Content-Type: application/json" \
-      -d "$body"
+      -d "$body" 2>/dev/null || echo "000")
   else
-    curl -sS --max-time 60 -X "$method" "$SERVER_URL$path" \
-      -H "Authorization: Bearer $ADMIN_TOKEN"
+    status=$(curl -sS --max-time 60 -o "$tmp" -w "%{http_code}" -X "$method" "$SERVER_URL$path" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null || echo "000")
+  fi
+  if [ "$status" -ge 400 ] 2>/dev/null || [ "$status" = "000" ]; then
+    log_err "API $method $path failed (HTTP $status)"
+    cat "$tmp" >&2; echo >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+api_try() {
+  # Non-fatal variant: writes body to stdout, swallows errors silently.
+  # Used for idempotent cleanup (expect 404 on first run).
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    curl -sS --max-time 30 -X "$method" "$SERVER_URL$path" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$body" 2>/dev/null || true
+  else
+    curl -sS --max-time 30 -X "$method" "$SERVER_URL$path" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null || true
   fi
 }
 
@@ -299,8 +324,8 @@ if ! curl -sS --max-time 10 "$SERVER_URL/health" >/dev/null; then
   log_err "API /health unreachable at $SERVER_URL"
   exit 1
 fi
-if ! api_call GET "/api/auth/whoami" >/dev/null 2>&1; then
-  if ! api_call GET "/api/sources" >/dev/null 2>&1; then
+if ! api_try GET "/api/auth/whoami" >/dev/null; then
+  if ! api_try GET "/api/sources" >/dev/null; then
     log_err "Admin token rejected by API"
     exit 1
   fi
@@ -325,7 +350,8 @@ fi
 # ─── Register embedding model (idempotent) ──────────────────────────────────
 log_step 3 "Registering Azure OpenAI embedding model"
 MODEL_NAME="e2e-blob-embed"
-EXISTING_MODELS=$(api_call GET "/api/models" 2>/dev/null || echo '{"models":[]}')
+EXISTING_MODELS=$(api_try GET "/api/models")
+[ -z "$EXISTING_MODELS" ] && EXISTING_MODELS='{"models":[]}'
 MODEL_ID=$(python3 -c "
 import json, sys
 try:
@@ -377,14 +403,38 @@ else
 fi
 
 az storage container create --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
-  "${AUTH_ARGS[@]}" --only-show-errors >/dev/null
+  "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1 || true
 log_ok "Container ready: $CONTAINER"
+
+# Upload with per-file error detection; on AAD failure, wait for RBAC propagation
+# (or fall back to account key if it becomes available mid-run) and retry once.
+upload_one() {
+  local file="$1" out=""
+  out=$(az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
+    --name "$(basename "$file")" --file "$file" "${AUTH_ARGS[@]}" --overwrite --only-show-errors 2>&1)
+  local ec=$?
+  if [ $ec -ne 0 ]; then
+    log_warn "Upload failed for $(basename "$file") (rc=$ec). Error: $(echo "$out" | head -3 | tr '\n' ' ')"
+    log "  Waiting 30s for RBAC propagation and retrying..."
+    sleep 30
+    out=$(az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
+      --name "$(basename "$file")" --file "$file" "${AUTH_ARGS[@]}" --overwrite --only-show-errors 2>&1)
+    ec=$?
+  fi
+  if [ $ec -ne 0 ]; then
+    log_err "Upload failed for $(basename "$file") after retry:"
+    echo "$out" >&2
+    return 1
+  fi
+  return 0
+}
 
 SAMPLE_COUNT=0
 for f in "$SAMPLES_DIR"/*.txt; do
   [ -e "$f" ] || continue
-  az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
-    --name "$(basename "$f")" --file "$f" "${AUTH_ARGS[@]}" --overwrite --only-show-errors >/dev/null
+  if ! upload_one "$f"; then
+    exit 1
+  fi
   log_ok "Uploaded $(basename "$f")"
   SAMPLE_COUNT=$((SAMPLE_COUNT + 1))
 done
@@ -442,7 +492,8 @@ PIPE_NAME="e2e-blob-pipeline"
 
 # Clean up existing demo objects for idempotency
 for kind in pipelines sources destinations; do
-  LIST=$(api_call GET "/api/$kind" 2>/dev/null || echo '{}')
+  LIST=$(api_try GET "/api/$kind")
+  [ -z "$LIST" ] && LIST='{}'
   IDS=$(python3 -c "
 import json, sys
 try:
@@ -454,7 +505,7 @@ except Exception:
     pass
 " "$LIST")
   for id in $IDS; do
-    [ -n "$id" ] && api_call DELETE "/api/$kind/$id" >/dev/null 2>&1 || true
+    [ -n "$id" ] && api_try DELETE "/api/$kind/$id" >/dev/null
   done
 done
 
@@ -464,6 +515,8 @@ EOF
 )
 SRC_RESP=$(api_call POST "/api/sources" "$SRC_BODY")
 SOURCE_ID=$(json_field "$SRC_RESP" source.id)
+[ -z "$SOURCE_ID" ] && SOURCE_ID=$(json_field "$SRC_RESP" id)
+if [ -z "$SOURCE_ID" ]; then log_err "Source creation returned no id. Response: $SRC_RESP"; exit 1; fi
 log_ok "Source: $SOURCE_ID"
 
 DST_BODY=$(cat <<EOF
@@ -472,6 +525,8 @@ EOF
 )
 DST_RESP=$(api_call POST "/api/destinations" "$DST_BODY")
 DEST_ID=$(json_field "$DST_RESP" destination.id)
+[ -z "$DEST_ID" ] && DEST_ID=$(json_field "$DST_RESP" id)
+if [ -z "$DEST_ID" ]; then log_err "Destination creation returned no id. Response: $DST_RESP"; exit 1; fi
 log_ok "Destination: $DEST_ID"
 
 # DocGrok pipelines registration (idempotent)
@@ -510,6 +565,14 @@ EOF
 )
 PIP_RESP=$(api_call POST "/api/pipelines" "$PIP_BODY")
 PIPE_ID=$(json_field "$PIP_RESP" pipeline.id)
+if [ -z "$PIPE_ID" ]; then
+  # Fall back to top-level id (some API versions may flatten)
+  PIPE_ID=$(json_field "$PIP_RESP" id)
+fi
+if [ -z "$PIPE_ID" ]; then
+  log_err "Pipeline creation returned no id. Response: $PIP_RESP"
+  exit 1
+fi
 log_ok "Pipeline: $PIPE_ID ($PIP_MODE mode)"
 
 # ─── Activate pipeline and poll for vectors ─────────────────────────────────
@@ -595,7 +658,8 @@ fi
 if [ "$CLEANUP" = "true" ]; then
   log_step 9 "Cleanup"
   for kind in pipelines sources destinations; do
-    LIST=$(api_call GET "/api/$kind" 2>/dev/null || echo '{}')
+    LIST=$(api_try GET "/api/$kind")
+    [ -z "$LIST" ] && LIST='{}'
     IDS=$(python3 -c "
 import json, sys
 try:
@@ -607,7 +671,7 @@ except Exception:
     pass
 " "$LIST")
     for id in $IDS; do
-      [ -n "$id" ] && api_call DELETE "/api/$kind/$id" >/dev/null 2>&1 || true
+      [ -n "$id" ] && api_try DELETE "/api/$kind/$id" >/dev/null
     done
   done
   az storage container delete --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
