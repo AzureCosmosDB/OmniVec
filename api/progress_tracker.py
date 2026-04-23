@@ -10,12 +10,16 @@ All progress stored in CosmosDB for durability and querying.
 """
 
 import logging
+import random
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from enum import Enum
 
 from azure.cosmos.exceptions import (
     CosmosAccessConditionFailedError,
+    CosmosHttpResponseError,
+    CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
 from store import get_store
@@ -51,53 +55,103 @@ class ProgressTracker:
         self._current_etag: Optional[str] = None
 
     def get_progress(self) -> Optional[Dict[str, Any]]:
-        """Get current progress for source."""
+        """Get current progress for source.
+
+        Returns None only when the document does not exist. Transient Cosmos
+        errors (429/5xx) are retried by the store decorator and, if still
+        failing, propagate so callers can decide whether to proceed or back off
+        — previously they were silently swallowed and looked identical to
+        'not found'.
+        """
         store = get_store()
-        try:
-            doc = store.get(self.progress_id, partition_key="progress")
-            self._current_etag = doc.get("_etag")
-            return {k: v for k, v in doc.items() if not k.startswith("_")}
-        except CosmosResourceNotFoundError:
+        doc = store.get(self.progress_id, partition_key="progress")
+        if doc is None:
             self._current_etag = None
             return None
-        except Exception:
-            return None
+        self._current_etag = doc.get("_etag")
+        return {k: v for k, v in doc.items() if not k.startswith("_")}
 
-    def _save_with_etag(self, doc: Dict[str, Any], max_retries: int = 3) -> bool:
-        """Save document with etag-based optimistic concurrency."""
+    def _save_with_etag(self, doc: Dict[str, Any], max_retries: int = 5) -> bool:
+        """Save document with etag-based optimistic concurrency.
+
+        On etag conflicts, reloads the latest doc and retries with jittered
+        backoff. Returns False if we exhaust retries against a contended
+        document; raises on non-retryable errors (the underlying store decorator
+        already retries transient 429/5xx at a lower layer).
+        """
         store = get_store()
 
-        for attempt in range(max_retries):
+        for attempt in range(1, max_retries + 1):
             try:
                 if self._current_etag:
                     store.replace_with_etag(doc, self._current_etag)
                 else:
-                    # Try create first to avoid race condition
+                    # Try create first to avoid race condition.
                     try:
                         store.create(doc)
-                    except Exception as e:
-                        if "Conflict" in str(e) or "already exists" in str(e).lower():
-                            # Another process created it - reload and retry
-                            self.get_progress()
-                            continue
-                        raise
+                    except CosmosResourceExistsError:
+                        # Another process created it — reload and retry with etag.
+                        logger.debug(
+                            "Progress doc %s created concurrently, reloading",
+                            self.progress_id,
+                        )
+                        self.get_progress()
+                        continue
 
-                # Update etag after successful save
+                # Refresh etag after successful save.
                 saved_doc = store.get(self.progress_id, partition_key="progress")
-                self._current_etag = saved_doc.get("_etag")
+                if saved_doc is not None:
+                    self._current_etag = saved_doc.get("_etag")
                 return True
 
             except CosmosAccessConditionFailedError:
-                # Concurrent update - reload and retry
-                logger.debug("Progress update conflict, retrying (attempt %d)", attempt + 1)
-                self.get_progress()  # Reload to get new etag
+                # Concurrent update — reload, jittered backoff, retry.
+                delay = min(0.05 * (2 ** (attempt - 1)), 1.0)
+                delay += random.uniform(0, delay)
+                logger.debug(
+                    "Progress etag conflict for %s (attempt %d/%d); retrying in %.2fs",
+                    self.progress_id, attempt, max_retries, delay,
+                )
+                time.sleep(delay)
+                self.get_progress()  # reload to get new etag
                 continue
-            except Exception as e:
-                logger.error("Failed to save progress: %s", e)
-                return False
 
-        logger.warning("Failed to save progress after %d retries", max_retries)
+        logger.warning(
+            "Failed to save progress for %s after %d etag retries",
+            self.progress_id, max_retries,
+        )
         return False
+
+    def _load_or_new(self, default_status: "SourceStatus", extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Load progress doc or return a freshly initialized one.
+
+        Consolidates the try/except-NotFound boilerplate previously duplicated
+        across update_backfill_progress / update_live_progress / set_status.
+        Transient errors now propagate (they used to be silently replaced with
+        a blank default doc, which would overwrite real progress on the next
+        save).
+        """
+        store = get_store()
+        doc = store.get(self.progress_id, partition_key="progress")
+        if doc is not None:
+            self._current_etag = doc.get("_etag")
+            return doc
+
+        self._current_etag = None
+        base = {
+            "id": self.progress_id,
+            "doc_type": "progress",
+            "source_id": self.source_id,
+            "status": default_status.value,
+            "backfill": {"locations": {}, "totals": {}},
+            "live": {},
+            "workers": {},
+            "health": {"status": "healthy", "issues": []},
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        if extra:
+            base.update(extra)
+        return base
 
     def update_backfill_progress(
         self,
@@ -113,37 +167,7 @@ class ProgressTracker:
         error: Optional[str] = None,
     ):
         """Update backfill progress for a location."""
-        store = get_store()
-
-        # Get or create progress doc
-        try:
-            doc = store.get(self.progress_id, partition_key="progress")
-            self._current_etag = doc.get("_etag")
-        except CosmosResourceNotFoundError:
-            self._current_etag = None
-            doc = {
-                "id": self.progress_id,
-                "doc_type": "progress",
-                "source_id": self.source_id,
-                "status": SourceStatus.BACKFILLING.value,
-                "backfill": {"locations": {}, "totals": {}},
-                "live": {},
-                "workers": {},
-                "health": {"status": "healthy", "issues": []},
-                "created_at": datetime.utcnow().isoformat(),
-            }
-        except Exception:
-            doc = {
-                "id": self.progress_id,
-                "doc_type": "progress",
-                "source_id": self.source_id,
-                "status": SourceStatus.BACKFILLING.value,
-                "backfill": {"locations": {}, "totals": {}},
-                "live": {},
-                "workers": {},
-                "health": {"status": "healthy", "issues": []},
-                "created_at": datetime.utcnow().isoformat(),
-            }
+        doc = self._load_or_new(SourceStatus.BACKFILLING)
 
         # Update location progress
         if "backfill" not in doc:
@@ -224,36 +248,10 @@ class ProgressTracker:
         error: Optional[str] = None,
     ):
         """Update live processing progress."""
-        store = get_store()
-
-        try:
-            doc = store.get(self.progress_id, partition_key="progress")
-            self._current_etag = doc.get("_etag")
-        except CosmosResourceNotFoundError:
-            self._current_etag = None
-            doc = {
-                "id": self.progress_id,
-                "doc_type": "progress",
-                "source_id": self.source_id,
-                "status": SourceStatus.LIVE.value,
-                "backfill": {},
-                "live": {},
-                "workers": {},
-                "health": {"status": "healthy", "issues": []},
-                "created_at": datetime.utcnow().isoformat(),
-            }
-        except Exception:
-            doc = {
-                "id": self.progress_id,
-                "doc_type": "progress",
-                "source_id": self.source_id,
-                "status": SourceStatus.LIVE.value,
-                "backfill": {},
-                "live": {},
-                "workers": {},
-                "health": {"status": "healthy", "issues": []},
-                "created_at": datetime.utcnow().isoformat(),
-            }
+        doc = self._load_or_new(
+            SourceStatus.LIVE,
+            extra={"backfill": {}, "live": {}},
+        )
 
         # Calculate lag
         lag_seconds = 0
@@ -288,16 +286,12 @@ class ProgressTracker:
         ready: int,
         processing: int,
     ):
-        """Update worker status."""
+        """Update worker status. No-op if progress doc does not exist yet."""
         store = get_store()
-
-        try:
-            doc = store.get(self.progress_id, partition_key="progress")
-            self._current_etag = doc.get("_etag")
-        except CosmosResourceNotFoundError:
+        doc = store.get(self.progress_id, partition_key="progress")
+        if doc is None:
             return
-        except Exception:
-            return
+        self._current_etag = doc.get("_etag")
 
         if "workers" not in doc:
             doc["workers"] = {}
@@ -314,34 +308,10 @@ class ProgressTracker:
 
     def set_status(self, status: SourceStatus, reason: str):
         """Set source status with reason."""
-        store = get_store()
-
-        try:
-            doc = store.get(self.progress_id, partition_key="progress")
-            self._current_etag = doc.get("_etag")
-        except CosmosResourceNotFoundError:
-            self._current_etag = None
-            doc = {
-                "id": self.progress_id,
-                "doc_type": "progress",
-                "source_id": self.source_id,
-                "backfill": {},
-                "live": {},
-                "workers": {},
-                "health": {"status": "healthy", "issues": []},
-                "created_at": datetime.utcnow().isoformat(),
-            }
-        except Exception:
-            doc = {
-                "id": self.progress_id,
-                "doc_type": "progress",
-                "source_id": self.source_id,
-                "backfill": {},
-                "live": {},
-                "workers": {},
-                "health": {"status": "healthy", "issues": []},
-                "created_at": datetime.utcnow().isoformat(),
-            }
+        doc = self._load_or_new(
+            status,
+            extra={"backfill": {}, "live": {}},
+        )
 
         doc["status"] = status.value
         doc["status_reason"] = reason
@@ -350,13 +320,19 @@ class ProgressTracker:
 
 
 def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
-    """Get aggregated progress for a pipeline across all sources."""
+    """Get aggregated progress for a pipeline across all sources.
+
+    Returns an error dict on caller-visible failures (pipeline missing,
+    Cosmos unavailable after retries). Per-source lookup failures are
+    surfaced as a per-source `status: unknown` entry with the specific
+    error so operators can distinguish 'no progress yet' from 'Cosmos
+    failing'.
+    """
     store = get_store()
 
     # Get pipeline
-    try:
-        pipeline = store.get(pipeline_id, partition_key="pipeline")
-    except Exception:
+    pipeline = store.get(pipeline_id, partition_key="pipeline")
+    if pipeline is None:
         return {"error": "Pipeline not found"}
 
     # Get all source progress
@@ -374,32 +350,44 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
     for source_id in source_ids:
         try:
             progress = store.get(f"progress-{source_id}", partition_key="progress")
+        except CosmosHttpResponseError as exc:
+            logger.warning(
+                "Cosmos error fetching progress for source %s: status=%s %s",
+                source_id, getattr(exc, "status_code", None), exc,
+            )
             sources_progress[source_id] = {
-                "status": progress.get("status", "unknown"),
-                "status_reason": progress.get("status_reason", ""),
-                "backfill_percent": progress.get("backfill", {}).get("totals", {}).get("percent_complete", 0),
-                "live_lag_seconds": progress.get("live", {}).get("lag_seconds", 0),
-                "jobs_pending": progress.get("backfill", {}).get("totals", {}).get("jobs_pending", 0),
-                "jobs_completed": progress.get("backfill", {}).get("totals", {}).get("jobs_completed", 0),
+                "status": "unknown",
+                "status_reason": f"Cosmos error ({getattr(exc, 'status_code', 'n/a')})",
             }
+            continue
 
-            # Aggregate totals
-            totals["documents_indexed"] += sources_progress[source_id]["jobs_completed"]
-            totals["documents_pending"] += sources_progress[source_id]["jobs_pending"]
-
-            status = progress.get("status", "")
-            if status == SourceStatus.ERROR.value:
-                totals["sources_error"] += 1
-            elif status == SourceStatus.PAUSED.value:
-                totals["sources_paused"] += 1
-            else:
-                totals["sources_active"] += 1
-
-        except Exception:
+        if progress is None:
             sources_progress[source_id] = {
                 "status": "unknown",
                 "status_reason": "Progress not available",
             }
+            continue
+
+        sources_progress[source_id] = {
+            "status": progress.get("status", "unknown"),
+            "status_reason": progress.get("status_reason", ""),
+            "backfill_percent": progress.get("backfill", {}).get("totals", {}).get("percent_complete", 0),
+            "live_lag_seconds": progress.get("live", {}).get("lag_seconds", 0),
+            "jobs_pending": progress.get("backfill", {}).get("totals", {}).get("jobs_pending", 0),
+            "jobs_completed": progress.get("backfill", {}).get("totals", {}).get("jobs_completed", 0),
+        }
+
+        # Aggregate totals
+        totals["documents_indexed"] += sources_progress[source_id]["jobs_completed"]
+        totals["documents_pending"] += sources_progress[source_id]["jobs_pending"]
+
+        status = progress.get("status", "")
+        if status == SourceStatus.ERROR.value:
+            totals["sources_error"] += 1
+        elif status == SourceStatus.PAUSED.value:
+            totals["sources_paused"] += 1
+        else:
+            totals["sources_active"] += 1
 
     # Determine pipeline status
     if totals["sources_error"] > 0:
