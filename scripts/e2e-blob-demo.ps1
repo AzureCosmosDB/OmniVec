@@ -279,6 +279,7 @@ LogStep 4 "Preparing blob container + uploading samples"
 # Storage Blob Data Contributor on the account).
 $allowKey = az storage account show --name $STORAGE_ACCT --resource-group $RESOURCE_GROUP `
     --query "allowSharedKeyAccess" -o tsv 2>$null
+$script:RestoreDisableKey = $false
 if ($allowKey -eq "true") {
     $storageKey = az storage account keys list --account-name $STORAGE_ACCT `
         --resource-group $RESOURCE_GROUP --query "[0].value" -o tsv 2>$null
@@ -287,7 +288,6 @@ if ($allowKey -eq "true") {
 } else {
     $authArgs = @("--auth-mode", "login")
     Log "Shared keys disabled — using AAD (signed-in user) for local upload"
-    # Make sure the caller has the role — grant if missing (best-effort).
     $me = az ad signed-in-user show --query id -o tsv 2>$null
     $saId = az storage account show --name $STORAGE_ACCT --resource-group $RESOURCE_GROUP --query id -o tsv 2>$null
     if ($me -and $saId) {
@@ -301,6 +301,40 @@ if ($allowKey -eq "true") {
             Start-Sleep -Seconds 45
         }
     }
+
+    # Probe AAD with retries; if still flaky, temporarily enable shared-key.
+    $probeOk = $false
+    foreach ($attempt in 1..4) {
+        az storage container show --account-name $STORAGE_ACCT --name $Container `
+            @authArgs --only-show-errors 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { $probeOk = $true; break }
+        az storage container create --account-name $STORAGE_ACCT --name $Container `
+            @authArgs --only-show-errors 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { $probeOk = $true; break }
+        Log "  AAD probe attempt $attempt/4 failed — waiting 30s for RBAC propagation..."
+        Start-Sleep -Seconds 30
+    }
+    if (-not $probeOk) {
+        LogWarn "AAD still failing after ~2min — temporarily enabling shared-key access as fallback"
+        az storage account update --name $STORAGE_ACCT --resource-group $RESOURCE_GROUP `
+            --allow-shared-key-access true --only-show-errors 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $script:RestoreDisableKey = $true
+            Start-Sleep -Seconds 10
+            $storageKey = az storage account keys list --account-name $STORAGE_ACCT `
+                --resource-group $RESOURCE_GROUP --query "[0].value" -o tsv 2>$null
+            if ($storageKey) {
+                $authArgs = @("--account-key", $storageKey)
+                LogOk "Switched to shared-key auth (will re-disable on exit)"
+            } else {
+                LogErr "Failed to read account key after enabling shared-key"
+                exit 1
+            }
+        } else {
+            LogErr "Could not enable shared-key fallback (policy may block it). Wait ~5min and re-run."
+            exit 1
+        }
+    }
 }
 az storage container create `
     --account-name $STORAGE_ACCT `
@@ -311,33 +345,38 @@ LogOk "Container ready: $Container"
 
 $samples = Get-ChildItem -Path $SamplesDir -Filter *.txt
 if (-not $samples) { LogErr "No .txt samples in $SamplesDir"; exit 1 }
-foreach ($f in $samples) {
-    $uploadOut = az storage blob upload `
-        --account-name $STORAGE_ACCT `
-        --container-name $Container `
-        --name $f.Name `
-        --file $f.FullName `
-        @authArgs `
-        --overwrite `
-        --only-show-errors 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        LogWarn "Upload failed for $($f.Name) (rc=$LASTEXITCODE). Waiting 30s for RBAC propagation and retrying..."
-        Start-Sleep -Seconds 30
-        $uploadOut = az storage blob upload `
-            --account-name $STORAGE_ACCT `
-            --container-name $Container `
-            --name $f.Name `
-            --file $f.FullName `
-            @authArgs `
-            --overwrite `
-            --only-show-errors 2>&1
-    }
-    if ($LASTEXITCODE -ne 0) {
-        LogErr "Upload failed for $($f.Name) after retry:"
-        Write-Host $uploadOut
-        exit 1
-    }
-    LogOk "Uploaded $($f.Name)"
+try {
+  foreach ($f in $samples) {
+      $uploadOut = $null
+      $ok = $false
+      foreach ($attempt in 1..4) {
+          $uploadOut = az storage blob upload `
+              --account-name $STORAGE_ACCT `
+              --container-name $Container `
+              --name $f.Name `
+              --file $f.FullName `
+              @authArgs `
+              --overwrite `
+              --only-show-errors 2>&1
+          if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+          if ($attempt -lt 4) {
+              LogWarn "Upload $($f.Name) attempt $attempt/4 failed — retry in 30s"
+              Start-Sleep -Seconds 30
+          }
+      }
+      if (-not $ok) {
+          LogErr "Upload failed for $($f.Name) after 4 attempts:"
+          Write-Host $uploadOut
+          exit 1
+      }
+      LogOk "Uploaded $($f.Name)"
+  }
+} finally {
+  if ($script:RestoreDisableKey) {
+      Log "Restoring allowSharedKeyAccess=false on $STORAGE_ACCT"
+      az storage account update --name $STORAGE_ACCT --resource-group $RESOURCE_GROUP `
+          --allow-shared-key-access false --only-show-errors 2>$null | Out-Null
+  }
 }
 
 # ── Cosmos database + vectors container ─────────────────────────────────────

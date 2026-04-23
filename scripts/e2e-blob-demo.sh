@@ -379,6 +379,7 @@ fi
 log_step 4 "Preparing blob container + uploading samples"
 ALLOW_KEY=$(az storage account show --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" \
   --query "allowSharedKeyAccess" -o tsv 2>/dev/null)
+RESTORE_DISABLE_KEY=0
 if [ "$ALLOW_KEY" = "true" ]; then
   STORAGE_KEY=$(az storage account keys list --account-name "$STORAGE_ACCT" \
     --resource-group "$RESOURCE_GROUP" --query "[0].value" -o tsv 2>/dev/null)
@@ -402,31 +403,73 @@ else
   fi
 fi
 
+# Cleanup trap: if we temporarily enabled shared-key, put it back.
+cleanup_storage() {
+  if [ "$RESTORE_DISABLE_KEY" = "1" ]; then
+    log "Restoring allowSharedKeyAccess=false on $STORAGE_ACCT"
+    az storage account update --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" \
+      --allow-shared-key-access false --only-show-errors >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_storage EXIT
+
+# Probe auth with a harmless list; if AAD fails, fall back to account key
+# (temporarily enabling it if disabled) to dodge RBAC propagation flakiness.
+probe_ok=0
+if [ "$ALLOW_KEY" != "true" ]; then
+  for attempt in 1 2 3 4; do
+    if az storage container show --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
+        "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1; then
+      probe_ok=1; break
+    fi
+    az storage container create --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
+      "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1 && { probe_ok=1; break; }
+    log "  AAD probe attempt $attempt/4 failed — waiting 30s for RBAC propagation..."
+    sleep 30
+  done
+  if [ "$probe_ok" != "1" ]; then
+    log_warn "AAD still failing after ~2min — temporarily enabling shared-key access as fallback"
+    if az storage account update --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" \
+         --allow-shared-key-access true --only-show-errors >/dev/null 2>&1; then
+      RESTORE_DISABLE_KEY=1
+      sleep 10
+      STORAGE_KEY=$(az storage account keys list --account-name "$STORAGE_ACCT" \
+        --resource-group "$RESOURCE_GROUP" --query "[0].value" -o tsv 2>/dev/null)
+      if [ -n "$STORAGE_KEY" ]; then
+        AUTH_ARGS=(--account-key "$STORAGE_KEY")
+        log_ok "Switched to shared-key auth (will re-disable on exit)"
+      else
+        log_err "Failed to read account key after enabling shared-key"
+        exit 1
+      fi
+    else
+      log_err "Could not enable shared-key fallback (policy may block it). Wait ~5min and re-run."
+      exit 1
+    fi
+  fi
+fi
+
 az storage container create --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
   "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1 || true
 log_ok "Container ready: $CONTAINER"
 
-# Upload with per-file error detection; on AAD failure, wait for RBAC propagation
-# (or fall back to account key if it becomes available mid-run) and retry once.
+# Upload with per-file error detection; retry up to 3 times on transient AAD
+# RBAC propagation 403s before giving up.
 upload_one() {
-  local file="$1" out=""
-  out=$(az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
-    --name "$(basename "$file")" --file "$file" "${AUTH_ARGS[@]}" --overwrite --only-show-errors 2>&1)
-  local ec=$?
-  if [ $ec -ne 0 ]; then
-    log_warn "Upload failed for $(basename "$file") (rc=$ec). Error: $(echo "$out" | head -3 | tr '\n' ' ')"
-    log "  Waiting 30s for RBAC propagation and retrying..."
-    sleep 30
+  local file="$1" out="" ec=0
+  for attempt in 1 2 3 4; do
     out=$(az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
       --name "$(basename "$file")" --file "$file" "${AUTH_ARGS[@]}" --overwrite --only-show-errors 2>&1)
     ec=$?
-  fi
-  if [ $ec -ne 0 ]; then
-    log_err "Upload failed for $(basename "$file") after retry:"
-    echo "$out" >&2
-    return 1
-  fi
-  return 0
+    if [ $ec -eq 0 ]; then return 0; fi
+    if [ $attempt -lt 4 ]; then
+      log_warn "Upload $(basename "$file") attempt $attempt/4 failed — retry in 30s"
+      sleep 30
+    fi
+  done
+  log_err "Upload failed for $(basename "$file") after 4 attempts:"
+  echo "$out" >&2
+  return 1
 }
 
 SAMPLE_COUNT=0
