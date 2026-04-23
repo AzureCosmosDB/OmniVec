@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# OmniVec E2E Demo — Azure Blob (txt) → Cosmos DB (vectors)
+# OmniVec E2E Demo — Azure Blob (txt or pdf) → Cosmos DB (vectors)
 #
 # Exercises the full pipeline against an existing azd deployment:
-#   1. Upload sample .txt files to a blob container
+#   1. Upload sample files (.txt or .pdf) to a blob container
 #   2. Register an embedding model (Azure OpenAI)
 #   3. Create an azure-blob source + cosmosdb-vector destination
 #   4. Create + activate a pipeline (queue mode by default, inline with --skip-queue)
@@ -15,7 +15,8 @@
 #   - Azure OpenAI resource with a text-embedding deployment
 #
 # Usage:
-#   ./scripts/e2e-blob-demo.sh --env my-omnivec \
+#   ./scripts/e2e-blob-demo.sh --env my-omnivec --file-type txt
+#   ./scripts/e2e-blob-demo.sh --env my-omnivec --file-type pdf \
 #       --endpoint https://my-aoai.openai.azure.com --key $AOAI_KEY
 
 set -o pipefail
@@ -27,26 +28,28 @@ AOAI_ENDPOINT="${AOAI_ENDPOINT:-}"
 AOAI_KEY="${AOAI_KEY:-}"
 AOAI_DEPLOYMENT="${AOAI_DEPLOYMENT:-text-embedding-3-small}"
 AOAI_DIMS="${AOAI_DIMS:-1536}"
-CONTAINER="e2e-blob-txt"
+FILE_TYPE="${FILE_TYPE:-txt}"
+CONTAINER=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SAMPLES_DIR="$SCRIPT_DIR/samples/blob-txt"
+SAMPLES_DIR=""
 CLEANUP=false
 NO_SEARCH=false
 SKIP_QUEUE=false
 
 show_help() {
   cat <<EOF
-OmniVec E2E Demo — Azure Blob (txt) → Cosmos DB Vectors (Linux/macOS/WSL)
+OmniVec E2E Demo — Azure Blob (txt|pdf) → Cosmos DB Vectors (Linux/macOS/WSL)
 
 OPTIONS:
   --env NAME            azd environment name.
+  --file-type TYPE      File type to demo: txt (default) or pdf.
   --token TOKEN         OmniVec admin token (skips auto-discovery).
   --endpoint URL        Azure OpenAI endpoint.
   --key KEY             Azure OpenAI API key.
   --deployment NAME     Embedding deployment (default: text-embedding-3-small).
   --dims N              Embedding dimensions (default: 1536).
-  --container NAME      Blob container name (default: e2e-blob-txt).
-  --samples-dir PATH    Directory of .txt samples to upload.
+  --container NAME      Blob container name (default: e2e-blob-<type>).
+  --samples-dir PATH    Directory of samples to upload.
   --skip-queue          Create pipeline in inline mode (bypass queue flow).
   --cleanup             Delete demo objects + blob container at end.
   --no-search           Skip the semantic-search validation step.
@@ -54,7 +57,7 @@ OPTIONS:
 
 ENVIRONMENT VARIABLES (used when flag not passed):
   AZURE_ENV_NAME, OMNIVEC_ADMIN_TOKEN, AOAI_ENDPOINT, AOAI_KEY,
-  AOAI_DEPLOYMENT, AOAI_DIMS
+  AOAI_DEPLOYMENT, AOAI_DIMS, FILE_TYPE
 
 Windows users: use the PowerShell variant instead:
   pwsh scripts/e2e-blob-demo.ps1 -h
@@ -65,6 +68,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) show_help; exit 0 ;;
     --env) ENV_NAME="$2"; shift 2 ;;
+    --file-type) FILE_TYPE="$2"; shift 2 ;;
     --token) ADMIN_TOKEN="$2"; shift 2 ;;
     --endpoint) AOAI_ENDPOINT="$2"; shift 2 ;;
     --key) AOAI_KEY="$2"; shift 2 ;;
@@ -78,6 +82,15 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
+
+# Normalize and validate file type
+FILE_TYPE=$(echo "$FILE_TYPE" | tr '[:upper:]' '[:lower:]')
+case "$FILE_TYPE" in
+  txt|pdf) : ;;
+  *) echo "Unsupported --file-type '$FILE_TYPE' (must be txt or pdf)" >&2; exit 1 ;;
+esac
+[ -z "$CONTAINER" ] && CONTAINER="e2e-blob-$FILE_TYPE"
+[ -z "$SAMPLES_DIR" ] && SAMPLES_DIR="$SCRIPT_DIR/samples/blob-$FILE_TYPE"
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
@@ -152,11 +165,11 @@ except Exception:
 
 # ─── Banner ─────────────────────────────────────────────────────────────────
 printf "\n${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}\n"
-printf   "${GREEN}║  OmniVec E2E Demo — Azure Blob (txt) → Cosmos DB Vectors  ║${NC}\n"
+printf   "${GREEN}║  OmniVec E2E Demo — Azure Blob (%-3s) → Cosmos DB Vectors  ║${NC}\n" "$FILE_TYPE"
 printf   "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}\n"
 
 # ─── Samples check (auto-generate if missing) ───────────────────────────────
-ensure_samples() {
+ensure_samples_txt() {
   mkdir -p "$SAMPLES_DIR"
   cat > "$SAMPLES_DIR/azure-cosmos-db.txt" <<'EOF'
 Azure Cosmos DB Overview
@@ -218,10 +231,28 @@ Azure Key Vault for end-to-end observability, identity, and secret management.
 EOF
 }
 
-if [ ! -d "$SAMPLES_DIR" ] || ! ls "$SAMPLES_DIR"/*.txt >/dev/null 2>&1; then
-  log_warn "Samples directory missing or empty — generating defaults at: $SAMPLES_DIR"
-  ensure_samples
-  log_ok "Created 3 sample .txt files."
+ensure_samples_pdf() {
+  mkdir -p "$SAMPLES_DIR"
+  if [ -x "$SCRIPT_DIR/gen_sample_pdfs.py" ] || [ -f "$SCRIPT_DIR/gen_sample_pdfs.py" ]; then
+    python3 "$SCRIPT_DIR/gen_sample_pdfs.py" "$SAMPLES_DIR" >/dev/null
+  else
+    log_err "gen_sample_pdfs.py not found at $SCRIPT_DIR — cannot generate PDF samples"
+    exit 1
+  fi
+}
+
+if [ "$FILE_TYPE" = "pdf" ]; then
+  if [ ! -d "$SAMPLES_DIR" ] || ! ls "$SAMPLES_DIR"/*.pdf >/dev/null 2>&1; then
+    log_warn "Samples directory missing or empty — generating PDF defaults at: $SAMPLES_DIR"
+    ensure_samples_pdf
+    log_ok "Created sample .pdf files."
+  fi
+else
+  if [ ! -d "$SAMPLES_DIR" ] || ! ls "$SAMPLES_DIR"/*.txt >/dev/null 2>&1; then
+    log_warn "Samples directory missing or empty — generating defaults at: $SAMPLES_DIR"
+    ensure_samples_txt
+    log_ok "Created 3 sample .txt files."
+  fi
 fi
 
 # ─── Select azd env ─────────────────────────────────────────────────────────
@@ -318,6 +349,97 @@ log_ok "Cosmos endpoint : $COSMOS_ENDPOINT"
 log_ok "API             : $SERVER_URL"
 if [ -n "$SEARCH_IP" ]; then log_ok "Search          : http://$SEARCH_IP"; else log_warn "omnivec-search external IP not yet available"; fi
 
+# ─── Ensure shared demo-assets storage account ──────────────────────────────
+# We use a dedicated RG + SA for demo uploads so we don't fight with the
+# deployment's hardened storage account RBAC (which may block self-grants).
+# Shared-key access is enabled on this SA only, and the OmniVec workload
+# managed identity is granted Storage Blob Data Reader so the controller can
+# read the samples.
+ASSETS_RG="${DEMO_ASSETS_RG:-rg-omnivec-assets}"
+ASSETS_SA="${DEMO_ASSETS_STORAGE_ACCOUNT:-$(azd_value DEMO_ASSETS_STORAGE_ACCOUNT)}"
+[ -z "${DEMO_ASSETS_RG:-}" ] && ASSETS_RG=$(azd_value DEMO_ASSETS_RG)
+[ -z "$ASSETS_RG" ] && ASSETS_RG="rg-omnivec-assets"
+
+ASSETS_LOC="${DEMO_ASSETS_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)}"
+[ -z "$ASSETS_LOC" ] && ASSETS_LOC="eastus2"
+
+log_step "1b" "Preparing shared demo-assets storage ($ASSETS_RG)"
+
+# Create RG if missing
+if ! az group show -n "$ASSETS_RG" >/dev/null 2>&1; then
+  log "Creating resource group $ASSETS_RG in $ASSETS_LOC..."
+  az group create -n "$ASSETS_RG" -l "$ASSETS_LOC" --only-show-errors >/dev/null
+  log_ok "Created RG: $ASSETS_RG"
+else
+  log_ok "Using existing RG: $ASSETS_RG"
+fi
+
+# Find or create a storage account in the assets RG
+if [ -z "$ASSETS_SA" ]; then
+  ASSETS_SA=$(az storage account list --resource-group "$ASSETS_RG" \
+    --query "[?starts_with(name,'omnivecassets')].name | [0]" -o tsv 2>/dev/null)
+fi
+if [ -z "$ASSETS_SA" ]; then
+  # Derive a stable 8-char suffix from the subscription so reruns are idempotent
+  SUB_ID=$(az account show --query id -o tsv 2>/dev/null)
+  SUFFIX=$(printf '%s' "$SUB_ID" | md5sum 2>/dev/null | cut -c1-8)
+  [ -z "$SUFFIX" ] && SUFFIX=$(printf '%s' "$SUB_ID" | shasum 2>/dev/null | cut -c1-8)
+  [ -z "$SUFFIX" ] && SUFFIX=$(date +%s | tail -c 9)
+  ASSETS_SA="omnivecassets$SUFFIX"
+  log "Creating storage account $ASSETS_SA..."
+  az storage account create \
+    --name "$ASSETS_SA" \
+    --resource-group "$ASSETS_RG" \
+    --location "$ASSETS_LOC" \
+    --sku Standard_LRS \
+    --kind StorageV2 \
+    --allow-shared-key-access true \
+    --allow-blob-public-access false \
+    --min-tls-version TLS1_2 \
+    --only-show-errors >/dev/null
+  log_ok "Created SA: $ASSETS_SA"
+else
+  log_ok "Using existing SA: $ASSETS_SA"
+  # Ensure shared-key is enabled on pre-existing account
+  az storage account update --name "$ASSETS_SA" --resource-group "$ASSETS_RG" \
+    --allow-shared-key-access true --only-show-errors >/dev/null 2>&1 || true
+fi
+
+# Persist to azd env for subsequent runs
+azd env set DEMO_ASSETS_RG "$ASSETS_RG" >/dev/null 2>&1 || true
+azd env set DEMO_ASSETS_STORAGE_ACCOUNT "$ASSETS_SA" >/dev/null 2>&1 || true
+
+# Grant OmniVec workload MI "Storage Blob Data Reader" on the assets SA so
+# the controller can enumerate/read blobs uploaded here.
+if [ -n "$IDENTITY_CID" ]; then
+  MI_PRINCIPAL=$(az ad sp show --id "$IDENTITY_CID" --query id -o tsv 2>/dev/null)
+  ASSETS_SA_ID=$(az storage account show --name "$ASSETS_SA" --resource-group "$ASSETS_RG" --query id -o tsv 2>/dev/null)
+  if [ -n "$MI_PRINCIPAL" ] && [ -n "$ASSETS_SA_ID" ]; then
+    HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$ASSETS_SA_ID" \
+      --role "Storage Blob Data Reader" --query "[0].id" -o tsv 2>/dev/null)
+    if [ -z "$HAS" ]; then
+      log "Granting 'Storage Blob Data Reader' to OmniVec workload identity on $ASSETS_SA..."
+      if az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
+           --assignee-principal-type ServicePrincipal \
+           --role "Storage Blob Data Reader" \
+           --scope "$ASSETS_SA_ID" --only-show-errors >/dev/null 2>&1; then
+        log_ok "Role granted — waiting 30s for propagation"
+        sleep 30
+      else
+        log_warn "Could not grant MI role (may need Owner). Controller may get 403 on blob reads."
+      fi
+    else
+      log_ok "Workload MI already has Storage Blob Data Reader"
+    fi
+  fi
+fi
+
+# Override the upload target to use the assets SA (shared-key auth, deterministic)
+STORAGE_ACCT="$ASSETS_SA"
+STORAGE_RG="$ASSETS_RG"
+BLOB_ENDPOINT="https://${ASSETS_SA}.blob.core.windows.net"
+log_ok "Upload target   : $BLOB_ENDPOINT"
+
 # ─── Validate API + token ───────────────────────────────────────────────────
 log_step 2 "Validating API + admin token"
 if ! curl -sS --max-time 10 "$SERVER_URL/health" >/dev/null; then
@@ -376,104 +498,40 @@ else
 fi
 
 # ─── Blob container + upload samples ────────────────────────────────────────
-log_step 4 "Preparing blob container + uploading samples"
-ALLOW_KEY=$(az storage account show --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" \
-  --query "allowSharedKeyAccess" -o tsv 2>/dev/null)
-RESTORE_DISABLE_KEY=0
-if [ "$ALLOW_KEY" = "true" ]; then
-  STORAGE_KEY=$(az storage account keys list --account-name "$STORAGE_ACCT" \
-    --resource-group "$RESOURCE_GROUP" --query "[0].value" -o tsv 2>/dev/null)
-  AUTH_ARGS=(--account-key "$STORAGE_KEY")
-  log "Using shared-key auth for local upload"
-else
-  AUTH_ARGS=(--auth-mode login)
-  log "Shared keys disabled — using AAD (signed-in user) for local upload"
-  ME=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
-  SA_ID=$(az storage account show --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" --query id -o tsv 2>/dev/null)
-  if [ -n "$ME" ] && [ -n "$SA_ID" ]; then
-    HAS_ROLE=$(az role assignment list --assignee "$ME" --scope "$SA_ID" \
-      --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null)
-    if [ -z "$HAS_ROLE" ]; then
-      log "Granting 'Storage Blob Data Contributor' to signed-in user (one-time)"
-      az role assignment create --assignee-object-id "$ME" --assignee-principal-type User \
-        --role "Storage Blob Data Contributor" --scope "$SA_ID" --only-show-errors >/dev/null 2>&1 || true
-      log "Waiting 45s for RBAC propagation..."
-      sleep 45
-    fi
-  fi
-fi
+log_step 4 "Preparing blob container + uploading samples ($FILE_TYPE)"
 
-# Cleanup trap: if we temporarily enabled shared-key, put it back.
-cleanup_storage() {
-  if [ "$RESTORE_DISABLE_KEY" = "1" ]; then
-    log "Restoring allowSharedKeyAccess=false on $STORAGE_ACCT"
-    az storage account update --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" \
-      --allow-shared-key-access false --only-show-errors >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup_storage EXIT
-
-# Probe auth with a harmless list; if AAD fails, fall back to account key
-# (temporarily enabling it if disabled) to dodge RBAC propagation flakiness.
-probe_ok=0
-if [ "$ALLOW_KEY" != "true" ]; then
-  for attempt in 1 2 3 4; do
-    if az storage container show --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
-        "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1; then
-      probe_ok=1; break
-    fi
-    az storage container create --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
-      "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1 && { probe_ok=1; break; }
-    log "  AAD probe attempt $attempt/4 failed — waiting 30s for RBAC propagation..."
-    sleep 30
-  done
-  if [ "$probe_ok" != "1" ]; then
-    log_warn "AAD still failing after ~2min — temporarily enabling shared-key access as fallback"
-    if az storage account update --name "$STORAGE_ACCT" --resource-group "$RESOURCE_GROUP" \
-         --allow-shared-key-access true --only-show-errors >/dev/null 2>&1; then
-      RESTORE_DISABLE_KEY=1
-      sleep 10
-      STORAGE_KEY=$(az storage account keys list --account-name "$STORAGE_ACCT" \
-        --resource-group "$RESOURCE_GROUP" --query "[0].value" -o tsv 2>/dev/null)
-      if [ -n "$STORAGE_KEY" ]; then
-        AUTH_ARGS=(--account-key "$STORAGE_KEY")
-        log_ok "Switched to shared-key auth (will re-disable on exit)"
-      else
-        log_err "Failed to read account key after enabling shared-key"
-        exit 1
-      fi
-    else
-      log_err "Could not enable shared-key fallback (policy may block it). Wait ~5min and re-run."
-      exit 1
-    fi
-  fi
+# Assets SA always has shared-key enabled (we ensured it in step 1b).
+STORAGE_KEY=$(az storage account keys list --account-name "$STORAGE_ACCT" \
+  --resource-group "$STORAGE_RG" --query "[0].value" -o tsv 2>/dev/null)
+if [ -z "$STORAGE_KEY" ]; then
+  log_err "Could not read storage key for $STORAGE_ACCT"
+  exit 1
 fi
+AUTH_ARGS=(--account-key "$STORAGE_KEY")
 
 az storage container create --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
   "${AUTH_ARGS[@]}" --only-show-errors >/dev/null 2>&1 || true
 log_ok "Container ready: $CONTAINER"
 
-# Upload with per-file error detection; retry up to 3 times on transient AAD
-# RBAC propagation 403s before giving up.
 upload_one() {
   local file="$1" out="" ec=0
-  for attempt in 1 2 3 4; do
+  for attempt in 1 2 3; do
     out=$(az storage blob upload --account-name "$STORAGE_ACCT" --container-name "$CONTAINER" \
       --name "$(basename "$file")" --file "$file" "${AUTH_ARGS[@]}" --overwrite --only-show-errors 2>&1)
     ec=$?
     if [ $ec -eq 0 ]; then return 0; fi
-    if [ $attempt -lt 4 ]; then
-      log_warn "Upload $(basename "$file") attempt $attempt/4 failed — retry in 30s"
-      sleep 30
+    if [ $attempt -lt 3 ]; then
+      log_warn "Upload $(basename "$file") attempt $attempt/3 failed — retry in 5s"
+      sleep 5
     fi
   done
-  log_err "Upload failed for $(basename "$file") after 4 attempts:"
+  log_err "Upload failed for $(basename "$file"):"
   echo "$out" >&2
   return 1
 }
 
 SAMPLE_COUNT=0
-for f in "$SAMPLES_DIR"/*.txt; do
+for f in "$SAMPLES_DIR"/*."$FILE_TYPE"; do
   [ -e "$f" ] || continue
   if ! upload_one "$f"; then
     exit 1
@@ -482,7 +540,7 @@ for f in "$SAMPLES_DIR"/*.txt; do
   SAMPLE_COUNT=$((SAMPLE_COUNT + 1))
 done
 if [ "$SAMPLE_COUNT" -eq 0 ]; then
-  log_err "No .txt samples in $SAMPLES_DIR"
+  log_err "No .$FILE_TYPE samples in $SAMPLES_DIR"
   exit 1
 fi
 
@@ -553,7 +611,7 @@ except Exception:
 done
 
 SRC_BODY=$(cat <<EOF
-{"name":"$SOURCE_NAME","type":"azure-blob","config":{"account_url":"$BLOB_ENDPOINT","container":"$CONTAINER","file_type":"txt","auth_type":"managed-identity"}}
+{"name":"$SOURCE_NAME","type":"azure-blob","config":{"account_url":"$BLOB_ENDPOINT","container":"$CONTAINER","file_type":"$FILE_TYPE","auth_type":"managed-identity"}}
 EOF
 )
 SRC_RESP=$(api_call POST "/api/sources" "$SRC_BODY")
@@ -595,6 +653,16 @@ register_docgrok() {
 DG_TEXT_ID=$(register_docgrok "DocGrok Text" "$MODEL_ID")
 DG_PDF_ID=$(register_docgrok "DocGrok PDF" "$MODEL_ID")
 
+if [ "$FILE_TYPE" = "pdf" ]; then
+  DG_PIPELINE_ID="$DG_PDF_ID"
+else
+  DG_PIPELINE_ID="$DG_TEXT_ID"
+fi
+if [ -z "$DG_PIPELINE_ID" ]; then
+  log_err "DocGrok $FILE_TYPE pipeline registration failed — cannot create OmniVec pipeline"
+  exit 1
+fi
+
 if [ "$SKIP_QUEUE" = "true" ]; then
   PIP_MODE="inline"
   log "Pipeline mode: inline (--skip-queue)"
@@ -603,7 +671,7 @@ else
 fi
 
 PIP_BODY=$(cat <<EOF
-{"name":"$PIPE_NAME","sources":[{"source_id":"$SOURCE_ID","filters":{},"content_fields":["content"],"file_types":["txt"]}],"destination_id":"$DEST_ID","docgrok_pipeline":"$DG_TEXT_ID","vector_index_path":"embedding","process_existing":true,"processing_mode":"$PIP_MODE"}
+{"name":"$PIPE_NAME","sources":[{"source_id":"$SOURCE_ID","filters":{},"content_fields":["content"],"file_types":["$FILE_TYPE"]}],"destination_id":"$DEST_ID","docgrok_pipeline":"$DG_PIPELINE_ID","vector_index_path":"embedding","process_existing":true,"processing_mode":"$PIP_MODE"}
 EOF
 )
 PIP_RESP=$(api_call POST "/api/pipelines" "$PIP_BODY")
@@ -718,7 +786,7 @@ except Exception:
     done
   done
   az storage container delete --account-name "$STORAGE_ACCT" --name "$CONTAINER" \
-    --auth-mode login --only-show-errors >/dev/null 2>&1 || true
+    --account-key "$STORAGE_KEY" --only-show-errors >/dev/null 2>&1 || true
   log_ok "Demo objects deleted"
 fi
 
