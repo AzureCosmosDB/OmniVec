@@ -422,6 +422,30 @@ DOCGROK_URL = os.getenv("DOCGROK_URL", "http://docgrok:80")
 SEARCH_SERVICE_URL = os.getenv("SEARCH_SERVICE_URL", "http://omnivec-search").rstrip("/")
 SEARCH_INTERNAL_TOKEN = os.getenv("SEARCH_INTERNAL_TOKEN", "")
 
+# Feature flag: set by postprovision based on infra.enableBlobSource (Bicep).
+# When disabled, Service Bus + Storage + Event Grid are NOT deployed, so we
+# must refuse any request that would require them:
+#   - creating an azure-blob source (needs Storage + Event Grid)
+#   - creating/switching a pipeline to queue mode (needs Service Bus)
+_BLOB_SOURCE_ENABLED = os.getenv("ENABLE_BLOB_SOURCE", "true").strip().lower() not in ("false", "0", "no", "")
+
+
+def _require_blob_source_enabled(kind: str) -> None:
+    """Raise 400 when the deployment was provisioned without blob/service bus.
+
+    kind is a short label used in the error message ('source', 'queue-mode pipeline').
+    """
+    if not _BLOB_SOURCE_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot create {kind}: this deployment was provisioned with "
+                "blob source disabled (no Storage Account / Service Bus / Event Grid). "
+                "Re-deploy with OMNIVEC_ENABLE_BLOB_SOURCE=true to enable."
+            ),
+        )
+
+
 # HTTP Client
 http_client: Optional[httpx.AsyncClient] = None
 
@@ -484,6 +508,25 @@ async def serve_ui():
 async def health():
     """Lightweight health check for K8s probes â€” no external calls."""
     return {"status": "healthy", "service": "OmniVec", "version": "1.0.0"}
+
+
+@app.get("/api/capabilities")
+async def get_capabilities():
+    """Return the feature flags of this deployment so the UI can hide options
+    that require infra we didn't provision (e.g. blob source / queue mode)."""
+    return {
+        "blob_source_enabled": _BLOB_SOURCE_ENABLED,
+        "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
+        "allowed_source_types": (
+            ["azure-blob", "cosmosdb", "postgres", "mssql"]
+            if _BLOB_SOURCE_ENABLED else
+            ["cosmosdb", "postgres", "mssql"]
+        ),
+        "allowed_processing_modes": (
+            ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
+        ),
+    }
+
 
 
 # =============================================================================
@@ -1096,6 +1139,9 @@ async def create_source(req: CreateSourceRequest):
     existing = [_source_from_doc(d) for d in store.list("source")]
     if any(s.name.lower() == req.name.strip().lower() for s in existing):
         raise HTTPException(status_code=400, detail=f"Source name '{req.name.strip()}' already exists")
+    # Reject azure-blob sources when blob infra was not provisioned
+    if req.type == SourceType.AZURE_BLOB:
+        _require_blob_source_enabled("azure-blob source")
     # Prevent duplicate CosmosDB sources pointing to the same container
     if req.type == SourceType.COSMOSDB:
         for s in existing:
@@ -1160,6 +1206,9 @@ def update_source(source_id: str, req: CreateSourceRequest):
     doc = store.get(source_id, "source")
     if not doc:
         raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+    # Block switching a source's type to azure-blob on blob-disabled deployments
+    if req.type == SourceType.AZURE_BLOB:
+        _require_blob_source_enabled("azure-blob source")
     existing = [_source_from_doc(d) for d in store.list("source")]
     if any(s.name.lower() == req.name.strip().lower() and s.id != source_id for s in existing):
         raise HTTPException(status_code=400, detail=f"Source name '{req.name.strip()}' already exists")
@@ -1961,6 +2010,10 @@ async def create_pipeline(req: CreatePipelineRequest):
     if any(p.name.lower() == req.name.strip().lower() for p in existing_pipelines):
         raise HTTPException(status_code=400, detail=f"Pipeline name '{req.name.strip()}' already exists")
 
+    # Reject queue mode when Service Bus wasn't provisioned (blob source disabled)
+    if str(req.processing_mode or "").lower() == "queue":
+        _require_blob_source_enabled("queue-mode pipeline")
+
     # Validate sources exist
     for ps in req.sources:
         if not store.get(ps.source_id, "source"):
@@ -2036,6 +2089,10 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     doc = await asyncio.to_thread(store.get, pipeline_id, "pipeline")
     if not doc:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
+
+    # Reject queue mode when Service Bus wasn't provisioned (blob source disabled)
+    if str(req.processing_mode or "").lower() == "queue":
+        _require_blob_source_enabled("queue-mode pipeline")
 
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
 
@@ -2128,6 +2185,8 @@ def set_processing_mode(pipeline_id: str, mode: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
     if mode not in ("queue", "inline"):
         raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'. Must be 'queue' or 'inline'.")
+    if mode == "queue":
+        _require_blob_source_enabled("queue-mode pipeline")
     pipeline = _pipeline_from_doc(doc)
     pipeline.processing_mode = mode
     pipeline.updated_at = datetime.utcnow()

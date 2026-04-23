@@ -13,6 +13,7 @@ param(
     [switch]$Quiet,
     [switch]$Existing,  # Use an existing deployment (skip provisioning)
     [switch]$Cleanup,   # Delete test resources (OmniVec + Azure) after run
+    [switch]$SkipQueue, # Skip queue-mode steps (8-9); inline mode only
     [Alias('h','?')][switch]$Help,
     [string]$EnvName = $env:AZURE_ENV_NAME,
     [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
@@ -52,6 +53,8 @@ OPTIONS:
   -AoaiDims N             Embedding dimensions (default: 1536).
   -SharedRegistryToken T  Token for shared image registry (anonymous first).
   -Quiet                  Minimal output.
+  -SkipQueue              Skip queue-mode steps (8-9); create pipeline in
+                          inline mode directly and verify inline-only.
 
 ENVIRONMENT VARIABLES (used when flag is not passed):
   AZURE_ENV_NAME, OMNIVEC_ADMIN_TOKEN, AOAI_ENDPOINT, AOAI_KEY,
@@ -653,7 +656,13 @@ if ($FromStep -le 7) {
 # STEP 8: Create pipeline (queue mode), insert docs, activate
 # =============================================================================
 if ($FromStep -le 8) {
-    LogStep 8 "Creating pipeline (queue mode), inserting docs, activating..."
+    if ($SkipQueue) {
+        LogStep 8 "Creating pipeline (inline mode — queue skipped), inserting docs, activating..."
+        $PIP_MODE = "inline"
+    } else {
+        LogStep 8 "Creating pipeline (queue mode), inserting docs, activating..."
+        $PIP_MODE = "queue"
+    }
 
     # Clean up an existing demo pipeline to make step-8 resume idempotent
     try {
@@ -668,11 +677,11 @@ if ($FromStep -le 8) {
     $pipBody = @{
         name = $PIPELINE_NAME; sources = @(@{ source_id = $SOURCE_ID; filters = @{}; content_fields = @("content") })
         destination_id = $DEST_ID; docgrok_pipeline = $MODEL_ID; vector_index_path = "embedding"
-        process_existing = $true; processing_mode = "queue"
+        process_existing = $true; processing_mode = $PIP_MODE
     } | ConvertTo-Json -Depth 5
     $pipResult = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $apiHeaders -Body $pipBody
     $PIP_ID = $pipResult.pipeline.id
-    LogOk "Pipeline created (queue mode): $PIP_ID"
+    LogOk "Pipeline created ($PIP_MODE mode): $PIP_ID"
 
     # Insert test documents with retries for transient Cosmos timeout errors
     Log "  Inserting test documents..."
@@ -732,24 +741,28 @@ print("DOCS_OK")
     Log "  Resuming pipeline..."
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
     Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
-    LogOk "Pipeline activated (queue mode). Waiting for processing..."
-    $queueEmbedded = $false
-    for ($i = 0; $i -lt 24; $i++) {
-        try {
-            $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $apiHeaders
-            if ($poll.stats.embedded_count -gt 0) {
-                $queueEmbedded = $true
-                break
-            }
-        } catch {}
-        Start-Sleep -Seconds 10
-    }
-    if (-not $queueEmbedded) {
-        LogErr "Queue mode did not produce embeddings within timeout."
-        try { kubectl get pods -n omnivec } catch {}
-        try { kubectl logs deployment/omnivec-dotnet-worker -n omnivec --tail=120 2>$null } catch {}
-        try { kubectl logs deployment/omnivec-cosmos-changefeed -n omnivec --tail=120 2>$null } catch {}
-        exit 1
+    if ($SkipQueue) {
+        LogOk "Pipeline activated (inline mode — queue wait skipped)."
+    } else {
+        LogOk "Pipeline activated (queue mode). Waiting for processing..."
+        $queueEmbedded = $false
+        for ($i = 0; $i -lt 24; $i++) {
+            try {
+                $poll = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID" -Headers $apiHeaders
+                if ($poll.stats.embedded_count -gt 0) {
+                    $queueEmbedded = $true
+                    break
+                }
+            } catch {}
+            Start-Sleep -Seconds 10
+        }
+        if (-not $queueEmbedded) {
+            LogErr "Queue mode did not produce embeddings within timeout."
+            try { kubectl get pods -n omnivec } catch {}
+            try { kubectl logs deployment/omnivec-dotnet-worker -n omnivec --tail=120 2>$null } catch {}
+            try { kubectl logs deployment/omnivec-cosmos-changefeed -n omnivec --tail=120 2>$null } catch {}
+            exit 1
+        }
     }
     Save-Checkpoint 8
 } else {
@@ -765,7 +778,10 @@ print("DOCS_OK")
 # =============================================================================
 # STEP 9: Verify queue mode results
 # =============================================================================
-if ($PIP_ID) {
+if ($SkipQueue) {
+    LogStep 9 "Skipping queue-mode verification (-SkipQueue)."
+    Save-Checkpoint 9
+} elseif ($PIP_ID) {
     LogStep 9 "Verifying queue mode results..."
     if (-not $Quiet) { & $CLI pipeline show $PIP_ID }
 
@@ -789,23 +805,27 @@ if ($PIP_ID) {
 # STEP 10: Switch to inline mode, reset, reprocess same docs
 # =============================================================================
 if ($FromStep -le 10 -and $PIP_ID) {
-    LogStep 10 "Switching pipeline to inline mode, resetting..."
+    if ($SkipQueue) {
+        LogStep 10 "Waiting for inline-mode embeddings (queue skipped — no reset needed)..."
+    } else {
+        LogStep 10 "Switching pipeline to inline mode, resetting..."
 
-    # Pause pipeline before switching mode
-    try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $apiHeaders | Out-Null } catch {}
+        # Pause pipeline before switching mode
+        try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $apiHeaders | Out-Null } catch {}
 
-    # Switch processing mode to inline
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $apiHeaders | Out-Null
-    LogOk "Switched to inline mode"
+        # Switch processing mode to inline
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $apiHeaders | Out-Null
+        LogOk "Switched to inline mode"
 
-    # Reset pipeline — forces CFP to reprocess all docs from the beginning
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $apiHeaders | Out-Null
-    LogOk "Pipeline reset — will reprocess all docs in inline mode"
+        # Reset pipeline — forces CFP to reprocess all docs from the beginning
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $apiHeaders | Out-Null
+        LogOk "Pipeline reset — will reprocess all docs in inline mode"
 
-    # Resume pipeline
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
-    Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
-    LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
+        # Resume pipeline
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
+        LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
+    }
 
     # Poll source container until embeddings appear or 120s timeout
     $inlineReady = $false

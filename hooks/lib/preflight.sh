@@ -203,9 +203,11 @@ preflight_name_collisions() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────
-# b3: forbid switching an existing deployment's blob-source setting. If the
-# RG tag `omnivec-blob` is `true` but user set FALSE (or vice versa), we
-# refuse — Storage Account / ServiceBus / EventGrid would be orphaned.
+# b3: forbid DISABLING blob-source on an existing deployment. If the RG tag
+# `omnivec-blob` is `true` and user sets FALSE, we refuse — Storage Account /
+# ServiceBus / EventGrid would be orphaned. The reverse (false → true) is
+# allowed: Bicep is idempotent and will create the missing modules on the
+# next azd up.
 # ──────────────────────────────────────────────────────────────────────────
 preflight_blob_flip_guard() {
     _rg=$1
@@ -215,12 +217,15 @@ preflight_blob_flip_guard() {
     [ -z "$_existing" ] && return 0  # no prior tag, nothing to guard
     _want_norm=$(printf '%s' "$_want" | tr -d '\r\n ' | tr '[:upper:]' '[:lower:]')
     _existing_norm=$(printf '%s' "$_existing" | tr '[:upper:]' '[:lower:]')
-    if [ "$_existing_norm" != "$_want_norm" ]; then
-        printf "\n  ${RED}✗ Cannot change OMNIVEC_ENABLE_BLOB_SOURCE from %s to %s on existing deployment.${NC}\n" \
-            "$_existing" "$_want"
-        printf "  ${YELLOW}This would orphan Storage/ServiceBus/EventGrid (or leave code with no source).${NC}\n"
+    # Block only the destructive direction: existing=true and want=false.
+    if [ "$_existing_norm" = "true" ] && [ "$_want_norm" = "false" ]; then
+        printf "\n  ${RED}✗ Cannot disable OMNIVEC_ENABLE_BLOB_SOURCE (true -> false) on existing deployment.${NC}\n"
+        printf "  ${YELLOW}This would orphan Storage/ServiceBus/EventGrid resources.${NC}\n"
         printf "  ${YELLOW}Run 'azd down' first, or pick a different AZURE_ENV_NAME.${NC}\n"
         return 1
+    fi
+    if [ "$_existing_norm" = "false" ] && [ "$_want_norm" = "true" ]; then
+        printf "  ${YELLOW}! Enabling blob source on existing deployment (false -> true). Storage/ServiceBus/EventGrid will be created.${NC}\n"
     fi
     return 0
 }
