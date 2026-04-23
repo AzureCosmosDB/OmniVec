@@ -88,15 +88,10 @@ log_warn() { printf "  ${YELLOW}!${NC} %s\n" "$*"; }
 log_err()  { printf "  ${RED}✗${NC} %s\n" "$*" >&2; }
 
 azd_value() {
-  # Fetch a single key from `azd env get-values --output json`
-  azd env get-values --output json 2>/dev/null | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get('$1', ''))
-except Exception:
-    pass
-"
+  # Per-key lookup via `azd env get-value` — robust across azd versions.
+  # Suppresses errors and strips CR (for WSL/Windows).
+  val=$(azd env get-value "$1" 2>/dev/null) || val=""
+  printf '%s' "$val" | tr -d '\r\n'
 }
 
 api_call() {
