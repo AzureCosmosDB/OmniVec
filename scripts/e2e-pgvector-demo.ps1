@@ -14,6 +14,7 @@ param(
     [switch]$Quiet,
     [switch]$Existing,
     [switch]$Cleanup,
+    [switch]$SkipQueue,
     [Alias('h','?')][switch]$Help,
     [string]$EnvName,
     [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
@@ -54,6 +55,7 @@ OPTIONS:
   -AoaiDeployment NAME    Embedding deployment (default: text-embedding-3-small).
   -AoaiDims N             Embedding dimensions (default: 1536).
   -Quiet                  Minimal output.
+  -SkipQueue              Skip queue mode; create pipeline in inline mode.
 
 ENVIRONMENT VARIABLES (used when flag is not passed):
   OMNIVEC_ADMIN_TOKEN, AOAI_ENDPOINT, AOAI_KEY, AOAI_DEPLOYMENT, AOAI_DIMS
@@ -704,7 +706,13 @@ if ($FromStep -le 6) {
 # STEP 7: Create pipeline (queue mode) and activate
 # =============================================================================
 if ($FromStep -le 7) {
-    LogStep 7 "Creating pipeline (queue mode)..."
+    if ($SkipQueue) {
+        LogStep 7 "Creating pipeline (inline mode — queue skipped)..."
+        $PIP_MODE = "inline"
+    } else {
+        LogStep 7 "Creating pipeline (queue mode)..."
+        $PIP_MODE = "queue"
+    }
 
     if (-not $MODEL_ID) {
         $models = (ApiGet "/api/docgrok/models").models
@@ -722,7 +730,7 @@ if ($FromStep -le 7) {
         docgrok_pipeline = $MODEL_ID
         vector_index_path = "embedding"
         process_existing = $true
-        processing_mode = "queue"
+        processing_mode = $PIP_MODE
         content_strategy = "truncate"
     }
     try {
@@ -759,7 +767,7 @@ if ($FromStep -le 7) {
         $embedded = $stats.stats.embedded_count
         $pct = $stats.stats.completion_pct
         if ($embedded -ge 3) {
-            LogOk "Queue mode: $embedded documents embedded ($pct%)"
+            LogOk "$PIP_MODE mode: $embedded documents embedded ($pct%)"
             break
         }
         Log "  Waiting... ($embedded embedded, $pct%)"
