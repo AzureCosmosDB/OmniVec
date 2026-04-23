@@ -760,11 +760,11 @@ register_docgrok() {
   local id
   id=$(json_field "$resp" id)
   if [ -n "$id" ]; then
-    log_ok "DocGrok pipeline registered: $display -> id=$id (model=$model)"
-    echo "$id"
+    log_ok "DocGrok pipeline registered: $display -> id=$id (model=$model)" >&2
+    printf '%s' "$id"
   else
-    log_warn "DocGrok pipeline $display registration failed: $resp"
-    echo ""
+    log_warn "DocGrok pipeline $display registration failed: $resp" >&2
+    printf ''
   fi
 }
 DG_TEXT_ID=$(register_docgrok "DocGrok Text" "$MODEL_ID")
