@@ -410,13 +410,22 @@ if [ -z "$MI_PRINCIPAL" ] || [ -z "$DEMO_SA_ID" ]; then
   exit 1
 fi
 HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
-  --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null)
+  --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null | tr -d '\r\n')
 if [ -z "$HAS" ]; then
   log "Granting 'Storage Blob Data Contributor' to workload MI on $DEMO_SA..."
   GRANT_ERR=$(az role assignment create --assignee-object-id "$MI_PRINCIPAL" \
        --assignee-principal-type ServicePrincipal \
        --role "Storage Blob Data Contributor" \
        --scope "$DEMO_SA_ID" --only-show-errors 2>&1 >/dev/null) && GRANT_OK=1 || GRANT_OK=0
+  if [ "$GRANT_OK" != "1" ]; then
+    # Re-check: the create may have failed because the role already exists (e.g. granted out-of-band).
+    sleep 5
+    HAS=$(az role assignment list --assignee "$MI_PRINCIPAL" --scope "$DEMO_SA_ID" \
+      --role "Storage Blob Data Contributor" --query "[0].id" -o tsv 2>/dev/null | tr -d '\r\n')
+    if [ -n "$HAS" ]; then
+      GRANT_OK=1
+    fi
+  fi
   if [ "$GRANT_OK" = "1" ]; then
     log_ok "Role granted — waiting 30s for propagation"
     sleep 30
