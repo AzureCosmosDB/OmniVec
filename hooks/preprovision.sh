@@ -305,6 +305,16 @@ RG_EXISTS=$(printf '%s' "$RG_EXISTS" | tr -d '\r\n ')
 
 if [ "$RG_EXISTS" = "true" ]; then
   printf "\n${GREEN}Existing deployment detected (RG: ${RG_NAME}). Importing config from tags...${NC}\n"
+
+  # Snapshot user's blob-source override BEFORE tag import overwrites azd env.
+  # User can request a flip via either `azd env set OMNIVEC_ENABLE_BLOB_SOURCE true`
+  # or `azd env set AZURE_ENABLE_BLOB_SOURCE true`. OMNIVEC_ takes precedence.
+  _user_blob_override=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
+  if [ -z "$_user_blob_override" ]; then
+    _user_blob_override=$(azd_get AZURE_ENABLE_BLOB_SOURCE)
+  fi
+  _user_blob_override=$(printf '%s' "$_user_blob_override" | tr -d '\r\n ' | tr '[:upper:]' '[:lower:]')
+
   for _pair in \
     "omnivec-sys-sku:OMNIVEC_SYSTEM_NODE_VM_SIZE" \
     "omnivec-sys-count:OMNIVEC_SYSTEM_NODE_COUNT" \
@@ -317,6 +327,18 @@ if [ "$RG_EXISTS" = "true" ]; then
     _env=$(echo "$_pair" | cut -d: -f2)
     _val=$(az group show --name "$RG_NAME" --query "tags.\"$_tag\"" -o tsv < /dev/null 2>/dev/null || true)
     _val=$(printf '%s' "$_val" | tr -d '\r\n')
+    # Honor user-intended blob-source flip instead of re-importing the stale tag.
+    if [ "$_env" = "OMNIVEC_ENABLE_BLOB_SOURCE" ] && [ -n "$_user_blob_override" ] && [ "$_user_blob_override" != "$(printf '%s' "$_val" | tr '[:upper:]' '[:lower:]')" ]; then
+      # Validate flip direction (blocks destructive on->off; allows off->on).
+      if command -v preflight_blob_flip_guard >/dev/null 2>&1; then
+        if ! preflight_blob_flip_guard "$RG_NAME" "$_user_blob_override"; then
+          exit 1
+        fi
+      fi
+      azd env set "$_env" "$_user_blob_override" < /dev/null 2>/dev/null
+      printf "  ${_env} = ${_user_blob_override} ${YELLOW}(user override; tag was '${_val}')${NC}\n"
+      continue
+    fi
     if [ -n "$_val" ]; then
       azd env set "$_env" "$_val" < /dev/null 2>/dev/null
       printf "  ${_env} = ${_val}\n"
