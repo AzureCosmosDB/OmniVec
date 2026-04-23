@@ -18,7 +18,7 @@
 #   ./scripts/e2e-blob-demo.sh --env my-omnivec \
 #       --endpoint https://my-aoai.openai.azure.com --key $AOAI_KEY
 
-set -eo pipefail
+set -o pipefail
 
 # ─── Defaults / args ────────────────────────────────────────────────────────
 ENV_NAME=""
