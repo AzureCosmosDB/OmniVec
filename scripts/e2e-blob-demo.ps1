@@ -183,7 +183,28 @@ if (-not $COSMOS_ENDPOINT) {
 }
 
 # External IP — omnivec-api is ClusterIP; go through omnivec-web which proxies /api/*
+# Ensure kubectl is available; install via 'az aks install-cli' if missing.
+if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+    $kubectlLocal = Join-Path $HOME ".azure-kubectl/kubectl"
+    if (Test-Path $kubectlLocal) {
+        $env:PATH = "$(Split-Path $kubectlLocal)" + [IO.Path]::PathSeparator + $env:PATH
+    }
+}
+if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+    LogWarn "kubectl not found — installing via 'az aks install-cli'..."
+    $kubectlDir = Join-Path $HOME ".azure-kubectl"
+    New-Item -ItemType Directory -Force -Path $kubectlDir | Out-Null
+    az aks install-cli --install-location (Join-Path $kubectlDir "kubectl") --only-show-errors 2>&1 | Out-Null
+    $env:PATH = "$kubectlDir" + [IO.Path]::PathSeparator + $env:PATH
+    if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+        LogErr "Failed to install kubectl. Install manually and re-run."
+        exit 1
+    }
+    LogOk "kubectl installed at $kubectlDir"
+}
+
 $kubeCtx = az aks list --resource-group $RESOURCE_GROUP --query "[0].name" -o tsv
+if (-not $kubeCtx) { LogErr "No AKS cluster found in RG $RESOURCE_GROUP"; exit 1 }
 try {
     az aks get-credentials --resource-group $RESOURCE_GROUP --name $kubeCtx `
         --overwrite-existing --only-show-errors 2>&1 | Out-Null

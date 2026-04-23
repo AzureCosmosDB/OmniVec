@@ -248,8 +248,30 @@ if [ -z "$COSMOS_ENDPOINT" ]; then
   exit 1
 fi
 
-# AKS credentials
+# AKS credentials — install kubectl if missing, then fetch creds
+if ! command -v kubectl >/dev/null 2>&1; then
+  # Try the path the preprovision hook uses
+  if [ -x "$HOME/.azure-kubectl/kubectl" ]; then
+    export PATH="$HOME/.azure-kubectl:$PATH"
+  fi
+fi
+if ! command -v kubectl >/dev/null 2>&1; then
+  log_warn "kubectl not found — installing via 'az aks install-cli'..."
+  mkdir -p "$HOME/.azure-kubectl"
+  if az aks install-cli --install-location "$HOME/.azure-kubectl/kubectl" --only-show-errors >/dev/null 2>&1; then
+    export PATH="$HOME/.azure-kubectl:$PATH"
+    log_ok "kubectl installed at $HOME/.azure-kubectl/kubectl"
+  else
+    log_err "Failed to install kubectl. Install manually and re-run."
+    exit 1
+  fi
+fi
+
 AKS_NAME=$(az aks list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv 2>/dev/null)
+if [ -z "$AKS_NAME" ]; then
+  log_err "No AKS cluster found in RG $RESOURCE_GROUP"
+  exit 1
+fi
 az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$AKS_NAME" \
   --overwrite-existing --only-show-errors >/dev/null 2>&1 || true
 
