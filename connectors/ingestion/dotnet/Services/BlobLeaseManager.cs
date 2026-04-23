@@ -182,11 +182,11 @@ public class BlobLeaseManager
 
     private class LeaseDoc
     {
-        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        [Newtonsoft.Json.JsonProperty("id")]
         public string Id { get; set; } = "";
-        [System.Text.Json.Serialization.JsonPropertyName("ownerId")]
+        [Newtonsoft.Json.JsonProperty("ownerId")]
         public string OwnerId { get; set; } = "";
-        [System.Text.Json.Serialization.JsonPropertyName("expiresAt")]
+        [Newtonsoft.Json.JsonProperty("expiresAt")]
         public string ExpiresAt { get; set; } = "";
     }
 }
