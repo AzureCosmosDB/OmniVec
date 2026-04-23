@@ -371,10 +371,10 @@ if [ -z "$DEMO_SA" ]; then
   [ -z "$SUFFIX" ] && SUFFIX=$(printf '%s' "${ENV_EFFECTIVE}-$(date +%s%N)" | shasum 2>/dev/null | cut -c1-10)
   [ -z "$SUFFIX" ] && SUFFIX=$(date +%s | tail -c 11)
   DEMO_SA="omnivecdemo$SUFFIX"
-  DEMO_LOC=$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)
+  DEMO_LOC="${DEMO_SA_LOCATION:-$(az group show -n "$RESOURCE_GROUP" --query location -o tsv 2>/dev/null)}"
   [ -z "$DEMO_LOC" ] && DEMO_LOC="eastus2"
   log "Creating demo storage account $DEMO_SA in $RESOURCE_GROUP ($DEMO_LOC)..."
-  if ! az storage account create \
+  DEMO_ERR=$(az storage account create \
         --name "$DEMO_SA" \
         --resource-group "$RESOURCE_GROUP" \
         --location "$DEMO_LOC" \
@@ -383,10 +383,16 @@ if [ -z "$DEMO_SA" ]; then
         --allow-shared-key-access false \
         --allow-blob-public-access false \
         --min-tls-version TLS1_2 \
-        --only-show-errors >/dev/null 2>&1; then
-    log_err "Failed to create $DEMO_SA (check policy/quota)"
+        --only-show-errors 2>&1 >/dev/null) || {
+    log_err "Failed to create $DEMO_SA"
+    echo "$DEMO_ERR" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  Hints:" >&2
+    echo "   - Name collision: try deleting any soft-deleted SA with this prefix" >&2
+    echo "   - Region quota: try a different region with DEMO_SA_LOCATION=westus2" >&2
+    echo "   - Permissions: you need 'Contributor' on $RESOURCE_GROUP" >&2
     exit 1
-  fi
+  }
   log_ok "Created SA: $DEMO_SA (will be removed by 'azd down')"
 else
   log_ok "Using existing demo SA: $DEMO_SA"
