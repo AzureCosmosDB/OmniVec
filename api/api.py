@@ -419,6 +419,12 @@ EVENT_QUEUE: asyncio.Queue = None
 # =============================================================================
 
 DOCGROK_URL = os.getenv("DOCGROK_URL", "http://docgrok:80")
+PIPELINE_WORKER_URL = os.getenv("PIPELINE_WORKER_URL", "http://pipeline-worker-svc:8080")
+# When True, all pipeline-worker reads/writes go through the docgrok router so
+# every request leaves api/ via a single hop. The router proxies /transforms*,
+# /pipeline/recipe, /pipeline/stages/catalog, /process, /process/blob.
+ROUTE_PIPELINE_VIA_DOCGROK = os.getenv("ROUTE_PIPELINE_VIA_DOCGROK", "true").lower() == "true"
+PIPELINE_WORKER_BASE = DOCGROK_URL if ROUTE_PIPELINE_VIA_DOCGROK else PIPELINE_WORKER_URL
 SEARCH_SERVICE_URL = os.getenv("SEARCH_SERVICE_URL", "http://omnivec-search").rstrip("/")
 SEARCH_INTERNAL_TOKEN = os.getenv("SEARCH_INTERNAL_TOKEN", "")
 
@@ -1997,7 +2003,183 @@ async def _validate_docgrok_ref(docgrok_ref: str) -> str:
         # Mock pipelines for testing
         return docgrok_ref
     else:
-        raise HTTPException(status_code=400, detail=f"Invalid DocGrok reference '{docgrok_ref}'. Must be a model ID (mdl-ext-*, mdl-native-*) or transform pipeline (trp-*)")
+        # Treat any other ref as a transform-pipeline name (e.g. built-ins
+        # like image-transform / video-transform / text-transform). Validate
+        # by asking the docgrok router.
+        try:
+            resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms/{docgrok_ref}", timeout=5.0)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Invalid DocGrok reference '{docgrok_ref}'. Must be a model ID (mdl-*), trp-*, or known transform-pipeline name.")
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"Cannot connect to docgrok: {str(e)}")
+        return docgrok_ref
+
+
+async def _resolve_docgrok_output_dim(docgrok_ref: str) -> Optional[int]:
+    """Resolve the embedding dimension that the given pipeline ref will emit.
+
+    Returns None when the dim cannot be determined (e.g. a text/pdf transform
+    whose embed-stage model_id is decided at runtime). When None, the caller
+    should not enforce a dim match at pipeline-creation time."""
+    if docgrok_ref.startswith("mdl-"):
+        store = get_store()
+        try:
+            doc = await asyncio.to_thread(store.get, docgrok_ref, "docgrok_model")
+            if doc:
+                d = doc.get("dimensions") or doc.get("embedding_dim")
+                if d:
+                    return int(d)
+        except Exception:
+            pass
+        return None
+    if docgrok_ref in ("mock-embedding", "mock-1536"):
+        try:
+            return int(os.getenv("MOCK_EMBEDDING_DIM", "1536"))
+        except Exception:
+            return 1536
+    # Transform pipeline by name — ask the router. Built-ins like
+    # image-transform / video-transform declare `output_dimensions: 768`.
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms/{docgrok_ref}", timeout=5.0)
+        if resp.status_code == 200:
+            tdef = resp.json() or {}
+            d = tdef.get("output_dimensions")
+            if d:
+                return int(d)
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_destination_dim(dest_doc: Optional[dict], vector_index_path: Optional[str]) -> Optional[int]:
+    """Return the declared dim of a destination's vector_index_path (or
+    its top-level vector_dimensions). None if not declared."""
+    if not dest_doc:
+        return None
+    cfg = dest_doc.get("config", {}) or {}
+    if vector_index_path:
+        target = vector_index_path.lstrip("/")
+        for vi in cfg.get("vector_indexes", []) or []:
+            if (vi.get("path") or "").lstrip("/") == target:
+                d = vi.get("dimensions")
+                if d:
+                    return int(d)
+    d = cfg.get("vector_dimensions")
+    return int(d) if d else None
+
+
+async def _enforce_pipeline_dim_match(docgrok_ref: str, dest_doc: dict, vector_index_path: str) -> None:
+    """Raise 400 if the model/transform output dim is known and conflicts with
+    the destination's declared vector dim. If either side is unknown, allow
+    (worker's runtime check will skip mismatched rows)."""
+    pipe_dim = await _resolve_docgrok_output_dim(docgrok_ref)
+    dest_dim = _resolve_destination_dim(dest_doc, vector_index_path)
+    if pipe_dim and dest_dim and int(pipe_dim) != int(dest_dim):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Embedding-dim mismatch: model/transform '{docgrok_ref}' emits "
+                f"{pipe_dim}-dim vectors but destination's vector index "
+                f"'/{(vector_index_path or '').lstrip('/')}' expects {dest_dim}-dim. "
+                f"Pick a destination/index whose dimensions match, or use a different "
+                f"model/transform."
+            ),
+        )
+
+
+def _is_inline_compatible(store, pipeline_sources, dest_doc) -> bool:
+    """Return True iff every source points at the same physical store as the destination."""
+    if not dest_doc:
+        return False
+    dtype = dest_doc.get("type")
+    dcfg = dest_doc.get("config", {}) or {}
+    for ps in pipeline_sources or []:
+        sid = ps.source_id if hasattr(ps, "source_id") else (ps.get("source_id") if isinstance(ps, dict) else None)
+        if not sid:
+            return False
+        src_doc = store.get(sid, "source")
+        if not src_doc:
+            return False
+        stype = src_doc.get("type")
+        scfg = src_doc.get("config", {}) or {}
+        if dtype == "cosmosdb-vector" and stype == "cosmosdb":
+            if not (
+                (scfg.get("endpoint") or "").rstrip("/") == (dcfg.get("endpoint") or "").rstrip("/")
+                and scfg.get("database") == dcfg.get("database")
+                and scfg.get("container") == dcfg.get("container")
+            ):
+                return False
+        elif dtype == "pgvector" and stype == "pgvector":
+            if not (
+                scfg.get("host") == dcfg.get("host")
+                and scfg.get("database") == dcfg.get("database")
+                and scfg.get("table") == dcfg.get("table")
+            ):
+                return False
+        else:
+            return False
+    return True
+
+
+def _require_inline_compatible(store, pipeline_sources, dest_doc):
+    """Raise 400 unless every source points at the same physical store as the
+    destination. Inline processing writes embeddings back into the source docs
+    in-place, so the source container/table must equal the destination's."""
+    if not dest_doc:
+        return
+    dtype = dest_doc.get("type")
+    dcfg = dest_doc.get("config", {}) or {}
+    for ps in pipeline_sources or []:
+        sid = ps.source_id if hasattr(ps, "source_id") else (ps.get("source_id") if isinstance(ps, dict) else None)
+        if not sid:
+            continue
+        src_doc = store.get(sid, "source")
+        if not src_doc:
+            continue
+        stype = src_doc.get("type")
+        scfg = src_doc.get("config", {}) or {}
+
+        if dtype == "cosmosdb-vector" and stype == "cosmosdb":
+            same = (
+                (scfg.get("endpoint") or "").rstrip("/") == (dcfg.get("endpoint") or "").rstrip("/")
+                and scfg.get("database") == dcfg.get("database")
+                and scfg.get("container") == dcfg.get("container")
+            )
+            if not same:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Inline processing mode requires the source and destination to point at the same "
+                        f"Cosmos DB container. Source '{sid}' -> {scfg.get('database')}/{scfg.get('container')} "
+                        f"differs from destination {dcfg.get('database')}/{dcfg.get('container')}. "
+                        "Use 'queue' mode, or align source/destination to the same container."
+                    ),
+                )
+        elif dtype == "pgvector" and stype == "pgvector":
+            same = (
+                scfg.get("host") == dcfg.get("host")
+                and scfg.get("database") == dcfg.get("database")
+                and scfg.get("table") == dcfg.get("table")
+            )
+            if not same:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Inline processing mode requires source and destination to point at the same "
+                        f"pgvector table. Source '{sid}' -> {scfg.get('database')}.{scfg.get('table')} "
+                        f"differs from destination {dcfg.get('database')}.{dcfg.get('table')}."
+                    ),
+                )
+        else:
+            # Cross-store combinations (e.g., cosmosdb source -> pgvector dest,
+            # blob source -> anything) cannot be inline.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Inline processing mode is not supported when source type '{stype}' differs from "
+                    f"destination type '{dtype}'. Use 'queue' processing mode instead."
+                ),
+            )
 
 
 @app.post("/api/pipelines")
@@ -2013,7 +2195,6 @@ async def create_pipeline(req: CreatePipelineRequest):
     # Reject queue mode when Service Bus wasn't provisioned (blob source disabled)
     if str(req.processing_mode or "").lower() == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
-
     # Validate sources exist
     for ps in req.sources:
         if not store.get(ps.source_id, "source"):
@@ -2030,6 +2211,24 @@ async def create_pipeline(req: CreatePipelineRequest):
             detail=f"Destination '{req.destination_id}' not found"
         )
 
+    # Reject inline mode when source and destination are different stores.
+    # Inline mode writes embeddings back to source docs in-place, so the source
+    # container/table must be the same physical location as the destination.
+    if str(req.processing_mode or "").lower() == "inline":
+        _require_inline_compatible(store, req.sources, dest_doc)
+
+    # Reject queue mode when source and destination ARE the same store.
+    # Same-store pipelines must use inline (queue would be redundant).
+    if str(req.processing_mode or "").lower() == "queue":
+        if _is_inline_compatible(store, req.sources, dest_doc):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Queue processing mode cannot be used when source and destination point at the "
+                    "same container/table. Use 'inline' mode instead."
+                ),
+            )
+
     # Validate vector_index_path exists in destination's vector policies
     dest_config = dest_doc.get("config", {})
     vector_indexes = dest_config.get("vector_indexes", [])
@@ -2043,6 +2242,10 @@ async def create_pipeline(req: CreatePipelineRequest):
 
     # Validate docgrok_pipeline (must be a valid model ID or transform pipeline)
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
+
+    # Enforce dim match between model/transform output and destination.
+    dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    await _enforce_pipeline_dim_match(resolved_pipeline, dest_doc, req.vector_index_path)
 
     # Validate content strategy and chunk config
     content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else "truncate"
@@ -2094,6 +2297,23 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if str(req.processing_mode or "").lower() == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
 
+    # Reject inline mode when source/destination aren't the same store.
+    if str(req.processing_mode or "").lower() == "inline":
+        dest_doc_for_mode = await asyncio.to_thread(store.get, req.destination_id, "destination")
+        _require_inline_compatible(store, req.sources, dest_doc_for_mode)
+
+    # Reject queue mode when source/destination ARE the same store.
+    if str(req.processing_mode or "").lower() == "queue":
+        dest_doc_for_queue = await asyncio.to_thread(store.get, req.destination_id, "destination")
+        if _is_inline_compatible(store, req.sources, dest_doc_for_queue):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Queue processing mode cannot be used when source and destination point at the "
+                    "same container/table. Use 'inline' mode instead."
+                ),
+            )
+
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
 
     # Validate vector_index_path against destination if provided
@@ -2108,6 +2328,9 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
                     status_code=400,
                     detail=f"Vector index path '/{req.vector_index_path}' not found in destination. Available: {[f'/{p}' for p in valid_paths]}"
                 )
+
+    # Enforce dim match between model/transform output and destination.
+    await _enforce_pipeline_dim_match(resolved_pipeline, dest_doc, req.vector_index_path)
 
     pipeline = _pipeline_from_doc(doc)
 
@@ -2188,6 +2411,19 @@ def set_processing_mode(pipeline_id: str, mode: str):
     if mode == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
     pipeline = _pipeline_from_doc(doc)
+    if mode == "inline":
+        dest_doc_for_mode = store.get(pipeline.destination_id, "destination")
+        _require_inline_compatible(store, pipeline.sources, dest_doc_for_mode)
+    if mode == "queue":
+        dest_doc_for_queue = store.get(pipeline.destination_id, "destination")
+        if _is_inline_compatible(store, pipeline.sources, dest_doc_for_queue):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Queue processing mode cannot be used when source and destination point at the "
+                    "same container/table. Use 'inline' mode instead."
+                ),
+            )
     pipeline.processing_mode = mode
     pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
@@ -3964,6 +4200,226 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
 
 
 # =============================================================================
+# PLAYGROUND SEARCH
+# =============================================================================
+
+class PlaygroundSearchRequest(BaseModel):
+    query: Optional[str] = None
+    query_image_b64: Optional[str] = None
+    destination_ids: List[str]
+    top_k: int = 5
+    merge_strategy: str = "rrf"  # rrf | interleave | score
+
+
+async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Build IndexSpec[] for a set of destination ids by joining with pipelines.
+    Returns (indexes, warnings)."""
+    warnings: List[str] = []
+    indexes: List[Dict[str, Any]] = []
+    store = get_store()
+    pipeline_docs = await asyncio.to_thread(store.list, "pipeline")
+    for dest_id in destination_ids:
+        dest_doc = await asyncio.to_thread(store.get, dest_id, "destination")
+        if not dest_doc:
+            warnings.append(f"destination {dest_id} not found")
+            continue
+        matched_pip = next((pd for pd in pipeline_docs if pd.get("destination_id") == dest_id), None)
+        if not matched_pip:
+            warnings.append(f"destination {dest_id} has no pipeline (cannot embed query)")
+            continue
+        model_ref = matched_pip.get("docgrok_pipeline")
+        if not model_ref:
+            warnings.append(f"pipeline for {dest_id} has no model/pipeline reference")
+            continue
+
+        cf = ["content"]
+        sources = matched_pip.get("sources", [])
+        if sources and isinstance(sources[0], dict):
+            cf = sources[0].get("content_fields", ["content"]) or ["content"]
+
+        if model_ref.startswith("mdl-"):
+            embedding = {"policy": "model", "model_id": model_ref}
+        else:
+            embedding = {"policy": "pipeline", "pipeline": model_ref}
+        # Tag image/video transforms so the search layer routes the query
+        # through the image-embedding path (CLIP) instead of text.
+        if model_ref in ("image-transform", "video-transform"):
+            embedding["input_modality"] = "image"
+
+        dtype = dest_doc.get("type")
+        cfg = dest_doc.get("config", {}) or {}
+        # Inline processing writes embeddings to the SOURCE container in-place;
+        # the destination container stays empty. Redirect the search at the source.
+        pmode = (matched_pip.get("processing_mode") or "").lower()
+        inline_override_container = None
+        inline_override_endpoint = None
+        inline_override_database = None
+        if pmode == "inline" and dtype == "cosmosdb-vector":
+            try:
+                pip_sources = matched_pip.get("sources", []) or []
+                src_id = pip_sources[0].get("source_id") if pip_sources else None
+                if src_id:
+                    src_doc = await asyncio.to_thread(store.get, src_id, "source")
+                    scfg = (src_doc or {}).get("config", {}) or {}
+                    if (src_doc or {}).get("type") == "cosmosdb" and scfg.get("container"):
+                        inline_override_container = scfg.get("container")
+                        inline_override_endpoint = scfg.get("endpoint") or cfg.get("endpoint", "")
+                        inline_override_database = scfg.get("database") or cfg.get("database", "")
+            except Exception as e:
+                warnings.append(f"inline source lookup failed for {dest_id}: {e}")
+        if dtype == "cosmosdb-vector":
+            vf = (matched_pip.get("vector_index_path") or "").lstrip("/") or cfg.get("vector_field", "embedding")
+            # Resolve dims: prefer top-level vector_dimensions, fall back to the
+            # matching vector_indexes[].dimensions entry (that's where the UI
+            # actually stores dims for cosmosdb-vector destinations).
+            dims = cfg.get("vector_dimensions")
+            if not dims:
+                for vi in (cfg.get("vector_indexes") or []):
+                    vi_path = (vi.get("path") or "").lstrip("/")
+                    if vi_path == vf or not dims:
+                        d = vi.get("dimensions")
+                        if d:
+                            dims = d
+                            if vi_path == vf:
+                                break
+            dims = dims or 1024
+            indexes.append({
+                "id": dest_id,
+                "store": {
+                    "type": "cosmosdb",
+                    "endpoint": inline_override_endpoint or cfg.get("endpoint", ""),
+                    "database": inline_override_database or cfg.get("database", ""),
+                    "container": inline_override_container or cfg.get("container", ""),
+                    "auth": {"mode": "managed_identity"},
+                },
+                "vector": {"field": vf, "dims": dims, "metric": "cosine"},
+                "embedding": embedding,
+                "content_fields": cf,
+            })
+        elif dtype == "pgvector":
+            indexes.append({
+                "id": dest_id,
+                "store": {
+                    "type": "pgvector",
+                    "host": cfg.get("host", ""),
+                    "port": cfg.get("port", 5432),
+                    "database": cfg.get("database", ""),
+                    "user": cfg.get("user"),
+                    "password": cfg.get("password"),
+                    "ssl_mode": cfg.get("ssl_mode", "require"),
+                    "table": cfg.get("table", ""),
+                    "id_column": cfg.get("id_column", "id"),
+                    "content_column": cfg.get("content_column", "content"),
+                },
+                "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                "embedding": embedding,
+                "content_fields": cf,
+            })
+        else:
+            warnings.append(f"destination {dest_id} has unsupported type '{dtype}' for search")
+    return indexes, warnings
+
+
+@app.post("/api/playground/search")
+async def playground_search(req: PlaygroundSearchRequest):
+    """Vector search playground. Resolves destination_ids to IndexSpec[] and
+    delegates to the omnivec-search service."""
+    import time
+    has_text = bool(req.query and req.query.strip())
+    has_image = bool(req.query_image_b64)
+    if not has_text and not has_image:
+        raise HTTPException(status_code=400, detail="query or query_image_b64 is required")
+    if not req.destination_ids:
+        raise HTTPException(status_code=400, detail="destination_ids is required")
+    if not SEARCH_INTERNAL_TOKEN:
+        raise HTTPException(status_code=503, detail="Search service not configured (SEARCH_INTERNAL_TOKEN missing)")
+
+    indexes, warnings = await _build_index_specs(req.destination_ids)
+    if not indexes:
+        raise HTTPException(
+            status_code=400,
+            detail="No searchable indexes resolved from destination_ids: " + "; ".join(warnings))
+
+    # Map UI merge strategy to search-service merge spec.
+    # Search service accepts: rrf | score | round_robin | per_index
+    # UI uses "interleave" as an alias for round_robin.
+    ui_strategy = (req.merge_strategy or "rrf").lower()
+    strategy_map = {
+        "rrf": "rrf",
+        "score": "score",
+        "interleave": "round_robin",
+        "round_robin": "round_robin",
+        "per_index": "per_index",
+    }
+    merge_strategy = strategy_map.get(ui_strategy, "rrf")
+    merge_spec = {"strategy": merge_strategy}
+
+    # Build lookup of destination metadata for enriching the response with names.
+    store = get_store()
+    dest_name_map: Dict[str, str] = {}
+    for dest_id in req.destination_ids:
+        dd = await asyncio.to_thread(store.get, dest_id, "destination")
+        if dd:
+            dest_name_map[dest_id] = dd.get("name") or dest_id
+
+    payload = {
+        "query": req.query,
+        "query_image_b64": req.query_image_b64,
+        "top_k": req.top_k,
+        "indexes": indexes,
+        "merge": merge_spec,
+        "include": {"vectors": False, "scores": True},
+        "request_id": f"pg-{int(time.time())}",
+    }
+
+    try:
+        sresp = await http_client.post(
+            f"{SEARCH_SERVICE_URL}/search",
+            json=payload,
+            headers={"Authorization": f"Bearer {SEARCH_INTERNAL_TOKEN}"},
+            timeout=30.0,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Search service unreachable: {e}")
+
+    if sresp.status_code != 200:
+        raise HTTPException(
+            status_code=sresp.status_code,
+            detail=f"Search service error: {sresp.text[:500]}")
+
+    data = sresp.json() or {}
+    results = data.get("results", []) or []
+    per_index = data.get("per_index", []) or []
+    timing = data.get("timing_ms", {}) or {}
+
+    # Enrich each result with a friendly index_name (destination name).
+    for r in results:
+        idx_id = r.get("index_id")
+        if idx_id and idx_id in dest_name_map:
+            r["index_name"] = dest_name_map[idx_id]
+
+    indexes_searched = [
+        {
+            "index_id": pi.get("index_id"),
+            "index_name": dest_name_map.get(pi.get("index_id"), pi.get("index_id")),
+            "result_count": pi.get("result_count", 0),
+            "search_time_ms": pi.get("search_ms", 0),
+            "error": pi.get("error"),
+        }
+        for pi in per_index
+    ]
+
+    merged_warnings = warnings + (data.get("warnings") or [])
+
+    return {
+        "results": results,
+        "indexes_searched": indexes_searched,
+        "total_search_time_ms": timing.get("total", 0),
+        "warnings": merged_warnings,
+    }
+
+
+# =============================================================================
 # DOCGROK PROXY
 # =============================================================================
 
@@ -3985,6 +4441,206 @@ async def get_docgrok_pipeline_options():
         return resp.json()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"DocGrok error: {str(e)}")
+
+
+@app.get("/api/docgrok/pipelines/default-recipe")
+async def get_docgrok_default_recipe():
+    """Return the built-in pipeline-worker default declarative pipeline.
+
+    A pipeline is an ordered list of high-level stages (filter, extract,
+    chunk, embed, …) drawn from /api/docgrok/pipelines/stage-catalog,
+    each with its own config block.
+    """
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/pipeline/recipe", timeout=5.0)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code,
+                                detail=f"pipeline-worker /pipeline/recipe returned {resp.status_code}")
+        return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"pipeline-worker error: {str(e)}")
+
+
+@app.get("/api/docgrok/pipelines/stage-catalog")
+async def get_docgrok_stage_catalog():
+    """Return the catalog of reusable transformation stage types and
+    their config schemas (filter, extract, chunk, embed)."""
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/pipeline/stages/catalog", timeout=5.0)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code,
+                                detail=f"pipeline-worker /pipeline/stages/catalog returned {resp.status_code}")
+        return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"pipeline-worker error: {str(e)}")
+
+
+@app.get("/api/docgrok/transforms")
+async def list_docgrok_transforms():
+    """Return all transform pipelines: built-ins from pipeline-worker
+    merged with user-defined transforms persisted in Cosmos.
+
+    Each transform is atomic — single input shape (`applies_to`),
+    terminal `embed` stage, one vector schema. Ingestion pipelines bind
+    an ordered list of transforms; the dispatcher picks the first
+    matching one for each blob.
+    """
+    builtins: list = []
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms", timeout=5.0)
+        if resp.status_code == 200:
+            j = resp.json()
+            builtins = j.get("transforms") or []
+            for t in builtins:
+                t["source"] = "builtin"
+    except Exception as e:
+        logger.warning("pipeline-worker /transforms unreachable: %s", e)
+
+    user: list = []
+    try:
+        store = get_store()
+        docs = await asyncio.to_thread(store.list, "docgrok_transform")
+        for d in docs or []:
+            d.pop("doc_type", None)
+            d["source"] = "user"
+            user.append(d)
+    except Exception as e:
+        logger.warning("Cosmos list docgrok_transform failed: %s", e)
+
+    return {"transforms": builtins + user, "builtin_count": len(builtins), "user_count": len(user)}
+
+
+@app.get("/api/docgrok/transforms/stage-catalog")
+async def get_docgrok_transform_stage_catalog():
+    """Catalog of reusable stage types available to transform pipelines."""
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/pipeline/stages/catalog", timeout=5.0)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=f"stage-catalog HTTP {resp.status_code}")
+        return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"pipeline-worker error: {str(e)}")
+
+
+@app.get("/api/docgrok/transforms/{name}")
+async def get_docgrok_transform(name: str):
+    """Return a single transform by name (built-in or user-defined)."""
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms/{name}", timeout=5.0)
+        if resp.status_code == 200:
+            t = resp.json()
+            t["source"] = "builtin"
+            return t
+    except Exception:
+        pass
+    try:
+        store = get_store()
+        doc = await asyncio.to_thread(store.get, name, "docgrok_transform")
+        if doc:
+            doc.pop("doc_type", None)
+            doc["source"] = "user"
+            return doc
+    except Exception as e:
+        logger.warning("Cosmos get docgrok_transform '%s' failed: %s", name, e)
+    raise HTTPException(status_code=404, detail=f"Transform '{name}' not found")
+
+
+async def _validate_user_transform(payload: dict) -> dict:
+    """Send the payload to pipeline-worker for canonical validation."""
+    try:
+        resp = await http_client.post(
+            f"{PIPELINE_WORKER_BASE}/transforms/validate", json=payload, timeout=5.0,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"pipeline-worker validate unreachable: {str(e)}")
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=400, detail=f"Invalid transform: {detail}")
+    return resp.json().get("transform") or payload
+
+
+@app.post("/api/docgrok/transforms")
+async def create_docgrok_transform(payload: dict):
+    """Create a user-defined transform pipeline. Validated by the worker
+    (last stage must be `embed`, all stage types must exist) and
+    persisted to Cosmos with doc_type=docgrok_transform."""
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    # Reject collisions with built-ins.
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms/{name}", timeout=5.0)
+        if resp.status_code == 200:
+            raise HTTPException(status_code=409, detail=f"'{name}' is a built-in transform; pick a different name")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    validated = await _validate_user_transform(payload)
+    try:
+        store = get_store()
+        doc = {
+            **validated, "id": name, "doc_type": "docgrok_transform",
+            "stored_at": datetime.utcnow().isoformat(),
+        }
+        await asyncio.to_thread(store.upsert, doc)
+        logger.info("Created user transform '%s'", name)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"persist failed: {str(e)}")
+    return {**validated, "source": "user"}
+
+
+@app.put("/api/docgrok/transforms/{name}")
+async def update_docgrok_transform(name: str, payload: dict):
+    """Update a user-defined transform. Built-ins are read-only."""
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms/{name}", timeout=5.0)
+        if resp.status_code == 200:
+            raise HTTPException(status_code=409, detail=f"'{name}' is built-in and read-only")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    payload = {**payload, "name": name}
+    validated = await _validate_user_transform(payload)
+    try:
+        store = get_store()
+        doc = {
+            **validated, "id": name, "doc_type": "docgrok_transform",
+            "stored_at": datetime.utcnow().isoformat(),
+        }
+        await asyncio.to_thread(store.upsert, doc)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"persist failed: {str(e)}")
+    return {**validated, "source": "user"}
+
+
+@app.delete("/api/docgrok/transforms/{name}")
+async def delete_docgrok_transform(name: str):
+    """Delete a user-defined transform. Built-ins cannot be deleted."""
+    try:
+        resp = await http_client.get(f"{PIPELINE_WORKER_BASE}/transforms/{name}", timeout=5.0)
+        if resp.status_code == 200:
+            raise HTTPException(status_code=409, detail=f"'{name}' is built-in and cannot be deleted")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
+        store = get_store()
+        await asyncio.to_thread(store.delete, name, "docgrok_transform")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"delete failed: {str(e)}")
+    return {"deleted": name}
 
 
 @app.get("/api/docgrok/pipelines/{name}")
