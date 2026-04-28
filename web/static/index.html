@@ -1240,19 +1240,41 @@
                 <header class="header">
                     <h2 class="header-title">Transform Pipelines</h2>
                     <div class="header-actions">
-                        <button class="btn btn-primary" disabled style="opacity:0.5;cursor:not-allowed;" title="Transform pipeline creation is disabled. Use models directly.">
+                        <button class="btn btn-primary" onclick="openDgTransformCreate()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M12 5v14"/><path d="M5 12h14"/>
                             </svg>
-                            Create Pipeline
+                            Create Transform
                         </button>
                     </div>
                 </header>
 
                 <div class="content">
-                    <div id="dg-pipelines-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px;">
-                        <div style="text-align: center; padding: 60px; color: var(--text-tertiary);">Loading pipelines...</div>
+                    <div id="dg-pipelines-list-view">
+                        <div class="card">
+                            <div class="card-body" style="padding: 0;">
+                                <div class="table-container">
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>Transform</th>
+                                                <th>Source</th>
+                                                <th>Applies To</th>
+                                                <th>Stages</th>
+                                                <th>Version</th>
+                                                <th>Description</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="dg-pipelines-tbody">
+                                            <tr><td colspan="7" style="text-align:center;color:var(--text-tertiary);">Loading transforms...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
                     </div>
+                    <div id="dg-pipelines-detail-view" style="display:none;"></div>
                 </div>
             </section>
 
@@ -1373,6 +1395,12 @@
                                         <option value="round_robin">Round Robin</option>
                                         <option value="per_index">Per-Index Cap</option>
                                     </select>
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
+                                    <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Image:</label>
+                                    <input type="file" id="playground-image-file" accept="image/*" style="font-size: 12px;" onchange="onPlaygroundImageChange(event)">
+                                    <span id="playground-image-status" style="font-size: 12px; color: var(--text-tertiary);"></span>
+                                    <button type="button" class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;" onclick="clearPlaygroundImage()">Clear</button>
                                 </div>
                                 <div id="playground-status" style="color: var(--text-tertiary); font-size: 13px;"></div>
                             </div>
@@ -1966,6 +1994,12 @@
                             </svg>
                             <span>Destination</span>
                         </div>
+                        <div class="pipeline-step" onclick="showPipelineStep('options')" id="step-options" style="padding: 12px 20px; cursor: pointer; display: flex; align-items: center; gap: 10px; color: var(--text-secondary); border-left: 3px solid transparent;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                                <path d="M12 20v-6M6 20V10M18 20V4"/>
+                            </svg>
+                            <span>Options</span>
+                        </div>
                     </div>
 
                     <!-- Right Content Area -->
@@ -1979,71 +2013,6 @@
                             <div class="form-group">
                                 <label class="form-label">Description (optional)</label>
                                 <textarea class="form-input" name="description" placeholder="Describe what this pipeline does..." rows="3" style="resize: vertical;"></textarea>
-                            </div>
-                            <div class="form-group">
-                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                    <input type="checkbox" name="process_existing" checked>
-                                    <span>Process existing documents on creation</span>
-                                </label>
-                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                    If enabled, all existing documents in the source will be processed immediately
-                                </small>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Content Strategy</label>
-                                <select class="form-input" name="content_strategy" onchange="toggleChunkConfig(this.value)">
-                                    <option value="truncate">Truncate (single vector per document)</option>
-                                    <option value="chunk">Chunk (split into overlapping chunks)</option>
-                                </select>
-                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                    Truncate embeds full text as one vector. Chunk splits text and creates multiple vector documents.
-                                </small>
-                            </div>
-                            <div id="chunk-config-section" style="display: none; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); margin-top: 8px;">
-                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 10px; font-weight: 600; letter-spacing: 0.5px;">Chunk Settings</div>
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                                    <div class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">Chunk Size (chars)</label>
-                                        <input type="number" class="form-input" name="chunk_size" value="1000" min="100" max="10000">
-                                    </div>
-                                    <div class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">Chunk Overlap (chars)</label>
-                                        <input type="number" class="form-input" name="chunk_overlap" value="200" min="0" max="2000">
-                                    </div>
-                                </div>
-                                <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
-                                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                        <input type="checkbox" name="store_text">
-                                        <span>Store extracted text in vector documents</span>
-                                    </label>
-                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                        Each chunk document will include the chunk text alongside the embedding vector
-                                    </small>
-                                </div>
-                                <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
-                                    <label class="form-label">Chunk Doc ID Pattern</label>
-                                    <input type="text" class="form-input" name="chunk_doc_id_pattern" value="{source}-chunk-{chunk}" placeholder="{source}-chunk-{chunk}">
-                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                        Variables: <code>{source}</code> (filename), <code>{chunk}</code> (index), <code>{source_hash}</code>, <code>{pipeline}</code>
-                                    </small>
-                                </div>
-                            </div>
-                            <div class="form-group" style="margin-top: 16px;">
-                                <label class="form-label">Processing Mode</label>
-                                <select class="form-input" name="processing_mode" id="pipeline-processing-mode">
-                                    <option value="inline">Inline (changefeed embeds directly — recommended)</option>
-                                    <option value="queue">Queue (jobs created, worker processes)</option>
-                                </select>
-                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                    Queue mode: Change feed creates jobs, pipeline worker processes them. Inline mode: Change feed patches documents directly (faster for same source/destination).
-                                </small>
-                            </div>
-                            <div class="form-group" id="doc-id-pattern-group" style="display: none;">
-                                <label class="form-label">Document ID Pattern</label>
-                                <input type="text" class="form-input" name="doc_id_pattern" value="{source}" placeholder="{source}">
-                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                    Target doc name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
-                                </small>
                             </div>
                         </div>
 
@@ -2268,6 +2237,75 @@
                                         <div id="pl-dest-test-result" style="margin-top: 8px; flex: 1; overflow-y: auto; max-height: 120px; font-size: 12px;"></div>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+
+                        <!-- Options Step -->
+                        <div id="pipeline-step-options" class="pipeline-content" style="display: none;">
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" name="process_existing" checked>
+                                    <span>Process existing documents on creation</span>
+                                </label>
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    If enabled, all existing documents in the source will be processed immediately
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Content Strategy</label>
+                                <select class="form-input" name="content_strategy" onchange="toggleChunkConfig(this.value)">
+                                    <option value="truncate">Truncate (single vector per document)</option>
+                                    <option value="chunk">Chunk (split into overlapping chunks)</option>
+                                </select>
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    Truncate embeds full text as one vector. Chunk splits text and creates multiple vector documents.
+                                </small>
+                            </div>
+                            <div id="chunk-config-section" style="display: none; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); margin-top: 8px;">
+                                <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 10px; font-weight: 600; letter-spacing: 0.5px;">Chunk Settings</div>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label class="form-label">Chunk Size (chars)</label>
+                                        <input type="number" class="form-input" name="chunk_size" value="1000" min="100" max="10000">
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label class="form-label">Chunk Overlap (chars)</label>
+                                        <input type="number" class="form-input" name="chunk_overlap" value="200" min="0" max="2000">
+                                    </div>
+                                </div>
+                                <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
+                                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                        <input type="checkbox" name="store_text">
+                                        <span>Store extracted text in vector documents</span>
+                                    </label>
+                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                        Each chunk document will include the chunk text alongside the embedding vector
+                                    </small>
+                                </div>
+                                <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
+                                    <label class="form-label">Chunk Doc ID Pattern</label>
+                                    <input type="text" class="form-input" name="chunk_doc_id_pattern" value="{source}-chunk-{chunk}" placeholder="{source}-chunk-{chunk}">
+                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                        Variables: <code>{source}</code> (filename), <code>{chunk}</code> (index), <code>{source_hash}</code>, <code>{pipeline}</code>
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="form-group" style="margin-top: 16px;">
+                                <label class="form-label">Processing Mode</label>
+                                <select class="form-input" name="processing_mode" id="pipeline-processing-mode">
+                                    <option value="inline">Inline (changefeed embeds directly — recommended)</option>
+                                    <option value="queue">Queue (jobs created, worker processes)</option>
+                                </select>
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    Queue mode: Change feed creates jobs, pipeline worker processes them. Inline mode: Change feed patches documents directly (faster for same source/destination).
+                                </small>
+                            </div>
+                            <div class="form-group" id="doc-id-pattern-group" style="display: none;">
+                                <label class="form-label">Document ID Pattern</label>
+                                <input type="text" class="form-input" name="doc_id_pattern" value="{source}" placeholder="{source}">
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    Target doc name in destination. Variables: <code>{source}</code> (filename), <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
+                                </small>
                             </div>
                         </div>
                     </div>
@@ -2558,6 +2596,48 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('dg-pipeline-modal')">Cancel</button>
                 <button class="btn btn-primary" onclick="saveDgPipeline()">Save Pipeline</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="dg-transform-modal">
+        <div class="modal" style="max-width: 760px;">
+            <div class="modal-header">
+                <h3 class="modal-title" id="dg-tx-modal-title">Create Transform Pipeline</h3>
+                <button class="modal-close" onclick="closeModal('dg-transform-modal')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                        <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="dg-transform-form" onsubmit="event.preventDefault();saveDgTransform();">
+                    <div class="form-group">
+                        <label class="form-label">Name <span style="color:var(--danger);">*</span></label>
+                        <input type="text" class="form-input" id="dg-tx-name" placeholder="e.g. my-pdf-transform" required>
+                        <div style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Lowercase letters, digits and dashes. Must not collide with a built-in. Cannot be changed after creation.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Description</label>
+                        <input type="text" class="form-input" id="dg-tx-description" placeholder="What does this transform do?">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Applies to (file extensions)</label>
+                        <input type="text" class="form-input" id="dg-tx-extensions" placeholder=".pdf, .txt, .md">
+                        <div style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Comma-separated. Each must start with a dot. The dispatcher picks the first transform whose list matches the input file.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Stages</label>
+                        <div id="dg-tx-stages" style="display:flex;flex-direction:column;gap:10px;"></div>
+                        <button type="button" class="btn btn-secondary" style="width:100%;margin-top:10px;border-style:dashed;" onclick="addDgTxStage()">+ Add Stage</button>
+                        <div style="font-size:11px;color:var(--text-tertiary);margin-top:6px;">The last stage must be of type <code>embed</code>. Stage order = execution order.</div>
+                    </div>
+                    <div id="dg-tx-error" style="display:none;color:var(--danger);font-size:13px;margin-top:8px;padding:8px 12px;background:rgba(239,68,68,0.1);border-radius:6px;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('dg-transform-modal')">Cancel</button>
+                <button class="btn btn-primary" id="dg-tx-save-btn" onclick="saveDgTransform()">Create Transform</button>
             </div>
         </div>
     </div>
@@ -5769,11 +5849,19 @@
             // Both must be selected to evaluate
             const bothSelected = srcObj && destObj;
 
-            const sameContainer = bothSelected &&
+            const sameCosmosContainer = bothSelected &&
                 srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
-                srcObj.config?.endpoint === destObj.config?.endpoint &&
+                (srcObj.config?.endpoint || '').replace(/\/$/,'') === (destObj.config?.endpoint || '').replace(/\/$/,'') &&
                 srcObj.config?.database === destObj.config?.database &&
                 srcObj.config?.container === destObj.config?.container;
+
+            const samePgvectorTable = bothSelected &&
+                srcObj.type === 'postgresql' && destObj.type === 'pgvector' &&
+                srcObj.config?.host === destObj.config?.host &&
+                srcObj.config?.database === destObj.config?.database &&
+                srcObj.config?.table === destObj.config?.table;
+
+            const sameContainer = sameCosmosContainer || samePgvectorTable;
 
             indicator.style.display = sameContainer ? 'block' : 'none';
 
@@ -5784,6 +5872,28 @@
                     docIdGroup.style.display = 'none';  // Hide until both selected
                 } else {
                     docIdGroup.style.display = sameContainer ? 'none' : 'block';
+                }
+            }
+
+            // Enforce processing-mode compatibility based on source/destination:
+            //   not both selected -> leave both enabled (user hasn't decided yet)
+            //   same store        -> only 'inline' allowed (queue is redundant)
+            //   diff stores       -> only 'queue' allowed (inline cannot move data)
+            const pmSelect = document.getElementById('pipeline-processing-mode');
+            if (pmSelect) {
+                const inlineOpt = pmSelect.querySelector('option[value="inline"]');
+                const queueOpt = pmSelect.querySelector('option[value="queue"]');
+                if (!bothSelected) {
+                    if (inlineOpt) inlineOpt.disabled = false;
+                    if (queueOpt) queueOpt.disabled = false;
+                } else if (sameContainer) {
+                    if (inlineOpt) inlineOpt.disabled = false;
+                    if (queueOpt) queueOpt.disabled = true;
+                    if (pmSelect.value !== 'inline') pmSelect.value = 'inline';
+                } else {
+                    if (inlineOpt) inlineOpt.disabled = true;
+                    if (queueOpt) queueOpt.disabled = false;
+                    if (pmSelect.value !== 'queue') pmSelect.value = 'queue';
                 }
             }
         }
@@ -6081,8 +6191,13 @@
 
             // Update buttons
             document.getElementById('pipeline-prev-btn').style.display = step === 'general' ? 'none' : 'inline-flex';
-            document.getElementById('pipeline-next-btn').style.display = step === 'destination' ? 'none' : 'inline-flex';
-            document.getElementById('pipeline-create-btn').style.display = step === 'destination' ? 'inline-flex' : 'none';
+            document.getElementById('pipeline-next-btn').style.display = step === 'options' ? 'none' : 'inline-flex';
+            document.getElementById('pipeline-create-btn').style.display = step === 'options' ? 'inline-flex' : 'none';
+
+            // Re-apply source/destination compatibility rules whenever the
+            // user lands on any step — this keeps the processing-mode dropdown
+            // correct even if the user backtracks from destination to general.
+            try { updateSameContainerIndicator(); } catch (_) {}
         }
 
         function nextPipelineStep() {
@@ -6110,10 +6225,15 @@
                 // After showing destination step, check for same container indicator
                 updateSameContainerIndicator();
             }
+            else if (currentPipelineStep === 'destination') {
+                showPipelineStep('options');
+                updateSameContainerIndicator();
+            }
         }
 
         function prevPipelineStep() {
-            if (currentPipelineStep === 'destination') showPipelineStep('transform');
+            if (currentPipelineStep === 'options') showPipelineStep('destination');
+            else if (currentPipelineStep === 'destination') showPipelineStep('transform');
             else if (currentPipelineStep === 'transform') showPipelineStep('source');
             else if (currentPipelineStep === 'source') showPipelineStep('general');
         }
@@ -6236,7 +6356,9 @@
                     id_column: formData.get('id_column') || 'id',
                     timestamp_column: formData.get('timestamp_column') || 'updated_at',
                     poll_interval_seconds: parseInt(formData.get('poll_interval_seconds')) || 60,
-                    ssl_mode: 'require'
+                    user: formData.get('user') || '',
+                    password: formData.get('password') || '',
+                    ssl_mode: formData.get('ssl_mode') || 'require'
                 };
             }
 
@@ -6283,8 +6405,10 @@
                     database: formData.get('database'),
                     table: formData.get('table'),
                     vector_column: formData.get('vector_column') || 'embedding',
-                    vector_dimensions: parseInt(formData.get('vector_dimensions')) || 1024,
-                    index_type: formData.get('index_type') || 'ivfflat',
+                    content_column: formData.get('content_column') || 'content',
+                    id_column: formData.get('id_column') || 'id',
+                    vector_dimensions: parseInt(formData.get('vector_dimensions')) || 1536,
+                    index_type: formData.get('index_type') || 'hnsw',
                     user: formData.get('user') || '',
                     password: formData.get('password') || '',
                     ssl_mode: formData.get('ssl_mode') || 'require'
@@ -6690,6 +6814,25 @@
                         <label class="form-label">Poll Interval (seconds)</label>
                         <input type="number" class="form-input" name="poll_interval_seconds" value="60" placeholder="60">
                     </div>
+                    <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
+                    <h5 style="margin: 0 0 12px 0; font-size: 14px;">Authentication</h5>
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-input" name="user" placeholder="postgres">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-input" name="password" placeholder="Enter password">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">SSL Mode</label>
+                        <select class="form-input" name="ssl_mode">
+                            <option value="require" selected>Require (recommended)</option>
+                            <option value="verify-full">Verify Full</option>
+                            <option value="prefer">Prefer</option>
+                            <option value="disable">Disable</option>
+                        </select>
+                    </div>
                 `;
             }
             // Reset test result when config changes
@@ -7079,14 +7222,25 @@
                         <input type="text" class="form-input" name="vector_column" value="embedding" placeholder="embedding">
                     </div>
                     <div class="form-group">
+                        <label class="form-label">Content Column</label>
+                        <input type="text" class="form-input" name="content_column" value="content" placeholder="content">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">ID Column</label>
+                        <input type="text" class="form-input" name="id_column" value="id" placeholder="id">
+                    </div>
+                    <div class="form-group">
                         <label class="form-label">Vector Dimensions</label>
-                        <input type="number" class="form-input" name="vector_dimensions" value="1024" placeholder="1024">
+                        <input type="number" class="form-input" name="vector_dimensions" value="1536" placeholder="1536">
+                        <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
+                            Must match your embedding model (e.g. 1536 for text-embedding-3-small, 3072 for text-embedding-3-large).
+                        </small>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Index Type</label>
                         <select class="form-input" name="index_type">
+                            <option value="hnsw" selected>HNSW (faster, more memory)</option>
                             <option value="ivfflat">IVFFlat (good balance)</option>
-                            <option value="hnsw">HNSW (faster, more memory)</option>
                         </select>
                     </div>
                     <hr style="border: 0; border-top: 1px solid var(--border-primary); margin: 16px 0;">
@@ -7997,63 +8151,507 @@
         }
 
         // DocGrok Transform Pipelines
+        let dgDefaultRecipe = null;
+        let dgStageCatalog = null;
+        let dgTransforms = [];
+
         async function loadDgTransformPipelines() {
             try {
-                const res = await apiFetch(`${DOCGROK_API}/pipelines`);
+                const res = await apiFetch(`${DOCGROK_API}/transforms`);
                 const data = await res.json();
-                dgTransformPipelines = data.pipelines || [];
+                dgTransforms = Array.isArray(data.transforms) ? data.transforms : [];
+
+                // Stage catalog (reusable building blocks; used by detail wizard
+                // and the create modal)
+                try {
+                    const catRes = await apiFetch(`${DOCGROK_API}/transforms/stage-catalog`);
+                    if (catRes.ok) dgStageCatalog = await catRes.json();
+                } catch (e) { dgStageCatalog = null; }
+
                 renderDgTransformPipelines();
 
-                // Also load pipeline options
                 try {
                     const optRes = await apiFetch(`${DOCGROK_API}/pipelines/options`);
                     dgPipelineOptions = await optRes.json();
                 } catch (e) {}
             } catch (err) {
-                console.error('Error loading DocGrok pipelines:', err);
+                console.error('Error loading DocGrok transforms:', err);
+                const tbody = document.getElementById('dg-pipelines-tbody');
+                if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--danger);">Failed to load transforms: ${_escape(err.message || err)}</td></tr>`;
             }
         }
 
-        function renderDgTransformPipelines() {
-            const grid = document.getElementById('dg-pipelines-grid');
+        // Tiny helpers
+        function _escape(s) {
+            return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        }
+        function _fmtVal(v) {
+            if (v === null || v === undefined) return '<span style="color:var(--text-tertiary)">null</span>';
+            if (Array.isArray(v)) return v.length ? v.map(x => `<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;font-size:11px;">${_escape(x)}</code>`).join(' ') : '<span style="color:var(--text-tertiary)">[]</span>';
+            if (typeof v === 'object') return `<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;font-size:11px;">${_escape(JSON.stringify(v))}</code>`;
+            return `<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;font-size:11px;">${_escape(v)}</code>`;
+        }
+        function _appliesToBadges(t) {
+            const exts = ((t.applies_to || {}).extensions) || [];
+            if (!exts.length) return '<span style="color:var(--text-tertiary);font-size:12px;">any</span>';
+            const shown = exts.slice(0, 4).map(e => `<code style="background:var(--bg-secondary);padding:1px 6px;border-radius:3px;font-size:11px;">${_escape(e)}</code>`).join(' ');
+            const more = exts.length > 4 ? ` <span style="font-size:11px;color:var(--text-tertiary);">+${exts.length - 4}</span>` : '';
+            return shown + more;
+        }
 
-            if (!dgTransformPipelines.length) {
-                grid.innerHTML = `
-                    <div style="text-align: center; padding: 60px; color: var(--text-tertiary); grid-column: 1 / -1;">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="64" height="64" style="margin-bottom: 16px; opacity: 0.5;">
-                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-                        </svg>
-                        <h3 style="margin-bottom: 8px;">No transform pipelines</h3>
-                        <p style="margin-bottom: 16px;">Create a pipeline to define document processing workflows</p>
-                        <button class="btn btn-primary" disabled style="opacity:0.5;cursor:not-allowed;" title="Disabled">Create Pipeline</button>
-                    </div>
-                `;
-                return;
+        function renderDgTransformPipelines() {
+            const listEl = document.getElementById('dg-pipelines-list-view');
+            const detailEl = document.getElementById('dg-pipelines-detail-view');
+            if (listEl) listEl.style.display = '';
+            if (detailEl) { detailEl.style.display = 'none'; detailEl.innerHTML = ''; }
+
+            const tbody = document.getElementById('dg-pipelines-tbody');
+            const rows = [];
+
+            for (const t of dgTransforms) {
+                const stageCount = (t.stages || []).length;
+                const isBuiltin = t.source === 'builtin';
+                const sourceBadge = isBuiltin
+                    ? '<span class="badge badge-info">System</span>'
+                    : '<span class="badge badge-success">User</span>';
+                const gradient = isBuiltin
+                    ? 'linear-gradient(135deg,var(--accent-primary,#3b82f6),#8b5cf6)'
+                    : 'linear-gradient(135deg,#10b981,#059669)';
+                const delBtn = isBuiltin ? '' :
+                    `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openDgTransformEdit('${_escape(t.name)}')" title="Edit">✎</button>
+                     <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();deleteDgTransform('${_escape(t.name)}')" title="Delete">✕</button>`;
+                rows.push(`
+                    <tr onclick="openDgPipelineWizard('${_escape(t.name)}')" style="cursor:pointer;">
+                        <td>
+                            <div style="display:flex;align-items:center;gap:12px;">
+                                <div style="width:40px;height:40px;border-radius:10px;background:${gradient};display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;">&#9881;</div>
+                                <div>
+                                    <strong>${_escape(t.name)}</strong>
+                                    <div style="font-size:11px;color:var(--text-tertiary);font-family:var(--font-mono);">${_escape(t.name)}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>${sourceBadge}</td>
+                        <td>${_appliesToBadges(t)}</td>
+                        <td><span class="mono">${stageCount}</span></td>
+                        <td>v${_escape(t.version || '1')}</td>
+                        <td style="color:var(--text-secondary);font-size:13px;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_escape(t.description || '')}</td>
+                        <td style="text-align:right;">${delBtn}</td>
+                    </tr>
+                `);
             }
 
-            grid.innerHTML = dgTransformPipelines.map(p => {
-                const stepsHtml = (p.steps || []).map((s, i) => {
-                    const label = s.function || s.model_id || s.model || 'unknown';
-                    const stepClass = s.type === 'local' ? 'badge-success' : s.type === 'api' ? 'badge-info' : 'badge-warning';
-                    return `<span class="badge ${stepClass}">${label}</span>` +
-                           (i < p.steps.length - 1 ? '<span style="color: var(--text-tertiary); margin: 0 4px;">→</span>' : '');
-                }).join('');
+            if (rows.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-tertiary);">No transforms available. Click "Create Transform" to add one.</td></tr>`;
+            } else {
+                tbody.innerHTML = rows.join('');
+            }
+        }
 
+        async function deleteDgTransform(name) {
+            if (!confirm(`Delete transform '${name}'? This cannot be undone.`)) return;
+            try {
+                const res = await apiFetch(`${DOCGROK_API}/transforms/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    const j = await res.json().catch(() => ({}));
+                    throw new Error(j.detail || `HTTP ${res.status}`);
+                }
+                await loadDgTransformPipelines();
+            } catch (e) {
+                alert(`Failed to delete: ${e.message || e}`);
+            }
+        }
+
+        // -------- Pipeline detail wizard --------
+        let dgWizardPipeline = null;
+        let dgWizardStep = 0;
+
+        function _normalizePipeline(name) {
+            const t = dgTransforms.find(x => x.name === name);
+            if (!t) return null;
+            return {
+                name: t.name,
+                version: t.version || '1.0.0',
+                description: t.description || '',
+                source: t.source || 'user',
+                applies_to: t.applies_to || {},
+                stages: (t.stages || []).map(s => ({
+                    type: s.type || 'step',
+                    name: s.name || s.type || 'step',
+                    config: s.config || {},
+                })),
+            };
+        }
+
+        function openDgPipelineWizard(name) {
+            const norm = _normalizePipeline(name);
+            if (!norm) return;
+            dgWizardPipeline = norm;
+            dgWizardStep = 1;
+            document.getElementById('dg-pipelines-list-view').style.display = 'none';
+            const detailEl = document.getElementById('dg-pipelines-detail-view');
+            detailEl.style.display = '';
+            renderDgPipelineWizard();
+        }
+
+        // -------- Create / Edit Transform modal --------
+        let dgTxStages = [];
+        let dgTxEditingName = null;  // null = create, else = edit existing user transform
+
+        function openDgTransformCreate() {
+            dgTxEditingName = null;
+            dgTxStages = [
+                { type: 'extract', config: {} },
+                { type: 'chunk', config: {} },
+                { type: 'embed', config: {} },
+            ];
+            const titleEl = document.getElementById('dg-tx-modal-title');
+            const btnEl = document.getElementById('dg-tx-save-btn');
+            if (titleEl) titleEl.textContent = 'Create Transform Pipeline';
+            if (btnEl) btnEl.textContent = 'Create Transform';
+            const nameEl = document.getElementById('dg-tx-name');
+            nameEl.value = '';
+            nameEl.disabled = false;
+            document.getElementById('dg-tx-description').value = '';
+            document.getElementById('dg-tx-extensions').value = '.pdf';
+            const errEl = document.getElementById('dg-tx-error');
+            if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+            renderDgTxStages();
+            showModal('dg-transform-modal');
+        }
+
+        function openDgTransformEdit(name) {
+            const t = dgTransforms.find(x => x.name === name);
+            if (!t) { alert(`Transform '${name}' not found`); return; }
+            if (t.source === 'builtin') {
+                alert('Built-in transforms are read-only. Create a new transform to customize.');
+                return;
+            }
+            dgTxEditingName = name;
+            dgTxStages = (t.stages || []).map(s => ({
+                type: s.type || 'extract',
+                config: s.config || {},
+            }));
+            const titleEl = document.getElementById('dg-tx-modal-title');
+            const btnEl = document.getElementById('dg-tx-save-btn');
+            if (titleEl) titleEl.textContent = `Edit Transform: ${name}`;
+            if (btnEl) btnEl.textContent = 'Save Changes';
+            const nameEl = document.getElementById('dg-tx-name');
+            nameEl.value = t.name;
+            nameEl.disabled = true;
+            document.getElementById('dg-tx-description').value = t.description || '';
+            const exts = ((t.applies_to || {}).extensions) || [];
+            document.getElementById('dg-tx-extensions').value = exts.join(', ');
+            const errEl = document.getElementById('dg-tx-error');
+            if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+            renderDgTxStages();
+            showModal('dg-transform-modal');
+        }
+
+        function _stageTypeOptions(selected) {
+            const types = (dgStageCatalog && dgStageCatalog.stages) ? Object.keys(dgStageCatalog.stages) : ['extract', 'caption', 'chunk', 'embed'];
+            return types.map(t => `<option value="${_escape(t)}" ${t === selected ? 'selected' : ''}>${_escape(t)}</option>`).join('');
+        }
+
+        function renderDgTxStages() {
+            const host = document.getElementById('dg-tx-stages');
+            if (!host) return;
+            host.innerHTML = dgTxStages.map((s, i) => {
+                const summary = (dgStageCatalog && dgStageCatalog.stages && dgStageCatalog.stages[s.type] && dgStageCatalog.stages[s.type].summary) || '';
+                const cfgJson = JSON.stringify(s.config || {}, null, 2);
+                const isLast = i === dgTxStages.length - 1;
                 return `
-                    <div class="card" style="cursor: pointer;" onclick="editDgPipeline('${p.name}')">
-                        <div class="card-body">
-                            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
-                                <strong style="font-size: 16px;">${p.name}</strong>
-                                <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); deleteDgPipeline('${p.name}')" style="color: var(--error);">Delete</button>
-                            </div>
-                            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">${p.description || ''}</p>
-                            <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">
-                                ${stepsHtml}
-                            </div>
+                    <div style="border:1px solid var(--border-primary);border-radius:8px;padding:12px;background:var(--bg-secondary);">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                            <span style="font-size:12px;color:var(--text-tertiary);min-width:40px;">#${i + 1}</span>
+                            <select class="form-input" style="flex:1;" onchange="dgTxSetType(${i}, this.value)">${_stageTypeOptions(s.type)}</select>
+                            <button class="btn btn-ghost btn-sm" onclick="dgTxMove(${i}, -1)" ${i === 0 ? 'disabled style=\"opacity:0.4;\"' : ''}>↑</button>
+                            <button class="btn btn-ghost btn-sm" onclick="dgTxMove(${i}, 1)" ${isLast ? 'disabled style=\"opacity:0.4;\"' : ''}>↓</button>
+                            <button class="btn btn-ghost btn-sm" onclick="dgTxRemove(${i})" title="Remove">✕</button>
                         </div>
+                        ${summary ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">${_escape(summary)}</div>` : ''}
+                        <label style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;">Config (JSON, leave {} for defaults)</label>
+                        <textarea id="dg-tx-cfg-${i}" class="form-input" style="font-family:var(--font-mono);font-size:12px;min-height:60px;margin-top:4px;" oninput="dgTxSetConfig(${i}, this.value)">${_escape(cfgJson)}</textarea>
                     </div>
                 `;
             }).join('');
+        }
+
+        function dgTxSetType(i, t) {
+            if (!dgTxStages[i]) return;
+            dgTxStages[i].type = t;
+            renderDgTxStages();
+        }
+        function dgTxSetConfig(i, raw) {
+            // Best-effort: store raw text; parse on save.
+            if (!dgTxStages[i]) return;
+            dgTxStages[i]._rawConfig = raw;
+        }
+        function dgTxMove(i, delta) {
+            const j = i + delta;
+            if (j < 0 || j >= dgTxStages.length) return;
+            // Persist the unsaved config text before re-render
+            for (let k = 0; k < dgTxStages.length; k++) {
+                const ta = document.getElementById(`dg-tx-cfg-${k}`);
+                if (ta) dgTxStages[k]._rawConfig = ta.value;
+            }
+            const tmp = dgTxStages[i]; dgTxStages[i] = dgTxStages[j]; dgTxStages[j] = tmp;
+            renderDgTxStages();
+        }
+        function dgTxRemove(i) {
+            for (let k = 0; k < dgTxStages.length; k++) {
+                const ta = document.getElementById(`dg-tx-cfg-${k}`);
+                if (ta) dgTxStages[k]._rawConfig = ta.value;
+            }
+            dgTxStages.splice(i, 1);
+            renderDgTxStages();
+        }
+        function addDgTxStage() {
+            for (let k = 0; k < dgTxStages.length; k++) {
+                const ta = document.getElementById(`dg-tx-cfg-${k}`);
+                if (ta) dgTxStages[k]._rawConfig = ta.value;
+            }
+            dgTxStages.push({ type: 'chunk', config: {} });
+            renderDgTxStages();
+        }
+
+        function _showTxError(msg) {
+            const el = document.getElementById('dg-tx-error');
+            if (!el) { alert(msg); return; }
+            el.textContent = msg;
+            el.style.display = '';
+        }
+
+        async function saveDgTransform() {
+            const name = (document.getElementById('dg-tx-name').value || '').trim();
+            const description = (document.getElementById('dg-tx-description').value || '').trim();
+            const extsRaw = (document.getElementById('dg-tx-extensions').value || '').trim();
+            const errEl = document.getElementById('dg-tx-error');
+            if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+            if (!name) return _showTxError('Name is required.');
+            if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) return _showTxError('Name must be alphanumeric with optional dashes.');
+
+            const extensions = extsRaw
+                ? extsRaw.split(',').map(s => s.trim()).filter(Boolean)
+                : [];
+            for (const e of extensions) {
+                if (!e.startsWith('.')) return _showTxError(`Extension '${e}' must start with a dot.`);
+            }
+
+            // Materialize stages from form (parse pending JSON edits)
+            const stages = [];
+            for (let i = 0; i < dgTxStages.length; i++) {
+                const s = dgTxStages[i];
+                let cfg = s.config || {};
+                const ta = document.getElementById(`dg-tx-cfg-${i}`);
+                const raw = ta ? ta.value : (s._rawConfig || JSON.stringify(cfg));
+                if (raw && raw.trim()) {
+                    try { cfg = JSON.parse(raw); }
+                    catch (e) { return _showTxError(`Stage #${i + 1} config is not valid JSON: ${e.message}`); }
+                }
+                if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
+                    return _showTxError(`Stage #${i + 1} config must be a JSON object.`);
+                }
+                stages.push({ type: s.type, name: s.type, config: cfg });
+            }
+            if (stages.length === 0) return _showTxError('At least one stage is required.');
+            if (stages[stages.length - 1].type !== 'embed') {
+                return _showTxError("The last stage must be of type 'embed'.");
+            }
+
+            const payload = {
+                name, description,
+                version: '1.0.0',
+                applies_to: { extensions },
+                priority: 50,
+                stages,
+            };
+
+            const isEdit = !!dgTxEditingName;
+            const url = isEdit
+                ? `${DOCGROK_API}/transforms/${encodeURIComponent(dgTxEditingName)}`
+                : `${DOCGROK_API}/transforms`;
+            const method = isEdit ? 'PUT' : 'POST';
+            try {
+                const res = await apiFetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const j = await res.json().catch(() => ({}));
+                    return _showTxError(j.detail || `HTTP ${res.status}`);
+                }
+                closeModal('dg-transform-modal');
+                await loadDgTransformPipelines();
+            } catch (e) {
+                _showTxError(`Save failed: ${e.message || e}`);
+            }
+        }
+
+        function closeDgPipelineWizard() {
+            dgWizardPipeline = null;
+            const detailEl = document.getElementById('dg-pipelines-detail-view');
+            detailEl.style.display = 'none';
+            detailEl.innerHTML = '';
+            document.getElementById('dg-pipelines-list-view').style.display = '';
+        }
+
+        function dgWizardGoto(idx) {
+            if (!dgWizardPipeline) return;
+            const total = (dgWizardPipeline.stages || []).length;
+            if (idx < 0) idx = 0;
+            if (idx > total) idx = total;
+            dgWizardStep = idx;
+            renderDgPipelineWizard();
+        }
+
+        function renderDgPipelineWizard() {
+            const detailEl = document.getElementById('dg-pipelines-detail-view');
+            if (!dgWizardPipeline) { closeDgPipelineWizard(); return; }
+            const r = dgWizardPipeline;
+            const total = (r.stages || []).length;
+            const stageBadge = { filter: 'badge-warning', extract: 'badge-info',
+                                 chunk: 'badge-success', embed: 'badge-primary',
+                                 local: 'badge-success', api: 'badge-info' };
+
+            // ---------- Section 1: General Info (always visible) ----------
+            const sourceLabel = r.source === 'builtin' || r.source === 'system' ? 'System (built-in)' : 'User-created';
+            const exts = ((r.applies_to || {}).extensions) || [];
+            const appliesHtml = exts.length
+                ? exts.map(e => `<code style="background:var(--bg-secondary);padding:1px 6px;border-radius:3px;font-size:11px;">${_escape(e)}</code>`).join(' ')
+                : '<span style="color:var(--text-tertiary);font-size:12px;">any input</span>';
+            const generalInfo = `
+                <div class="card" style="margin-bottom:20px;">
+                    <div class="card-body">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                            <strong style="font-size:15px;">General info</strong>
+                            <span class="badge badge-success">Active</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;">
+                            <div><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Name</div><div style="font-size:14px;">${_escape(r.name)}</div></div>
+                            <div><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Version</div><div style="font-size:14px;">${_escape(r.version)}</div></div>
+                            <div><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Source</div><div style="font-size:14px;">${sourceLabel}</div></div>
+                            <div><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Stages</div><div style="font-size:14px;">${total}</div></div>
+                            <div><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Topology</div><div style="font-size:14px;color:var(--text-secondary);">DAG · topological order</div></div>
+                            <div><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Status</div><div style="font-size:14px;color:var(--text-secondary);">Ready</div></div>
+                            <div style="grid-column:1 / -1;"><div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Applies to</div><div style="font-size:14px;">${appliesHtml}</div></div>
+                        </div>
+                        ${r.description ? `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-primary);">
+                            <div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Description</div>
+                            <div style="font-size:13px;color:var(--text-secondary);line-height:1.6;">${_escape(r.description)}</div>
+                        </div>` : ''}
+                    </div>
+                </div>
+            `;
+
+            // ---------- Section 2: Stages wizard ----------
+            // Wizard step is 1..N (only stages — no overview step)
+            if (dgWizardStep < 1) dgWizardStep = 1;
+            if (dgWizardStep > total) dgWizardStep = total;
+
+            // Step indicator (clickable dots) — only for stages
+            const indicator = r.stages.map((s, i) => {
+                const stepIdx = i + 1;
+                const active = stepIdx === dgWizardStep;
+                const done = stepIdx < dgWizardStep;
+                const bg = active ? 'var(--accent)' : (done ? 'var(--success, #16a34a)' : 'var(--bg-secondary)');
+                const color = (active || done) ? '#fff' : 'var(--text-tertiary)';
+                return `<button onclick="dgWizardGoto(${stepIdx})" style="border:none;background:transparent;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0;">
+                    <div style="width:28px;height:28px;border-radius:50%;background:${bg};color:${color};display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">${stepIdx}</div>
+                    <span style="font-size:11px;color:${active ? 'var(--text-primary)' : 'var(--text-tertiary)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;">${_escape(s.name || s.type)}</span>
+                </button>` + (i < r.stages.length - 1
+                    ? `<div style="flex:0 0 12px;height:2px;background:${stepIdx < dgWizardStep ? 'var(--success,#16a34a)' : 'var(--bg-secondary)'};margin-top:13px;"></div>`
+                    : '');
+            }).join('');
+
+            // Current stage detail
+            const s = r.stages[dgWizardStep - 1];
+            const cls = stageBadge[s.type] || 'badge-info';
+            const cfg = s.config || {};
+            const catDef = (dgStageCatalog && dgStageCatalog.stages && dgStageCatalog.stages[s.type]) || null;
+            const catalogParams = catDef ? (catDef.params || {}) : {};
+
+            const allKeys = Array.from(new Set([
+                ...Object.keys(cfg),
+                ...Object.keys(catalogParams),
+            ]));
+            const rows = allKeys.length === 0
+                ? '<div style="color:var(--text-tertiary);font-size:13px;padding:12px 0;">This stage has no configurable params.</div>'
+                : allKeys.map(k => {
+                    const meta = catalogParams[k] || {};
+                    const v = (k in cfg) ? cfg[k] : (meta.default !== undefined ? meta.default : null);
+                    const isDefault = !(k in cfg);
+                    return `
+                        <div style="padding:12px 0;border-top:1px solid var(--border-primary);">
+                            <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;">
+                                <code style="color:var(--accent);font-weight:600;">${_escape(k)}</code>
+                                ${meta.type ? `<span style="font-size:11px;color:var(--text-tertiary);">${_escape(meta.type)}</span>` : ''}
+                                ${isDefault ? '<span class="badge badge-info" style="font-size:10px;">default</span>' : '<span class="badge badge-success" style="font-size:10px;">configured</span>'}
+                                <span style="margin-left:auto;">${_fmtVal(v)}</span>
+                            </div>
+                            ${meta.description ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:6px;line-height:1.5;">${_escape(meta.description)}</div>` : ''}
+                        </div>
+                    `;
+                }).join('');
+
+            const stageBody = `
+                <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+                    <span class="badge ${cls}">${_escape(s.type)}</span>
+                    <strong style="font-size:18px;">${_escape(s.name || s.type)}</strong>
+                    <span style="font-size:12px;color:var(--text-tertiary);margin-left:auto;">Stage ${dgWizardStep} of ${total}</span>
+                </div>
+                ${catDef && catDef.summary ? `<p style="color:var(--text-secondary);font-size:13px;line-height:1.6;margin-bottom:20px;">${_escape(catDef.summary)}</p>` : ''}
+                <div style="background:var(--bg-secondary);border-radius:8px;padding:8px 16px;">
+                    <div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.5px;padding:8px 0 4px;">Configuration</div>
+                    ${rows}
+                </div>
+            `;
+
+            const prevDisabled = dgWizardStep <= 1;
+            const nextDisabled = dgWizardStep >= total;
+            const nav = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--border-primary);">
+                    <button class="btn btn-ghost" ${prevDisabled ? 'disabled style="opacity:0.4;cursor:not-allowed;"' : ''} onclick="dgWizardGoto(${dgWizardStep - 1})">← Previous</button>
+                    <span style="font-size:12px;color:var(--text-tertiary);">${dgWizardStep} / ${total}</span>
+                    <button class="btn btn-primary" ${nextDisabled ? 'disabled style="opacity:0.4;cursor:not-allowed;"' : ''} onclick="dgWizardGoto(${dgWizardStep + 1})">Next →</button>
+                </div>
+            `;
+
+            const stagesSection = total === 0 ? `
+                <div class="card">
+                    <div class="card-body">
+                        <strong style="font-size:15px;">Stages</strong>
+                        <p style="color:var(--text-tertiary);font-size:13px;margin-top:8px;">This pipeline has no stages.</p>
+                    </div>
+                </div>
+            ` : `
+                <div class="card">
+                    <div class="card-body">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                            <strong style="font-size:15px;">Stages</strong>
+                            <span style="font-size:12px;color:var(--text-tertiary);">Click a step to jump</span>
+                        </div>
+                        <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:24px;overflow-x:auto;">${indicator}</div>
+                        ${stageBody}
+                        ${nav}
+                    </div>
+                </div>
+            `;
+
+            const isUser = !(r.source === 'builtin' || r.source === 'system');
+            const editBtn = isUser
+                ? `<button class="btn btn-primary btn-sm" onclick="openDgTransformEdit('${_escape(r.name)}')" style="margin-left:8px;">Edit</button>`
+                : '';
+            detailEl.innerHTML = `
+                <div style="margin-bottom:16px;display:flex;align-items:center;">
+                    <button class="btn btn-ghost btn-sm" onclick="closeDgPipelineWizard()">← Back to pipelines</button>
+                    ${editBtn}
+                </div>
+                ${generalInfo}
+                ${stagesSection}
+            `;
         }
 
         function showAddDgPipelineModal() {
@@ -9683,6 +10281,38 @@
             }
         }
 
+        function entityBadge(kind) {
+            const k = (kind || 'text').toLowerCase();
+            const palette = {
+                text:  { bg:'#3b82f620', fg:'#3b82f6', label:'TEXT' },
+                image: { bg:'#10b98120', fg:'#10b981', label:'IMAGE' },
+                video: { bg:'#f59e0b20', fg:'#f59e0b', label:'VIDEO' },
+            };
+            const p = palette[k] || palette.text;
+            return `<span style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:${p.bg};color:${p.fg};border:1px solid ${p.fg}40;">${p.label}</span>`;
+        }
+
+        let _playgroundImageB64 = null;
+        function onPlaygroundImageChange(ev) {
+            const f = ev.target.files && ev.target.files[0];
+            const status = document.getElementById('playground-image-status');
+            if (!f) { _playgroundImageB64 = null; status.textContent = ''; return; }
+            const r = new FileReader();
+            r.onload = () => {
+                const s = String(r.result || '');
+                const i = s.indexOf(',');
+                _playgroundImageB64 = i >= 0 ? s.substring(i + 1) : s;
+                status.textContent = `${f.name} (${Math.round(f.size/1024)} KB)`;
+            };
+            r.readAsDataURL(f);
+        }
+        function clearPlaygroundImage() {
+            _playgroundImageB64 = null;
+            const inp = document.getElementById('playground-image-file');
+            if (inp) inp.value = '';
+            document.getElementById('playground-image-status').textContent = '';
+        }
+
         async function performVectorSearch() {
             const query = document.getElementById('playground-query').value.trim();
             const destIds = getSelectedDestIds();
@@ -9692,8 +10322,8 @@
             const statusEl = document.getElementById('playground-status');
             const resultsEl = document.getElementById('playground-results');
 
-            if (!query) {
-                alert('Please enter a search query');
+            if (!query && !_playgroundImageB64) {
+                alert('Please enter a search query or upload an image');
                 return;
             }
             if (destIds.length === 0) {
@@ -9711,6 +10341,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         query: query,
+                        query_image_b64: _playgroundImageB64,
                         destination_ids: destIds,
                         top_k: topK,
                         merge_strategy: mergeStrategy
@@ -9787,6 +10418,7 @@
                                     </div>
                                 </div>
                                 <div style="display:flex;align-items:center;gap:8px;">
+                                    ${entityBadge(r.entity_type)}
                                     ${indexBadge}
                                     <div style="text-align: right;">
                                         <span class="badge badge-success" style="font-family: 'JetBrains Mono', monospace;">${(r.score * 100).toFixed(1)}%</span>
