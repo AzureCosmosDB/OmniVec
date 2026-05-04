@@ -190,19 +190,44 @@ public class SourceWatcher : ISourceWatcher
 
         // Process documents per-pipeline (each pipeline may have different content_fields)
         int skippedNoContent = 0, skippedUnchanged = 0;
-        var allEligibleDocs = new Dictionary<string, List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields)>>();
+        var allEligibleDocs = new Dictionary<string, List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields, Source.AttachmentRef? att)>>();
+
+        // When the source opts into attachment mode, watcher emits one blob_ref message
+        // per matching attachment (DocGrok pipeline-worker downloads the blob and embeds it)
+        // instead of extracting inline text from content_fields.
+        var attachmentMode = !string.IsNullOrEmpty(_source.AttachmentsField);
 
         foreach (var pipeline in pipelines)
         {
             var pipSrcOuter = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
             var cfFields = pipSrcOuter?.ContentFields ?? new List<string> { "content" };
-            var eligible = new List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields)>();
+            var eligible = new List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields, Source.AttachmentRef? att)>();
 
             foreach (var doc in changes)
             {
                 try
                 {
                     if (doc is null) continue;
+
+                    if (attachmentMode)
+                    {
+                        var atts = _source.ExtractAttachments(doc);
+                        if (atts.Count == 0)
+                        {
+                            skippedNoContent++;
+                            continue;
+                        }
+                        var aDocId = doc["id"]?.Value<string>() ?? "";
+                        var aEtag = doc["_etag"]?.Value<string>() ?? "";
+                        var aPkField = _partitionKeyPath.TrimStart('/');
+                        var aPkValue = aPkField == "id" ? aDocId : (doc[aPkField]?.Value<string>() ?? "");
+                        foreach (var att in atts)
+                        {
+                            var attHash = _hasher.ComputeHash($"{aDocId}::{aEtag}::{att.Name}::{att.Url}");
+                            eligible.Add((aDocId, "", attHash, aPkValue, doc, cfFields, att));
+                        }
+                        continue;
+                    }
 
                     if (!Source.HasContent(doc, cfFields))
                     {
@@ -259,7 +284,7 @@ public class SourceWatcher : ISourceWatcher
                     var pkField = _partitionKeyPath.TrimStart('/');
                     var pkValue = pkField == "id" ? docId : (doc[pkField]?.Value<string>() ?? "");
 
-                    eligible.Add((docId, contentText, contentHash2, pkValue, doc, cfFields));
+                    eligible.Add((docId, contentText, contentHash2, pkValue, doc, cfFields, null));
                 }
                 catch (Exception ex)
                 {
@@ -289,12 +314,20 @@ public class SourceWatcher : ISourceWatcher
         // Handle INLINE pipelines
         if (inlinePipelines.Count > 0)
         {
+            // Attachment-mode entries can't be processed inline (worker must download the
+            // blob from Azure Storage), so they bypass the inline path and go to queue mode.
             var inlineEligible = inlinePipelines
                 .Where(p => allEligibleDocs.ContainsKey(p.Id))
-                .SelectMany(p => allEligibleDocs[p.Id].Select(e => (e.docId, e.content, e.contentHash, e.pkValue, e.doc)))
+                .SelectMany(p => allEligibleDocs[p.Id].Where(e => e.att is null).Select(e => (e.docId, e.content, e.contentHash, e.pkValue, e.doc)))
                 .ToList();
             if (inlineEligible.Count > 0)
                 await ProcessInlineAsync(inlinePipelines, inlineEligible, context.LeaseToken, ct);
+            if (attachmentMode && inlinePipelines.Any(p => allEligibleDocs.TryGetValue(p.Id, out var d) && d.Any(e => e.att is not null)))
+            {
+                _logger.LogWarning("Attachment-mode source {SourceId}: {N} pipeline(s) configured as 'inline' will be skipped. Set processing_mode='queue' to ingest attachments.",
+                    _source.Id,
+                    inlinePipelines.Count(p => allEligibleDocs.TryGetValue(p.Id, out var d) && d.Any(e => e.att is not null)));
+            }
         }
 
         // Handle QUEUE pipelines: publish to Service Bus
@@ -306,30 +339,33 @@ public class SourceWatcher : ISourceWatcher
                 foreach (var pipeline in queuePipelines)
                 {
                     if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
-                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields) in pipelineDocs)
+                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att) in pipelineDocs)
                     {
                         var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
                         var contentFields = new Dictionary<string, string>();
-                        foreach (var field in cfFields)
+                        if (att is null)
                         {
-                            var token = doc[field];
-                            if (token is not null && token.Type != Newtonsoft.Json.Linq.JTokenType.Null)
-                                contentFields[field] = token.Type == Newtonsoft.Json.Linq.JTokenType.String
-                                    ? (string?)token ?? ""
-                                    : token.ToString();
+                            foreach (var field in cfFields)
+                            {
+                                var token = doc[field];
+                                if (token is not null && token.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                                    contentFields[field] = token.Type == Newtonsoft.Json.Linq.JTokenType.String
+                                        ? (string?)token ?? ""
+                                        : token.ToString();
+                            }
                         }
 
                         // Inject pipeline's vector_index_path into destination config
                         var destConfig = dest?.Config ?? new();
                         destConfig["vector_field"] = pipeline.VectorIndexPath;
 
-                        messages.Add(new EmbeddingMessage
+                        var msg = new EmbeddingMessage
                         {
                             PipelineId = pipeline.Id,
                             PipelineName = pipeline.Name,
                             DocgrokPipeline = pipeline.DocgrokPipeline,
                             SourceId = _source.Id,
-                            SourceRef = docId,
+                            SourceRef = att is null ? docId : $"{docId}::{att.Name}",
                             DestinationId = pipeline.DestinationId,
                             DestinationType = dest?.Type ?? "cosmosdb-vector",
                             DestinationConfig = destConfig,
@@ -338,7 +374,16 @@ public class SourceWatcher : ISourceWatcher
                             PartitionKeyValue = pkValue,
                             PipelineGeneration = pipeline.Generation,
                             SourceContentFields = contentFields,
-                        });
+                        };
+                        if (att is not null)
+                        {
+                            msg.ContentType = "blob_ref";
+                            msg.BlobAccountUrl = att.AccountUrl ?? _source.BlobAccountUrl;
+                            msg.BlobConnectionString = _source.BlobConnectionString;
+                            msg.BlobContainer = att.Container ?? _source.BlobContainer;
+                            msg.BlobName = att.BlobName;
+                        }
+                        messages.Add(msg);
                     }
                 }
 
@@ -354,23 +399,32 @@ public class SourceWatcher : ISourceWatcher
                 foreach (var pipeline in queuePipelines)
                 {
                     if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
-                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields) in pipelineDocs)
+                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att) in pipelineDocs)
                     {
                         var etag = doc["_etag"]?.Value<string>();
+                        var metadata = new Dictionary<string, object>
+                        {
+                            ["trigger"] = "change_feed_dotnet",
+                            ["_etag"] = etag ?? "",
+                            ["partition"] = context.LeaseToken,
+                            ["content"] = content,
+                            ["content_hash"] = contentHash,
+                            ["_pk_value"] = pkValue
+                        };
+                        if (att is not null)
+                        {
+                            metadata["content_type"] = "blob_ref";
+                            metadata["blob_account_url"] = att.AccountUrl ?? _source.BlobAccountUrl ?? "";
+                            metadata["blob_container"] = att.Container ?? _source.BlobContainer ?? "";
+                            metadata["blob_name"] = att.BlobName;
+                            metadata["attachment_name"] = att.Name;
+                        }
                         jobEntries.Add(new CreateJobEntry
                         {
                             PipelineId = pipeline.Id,
                             SourceId = _source.Id,
-                            SourceRef = docId,
-                            Metadata = new Dictionary<string, object>
-                            {
-                                ["trigger"] = "change_feed_dotnet",
-                                ["_etag"] = etag ?? "",
-                                ["partition"] = context.LeaseToken,
-                                ["content"] = content,
-                                ["content_hash"] = contentHash,
-                                ["_pk_value"] = pkValue
-                            }
+                            SourceRef = att is null ? docId : $"{docId}::{att.Name}",
+                            Metadata = metadata
                         });
                     }
                 }
