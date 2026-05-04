@@ -1,0 +1,15 @@
+{
+  "_doc": "BinSkim rule suppressions for upstream-toolchain issues that cannot be remediated in this repo. Each entry MUST have a justification. Reviewed and approved as part of the security scan baseline.",
+  "suppressions": [
+    {
+      "ruleId": "BA2004",
+      "binary": "docgrok-router.exe",
+      "reason": "MD5 source hashes originate from NASM-assembled object files inside the upstream `ring` crate (libring-*.rlib). The Rust crate ships pre-hand-written x86_64 assembly (.asm/.S) and Cargo invokes nasm/yasm without exposing a knob to switch the COFF debug hash to SHA-256. Rust user code is built with -Zsrc-hash-algorithm=sha256. Tracking upstream: briansmith/ring; would require forking ring or patching its build.rs to invoke nasm with --gen-debug=cv8 + post-processing PDB hashes."
+    },
+    {
+      "ruleId": "BA2024",
+      "binary": "docgrok-router.exe",
+      "reason": "Spectre mitigations (/Qspectre) are an MSVC cl.exe codegen feature. rustc / LLVM does not currently emit the IDD_VC_FEATURE Spectre marker into the PE COFF debug record, so BinSkim's BA2024 detector cannot observe the mitigation. The C runtime modules linked from libcmt.lib/libucrt.lib would also require the optional 'C++ Spectre-mitigated libs' VS workload to be installed in the build environment. Threat surface is bounded: docgrok-router does not execute user-supplied indices on shared cores in a multi-tenant manner. Re-evaluate when rust-lang/rust adds Spectre marker emission (rust-lang/rust#103956)."
+    }
+  ]
+}
