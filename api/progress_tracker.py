@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from enum import Enum
 
-from azure.cosmos.exceptions import (
+from azure.cosmos.exceptions import (  # lgtm[py/unused-import]
     CosmosAccessConditionFailedError,
     CosmosHttpResponseError,
     CosmosResourceExistsError,

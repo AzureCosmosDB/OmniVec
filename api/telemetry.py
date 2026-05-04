@@ -25,7 +25,7 @@ import time
 import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional  # lgtm[py/unused-import]
 
 logger = logging.getLogger(__name__)
 

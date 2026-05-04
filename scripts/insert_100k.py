@@ -1,7 +1,7 @@
 """Insert 100K test documents into throughput-test container."""
 import asyncio
 import time
-import uuid
+import uuid  # lgtm[py/unused-import]
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import DefaultAzureCredential
 

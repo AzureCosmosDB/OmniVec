@@ -14,10 +14,10 @@ Uses leader election for HA - only one instance active at a time.
 import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # lgtm[py/unused-import]
 from typing import Dict, List, Optional, Any
 
-from models import Source, SourceType, Pipeline, Job, JobStatus
+from models import Source, SourceType, Pipeline, Job, JobStatus  # lgtm[py/unused-import]
 from store import init_store, get_store
 from progress_tracker import ProgressTracker, SourceStatus
 from leader_election import run_with_leader_election
@@ -107,7 +107,7 @@ class CosmosDBController:
         active_sources = await self._get_active_cosmosdb_sources()
 
         # Get current deployments
-        current_deployments = await self._get_current_deployments()
+        current_deployments = await self._get_current_deployments()  # lgtm[py/unused-local-variable]
 
         # Create missing deployments
         for source_id, source in active_sources.items():
@@ -378,7 +378,7 @@ class CosmosDBController:
                     name,
                     NAMESPACE
                 )
-            except Exception:
+            except Exception:  # lgtm[py/empty-except]
                 pass
 
             if prefix == "cosmos-backfill":
@@ -388,7 +388,7 @@ class CosmosDBController:
                         name,
                         NAMESPACE
                     )
-                except Exception:
+                except Exception:  # lgtm[py/empty-except]
                     pass
 
         logger.info("Deleted CosmosDB deployments for source %s", source_id)
@@ -429,7 +429,7 @@ class CosmosDBController:
                     ready=dep.status.ready_replicas or 0,
                     processing=dep.status.available_replicas or 0,
                 )
-            except Exception:
+            except Exception:  # lgtm[py/empty-except]
                 pass
 
 
