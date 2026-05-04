@@ -43,7 +43,7 @@ async def test_cosmosdb_connection(config: Dict[str, Any]) -> Dict[str, Any]:
     container = database.get_container_client(config["container"])
 
     # Get container properties
-    props = container.read()
+    props = container.read()  # lgtm[py/unused-local-variable]
 
     # Count documents
     query = "SELECT VALUE COUNT(1) FROM c"

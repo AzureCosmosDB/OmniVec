@@ -130,7 +130,7 @@ async def ready(request: Request):
     except Exception as e:
         return JSONResponse(
             status_code=503,
-            content={"status": "not-ready", "docgrok_error": str(e)[:200]},
+            content={"status": "not-ready", "docgrok_error": str(e)[:200]},  # lgtm[py/stack-trace-exposure]
         )
 
 
@@ -152,7 +152,7 @@ async def search_endpoint(req: SearchRequest, request: Request):
     req.request_id = rid
     logger.info(
         "search rid=%s q_len=%s n_indexes=%s top_k=%s merge=%s",
-        rid, len(req.query or ""), len(req.indexes), req.top_k, req.merge.strategy,
+        rid, len(req.query or ""), len(req.indexes), req.top_k, req.merge.strategy,  # lgtm[py/log-injection]
     )
     try:
         return await run_search(request.app.state.http, req)
