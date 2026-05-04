@@ -82,7 +82,7 @@ jobs:
         run: |
           nuget install Microsoft.CodeAnalysis.BinSkim -OutputDirectory $env:RUNNER_TEMP\bs -ExcludeVersion
           $bs = (Get-ChildItem "$env:RUNNER_TEMP\bs\Microsoft.CodeAnalysis.BinSkim\tools\net*\win-x64\BinSkim.exe" | Select-Object -First 1).FullName
-          & $bs analyze cli/omnivec.exe --output binskim-go.sarif
+          & $bs analyze cli/omnivec.exe --output binskim-go.sarif --ignorePdbLoadError
 
       - name: Upload BinSkim SARIF
         if: always()
