@@ -60,7 +60,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
-          build-mode: ${{ matrix.language == 'csharp' && 'manual' || 'none' }}
+          build-mode: ${{ (matrix.language == 'csharp' && 'manual') || (matrix.language == 'go' && 'autobuild') || 'none' }}
 
       - name: Build .NET projects (csharp)
         if: matrix.language == 'csharp'
