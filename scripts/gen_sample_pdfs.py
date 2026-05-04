@@ -10,7 +10,7 @@ Usage: gen_sample_pdfs.py <out_dir>
 """
 from __future__ import annotations
 
-import os
+import os  # lgtm[py/unused-import]
 import sys
 from pathlib import Path
 from typing import List

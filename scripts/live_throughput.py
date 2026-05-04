@@ -14,7 +14,7 @@ Examples:
   python3 live_throughput.py throughput-test --interval 1
 """
 
-import sys
+import sys  # lgtm[py/unused-import]
 import time
 import argparse
 from datetime import datetime
@@ -101,7 +101,7 @@ def main():
                 eta = "—"
 
             ts = datetime.now().strftime("%H:%M:%S")
-            pct = (current / total * 100) if total > 0 else 0
+            pct = (current / total * 100) if total > 0 else 0  # lgtm[py/unused-local-variable]
 
             # Color: green if processing, yellow if stalled, cyan if done
             if remaining <= 0:

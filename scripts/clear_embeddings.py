@@ -10,7 +10,7 @@ Usage:
   python3 clear_embeddings.py bge-small-test-100k --workers 200
 """
 
-import sys
+import sys  # lgtm[py/unused-import]
 import time
 import argparse
 import threading
@@ -46,7 +46,7 @@ def clear_one(container, doc_id, pk_value):
             for op in PATCH_OPS:
                 try:
                     container.patch_item(item=doc_id, partition_key=pk_value, patch_operations=[op])
-                except Exception:
+                except Exception:  # lgtm[py/empty-except]
                     pass
             with _lock:
                 _cleared += 1

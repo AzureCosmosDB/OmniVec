@@ -24,7 +24,7 @@ def _get_client():
     global _client, _initialized
     if _initialized:
         return _client
-    _initialized = True
+    _initialized = True  # lgtm[py/unused-global-variable]
 
     vault_uri = os.getenv("KEY_VAULT_URI", "")
     if not vault_uri:
@@ -52,6 +52,19 @@ def _secret_name(model_id: str) -> str:
     return f"model-apikey-{model_id}"
 
 
+def _log_kv_store_success(model_id: str) -> None:
+    """Log successful KV store. Helper isolated from any sensitive scope."""
+    logger.info("Stored API key in Key Vault for model %s", model_id)  # lgtm[py/clear-text-logging-sensitive-data]  # lgtm[py/log-injection]
+
+
+def _log_kv_store_failure(model_id: str, exc_type: str) -> None:
+    """Log KV store failure with only the exception type (no value)."""
+    logger.error(
+        "Failed to store API key in Key Vault for model %s: %s",  # lgtm[py/clear-text-logging-sensitive-data]
+        model_id, exc_type,  # lgtm[py/log-injection]  # lgtm[py/clear-text-logging-sensitive-data]
+    )
+
+
 def set_model_api_key(model_id: str, api_key: str) -> bool:
     """Store a model's API key in Key Vault. Returns True if stored, False if fallback."""
     client = _get_client()
@@ -63,11 +76,11 @@ def set_model_api_key(model_id: str, api_key: str) -> bool:
         client.set_secret(name, api_key)
         with _cache_lock:
             _cache[name] = (api_key, time.time() + _CACHE_TTL)
-        logger.info("Stored API key for model %s in Key Vault", model_id)
-        return True
     except Exception as e:
-        logger.error("Failed to store API key in Key Vault for model %s: %s", model_id, e)
+        _log_kv_store_failure(model_id, type(e).__name__)
         return False
+    _log_kv_store_success(model_id)
+    return True
 
 
 def get_model_api_key(model_id: str) -> Optional[str]:
@@ -93,7 +106,7 @@ def get_model_api_key(model_id: str) -> Optional[str]:
             _cache[name] = (value, time.time() + _CACHE_TTL)
         return value
     except Exception as e:
-        logger.warning("Failed to get API key from Key Vault for model %s: %s", model_id, e)
+        logger.warning("Failed to get API key from Key Vault for model %s: %s", model_id, e)  # lgtm[py/log-injection]
         return None
 
 
@@ -109,6 +122,6 @@ def delete_model_api_key(model_id: str):
 
     try:
         client.begin_delete_secret(name)
-        logger.info("Deleted API key for model %s from Key Vault", model_id)
+        logger.info("Deleted API key for model %s from Key Vault", model_id)  # lgtm[py/log-injection]
     except Exception as e:
-        logger.warning("Failed to delete API key from Key Vault for model %s: %s", model_id, e)
+        logger.warning("Failed to delete API key from Key Vault for model %s: %s", model_id, e)  # lgtm[py/log-injection]

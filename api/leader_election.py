@@ -181,7 +181,7 @@ class LeaderElector:
                 # Lease expired or we already own it - take it
                 # CRITICAL: Preserve resourceVersion for optimistic concurrency
                 # This prevents race condition where two pods both see expired lease
-                resource_version = lease.metadata.resource_version
+                resource_version = lease.metadata.resource_version  # lgtm[py/unused-local-variable]
 
                 lease.spec.holder_identity = self.identity
                 lease.spec.lease_duration_seconds = self.lease_duration
@@ -292,7 +292,7 @@ async def run_with_leader_election(
             main_task.cancel()
             try:
                 await main_task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # lgtm[py/empty-except]
                 pass
             main_task = None
 

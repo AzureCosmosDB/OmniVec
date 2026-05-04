@@ -1,0 +1,89 @@
+name: BinSkim (.NET + Go binaries)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'connectors/worker/dotnet/**'
+      - 'connectors/ingestion/dotnet/**'
+      - 'cli/**'
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'connectors/worker/dotnet/**'
+      - 'connectors/ingestion/dotnet/**'
+      - 'cli/**'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  binskim-dotnet:
+    name: BinSkim .NET worker
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build worker
+        run: dotnet publish connectors/worker/dotnet -c Release -o publish-out
+
+      - name: Run BinSkim
+        uses: microsoft/binskim-action@v1
+        with:
+          arguments: analyze publish-out/OmniVec.Worker.dll --output binskim-dotnet.sarif --recurse false
+
+      - name: Upload BinSkim SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: binskim-dotnet.sarif
+          category: binskim-dotnet
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binskim-dotnet-sarif
+          path: binskim-dotnet.sarif
+
+  binskim-go:
+    name: BinSkim Go CLI
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: cli/go.sum
+
+      - name: Build CLI
+        working-directory: cli
+        run: go build -trimpath -ldflags "-s -w" -o omnivec.exe .
+
+      - name: Run BinSkim
+        uses: microsoft/binskim-action@v1
+        with:
+          arguments: analyze cli/omnivec.exe --output binskim-go.sarif
+
+      - name: Upload BinSkim SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: binskim-go.sarif
+          category: binskim-go
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binskim-go-sarif
+          path: binskim-go.sarif

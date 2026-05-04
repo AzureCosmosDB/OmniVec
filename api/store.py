@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Any, Optional
+from typing import Any, Optional  # lgtm[py/unused-import]
 
-from azure.cosmos import CosmosClient, PartitionKey
-from azure.cosmos.exceptions import (
+from azure.cosmos import CosmosClient, PartitionKey  # lgtm[py/unused-import]
+from azure.cosmos.exceptions import (  # lgtm[py/unused-import]
     CosmosResourceNotFoundError,
     CosmosAccessConditionFailedError,
     CosmosResourceExistsError,

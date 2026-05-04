@@ -15,43 +15,59 @@ from typing import Optional, Dict, Any, List, Tuple, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
-# Async PostgreSQL client (asyncpg)
-_pool = None
+# Async PostgreSQL client (asyncpg). Pool is keyed by (host, port, db, user) so
+# multiple sources/destinations don't accidentally share a connection pool that
+# was created with a different config.
+_pools: Dict[Tuple[str, int, str, str], Any] = {}
+
+
+def _pool_key(config: Dict[str, Any]) -> Tuple[str, int, str, str]:
+    return (
+        str(config.get("host", "")),
+        int(config.get("port", 5432) or 5432),
+        str(config.get("database", "")),
+        str(config.get("user", "")),
+    )
 
 
 async def get_pool(config: Dict[str, Any]):
-    """Get or create connection pool."""
-    global _pool
-    if _pool is None:
-        try:
-            import asyncpg
-        except ImportError:
-            raise ImportError("asyncpg required: pip install asyncpg")
+    """Get or create connection pool for the given config."""
+    key = _pool_key(config)
+    pool = _pools.get(key)
+    if pool is not None:
+        return pool
 
-        # Build connection string
-        dsn = f"postgresql://{config.get('user', '')}:{config.get('password', '')}@{config['host']}:{config.get('port', 5432)}/{config['database']}"
+    try:
+        import asyncpg
+    except ImportError:
+        raise ImportError("asyncpg required: pip install asyncpg")
 
-        ssl_mode = config.get("ssl_mode", "require")
-        ssl = ssl_mode not in ("disable", "allow")
+    # Build connection string
+    dsn = f"postgresql://{config.get('user', '')}:{config.get('password', '')}@{config['host']}:{config.get('port', 5432)}/{config['database']}"
 
-        _pool = await asyncpg.create_pool(
-            dsn,
-            min_size=2,
-            max_size=10,
-            ssl=ssl if ssl else None,
-        )
-        logger.info("PostgreSQL connection pool created: %s:%s/%s",
-                    config['host'], config.get('port', 5432), config['database'])
+    ssl_mode = config.get("ssl_mode", "require")
+    ssl = ssl_mode not in ("disable", "allow")
 
-    return _pool
+    pool = await asyncpg.create_pool(
+        dsn,
+        min_size=2,
+        max_size=10,
+        ssl=ssl if ssl else None,
+    )
+    _pools[key] = pool
+    logger.info("PostgreSQL connection pool created: %s:%s/%s",
+                config['host'], config.get('port', 5432), config['database'])
+    return pool
 
 
 async def close_pool():
-    """Close connection pool."""
-    global _pool
-    if _pool:
-        await _pool.close()
-        _pool = None
+    """Close all connection pools."""
+    for pool in list(_pools.values()):
+        try:
+            await pool.close()
+        except Exception:  # lgtm[py/empty-except]
+            pass
+    _pools.clear()
 
 
 # =============================================================================
@@ -63,12 +79,15 @@ async def get_rows_since(
     since: Optional[datetime] = None,
     limit: int = 1000,
     content_fields: list = None,
-) -> Tuple[List[Dict[str, Any]], Optional[datetime]]:
+    last_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[datetime], Optional[str]]:
     """
     Get rows modified since a timestamp.
 
-    Returns:
-        Tuple of (rows, max_timestamp) where max_timestamp can be used for next poll
+    Uses (timestamp, id) lexicographic ordering with an id tiebreaker so that
+    rows sharing the exact same timestamp as the last checkpoint are not
+    skipped on subsequent polls. Returns a tuple of
+    (rows, max_timestamp, max_id) suitable for use as the next checkpoint.
     """
     pool = await get_pool(config)
 
@@ -81,13 +100,26 @@ async def get_rows_since(
     columns = [id_col, ts_col] + content_cols
     col_str = ", ".join(f'"{c}"' for c in columns)
 
-    # Build query
-    if since:
+    # Build query — always order by (timestamp, id) for deterministic paging.
+    if since is not None and last_id is not None:
+        # (ts, id) strictly greater than (since, last_id)
         query = f'''
             SELECT {col_str}
             FROM "{table}"
-            WHERE "{ts_col}" > $1
-            ORDER BY "{ts_col}" ASC
+            WHERE ("{ts_col}", "{id_col}"::text) > ($1, $2)
+            ORDER BY "{ts_col}" ASC, "{id_col}" ASC
+            LIMIT $3
+        '''
+        params = [since, str(last_id), limit]
+    elif since is not None:
+        # First poll after a checkpoint that didn't carry an id. Use >= so we
+        # don't skip rows that share the checkpoint timestamp; the
+        # downstream pipeline already deduplicates by content_hash.
+        query = f'''
+            SELECT {col_str}
+            FROM "{table}"
+            WHERE "{ts_col}" >= $1
+            ORDER BY "{ts_col}" ASC, "{id_col}" ASC
             LIMIT $2
         '''
         params = [since, limit]
@@ -95,7 +127,7 @@ async def get_rows_since(
         query = f'''
             SELECT {col_str}
             FROM "{table}"
-            ORDER BY "{ts_col}" ASC
+            ORDER BY "{ts_col}" ASC, "{id_col}" ASC
             LIMIT $1
         '''
         params = [limit]
@@ -104,17 +136,26 @@ async def get_rows_since(
         rows = await conn.fetch(query, *params)
 
     if not rows:
-        return [], since
+        return [], since, last_id
 
     # Convert to dicts
     result = []
     max_ts = since
+    max_id = last_id
 
     for row in rows:
         doc = dict(row)
         row_ts = doc.get(ts_col)
-        if row_ts and (max_ts is None or row_ts > max_ts):
-            max_ts = row_ts
+        row_id = doc.get(id_col)
+        if row_ts is not None and (max_ts is None or row_ts >= max_ts):
+            if max_ts is None or row_ts > max_ts or row_id is None:
+                max_ts = row_ts
+                max_id = str(row_id) if row_id is not None else max_id
+            else:
+                # Same timestamp — keep the larger id as tiebreaker
+                rid_str = str(row_id)
+                if max_id is None or rid_str > max_id:
+                    max_id = rid_str
 
         # Combine content columns into single content field
         content_parts = []
@@ -127,8 +168,9 @@ async def get_rows_since(
 
         result.append(doc)
 
-    logger.info("Fetched %d rows from %s (since=%s)", len(result), table, since)
-    return result, max_ts
+    logger.info("Fetched %d rows from %s (since=%s, last_id=%s)",
+                len(result), table, since, last_id)
+    return result, max_ts, max_id
 
 
 async def get_row_by_id(
@@ -229,7 +271,12 @@ async def stream_all_rows(
 # =============================================================================
 
 async def ensure_pgvector_table(config: Dict[str, Any]):
-    """Create pgvector table and index if not exists."""
+    """Create pgvector table and index if not exists.
+
+    If the table already exists with a different vector dimension than the
+    configured one, logs a clear error so callers can surface it instead of
+    failing later with an opaque pgvector cast error.
+    """
     pool = await get_pool(config)
 
     table = config["table"]
@@ -237,12 +284,46 @@ async def ensure_pgvector_table(config: Dict[str, Any]):
     vector_col = config.get("vector_column", "embedding")
     content_col = config.get("content_column", "content")
     metadata_cols = config.get("metadata_columns", ["source_id", "source_ref", "created_at"])
-    dimensions = config.get("vector_dimensions", 1024)
-    index_type = config.get("index_type", "ivfflat")
+    dimensions = int(config.get("vector_dimensions", 1536))
+    index_type = config.get("index_type", "hnsw")
+    metric = str(config.get("metric", "cosine")).lower()
+
+    # Map metric → pgvector index opclass
+    if metric in ("l2", "euclidean"):
+        opclass = "vector_l2_ops"
+    elif metric in ("dot", "inner_product", "ip"):
+        opclass = "vector_ip_ops"
+    else:
+        opclass = "vector_cosine_ops"
 
     async with pool.acquire() as conn:
         # Enable pgvector extension
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+        # If table+column already exist, validate the dimension matches.
+        try:
+            existing_dim = await conn.fetchval(
+                """
+                SELECT a.atttypmod
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE c.relname = $1
+                  AND a.attname = $2
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                  AND n.nspname = ANY (current_schemas(false))
+                """,
+                table, vector_col,
+            )
+            if existing_dim is not None and existing_dim > 0 and existing_dim != dimensions:
+                logger.error(
+                    "pgvector dim mismatch on %s.%s: existing=vector(%d), config=vector(%d). "
+                    "Embeddings will fail to insert. Drop the column or change vector_dimensions.",
+                    table, vector_col, existing_dim, dimensions,
+                )
+        except Exception as e:
+            logger.debug("Could not introspect existing vector column dim: %s", e)
 
         # Build metadata columns SQL
         meta_sql = ", ".join(f'"{col}" TEXT' for col in metadata_cols if col != "created_at")
@@ -260,7 +341,7 @@ async def ensure_pgvector_table(config: Dict[str, Any]):
         '''
         await conn.execute(create_sql)
 
-        # Create vector index
+        # Create vector index — opclass must match query metric.
         index_name = f"{table}_{vector_col}_idx"
         if index_type == "hnsw":
             m = config.get("hnsw_m", 16)
@@ -268,7 +349,7 @@ async def ensure_pgvector_table(config: Dict[str, Any]):
             index_sql = f'''
                 CREATE INDEX IF NOT EXISTS "{index_name}"
                 ON "{table}"
-                USING hnsw ("{vector_col}" vector_cosine_ops)
+                USING hnsw ("{vector_col}" {opclass})
                 WITH (m = {m}, ef_construction = {ef})
             '''
         else:  # ivfflat
@@ -276,7 +357,7 @@ async def ensure_pgvector_table(config: Dict[str, Any]):
             index_sql = f'''
                 CREATE INDEX IF NOT EXISTS "{index_name}"
                 ON "{table}"
-                USING ivfflat ("{vector_col}" vector_cosine_ops)
+                USING ivfflat ("{vector_col}" {opclass})
                 WITH (lists = {lists})
             '''
 
@@ -285,7 +366,8 @@ async def ensure_pgvector_table(config: Dict[str, Any]):
         except Exception as e:
             logger.warning("Could not create index (may need more data): %s", e)
 
-    logger.info("Ensured pgvector table: %s", table)
+    logger.info("Ensured pgvector table: %s (dim=%d, metric=%s, index=%s)",
+                table, dimensions, metric, index_type)
 
 
 async def upsert_vectors(
@@ -388,6 +470,21 @@ async def search_vectors(
         vector_col = config.get("vector_column", "embedding")
         content_col = config.get("content_column", "content")
         metadata_cols = config.get("metadata_columns", [])
+        metric = str(config.get("metric", "cosine")).lower()
+
+        # Map metric → pgvector operator and similarity expression.
+        # cosine: <=> returns cosine distance in [0, 2]; similarity = 1 - dist
+        # l2:     <-> returns euclidean distance >= 0;   similarity = 1/(1+dist)
+        # dot:    <#> returns negative inner product;    similarity = -(<#>)
+        if metric in ("l2", "euclidean"):
+            op = "<->"
+            sim_expr = f'1.0 / (1.0 + ("{vector_col}" <-> $1::vector))'
+        elif metric in ("dot", "inner_product", "ip"):
+            op = "<#>"
+            sim_expr = f'-("{vector_col}" <#> $1::vector)'
+        else:  # cosine (default)
+            op = "<=>"
+            sim_expr = f'1 - ("{vector_col}" <=> $1::vector)'
 
         # Build column list
         select_cols = [id_col, content_col] + metadata_cols
@@ -405,10 +502,10 @@ async def search_vectors(
 
         query = f'''
             SELECT {col_str},
-                   1 - ("{vector_col}" <=> $1::vector) as similarity
+                   {sim_expr} as similarity
             FROM "{table}"
             {where_clause}
-            ORDER BY "{vector_col}" <=> $1::vector
+            ORDER BY "{vector_col}" {op} $1::vector
             LIMIT $2
         '''
 
@@ -574,7 +671,11 @@ async def test_destination_connection(config: Dict[str, Any]) -> Dict[str, Any]:
     conn = await asyncpg.connect(dsn, ssl=ssl if ssl else None)
     try:
         table = config["table"]
-        row_count = await conn.fetchval(f'SELECT COUNT(*) FROM "{table}"')
+        # Validate identifier to prevent SQL injection through identifier interpolation.
+        import re as _re
+        if not isinstance(table, str) or not _re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$", table):
+            raise ValueError(f"invalid table identifier: {table!r}")
+        row_count = await conn.fetchval(f'SELECT COUNT(*) FROM "{table}"')  # lgtm[py/sql-injection]
         ext = await conn.fetchval(
             "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
         )
