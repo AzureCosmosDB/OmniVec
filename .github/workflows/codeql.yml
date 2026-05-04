@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [python, javascript-typescript, go]
+        language: [python, javascript-typescript, go, csharp]
     steps:
       - name: Start SSH agent with DocGrok deploy key
         uses: webfactory/ssh-agent@v0.9.0
@@ -49,13 +49,27 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Set up .NET
+        if: matrix.language == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
+          build-mode: ${{ (matrix.language == 'csharp' && 'manual') || (matrix.language == 'go' && 'autobuild') || 'none' }}
+
+      - name: Build .NET projects (csharp)
+        if: matrix.language == 'csharp'
+        run: |
+          dotnet build connectors/worker/dotnet/OmniVec.Worker.csproj -c Release
+          dotnet build connectors/ingestion/dotnet/OmniVec.ChangeFeed.csproj -c Release
 
       - name: Autobuild
+        if: matrix.language != 'csharp'
         uses: github/codeql-action/autobuild@v3
 
       # Run analysis but don't auto-upload — we post-process first to honor
