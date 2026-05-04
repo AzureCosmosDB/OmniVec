@@ -42,9 +42,9 @@ jobs:
       - name: Run BinSkim
         shell: pwsh
         run: |
-          dotnet tool install -g Microsoft.CodeAnalysis.BinSkim
-          $env:Path = "$env:USERPROFILE\.dotnet\tools;$env:Path"
-          BinSkim analyze publish-out/OmniVec.Worker.dll --output binskim-dotnet.sarif --recurse false
+          nuget install Microsoft.CodeAnalysis.BinSkim -OutputDirectory $env:RUNNER_TEMP\bs -ExcludeVersion
+          $bs = (Get-ChildItem "$env:RUNNER_TEMP\bs\Microsoft.CodeAnalysis.BinSkim\tools\net*\win-x64\BinSkim.exe" | Select-Object -First 1).FullName
+          & $bs analyze publish-out/OmniVec.Worker.dll --output binskim-dotnet.sarif --recurse false
 
       - name: Upload BinSkim SARIF
         if: always()
@@ -80,9 +80,9 @@ jobs:
       - name: Run BinSkim
         shell: pwsh
         run: |
-          dotnet tool install -g Microsoft.CodeAnalysis.BinSkim
-          $env:Path = "$env:USERPROFILE\.dotnet\tools;$env:Path"
-          BinSkim analyze cli/omnivec.exe --output binskim-go.sarif
+          nuget install Microsoft.CodeAnalysis.BinSkim -OutputDirectory $env:RUNNER_TEMP\bs -ExcludeVersion
+          $bs = (Get-ChildItem "$env:RUNNER_TEMP\bs\Microsoft.CodeAnalysis.BinSkim\tools\net*\win-x64\BinSkim.exe" | Select-Object -First 1).FullName
+          & $bs analyze cli/omnivec.exe --output binskim-go.sarif
 
       - name: Upload BinSkim SARIF
         if: always()
@@ -107,12 +107,22 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.DOCGROK_DEPLOY_KEY }}
 
-      - uses: actions/checkout@v4
+      - name: Checkout OmniVec
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
-          ssh-key: ${{ secrets.DOCGROK_DEPLOY_KEY }}
+          submodules: false
+
+      - name: Init docgrok submodule via SSH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          git config -f .gitmodules submodule.docgrok.url git@github.com:AzureCosmosDB/DocGrok.git
+          git submodule sync --recursive
+          git -c core.sshCommand="ssh -o StrictHostKeyChecking=no" submodule update --init --recursive --depth=1
 
       - name: Install Rust nightly + rust-src
+        shell: pwsh
         run: |
           rustup toolchain install nightly --component rust-src
           rustup target add x86_64-pc-windows-msvc --toolchain nightly
@@ -124,9 +134,9 @@ jobs:
       - name: Run BinSkim
         shell: pwsh
         run: |
-          dotnet tool install -g Microsoft.CodeAnalysis.BinSkim
-          $env:Path = "$env:USERPROFILE\.dotnet\tools;$env:Path"
-          BinSkim analyze docgrok/router/target/x86_64-pc-windows-msvc/release/docgrok-router.exe --output binskim-rust.sarif --recurse false
+          nuget install Microsoft.CodeAnalysis.BinSkim -OutputDirectory $env:RUNNER_TEMP\bs -ExcludeVersion
+          $bs = (Get-ChildItem "$env:RUNNER_TEMP\bs\Microsoft.CodeAnalysis.BinSkim\tools\net*\win-x64\BinSkim.exe" | Select-Object -First 1).FullName
+          & $bs analyze docgrok/router/target/x86_64-pc-windows-msvc/release/docgrok-router.exe --output binskim-rust.sarif --recurse false
 
       - name: Apply documented upstream-toolchain suppressions
         run: python scripts/security/filter_binskim_sarif.py binskim-rust.sarif binskim-rust-final.sarif
