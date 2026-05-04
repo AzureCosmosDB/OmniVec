@@ -40,12 +40,15 @@ jobs:
         run: dotnet publish connectors/worker/dotnet -c Release -o publish-out
 
       - name: Run BinSkim
-        uses: microsoft/binskim-action@v1
-        with:
-          arguments: analyze publish-out/OmniVec.Worker.dll --output binskim-dotnet.sarif --recurse false
+        shell: pwsh
+        run: |
+          dotnet tool install -g Microsoft.CodeAnalysis.BinSkim
+          $env:Path = "$env:USERPROFILE\.dotnet\tools;$env:Path"
+          BinSkim analyze publish-out/OmniVec.Worker.dll --output binskim-dotnet.sarif --recurse false
 
       - name: Upload BinSkim SARIF
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: binskim-dotnet.sarif
@@ -75,12 +78,15 @@ jobs:
         run: go build -trimpath -ldflags "-s -w" -o omnivec.exe .
 
       - name: Run BinSkim
-        uses: microsoft/binskim-action@v1
-        with:
-          arguments: analyze cli/omnivec.exe --output binskim-go.sarif
+        shell: pwsh
+        run: |
+          dotnet tool install -g Microsoft.CodeAnalysis.BinSkim
+          $env:Path = "$env:USERPROFILE\.dotnet\tools;$env:Path"
+          BinSkim analyze cli/omnivec.exe --output binskim-go.sarif
 
       - name: Upload BinSkim SARIF
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: binskim-go.sarif
@@ -116,15 +122,18 @@ jobs:
         run: cargo +nightly build --release --target x86_64-pc-windows-msvc
 
       - name: Run BinSkim
-        uses: microsoft/binskim-action@v1
-        with:
-          arguments: analyze docgrok/router/target/x86_64-pc-windows-msvc/release/docgrok-router.exe --output binskim-rust.sarif --recurse false
+        shell: pwsh
+        run: |
+          dotnet tool install -g Microsoft.CodeAnalysis.BinSkim
+          $env:Path = "$env:USERPROFILE\.dotnet\tools;$env:Path"
+          BinSkim analyze docgrok/router/target/x86_64-pc-windows-msvc/release/docgrok-router.exe --output binskim-rust.sarif --recurse false
 
       - name: Apply documented upstream-toolchain suppressions
         run: python scripts/security/filter_binskim_sarif.py binskim-rust.sarif binskim-rust-final.sarif
 
       - name: Upload BinSkim SARIF
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: binskim-rust-final.sarif
