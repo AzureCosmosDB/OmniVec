@@ -102,11 +102,48 @@ omnivec source delete <id> -y
 | Type | Required Fields | Optional Fields |
 |------|----------------|----------------|
 | `azure-blob` | `account_url`, `container` | `prefix` |
-| `cosmosdb` | `endpoint`, `database`, `container` | `query` |
+| `cosmosdb` | `endpoint`, `database`, `container` | `query`, `attachments_field`, `attachment_url_field`, `attachment_name_field`, `attachment_content_type_field`, `attachment_name_regex`, `attachment_file_types`, `attachment_content_types`, `account_url`, `connection_string` |
 | `postgresql` | `host`, `database`, `table` | `port`, `user`, `password`, `ssl_mode` |
 | `mssql` | `host`, `database`, `table` | `port`, `user`, `password` |
 
 > **Note:** Content extraction config (`content_fields`, `content_mode`, `file_types`) is configured per-pipeline on the pipeline source entry, not on the source itself.
+
+### CosmosDB attachment-source mode
+
+By default a CosmosDB source extracts inline text from the per-pipeline
+`content_fields`. Setting `attachments_field` switches the source into
+**attachment mode**: for each document, the watcher iterates the named array,
+applies user filters, and emits one job per matching attachment with the blob
+URL — DocGrok's pipeline-worker downloads each blob from Azure Storage and
+embeds it (PDF, DOCX, etc.).
+
+```bash
+omnivec source create --name "Cases with PDFs" --type cosmosdb \
+  --config endpoint=https://acct.documents.azure.com:443/ \
+  --config database=app --config container=cases \
+  --config attachments_field=attachments \
+  --config attachment_file_types=pdf,docx \
+  --config attachment_name_regex='^report-.*' \
+  --config account_url=https://acct.blob.core.windows.net \
+  --config container=docs
+```
+
+Filter keys (all optional, AND-combined; an attachment must pass every
+configured filter to be selected):
+
+| Key | Description |
+|-----|-------------|
+| `attachments_field` | Top-level field name of the attachments array (e.g. `attachments`) |
+| `attachment_url_field` / `attachment_name_field` / `attachment_content_type_field` | Per-attachment keys (defaults: `url`, `name`, `contentType`) |
+| `attachment_name_regex` | Case-insensitive regex over the attachment name |
+| `attachment_file_types` | Comma-separated or list — extensions, no dot (e.g. `pdf,docx`) |
+| `attachment_content_types` | Comma-separated or list — MIME types |
+| `account_url` / `container` | Azure Blob fallback for relative URLs and SSRF pinning |
+
+Attachment URLs must be on `*.blob.core.windows.net`; if `account_url` is set,
+URLs must match that exact host (SSRF guard). Attachment-mode pipelines must
+use `processing_mode=queue` — inline mode is skipped because the worker
+downloads the blob asynchronously.
 
 ---
 
