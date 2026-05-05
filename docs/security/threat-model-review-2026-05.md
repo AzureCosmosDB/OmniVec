@@ -225,19 +225,36 @@ Status of the six original backlog items:
    gate before flipping `public_network_access_enabled = false`) is the
    recommended sequencing.
 
-Ordered next-batch backlog (post-batch-6):
+Ordered next-batch backlog (post-batch-7):
 
-1. **AGIC ingress variant** for `ingress.controller=agic` (T-ING-1
-   follow-up; annotations + per-listener rewrite rules).
-2. **AAD thumbprint pin** (T-AAD-2 hardening): replace the env CA-bundle
-   with a hash-of-key pin verified post-fetch.
-3. **Private-endpoint phase 2**: AOAI + Key Vault + per-resource
-   `public_network_access_enabled=false` once the FY27 hub VNet is
-   ready (RES-1 follow-up).
-4. **Seccomp tuning**: tighten the allow-list once we have parser-worker
+1. **Seccomp tuning**: tighten the allow-list once we have parser-worker
    strace from production (RES-2 follow-up).
-5. **Cosign image signing** (RES-3) when ACR enables it org-wide.
-6. **Search per-token rate-limit** (RES-4).
+2. **Cosign image signing** (RES-3) when ACR enables it org-wide.
+3. **Threat model of CI/CD** (RES-5) — separate workstream once `.github/workflows/`
+   stabilises.
+
+Status of the six batch-6 backlog items (all closed in PR #135 / batch 7):
+
+* **AGIC ingress variant** — ✅ batch 7: `helm/omnivec/templates/ingress-agic.yaml`,
+  selected via `ingress.controller=agic`. Uses App Gateway annotations
+  (`appgw.ingress.kubernetes.io/rewrite-rule-set`,
+  `appgw.ingress.kubernetes.io/waf-policy-for-path`); the rewrite rule
+  set + WAF policy must be provisioned on the App Gateway out-of-band
+  before the chart is applied.
+* **AAD thumbprint pin** — ✅ batch 7: `OMNIVEC_AAD_JWKS_PIN_SHA256`
+  (comma-separated SHA-256 hex digests; whitespace / colon separators
+  accepted). One-shot TLS probe to login.microsoftonline.com on JWKS
+  client init; mismatch fails closed (returns `None` → AAD auth
+  unavailable, not silently downgraded).
+* **PE phase 2** — ✅ batch 7: `terraform/private-endpoints.tf`
+  extended with Key Vault and Azure OpenAI PEs. Both gated on per-resource
+  IDs (`var.key_vault_id`, `var.openai_account_id`) plus DNS zone keys
+  in `private_dns_zone_ids`.
+* **Per-token rate-limit on /search** — ✅ batch 7 (RES-4 closed):
+  `search/auth.py` rate-limit now keyed off token id (no longer token
+  name — two tokens with the same name had a shared bucket). Added
+  per-token override via the `rate_limit_rpm` field on the token doc:
+  `0` = uncapped (trusted automation), positive int = clamp.
 
 ## 6. Verification
 

@@ -40,9 +40,26 @@ variable "private_endpoint_subnet_id" {
 }
 
 variable "private_dns_zone_ids" {
-  description = "Map of service -> private DNS zone resource ID. Keys: cosmos_sql, blob, servicebus. Empty/missing value disables that service's PE."
+  description = "Map of service -> private DNS zone resource ID. Keys: cosmos_sql, blob, servicebus, keyvault, openai. Empty/missing value disables that service's PE."
   type        = map(string)
   default     = {}
+}
+
+# ----------------------------------------------------------------------
+# Phase 2 inputs — Key Vault + AOAI live outside this module today, so we
+# accept their resource IDs as inputs rather than baking in data sources.
+# Empty string disables the corresponding endpoint.
+# ----------------------------------------------------------------------
+variable "key_vault_id" {
+  description = "Resource ID of the Key Vault to front with a private endpoint. Empty disables the Key Vault PE."
+  type        = string
+  default     = ""
+}
+
+variable "openai_account_id" {
+  description = "Resource ID of the Azure OpenAI (Cognitive Services) account. Empty disables the AOAI PE."
+  type        = string
+  default     = ""
 }
 
 # ----------------------------------------------------------------------
@@ -115,6 +132,54 @@ resource "azurerm_private_endpoint" "servicebus" {
 }
 
 # ----------------------------------------------------------------------
+# Key Vault (RES-1 phase 2)
+# ----------------------------------------------------------------------
+resource "azurerm_private_endpoint" "keyvault" {
+  count = var.enable_private_endpoints && var.key_vault_id != "" && lookup(var.private_dns_zone_ids, "keyvault", "") != "" ? 1 : 0
+
+  name                = "omnivec-keyvault-pe"
+  location            = var.location
+  resource_group_name = data.azurerm_resource_group.main.name
+  subnet_id           = var.private_endpoint_subnet_id
+
+  private_service_connection {
+    name                           = "omnivec-keyvault-psc"
+    private_connection_resource_id = var.key_vault_id
+    subresource_names              = ["vault"]
+    is_manual_connection           = false
+  }
+
+  private_dns_zone_group {
+    name                 = "default"
+    private_dns_zone_ids = [var.private_dns_zone_ids["keyvault"]]
+  }
+}
+
+# ----------------------------------------------------------------------
+# Azure OpenAI / Cognitive Services (RES-1 phase 2)
+# ----------------------------------------------------------------------
+resource "azurerm_private_endpoint" "openai" {
+  count = var.enable_private_endpoints && var.openai_account_id != "" && lookup(var.private_dns_zone_ids, "openai", "") != "" ? 1 : 0
+
+  name                = "omnivec-openai-pe"
+  location            = var.location
+  resource_group_name = data.azurerm_resource_group.main.name
+  subnet_id           = var.private_endpoint_subnet_id
+
+  private_service_connection {
+    name                           = "omnivec-openai-psc"
+    private_connection_resource_id = var.openai_account_id
+    subresource_names              = ["account"]
+    is_manual_connection           = false
+  }
+
+  private_dns_zone_group {
+    name                 = "default"
+    private_dns_zone_ids = [var.private_dns_zone_ids["openai"]]
+  }
+}
+
+# ----------------------------------------------------------------------
 # Outputs — surface PE IDs so downstream pipelines can sanity-check DNS
 # ----------------------------------------------------------------------
 output "private_endpoint_ids" {
@@ -122,6 +187,8 @@ output "private_endpoint_ids" {
     cosmos     = try(azurerm_private_endpoint.cosmos[0].id, null)
     blob       = try(azurerm_private_endpoint.blob[0].id, null)
     servicebus = try(azurerm_private_endpoint.servicebus[0].id, null)
+    keyvault   = try(azurerm_private_endpoint.keyvault[0].id, null)
+    openai     = try(azurerm_private_endpoint.openai[0].id, null)
   }
   description = "Resource IDs of provisioned private endpoints (null when disabled)."
 }

@@ -502,7 +502,7 @@ docgrok:
 # annotations; in-process headers from api/api.py still apply.
 ingress:
   enabled: false
-  controller: nginx   # nginx | traefik
+  controller: nginx   # nginx | traefik | agic
   className: nginx
   annotations: {}
   hosts:
@@ -511,6 +511,15 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+  # AGIC (Azure Application Gateway Ingress Controller) — values consumed
+  # by templates/ingress-agic.yaml when controller=agic. Rewrite rule sets
+  # and WAF policies are managed on the App Gateway resource (out of
+  # band); supply their names here.
+  agic:
+    rewriteRuleSet: ""        # e.g. "omnivec-security-headers"
+    wafPolicy: ""             # e.g. "/subscriptions/.../wafPolicies/omnivec-waf"
+    sslRedirect: "true"
+    backendProtocol: "http"
   # Content-Security-Policy applied at the ingress layer (defence in depth on
   # top of the in-process header set by api/api.py). Override per deployment
   # if you need additional script-src / connect-src origins.

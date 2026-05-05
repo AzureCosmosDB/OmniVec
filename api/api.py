@@ -190,7 +190,65 @@ _AAD_REQUIRE_GROUP = os.getenv("OMNIVEC_AAD_REQUIRE_GROUP", "0").strip() == "1"
 # to a copy of the Microsoft IT CA chain to fail closed if egress is
 # MITM-able. Empty string = use defaults.
 _AAD_JWKS_CA_BUNDLE = os.getenv("OMNIVEC_AAD_JWKS_CA_BUNDLE", "").strip()
+# T-AAD-2 hardening: optional comma-separated SHA-256 thumbprints (hex,
+# lowercased, colons-or-spaces allowed) of the leaf certificate served by
+# login.microsoftonline.com. When set, the JWKS HTTPS connection is
+# verified against the CA bundle AS WELL AS pinned to one of these
+# fingerprints — fail closed on mismatch. The pin is checked the first
+# time we connect; PyJWKClient caches the keys for ``lifespan`` seconds.
+# Empty string disables the pin entirely (default).
+_AAD_JWKS_PIN_SHA256 = os.getenv("OMNIVEC_AAD_JWKS_PIN_SHA256", "").strip()
 _aad_jwks_client = None  # lazy-initialised PyJWKClient
+
+
+def _normalise_thumbprint(value: str) -> str:
+    """Strip separators and lower-case a SHA-256 hex digest.
+
+    Operators paste fingerprints in many shapes (``aa:bb:cc:..``, ``AA BB CC``,
+    ``aabbcc..``) — accept all and compare canonical forms.
+    """
+    return "".join(ch for ch in value.lower() if ch in "0123456789abcdef")
+
+
+def _parse_pinned_thumbprints(raw: str) -> list[str]:
+    """Split + canonicalise the pin env var; ignore empty + malformed entries."""
+    out: list[str] = []
+    for chunk in (raw or "").split(","):
+        norm = _normalise_thumbprint(chunk.strip())
+        if len(norm) == 64:  # SHA-256 = 32 bytes = 64 hex chars
+            out.append(norm)
+        elif chunk.strip():
+            logger.warning(
+                "AAD JWKS pin %r is not a 64-char SHA-256 hex digest; ignored",
+                chunk.strip(),
+            )
+    return out
+
+
+def _verify_jwks_thumbprint(host: str, port: int, pinned: list[str], cafile: str) -> bool:
+    """Open a TLS handshake to ``host:port`` and return True iff the leaf
+    cert SHA-256 matches one of ``pinned`` thumbprints.
+
+    Raises on TLS failure (network, hostname, CA). Used as a one-shot pre-check
+    before letting PyJWKClient cache the JWKS keys for the day.
+    """
+    import hashlib
+    import socket
+    import ssl
+    ctx = ssl.create_default_context(cafile=cafile or None)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    with socket.create_connection((host, port), timeout=10) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            der = tls.getpeercert(binary_form=True)
+    fp = hashlib.sha256(der).hexdigest()
+    if fp in pinned:
+        return True
+    logger.error(
+        "AAD JWKS thumbprint pin MISMATCH for %s — got %s, expected one of %s",
+        host, fp, pinned,
+    )
+    return False
 
 
 def _aad_enabled() -> bool:
@@ -209,6 +267,22 @@ def _get_aad_jwks_client():
     jwks_url = (
         f"https://login.microsoftonline.com/{_AAD_TENANT_ID}/discovery/v2.0/keys"
     )
+    # T-AAD-2 hardening: when a thumbprint pin is configured, do a one-shot
+    # TLS probe to login.microsoftonline.com and abort initialisation if
+    # the leaf cert SHA-256 doesn't match. Failing here returns ``None`` so
+    # AAD auth is unavailable rather than silently downgraded.
+    pinned = _parse_pinned_thumbprints(_AAD_JWKS_PIN_SHA256)
+    if pinned:
+        try:
+            ok = _verify_jwks_thumbprint(
+                "login.microsoftonline.com", 443, pinned, _AAD_JWKS_CA_BUNDLE,
+            )
+        except Exception as e:
+            logger.error("AAD JWKS thumbprint probe failed: %s", e)
+            return None
+        if not ok:
+            return None
+        logger.info("AAD JWKS thumbprint pin verified (%d candidate(s))", len(pinned))
     # T-AAD-2: pass an explicit CA bundle when one is pinned via env. PyJWT's
     # PyJWKClient uses urllib under the hood; surface SSL context via the
     # ``ssl_context`` kwarg when available, otherwise fall back to default.
