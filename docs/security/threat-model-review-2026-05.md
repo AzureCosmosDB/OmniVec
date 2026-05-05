@@ -225,13 +225,39 @@ Status of the six original backlog items:
    gate before flipping `public_network_access_enabled = false`) is the
    recommended sequencing.
 
-Ordered next-batch backlog (post-batch-7):
+Ordered next-batch backlog (post-batch-8):
 
-1. **Seccomp tuning**: tighten the allow-list once we have parser-worker
-   strace from production (RES-2 follow-up).
-2. **Cosign image signing** (RES-3) when ACR enables it org-wide.
-3. **Threat model of CI/CD** (RES-5) — separate workstream once `.github/workflows/`
-   stabilises.
+All severity-rated items are closed. The remaining backlog has external
+dependencies (CI/CD platform changes — see `cicd-threat-model.md` §5).
+
+1. **T-CI-2**: SHA-pin third-party GitHub Actions; renovate auto-bumps.
+2. **T-CI-4 follow-up**: ACR push via Workload Identity Federation
+   (remove `ACR_PASSWORD` secret).
+3. **T-CI-5**: AKS deploy via OIDC federated identity (remove
+   long-lived kubeconfig).
+4. **T-CI-7**: SBOM generation + attestation alongside cosign
+   signatures.
+
+Status of the post-batch-7 items (all closed in PR #136 / batch 8):
+
+* **Seccomp tuning** — ✅ batch 8 (RES-2 fully closed): tightened the
+  baseline (`docgrok-parser.json`) by removing chmod/chown family,
+  mknod, inotify\*, sysv-IPC msg\*, set/getuid family. Added an audit
+  profile (`docgrok-parser-audit.json`, `defaultAction=SCMP_ACT_LOG`)
+  for operators to capture real syscall usage in pre-prod and
+  selectively re-enable any false positives.
+* **Cosign image signing** — ✅ batch 8 (RES-3 fully closed):
+  `.github/workflows/build-images.yml` now keyless-signs every image
+  via Sigstore + GitHub OIDC. Verification at admission via
+  `templates/cosign-policy.yaml` (sigstore policy-controller
+  ClusterImagePolicy), gated on
+  `.Values.security.imageSigning.enabled` (off by default — operator
+  must install policy-controller first).
+* **CI/CD threat model** — ✅ batch 8 (RES-5 fully closed):
+  `docs/security/cicd-threat-model.md` covers STRIDE-aligned analysis
+  of `.github/workflows/`, ACR push paths, secret rotation, and
+  branch-protection bypass. Lists 5-item supply-chain backlog
+  (T-CI-2, -4 follow-up, -5, -7, CodeQL coverage).
 
 Status of the six batch-6 backlog items (all closed in PR #135 / batch 7):
 

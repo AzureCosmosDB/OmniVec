@@ -17,6 +17,9 @@ env:
 
 permissions:
   contents: read
+  # RES-3: cosign keyless signing uses GitHub OIDC tokens issued by the
+  # workflow run. id-token=write is the minimum permission required.
+  id-token: write
 
 jobs:
   build:
@@ -114,6 +117,7 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build & push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
@@ -122,3 +126,45 @@ jobs:
           tags: ${{ steps.tags.outputs.docker_tags }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ matrix.image }}:buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ matrix.image }}:buildcache,mode=max
+
+      # RES-3 — cosign keyless signing using GitHub OIDC. Signatures land
+      # in the same OCI registry next to the image (works on any
+      # OCI-compliant registry including ACR; no ACR-side cosign feature
+      # toggle required). Verify with:
+      #   cosign verify <REGISTRY>/<image>@<digest> \
+      #     --certificate-identity=<workflow-url> \
+      #     --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.0
+
+      - name: Sign image with cosign (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.tags.outputs.docker_tags }}
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          if [[ -z "${DIGEST}" ]]; then
+            echo "no digest from build step; skipping signing" >&2
+            exit 0
+          fi
+          # The build step pushes multiple tags pointing at the same
+          # digest, so we sign by digest once. Each unique repo:digest
+          # gets a sigstore record.
+          declare -A seen=()
+          IFS=',' read -ra refs <<< "${TAGS}"
+          for ref in "${refs[@]}"; do
+            ref="${ref%% }"
+            ref="${ref## }"
+            [[ -z "${ref}" ]] && continue
+            repo="${ref%%:*}"
+            target="${repo}@${DIGEST}"
+            if [[ -n "${seen[$target]:-}" ]]; then
+              continue
+            fi
+            seen[$target]=1
+            echo "cosign sign --yes ${target}"
+            cosign sign --yes "${target}"
+          done
