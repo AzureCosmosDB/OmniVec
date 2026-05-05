@@ -53,6 +53,12 @@ public class Source
     public string? AttachmentNameRegex => TryGetString("attachment_name_regex");
     public List<string> AttachmentFileTypes => TryGetStringList("attachment_file_types");
     public List<string> AttachmentContentTypes => TryGetStringList("attachment_content_types");
+    // Optional explicit allowlist of blob storage account hosts permitted as
+    // attachment sources. Used as a tighter SSRF guard than BlobAccountUrl
+    // when a source legitimately spans multiple storage accounts. Each entry
+    // may be a full URL ("https://acct.blob.core.windows.net") or just a
+    // hostname ("acct.blob.core.windows.net").
+    public List<string> AttachmentBlobAccountAllowlist => TryGetStringList("attachment_blob_account_allowlist");
 
     /// <summary>
     /// Build connection string from config. Supports both explicit connection_string
@@ -288,9 +294,18 @@ public class Source
     /// Resolve an attachment URL to an (accountUrl, container, blobName) triple.
     /// Accepts either a full https URL on a *.blob.core.windows.net host
     /// (validated against the source's configured <see cref="BlobAccountUrl"/>
-    /// when set, as an SSRF guard), or a relative blob name that is joined
-    /// with the source's configured account_url + container.
-    /// Returns (null,null,"") for invalid / disallowed URLs.
+    /// or <see cref="AttachmentBlobAccountAllowlist"/> as an SSRF guard), or
+    /// a relative blob name that is joined with the source's configured
+    /// account_url + container. Returns (null,null,"") for invalid /
+    /// disallowed URLs.
+    ///
+    /// Hardening (T-CON-2 / T-BLB-1):
+    ///   * Absolute URLs require either BlobAccountUrl or
+    ///     AttachmentBlobAccountAllowlist to be set; otherwise any
+    ///     *.blob.core.windows.net host could be reached.
+    ///   * Blob name segments are validated to reject '..' traversal,
+    ///     leading/trailing whitespace, control characters, and empty
+    ///     segments after URL-decoding.
     /// </summary>
     public (string? AccountUrl, string? Container, string BlobName) ResolveBlobLocation(string url)
     {
@@ -302,27 +317,91 @@ public class Source
             if (!uri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
                 return (null, null, "");
 
-            // SSRF guard: if source pins an account_url, the URL host must match.
-            if (!string.IsNullOrEmpty(BlobAccountUrl)
-                && Uri.TryCreate(BlobAccountUrl, UriKind.Absolute, out var pinned))
-            {
-                if (!string.Equals(pinned.Host, uri.Host, StringComparison.OrdinalIgnoreCase))
-                    return (null, null, "");
-            }
+            // SSRF guard: source MUST pin either account_url or an allowlist.
+            // Without one, any *.blob.core.windows.net host (incl. attacker-
+            // controlled accounts in the same tenant) would be reachable.
+            var pinnedHost = ExtractHost(BlobAccountUrl);
+            var allowedHosts = AttachmentBlobAccountAllowlist
+                .Select(ExtractHost)
+                .Where(h => !string.IsNullOrEmpty(h))
+                .Select(h => h!)
+                .ToList();
+            if (string.IsNullOrEmpty(pinnedHost) && allowedHosts.Count == 0)
+                return (null, null, "");
+
+            var hostMatches = false;
+            if (!string.IsNullOrEmpty(pinnedHost)
+                && string.Equals(pinnedHost, uri.Host, StringComparison.OrdinalIgnoreCase))
+                hostMatches = true;
+            if (!hostMatches && allowedHosts.Any(h =>
+                    string.Equals(h, uri.Host, StringComparison.OrdinalIgnoreCase)))
+                hostMatches = true;
+            if (!hostMatches) return (null, null, "");
 
             var path = uri.AbsolutePath.TrimStart('/');
             var slashIdx = path.IndexOf('/');
             if (slashIdx < 0) return (null, null, "");
             var ctnr = path.Substring(0, slashIdx);
-            var blob = path.Substring(slashIdx + 1);
-            if (string.IsNullOrEmpty(blob)) return (null, null, "");
-            return ($"https://{uri.Host}", ctnr, Uri.UnescapeDataString(blob));
+            var rawBlob = path.Substring(slashIdx + 1);
+            if (string.IsNullOrEmpty(rawBlob)) return (null, null, "");
+            var decoded = Uri.UnescapeDataString(rawBlob);
+            if (!IsSafeBlobName(decoded) || !IsSafeContainerName(ctnr))
+                return (null, null, "");
+            return ($"https://{uri.Host}", ctnr, decoded);
         }
 
         // Relative — fall back to source-configured account/container.
+        // Defense-in-depth: do NOT strip a leading slash. Reject absolute-style
+        // relative URLs so attackers can't smuggle a different key shape.
         if (string.IsNullOrEmpty(BlobAccountUrl) || string.IsNullOrEmpty(BlobContainer))
             return (null, null, "");
-        return (BlobAccountUrl, BlobContainer, url.TrimStart('/'));
+        var relDecoded = Uri.UnescapeDataString(url);
+        if (!IsSafeBlobName(relDecoded)) return (null, null, "");
+        return (BlobAccountUrl, BlobContainer, relDecoded);
+    }
+
+    private static string? ExtractHost(string? urlOrHost)
+    {
+        if (string.IsNullOrWhiteSpace(urlOrHost)) return null;
+        if (Uri.TryCreate(urlOrHost, UriKind.Absolute, out var u)) return u.Host;
+        return urlOrHost.Trim().TrimEnd('/');
+    }
+
+    /// <summary>
+    /// Validate a (URL-decoded) blob name. Rejects path traversal, control
+    /// characters, leading slashes, and absolute paths — anything that could
+    /// let an attacker pivot away from the configured container or smuggle a
+    /// crafted key into downstream storage operations.
+    /// </summary>
+    internal static bool IsSafeBlobName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        if (name.Length > 1024) return false; // Azure Blob max key length
+        if (name.StartsWith('/') || name.StartsWith('\\')) return false;
+        foreach (var ch in name)
+        {
+            if (ch == '\0' || (ch < 0x20 && ch != '\t')) return false;
+        }
+        foreach (var seg in name.Split(new[] { '/', '\\' }, StringSplitOptions.None))
+        {
+            if (seg.Length == 0) return false; // empty segment ("//" or trailing "/")
+            if (seg == "." || seg == "..") return false;
+            if (seg.Trim() != seg) return false; // leading/trailing whitespace per segment
+        }
+        return true;
+    }
+
+    internal static bool IsSafeContainerName(string ctnr)
+    {
+        if (string.IsNullOrWhiteSpace(ctnr)) return false;
+        // Azure container names: 3-63 chars, lowercase letters, digits, hyphens.
+        // We only need a permissive sanity check — the storage SDK will do strict
+        // validation. The point here is to refuse traversal-style values.
+        foreach (var ch in ctnr)
+        {
+            if (ch == '/' || ch == '\\' || ch == '.' || ch < 0x20) return false;
+        }
+        return ctnr.Length is >= 1 and <= 63;
     }
 }
 
