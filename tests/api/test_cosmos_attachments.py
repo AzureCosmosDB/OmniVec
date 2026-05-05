@@ -81,6 +81,23 @@ def test_relative_url_uses_source_account():
     assert out[0]["blob_name"] == "rel.pdf"
 
 
+def test_relative_url_prefers_attachment_blob_container():
+    # When both keys are present, attachment_blob_container wins so the
+    # cosmos container value (still in "container") is not used as the blob
+    # container. This is the documented escape hatch for sources that need
+    # to also pin a default blob container for relative URLs.
+    cfg = {
+        "attachments_field": "attachments",
+        "account_url": ACCOUNT,
+        "container": "cases",  # cosmos container — must NOT be used as blob container
+        "attachment_blob_container": CONTAINER,
+    }
+    doc = _doc({"name": "rel.pdf", "url": "rel.pdf", "contentType": "application/pdf"})
+    out = _extract_attachments(doc, cfg)
+    assert out[0]["blob_container"] == CONTAINER
+    assert out[0]["blob_container"] != "cases"
+
+
 def test_ssrf_rejects_non_blob_host():
     cfg = {"attachments_field": "attachments"}
     doc = _doc({"name": "x.pdf", "url": "https://evil.example.com/c/x.pdf",

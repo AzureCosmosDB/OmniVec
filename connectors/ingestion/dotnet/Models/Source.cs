@@ -33,7 +33,12 @@ public class Source
     // Blob source config accessors
     public string? BlobAccountUrl => TryGetString("account_url");
     public string? BlobConnectionString => TryGetString("connection_string");
-    public string? BlobContainer => TryGetString("container");
+    // For pure blob sources, "container" names the blob container.
+    // For cosmosdb attachment-mode sources, "container" names the *cosmos*
+    // container, so we honor "attachment_blob_container" first as a default
+    // for relative attachment URLs (and as the SSRF guard fallback container).
+    public string? BlobContainer =>
+        TryGetString("attachment_blob_container") ?? TryGetString("container");
     public string? BlobPrefix => TryGetString("prefix") ?? "";
     public string? BlobFileType => TryGetString("file_type") ?? "pdf";
 

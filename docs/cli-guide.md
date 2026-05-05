@@ -102,7 +102,7 @@ omnivec source delete <id> -y
 | Type | Required Fields | Optional Fields |
 |------|----------------|----------------|
 | `azure-blob` | `account_url`, `container` | `prefix` |
-| `cosmosdb` | `endpoint`, `database`, `container` | `query`, `attachments_field`, `attachment_url_field`, `attachment_name_field`, `attachment_content_type_field`, `attachment_name_regex`, `attachment_file_types`, `attachment_content_types`, `account_url`, `connection_string` |
+| `cosmosdb` | `endpoint`, `database`, `container` | `query`, `attachments_field`, `attachment_url_field`, `attachment_name_field`, `attachment_content_type_field`, `attachment_name_regex`, `attachment_file_types`, `attachment_content_types`, `attachment_blob_container`, `account_url`, `connection_string` |
 | `postgresql` | `host`, `database`, `table` | `port`, `user`, `password`, `ssl_mode` |
 | `mssql` | `host`, `database`, `table` | `port`, `user`, `password` |
 
@@ -125,8 +125,15 @@ omnivec source create --name "Cases with PDFs" --type cosmosdb \
   --config attachment_file_types=pdf,docx \
   --config attachment_name_regex='^report-.*' \
   --config account_url=https://acct.blob.core.windows.net \
-  --config container=docs
+  --config attachment_blob_container=docs
 ```
+
+Note that `container` names the **cosmos** container (`cases` above). For
+attachments stored in Azure Blob Storage, use the dedicated
+`attachment_blob_container` key — it is honored ahead of `container` for
+relative-URL resolution and SSRF guard so the two values do not collide.
+Most deployments use absolute blob URLs in the document itself and can omit
+both `account_url` and `attachment_blob_container`.
 
 Filter keys (all optional, AND-combined; an attachment must pass every
 configured filter to be selected):
@@ -138,7 +145,8 @@ configured filter to be selected):
 | `attachment_name_regex` | Case-insensitive regex over the attachment name |
 | `attachment_file_types` | Comma-separated or list — extensions, no dot (e.g. `pdf,docx`) |
 | `attachment_content_types` | Comma-separated or list — MIME types |
-| `account_url` / `container` | Azure Blob fallback for relative URLs and SSRF pinning |
+| `account_url` | Azure Blob account URL — SSRF host pin (URLs must match) |
+| `attachment_blob_container` | Default blob container for relative URLs (preferred over `container`) |
 
 Attachment URLs must be on `*.blob.core.windows.net`; if `account_url` is set,
 URLs must match that exact host (SSRF guard). Attachment-mode pipelines must
