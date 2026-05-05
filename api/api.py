@@ -179,6 +179,11 @@ _AAD_AUDIENCE = os.getenv("OMNIVEC_AAD_AUDIENCE", "").strip()
 _AAD_ADMIN_GROUP = os.getenv("OMNIVEC_AAD_ADMIN_GROUP_ID", "").strip()
 _AAD_OPERATOR_GROUP = os.getenv("OMNIVEC_AAD_OPERATOR_GROUP_ID", "").strip()
 _AAD_VIEWER_GROUP = os.getenv("OMNIVEC_AAD_VIEWER_GROUP_ID", "").strip()
+# T-AAD-1: when ``1``, AAD identities whose ``groups``/``roles`` claims do not
+# match any configured role group are *rejected* rather than defaulting to
+# viewer. Operators in tenants with guests / service identities should set
+# this. Default ``0`` preserves the original behaviour.
+_AAD_REQUIRE_GROUP = os.getenv("OMNIVEC_AAD_REQUIRE_GROUP", "0").strip() == "1"
 _aad_jwks_client = None  # lazy-initialised PyJWKClient
 
 
@@ -202,8 +207,13 @@ def _get_aad_jwks_client():
     return _aad_jwks_client
 
 
-def _aad_role_for_claims(claims: dict) -> str:
-    """Map AAD ``groups`` / ``roles`` claims to OmniVec role names."""
+def _aad_role_for_claims(claims: dict) -> Optional[str]:
+    """Map AAD ``groups`` / ``roles`` claims to OmniVec role names.
+
+    Returns ``None`` only when ``OMNIVEC_AAD_REQUIRE_GROUP=1`` is set and the
+    token has no matching role group — caller treats that as auth failure
+    (T-AAD-1). Otherwise unmapped tokens fall through to ``viewer``.
+    """
     groups = claims.get("groups") or []
     roles = claims.get("roles") or []
     if isinstance(groups, str):
@@ -217,9 +227,10 @@ def _aad_role_for_claims(claims: dict) -> str:
         return "operator"
     if _AAD_VIEWER_GROUP and _AAD_VIEWER_GROUP in membership:
         return "viewer"
-    # Operators who set neither admin nor operator group get the default
-    # least-privileged role; tighten by setting an explicit viewer group and
-    # rejecting unmapped tokens at the gateway.
+    if _AAD_REQUIRE_GROUP:
+        # Strict mode: refuse to grant any role to an unmapped principal.
+        return None
+    # Default: least-privileged viewer for unmapped principals.
     return "viewer"
 
 
@@ -273,6 +284,13 @@ def _validate_aad_token(token: str) -> Optional[dict]:
         return None
 
     role = _aad_role_for_claims(claims)
+    if role is None:
+        # T-AAD-1 strict mode: principal is authenticated but unmapped.
+        logger.info(
+            "AAD token rejected (no matching role group; OMNIVEC_AAD_REQUIRE_GROUP=1): oid=%s",
+            claims.get("oid", "")[:8],
+        )
+        return None
     return {
         "name": claims.get("preferred_username") or claims.get("upn") or claims.get("oid", ""),
         "role": role,

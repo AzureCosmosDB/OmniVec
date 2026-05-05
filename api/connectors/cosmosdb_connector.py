@@ -2,9 +2,12 @@
 
 import os
 import hashlib
+import logging
 from typing import List, Dict, Any, Optional
 from azure.cosmos import CosmosClient
 from azure.identity import ManagedIdentityCredential, DefaultAzureCredential
+
+logger = logging.getLogger(__name__)
 
 
 class SkipDocument(Exception):
@@ -73,6 +76,7 @@ async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> Lis
     cap = int(config.get("result_cap", 50_000))
 
     documents = []
+    truncated = False
     for item in container.query_items(query, enable_cross_partition_query=True):
         documents.append({
             "ref": item.get("id"),
@@ -83,7 +87,16 @@ async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> Lis
             }
         })
         if len(documents) >= cap:
+            truncated = True
             break
+
+    if truncated:
+        logger.warning(
+            "cosmosdb list_documents truncated at result_cap=%d (container=%s); "
+            "raise OMNIVEC_COSMOS_RESULT_CAP or set 'result_cap' on the source config "
+            "if you need the full set (T-CON-3).",
+            cap, config.get("container", ""),
+        )
 
     return documents
 
