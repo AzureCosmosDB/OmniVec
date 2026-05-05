@@ -51,6 +51,7 @@ public class PostgresDestinationWriter : IDestinationWriter
                 ALTER TABLE {table} ADD COLUMN IF NOT EXISTS cfp_generation TEXT DEFAULT '';
                 ALTER TABLE {table} ADD COLUMN IF NOT EXISTS pipeline_id TEXT DEFAULT '';
                 ALTER TABLE {table} ADD COLUMN IF NOT EXISTS pipeline_name TEXT DEFAULT '';
+                ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source_id TEXT DEFAULT '';
                 ALTER TABLE {table} ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT '';
                 ALTER TABLE {table} ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ DEFAULT NOW();";
             await using (var cmd2 = new NpgsqlCommand(ddl, conn))
@@ -65,19 +66,21 @@ public class PostgresDestinationWriter : IDestinationWriter
                 {vectorCol} = @embedding::vector,
                 pipeline_id = @pipeline_id,
                 pipeline_name = @pipeline_name,
+                source_id = @source_id,
                 content_hash = @content_hash,
                 embedded_at = @embedded_at,
                 cfp_generation = @gen
             WHERE {idCol} = @id";
 
         var insertSql = $@"
-            INSERT INTO {table} ({idCol}, {vectorCol}, {contentCol}, pipeline_id, pipeline_name, content_hash, embedded_at, cfp_generation)
-            VALUES (@id, @embedding::vector, @content, @pipeline_id, @pipeline_name, @content_hash, @embedded_at, @gen)
+            INSERT INTO {table} ({idCol}, {vectorCol}, {contentCol}, pipeline_id, pipeline_name, source_id, content_hash, embedded_at, cfp_generation)
+            VALUES (@id, @embedding::vector, @content, @pipeline_id, @pipeline_name, @source_id, @content_hash, @embedded_at, @gen)
             ON CONFLICT ({idCol}) DO UPDATE SET
                 {vectorCol} = EXCLUDED.{vectorCol},
                 {contentCol} = EXCLUDED.{contentCol},
                 pipeline_id = EXCLUDED.pipeline_id,
                 pipeline_name = EXCLUDED.pipeline_name,
+                source_id = EXCLUDED.source_id,
                 content_hash = EXCLUDED.content_hash,
                 embedded_at = EXCLUDED.embedded_at,
                 cfp_generation = EXCLUDED.cfp_generation";
@@ -99,6 +102,7 @@ public class PostgresDestinationWriter : IDestinationWriter
                     cmd.Parameters.AddWithValue("embedding", embeddingStr);
                     cmd.Parameters.AddWithValue("pipeline_id", result.PipelineId);
                     cmd.Parameters.AddWithValue("pipeline_name", result.PipelineName);
+                    cmd.Parameters.AddWithValue("source_id", result.SourceId ?? "");
                     cmd.Parameters.AddWithValue("content_hash", result.ContentHash);
                     cmd.Parameters.AddWithValue("embedded_at", DateTime.UtcNow);
                     cmd.Parameters.AddWithValue("gen", result.PipelineGeneration ?? "");
@@ -116,6 +120,7 @@ public class PostgresDestinationWriter : IDestinationWriter
                         insertCmd.Parameters.AddWithValue("content", result.Content);
                         insertCmd.Parameters.AddWithValue("pipeline_id", result.PipelineId);
                         insertCmd.Parameters.AddWithValue("pipeline_name", result.PipelineName);
+                        insertCmd.Parameters.AddWithValue("source_id", result.SourceId ?? "");
                         insertCmd.Parameters.AddWithValue("content_hash", result.ContentHash);
                         insertCmd.Parameters.AddWithValue("embedded_at", DateTime.UtcNow);
                         insertCmd.Parameters.AddWithValue("gen", result.PipelineGeneration ?? "");

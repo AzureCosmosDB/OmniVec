@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using OmniVec.ChangeFeed.Configuration;
 
@@ -18,7 +19,7 @@ public class LeaseContainerManager
     private readonly ConcurrentDictionary<string, bool> _ensured = new();
 
     public LeaseContainerManager(
-        CosmosClient cosmosClient,
+        [FromKeyedServices("lease")] CosmosClient cosmosClient,
         IOptions<ChangeFeedOptions> options,
         ILogger<LeaseContainerManager> logger)
     {
@@ -27,10 +28,15 @@ public class LeaseContainerManager
         _logger = logger;
     }
 
+    private string LeaseDatabase =>
+        string.IsNullOrWhiteSpace(_options.LeaseCosmosDatabase)
+            ? _options.OmniVecDatabase
+            : _options.LeaseCosmosDatabase;
+
     /// <summary>Ensure the lease container exists for a source, return a reference to it.</summary>
     public async Task<Container> EnsureLeaseContainerAsync(string sourceId, CancellationToken ct)
     {
-        var db = _cosmosClient.GetDatabase(_options.OmniVecDatabase);
+        var db = _cosmosClient.GetDatabase(LeaseDatabase);
         var containerName = $"leases-{sourceId}";
 
         if (!_ensured.ContainsKey(sourceId))
@@ -56,7 +62,7 @@ public class LeaseContainerManager
     /// <summary>Delete the lease container for a source (used during pipeline reset).</summary>
     public async Task DeleteLeaseContainerAsync(string sourceId, CancellationToken ct)
     {
-        var db = _cosmosClient.GetDatabase(_options.OmniVecDatabase);
+        var db = _cosmosClient.GetDatabase(LeaseDatabase);
         var containerName = $"leases-{sourceId}";
 
         try

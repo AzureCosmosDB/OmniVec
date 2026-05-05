@@ -170,14 +170,15 @@ Legend: ✅ has mitigation in code · ⚠️ partial · ❌ open · — N/A
 ## 6. Mitigations checklist (what to do next)
 
 - [x] **High** Migration script `scripts/scrub_model_api_keys.py` clears legacy `api_key` from `docgrok_model` records (push to Key Vault first, fall back to `--force-clear` once AAD verified). *(T-MET-1, batch 1.)*
-- [~] **High** `OMNIVEC_ADMIN_TOKEN` → AAD bearer + role gating: **batch 2 ships audit-log + per-token last-used**; AAD-bearer migration still pending. *(T-API-1.)*
+- [x] **High** `OMNIVEC_ADMIN_TOKEN` → AAD bearer + role gating: audit-log + per-token last-used (batch 2) and dual-mode AAD JWT validation with group→role mapping (batch 4). *(T-API-1.)*
 - [x] **High** `attachment_blob_account_allowlist` config + mandatory pin: absolute attachment URLs are rejected unless host matches `account_url` or the allowlist. *(T-CON-2, batch 1.)*
-- [~] **Medium** Sandbox `pipeline-worker` parser in a subprocess with `RLIMIT_AS=1GB` and seccomp; cap pages-per-attachment to 200. *(Page cap shipped in batch 3 — `DOCGROK_PDF_MAX_PAGES` default lowered from 500 → 200; subprocess + RLIMIT + seccomp still pending.)*
-- [ ] **Medium** Isolate change-feed lease container into its own Cosmos DB with a separate SA.
+- [x] **Medium** Sandbox `pipeline-worker` parser in a subprocess with `RLIMIT_AS=1GB` and seccomp; cap pages-per-attachment to 200. *(Page cap shipped in batch 3; subprocess sandbox with `RLIMIT_AS` + `RLIMIT_CPU` + `RLIMIT_NOFILE` shipped in batch 4 behind `DOCGROK_PARSER_SANDBOX=1`. Full seccomp BPF profile remains a future hardening.)*
+- [x] **Medium** Isolate change-feed lease container into its own Cosmos DB with a separate SA. *(Batch 4: `LeaseCosmosEndpoint` / `LeaseCosmosDatabase` change-feed options route lease containers to a dedicated account when set; default behaviour unchanged for backwards compat.)*
 - [x] **Medium** Per-AOAI-deployment embed semaphore + jittered exponential backoff in pipeline-worker (`OMNIVEC_EMBED_CONCURRENCY`, default 4). *(T-RL-1, batch 1.)*
+- [x] **Medium** Cosmos source-connector hardening: parameterized `get_document` query (no f-string SQL) + `result_cap` on `list_documents`. *(T-CON-1, batch 4.)*
 - [x] **Low** Attachment IDs / blob keys validated: traversal segments (`..`, `.`), control chars, leading slashes, and empty segments are rejected; absolute-URL paths are sanitized after URL-decoding. *(T-BLB-1, batch 1.)*
-- [~] **Low** Document data classification of `e2eblob.vectors` as PII; add purge-by-source endpoint. *(Classification doc shipped in batch 3 — see `docs/security/data-classification.md`. Purge-by-source endpoint still pending; operators can use `delete_chunks_by_prefix` per-pipeline today.)*
-- [~] **Low** Add CSP + rate-limit at omnivec-web ingress. *(Batch 3 ships in-process CSP header + per-token sliding-window rate-limit on `/api/*` (defaults: 120 req / 60 s, env-tunable). Ingress-layer enforcement remains a future hardening step for defence in depth.)*
+- [x] **Low** Document data classification of `e2eblob.vectors` as PII; add purge-by-source endpoint. *(Classification doc in batch 3; `DELETE /api/sources/{id}/vectors` admin-gated cascade-purge endpoint in batch 4 with `source_id` field persisted by both Cosmos and Postgres destination writers.)*
+- [x] **Low** Add CSP + rate-limit at omnivec-web ingress. *(Batch 3: in-process CSP + per-token sliding-window rate-limit. Batch 4: nginx-ingress `Ingress` template ships matching CSP/headers/rate-limit annotations as defence in depth.)*
 
 ## 7. How to update this model
 

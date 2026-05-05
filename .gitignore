@@ -69,3 +69,7 @@ nul
 
 helm/omnivec/.last-deploy-fingerprint
 
+
+# .NET publish artifacts
+connectors/worker/dotnet/publish/
+

@@ -505,6 +505,14 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+  # Content-Security-Policy applied at the ingress layer (defence in depth on
+  # top of the in-process header set by api/api.py). Override per deployment
+  # if you need additional script-src / connect-src origins.
+  csp: ""
+  rateLimit:
+    enabled: false
+    rps: 50          # nginx.ingress.kubernetes.io/limit-rps
+    connections: 20  # nginx.ingress.kubernetes.io/limit-connections
 
 # =============================================================================
 # SERVICE ACCOUNT

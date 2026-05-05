@@ -58,12 +58,19 @@ async def test_cosmosdb_connection(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> List[Dict[str, Any]]:
-    """List documents in container."""
+    """List documents in container.
+
+    The ``query`` config field is operator-controlled (set when the source is
+    configured), so it's trusted input — but we still wrap it with a hard
+    result cap (``result_cap``, default 50_000) so a runaway query can't
+    drain the worker (T-CON-1).
+    """
     client = await get_cosmos_client(config)
     database = client.get_database_client(config["database"])
     container = database.get_container_client(config["container"])
 
     query = config.get("query", "SELECT * FROM c")
+    cap = int(config.get("result_cap", 50_000))
 
     documents = []
     for item in container.query_items(query, enable_cross_partition_query=True):
@@ -75,12 +82,20 @@ async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> Lis
                 "_ts": item.get("_ts")
             }
         })
+        if len(documents) >= cap:
+            break
 
     return documents
 
 
 async def get_document(config: Dict[str, Any], doc_id: str, content_fields: list = None) -> str:
-    """Get document content. Raises SkipDocument if embedding already exists."""
+    """Get document content. Raises SkipDocument if embedding already exists.
+
+    T-CON-1: ``doc_id`` is interpolated into a Cosmos SQL string. Cosmos SDK
+    parameterized queries are the safe form; previously we used an f-string
+    which let a doc_id like ``foo' OR 1=1--`` smuggle filter clauses past
+    the connector. Fixed by switching to ``parameters=[…]``.
+    """
     client = await get_cosmos_client(config)
     database = client.get_database_client(config["database"])
     container = database.get_container_client(config["container"])
@@ -88,10 +103,10 @@ async def get_document(config: Dict[str, Any], doc_id: str, content_fields: list
     if content_fields is None:
         content_fields = ["content"]
 
-    # Try to read document
     items = list(container.query_items(
-        f"SELECT * FROM c WHERE c.id = '{doc_id}'",
-        enable_cross_partition_query=True
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": doc_id}],
+        enable_cross_partition_query=True,
     ))
 
     if not items:
