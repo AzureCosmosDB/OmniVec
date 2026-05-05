@@ -19,6 +19,16 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      {{- with .Values.security }}
+      {{- if and .seccompProfile .seccompProfile.enabled }}
+      securityContext:
+        seccompProfile:
+          type: {{ .seccompProfile.type | default "Localhost" }}
+          {{- if eq (.seccompProfile.type | default "Localhost") "Localhost" }}
+          localhostProfile: {{ .seccompProfile.localhostProfile | default "docgrok-parser.json" }}
+          {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: dotnet-worker
           image: {{ .Values.global.imageRegistry }}/{{ .Values.dotnetWorker.image.repository }}:{{ .Values.dotnetWorker.image.tag }}

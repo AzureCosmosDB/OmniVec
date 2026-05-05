@@ -184,6 +184,12 @@ _AAD_VIEWER_GROUP = os.getenv("OMNIVEC_AAD_VIEWER_GROUP_ID", "").strip()
 # viewer. Operators in tenants with guests / service identities should set
 # this. Default ``0`` preserves the original behaviour.
 _AAD_REQUIRE_GROUP = os.getenv("OMNIVEC_AAD_REQUIRE_GROUP", "0").strip() == "1"
+# T-AAD-2: optional path to a CA bundle pin used when fetching the JWKS
+# from login.microsoftonline.com. Defaults to the system trust store (which
+# certifi keeps in sync). Operators in high-assurance environments can pin
+# to a copy of the Microsoft IT CA chain to fail closed if egress is
+# MITM-able. Empty string = use defaults.
+_AAD_JWKS_CA_BUNDLE = os.getenv("OMNIVEC_AAD_JWKS_CA_BUNDLE", "").strip()
 _aad_jwks_client = None  # lazy-initialised PyJWKClient
 
 
@@ -203,7 +209,26 @@ def _get_aad_jwks_client():
     jwks_url = (
         f"https://login.microsoftonline.com/{_AAD_TENANT_ID}/discovery/v2.0/keys"
     )
-    _aad_jwks_client = _jwt.PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=3600)
+    # T-AAD-2: pass an explicit CA bundle when one is pinned via env. PyJWT's
+    # PyJWKClient uses urllib under the hood; surface SSL context via the
+    # ``ssl_context`` kwarg when available, otherwise fall back to default.
+    kwargs: dict = {"cache_jwk_set": True, "lifespan": 3600}
+    if _AAD_JWKS_CA_BUNDLE and os.path.isfile(_AAD_JWKS_CA_BUNDLE):
+        try:
+            import ssl
+            ctx = ssl.create_default_context(cafile=_AAD_JWKS_CA_BUNDLE)
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            kwargs["ssl_context"] = ctx
+            logger.info("AAD JWKS pinned to CA bundle %s (T-AAD-2)", _AAD_JWKS_CA_BUNDLE)
+        except Exception as e:
+            logger.warning("AAD JWKS CA bundle %s ignored: %s", _AAD_JWKS_CA_BUNDLE, e)
+    try:
+        _aad_jwks_client = _jwt.PyJWKClient(jwks_url, **kwargs)
+    except TypeError:
+        # Older PyJWT without ssl_context kwarg; fall back to default.
+        kwargs.pop("ssl_context", None)
+        _aad_jwks_client = _jwt.PyJWKClient(jwks_url, **kwargs)
     return _aad_jwks_client
 
 

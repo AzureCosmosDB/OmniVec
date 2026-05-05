@@ -495,15 +495,14 @@ docgrok:
 # =============================================================================
 # INGRESS (Optional)
 # =============================================================================
-# T-ING-1: the bundled annotations target nginx-ingress
-# (`nginx.ingress.kubernetes.io/...`). On Traefik / AGIC / Istio they are
-# silently ignored — the in-process CSP header set by api/api.py still
-# applies, but the ingress-layer defence in depth does not. If you run a
-# non-nginx controller, replicate the equivalent CSP / X-Frame-Options /
-# rate-limit policy in your controller's native config (e.g. Traefik
-# `Middleware` CRD, AGIC custom rewrite rules).
+# T-ING-1 (closed): nginx is the default. Set `ingress.controller: traefik`
+# to render the Traefik Middleware variant (templates/ingress-traefik.yaml)
+# instead — it ships the same CSP / X-Frame-Options / rate-limit policy via
+# the native Traefik CRD. Other controllers (AGIC, Istio) ignore the bundled
+# annotations; in-process headers from api/api.py still apply.
 ingress:
   enabled: false
+  controller: nginx   # nginx | traefik
   className: nginx
   annotations: {}
   hosts:
@@ -529,3 +528,19 @@ serviceAccount:
   name: omnivec-api
   annotations: {}
     # azure.workload.identity/client-id: <client-id>
+
+
+# =============================================================================
+# SECURITY (RES-2 — seccomp + future hardening switches)
+# =============================================================================
+# RES-2: opt-in seccomp profile for parser-heavy workers. Off by default —
+# operators must first place the profile JSON
+# (helm/omnivec/seccomp/docgrok-parser.json) at
+# /var/lib/kubelet/seccomp/<localhostProfile> on every node (DaemonSet or
+# node-init script), THEN flip enabled=true. Otherwise pods will fail to
+# admit with 'cannot load seccomp profile'.
+security:
+  seccompProfile:
+    enabled: false
+    type: Localhost            # Localhost | RuntimeDefault | Unconfined
+    localhostProfile: docgrok-parser.json
