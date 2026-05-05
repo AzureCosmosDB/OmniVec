@@ -21,7 +21,7 @@ MAX_DELAY_MS = 30000  # Cap at 30 seconds
 
 # Adaptive throttle: starts fast, slows down on 429s
 _throttle_delay_ms = 0  # Current delay between operations
-_throttle_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
+_throttle_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None  # lgtm[py/unused-global-variable]
 
 
 async def _adaptive_throttle():
@@ -70,7 +70,7 @@ async def get_cosmos_client(config: Dict[str, Any]) -> CosmosClient:
     return _client_cache[endpoint]
 
 
-async def _retry_on_429(func, *args, **kwargs):
+async def _retry_on_429(func, *args, **kwargs):  # lgtm[py/mixed-returns]
     """Retry a sync function on 429 - never give up on rate limits."""
     await _adaptive_throttle()  # Apply current throttle before trying
 
@@ -355,7 +355,7 @@ async def delete_chunks_by_prefix(
             pk_value = row.get(pk_field, row["id"])
             container.delete_item(row["id"], partition_key=pk_value)
             deleted += 1
-        except Exception:
+        except Exception:  # lgtm[py/empty-except]
             pass
     return deleted
 

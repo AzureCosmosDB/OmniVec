@@ -2,8 +2,42 @@
 
 import os
 from typing import List, Dict, Any, Optional, Tuple
+from urllib.parse import urlparse
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
+
+
+_AZURE_BLOB_HOST_SUFFIXES = (
+    ".blob.core.windows.net",
+    ".blob.core.usgovcloudapi.net",
+    ".blob.core.chinacloudapi.cn",
+    ".blob.core.cloudapi.de",
+)
+
+
+def _validate_account_url(url: str) -> str:
+    """Validate an admin-supplied storage account URL: HTTPS scheme, no
+    credentials, and host must end with a known Azure blob suffix
+    (override via env BLOB_ACCOUNT_HOST_ALLOWLIST for dev scenarios)."""
+    if not isinstance(url, str) or not url:
+        raise ValueError("account_url must be a non-empty string")
+    parsed = urlparse(url)
+    if (parsed.scheme or "").lower() != "https":
+        raise ValueError("account_url must use https://")
+    if parsed.username or parsed.password:
+        raise ValueError("account_url must not embed credentials")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("account_url must contain a host")
+    extra = tuple(
+        s.strip().lower()
+        for s in (os.getenv("BLOB_ACCOUNT_HOST_ALLOWLIST", "") or "").split(",")
+        if s.strip()
+    )
+    suffixes = _AZURE_BLOB_HOST_SUFFIXES + extra
+    if not any(host.endswith(suf) for suf in suffixes):
+        raise ValueError(f"account_url host '{host}' not in allowlist")
+    return url
 
 
 async def get_blob_client(config: Dict[str, Any]) -> BlobServiceClient:
@@ -11,8 +45,9 @@ async def get_blob_client(config: Dict[str, Any]) -> BlobServiceClient:
     if config.get("connection_string"):
         return BlobServiceClient.from_connection_string(config["connection_string"])
     elif config.get("account_url"):
+        account_url = _validate_account_url(config["account_url"])
         credential = DefaultAzureCredential()
-        return BlobServiceClient(config["account_url"], credential=credential)
+        return BlobServiceClient(account_url, credential=credential)  # lgtm[py/full-ssrf]
     else:
         raise ValueError("Either connection_string or account_url required")
 

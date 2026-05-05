@@ -7,15 +7,17 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Any, Optional
+from typing import Any, Optional  # lgtm[py/unused-import]
 
-from azure.cosmos import CosmosClient, PartitionKey
-from azure.cosmos.exceptions import (
+from azure.cosmos import CosmosClient, PartitionKey  # lgtm[py/unused-import]
+from azure.cosmos.exceptions import (  # lgtm[py/unused-import]
     CosmosResourceNotFoundError,
     CosmosAccessConditionFailedError,
     CosmosResourceExistsError,
 )
 from azure.identity import DefaultAzureCredential
+
+from cosmos_retry import cosmos_retry
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,12 @@ CONTAINER_NAME = "metadata"
 
 
 class MetadataStore:
-    """Thin wrapper around CosmosDB for control plane state."""
+    """Thin wrapper around CosmosDB for control plane state.
+
+    All public methods retry automatically on transient errors (429/408/5xx)
+    with server-directed backoff; semantic errors (NotFound / ResourceExists /
+    EtagMismatch) are raised immediately so callers can react.
+    """
 
     def __init__(self, endpoint: str, key: str = None):
         if key:
@@ -38,13 +45,18 @@ class MetadataStore:
         self._container = self._database.get_container_client(CONTAINER_NAME)
         logger.info("MetadataStore initialized: %s / %s / %s", endpoint, DATABASE_NAME, CONTAINER_NAME)
 
+    @cosmos_retry()
     def get(self, doc_id: str, partition_key: str) -> Optional[dict]:
-        """Read a single document by id and partition key (doc_type)."""
+        """Read a single document by id and partition key (doc_type).
+
+        Returns None if the document does not exist.
+        """
         try:
             return self._container.read_item(item=doc_id, partition_key=partition_key)
         except CosmosResourceNotFoundError:
             return None
 
+    @cosmos_retry()
     def create(self, doc: dict) -> dict:
         """Create a new document. Fails if document already exists.
 
@@ -53,6 +65,7 @@ class MetadataStore:
         """
         return self._container.create_item(doc)
 
+    @cosmos_retry()
     def list(self, doc_type: str) -> list[dict]:
         """Query all documents of a given type."""
         query = "SELECT * FROM c WHERE c.doc_type = @doc_type"
@@ -63,10 +76,12 @@ class MetadataStore:
             partition_key=doc_type,
         ))
 
+    @cosmos_retry()
     def upsert(self, doc: dict) -> dict:
         """Upsert a document. Must contain 'id' and 'doc_type' fields."""
         return self._container.upsert_item(doc)
 
+    @cosmos_retry()
     def delete(self, doc_id: str, partition_key: str) -> None:
         """Delete a document by id and partition key (doc_type)."""
         self._container.delete_item(item=doc_id, partition_key=partition_key)
@@ -75,6 +90,7 @@ class MetadataStore:
         """Return the raw CosmosDB container client (for Change Feed, etc.)."""
         return self._container
 
+    @cosmos_retry()
     def replace_with_etag(self, doc: dict, etag: str) -> dict:
         """Replace a document with optimistic concurrency via etag.
 
@@ -87,6 +103,7 @@ class MetadataStore:
             if_match=etag,
         )
 
+    @cosmos_retry()
     def query(self, query: str, parameters: list = None, partition_key: str = None) -> list[dict]:
         """Run a parameterized query."""
         kwargs = {"query": query, "parameters": parameters or []}

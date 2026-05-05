@@ -267,6 +267,15 @@ $rgName = "rg-omnivec-$env:AZURE_ENV_NAME"
 $rgExists = az group exists --name $rgName 2>$null
 if ("$rgExists".Trim() -eq "true") {
     Write-Host "`n`e[32mExisting deployment detected (RG: $rgName). Importing config...`e[0m"
+
+    # Snapshot user's blob-source override BEFORE tag import overwrites azd env.
+    $_userBlobOverride = (& azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)
+    if (-not $_userBlobOverride -or "$_userBlobOverride" -match "ERROR") {
+        $_userBlobOverride = (& azd env get-value AZURE_ENABLE_BLOB_SOURCE 2>$null)
+    }
+    if ("$_userBlobOverride" -match "ERROR") { $_userBlobOverride = "" }
+    $_userBlobOverride = "$_userBlobOverride".Trim().ToLower()
+
     $tags = az group show --name $rgName --query "tags" -o json 2>$null | ConvertFrom-Json
     if ($tags) {
         $tagMap = @{
@@ -280,6 +289,21 @@ if ("$rgExists".Trim() -eq "true") {
         }
         foreach ($tag in $tagMap.GetEnumerator()) {
             $val = $tags.PSObject.Properties[$tag.Key].Value
+            # Honor user-intended blob-source flip over stale tag.
+            if ($tag.Value -eq "OMNIVEC_ENABLE_BLOB_SOURCE" -and $_userBlobOverride -and $_userBlobOverride -ne ("$val".Trim().ToLower())) {
+                if ($_userBlobOverride -eq "false" -and ("$val".Trim().ToLower()) -eq "true") {
+                    Write-Host "`n  `e[31m✗ Cannot disable OMNIVEC_ENABLE_BLOB_SOURCE (true -> false) on existing deployment.`e[0m"
+                    Write-Host "  `e[33mThis would orphan Storage/ServiceBus/EventGrid resources.`e[0m"
+                    Write-Host "  `e[33mRun 'azd down' first, or pick a different AZURE_ENV_NAME.`e[0m"
+                    exit 1
+                }
+                if ($_userBlobOverride -eq "true" -and ("$val".Trim().ToLower()) -eq "false") {
+                    Write-Host "  `e[33m! Enabling blob source on existing deployment (false -> true). Storage/ServiceBus/EventGrid will be created.`e[0m"
+                }
+                azd env set OMNIVEC_ENABLE_BLOB_SOURCE $_userBlobOverride 2>$null
+                Write-Host "  OMNIVEC_ENABLE_BLOB_SOURCE = $_userBlobOverride `e[33m(user override; tag was '$val')`e[0m"
+                continue
+            }
             if ($val) {
                 azd env set $tag.Value "$val" 2>$null
                 Write-Host "  $($tag.Value) = $val"

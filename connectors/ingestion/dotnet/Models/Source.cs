@@ -37,6 +37,18 @@ public class Source
     public string? BlobPrefix => TryGetString("prefix") ?? "";
     public string? BlobFileType => TryGetString("file_type") ?? "pdf";
 
+    // CosmosDB attachment-mode config accessors. When AttachmentsField is set,
+    // SourceWatcher iterates the named array on each document, applies filters,
+    // and emits one blob_ref EmbeddingMessage per matching attachment instead of
+    // extracting inline content_fields.
+    public string? AttachmentsField => TryGetString("attachments_field");
+    public string AttachmentUrlField => TryGetString("attachment_url_field") ?? "url";
+    public string AttachmentNameField => TryGetString("attachment_name_field") ?? "name";
+    public string AttachmentContentTypeField => TryGetString("attachment_content_type_field") ?? "contentType";
+    public string? AttachmentNameRegex => TryGetString("attachment_name_regex");
+    public List<string> AttachmentFileTypes => TryGetStringList("attachment_file_types");
+    public List<string> AttachmentContentTypes => TryGetStringList("attachment_content_types");
+
     /// <summary>
     /// Build connection string from config. Supports both explicit connection_string
     /// and individual host/port/database/user/password fields.
@@ -137,6 +149,175 @@ public class Source
         if (Config.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String)
             return v.GetString();
         return null;
+    }
+
+    private List<string> TryGetStringList(string key)
+    {
+        var result = new List<string>();
+        if (!Config.TryGetValue(key, out var v)) return result;
+        if (v.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in v.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String)
+                    result.Add(item.GetString()!);
+        }
+        else if (v.ValueKind == JsonValueKind.String)
+        {
+            // CSV fallback
+            foreach (var part in (v.GetString() ?? "").Split(','))
+                if (!string.IsNullOrWhiteSpace(part))
+                    result.Add(part.Trim());
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Reference to a single attachment selected from a CosmosDB document's
+    /// attachments array, after applying user-supplied filters.
+    /// </summary>
+    public sealed record AttachmentRef(
+        string Name,
+        string Url,
+        string? ContentType,
+        string? AccountUrl,
+        string? Container,
+        string BlobName);
+
+    /// <summary>
+    /// Iterate <paramref name="doc"/>'s attachments array (named by <see cref="AttachmentsField"/>)
+    /// and return the attachments that pass all configured filters
+    /// (<see cref="AttachmentNameRegex"/>, <see cref="AttachmentFileTypes"/>,
+    /// <see cref="AttachmentContentTypes"/>). Returns an empty list when
+    /// attachment mode is not configured or no attachments match.
+    /// </summary>
+    public List<AttachmentRef> ExtractAttachments(Newtonsoft.Json.Linq.JObject doc)
+    {
+        var matches = new List<AttachmentRef>();
+        var fieldName = AttachmentsField;
+        if (string.IsNullOrEmpty(fieldName)) return matches;
+
+        var arr = doc[fieldName] as Newtonsoft.Json.Linq.JArray;
+        if (arr is null) return matches;
+
+        System.Text.RegularExpressions.Regex? nameRx = null;
+        if (!string.IsNullOrEmpty(AttachmentNameRegex))
+        {
+            try
+            {
+                nameRx = new System.Text.RegularExpressions.Regex(
+                    AttachmentNameRegex,
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                    | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+                    TimeSpan.FromSeconds(1));
+            }
+            catch
+            {
+                // Treat invalid regex as match-nothing rather than match-all to surface config errors.
+                return matches;
+            }
+        }
+
+        var fileTypeAllow = new HashSet<string>(
+            AttachmentFileTypes.Select(t => t.TrimStart('.').ToLowerInvariant()),
+            StringComparer.OrdinalIgnoreCase);
+        var contentTypeAllow = new HashSet<string>(
+            AttachmentContentTypes.Select(t => t.ToLowerInvariant()),
+            StringComparer.OrdinalIgnoreCase);
+
+        var nameField = AttachmentNameField;
+        var urlField = AttachmentUrlField;
+        var ctField = AttachmentContentTypeField;
+
+        foreach (var token in arr)
+        {
+            if (token is not Newtonsoft.Json.Linq.JObject obj) continue;
+
+            var name = obj[nameField]?.ToString() ?? "";
+            var url = obj[urlField]?.ToString() ?? "";
+            var contentType = obj[ctField]?.ToString();
+            if (string.IsNullOrWhiteSpace(url)) continue;
+
+            if (nameRx is not null && !nameRx.IsMatch(name)) continue;
+
+            if (fileTypeAllow.Count > 0)
+            {
+                var ext = ExtractExtension(name) ?? ExtractExtension(url);
+                if (ext is null || !fileTypeAllow.Contains(ext)) continue;
+            }
+
+            if (contentTypeAllow.Count > 0)
+            {
+                if (string.IsNullOrEmpty(contentType)) continue;
+                if (!contentTypeAllow.Contains(contentType.ToLowerInvariant())) continue;
+            }
+
+            var (acct, ctnr, blob) = ResolveBlobLocation(url);
+            if (string.IsNullOrEmpty(blob)) continue;
+
+            matches.Add(new AttachmentRef(
+                Name: string.IsNullOrEmpty(name) ? blob : name,
+                Url: url,
+                ContentType: contentType,
+                AccountUrl: acct,
+                Container: ctnr,
+                BlobName: blob));
+        }
+        return matches;
+    }
+
+    private static string? ExtractExtension(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return null;
+        // Strip query string / fragment, then take last dot segment.
+        var clean = s;
+        var q = clean.IndexOfAny(new[] { '?', '#' });
+        if (q >= 0) clean = clean.Substring(0, q);
+        var dot = clean.LastIndexOf('.');
+        var slash = clean.LastIndexOfAny(new[] { '/', '\\' });
+        if (dot < 0 || dot < slash) return null;
+        var ext = clean.Substring(dot + 1).ToLowerInvariant();
+        return string.IsNullOrEmpty(ext) ? null : ext;
+    }
+
+    /// <summary>
+    /// Resolve an attachment URL to an (accountUrl, container, blobName) triple.
+    /// Accepts either a full https URL on a *.blob.core.windows.net host
+    /// (validated against the source's configured <see cref="BlobAccountUrl"/>
+    /// when set, as an SSRF guard), or a relative blob name that is joined
+    /// with the source's configured account_url + container.
+    /// Returns (null,null,"") for invalid / disallowed URLs.
+    /// </summary>
+    public (string? AccountUrl, string? Container, string BlobName) ResolveBlobLocation(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return (null, null, "");
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            if (uri.Scheme != "https") return (null, null, "");
+            if (!uri.Host.EndsWith(".blob.core.windows.net", StringComparison.OrdinalIgnoreCase))
+                return (null, null, "");
+
+            // SSRF guard: if source pins an account_url, the URL host must match.
+            if (!string.IsNullOrEmpty(BlobAccountUrl)
+                && Uri.TryCreate(BlobAccountUrl, UriKind.Absolute, out var pinned))
+            {
+                if (!string.Equals(pinned.Host, uri.Host, StringComparison.OrdinalIgnoreCase))
+                    return (null, null, "");
+            }
+
+            var path = uri.AbsolutePath.TrimStart('/');
+            var slashIdx = path.IndexOf('/');
+            if (slashIdx < 0) return (null, null, "");
+            var ctnr = path.Substring(0, slashIdx);
+            var blob = path.Substring(slashIdx + 1);
+            if (string.IsNullOrEmpty(blob)) return (null, null, "");
+            return ($"https://{uri.Host}", ctnr, Uri.UnescapeDataString(blob));
+        }
+
+        // Relative — fall back to source-configured account/container.
+        if (string.IsNullOrEmpty(BlobAccountUrl) || string.IsNullOrEmpty(BlobContainer))
+            return (null, null, "");
+        return (BlobAccountUrl, BlobContainer, url.TrimStart('/'));
     }
 }
 

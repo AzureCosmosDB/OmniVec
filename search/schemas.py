@@ -88,12 +88,14 @@ class ModelEmbedding(BaseModel):
     policy: Literal["model"] = "model"
     model_id: str  # e.g. "mdl-bge-large" — routed to DocGrok by model_id
     normalize: bool = False
+    input_modality: Literal["text", "image"] = "text"
 
 
 class PipelineEmbedding(BaseModel):
     policy: Literal["pipeline"] = "pipeline"
     pipeline: str  # named DocGrok pipeline
     normalize: bool = False
+    input_modality: Literal["text", "image"] = "text"
 
 
 class PrecomputedEmbedding(BaseModel):
@@ -162,6 +164,8 @@ class IncludeOptions(BaseModel):
 
 class SearchRequest(BaseModel):
     query: Optional[str] = None
+    # Base64-encoded image bytes to use as query for image-modality indexes.
+    query_image_b64: Optional[str] = None
     top_k: int = Field(default=10, ge=1, le=100)
     merge: MergeConfig = Field(default_factory=MergeConfig)
     indexes: List[IndexSpec] = Field(..., min_length=1, max_length=10)
@@ -173,11 +177,13 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _require_query_when_needed(self):
-        needs_query = any(
-            not isinstance(i.embedding, PrecomputedEmbedding) for i in self.indexes
-        )
-        if needs_query and not self.query:
-            raise ValueError("`query` is required when any index uses model/pipeline embedding")
+        # Need at least one query input.
+        if not (self.query or self.query_image_b64):
+            raise ValueError("provide either 'query' (text) or 'query_image_b64' (image)")
+        # Image-modality indexes accept either a text query (embedded via
+        # CLIP text encoder) or an image query. Text-modality indexes
+        # require a text query — they will be skipped at search time
+        # if only an image is provided.
         return self
 
 
@@ -193,6 +199,9 @@ class SearchResult(BaseModel):
     vector: Optional[List[float]] = None
     source: Optional[str] = None
     source_ref: Optional[str] = None
+    # "text" | "image" | "video" — derived from the index's embedding modality
+    # and from per-doc hints (e.g. blob filename extension, frame markers).
+    entity_type: str = "text"
 
 
 class PerIndexInfo(BaseModel):

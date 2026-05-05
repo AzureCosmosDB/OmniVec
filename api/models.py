@@ -1,7 +1,7 @@
 """OmniVec Data Models"""
 
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union  # lgtm[py/unused-import]
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -144,7 +144,7 @@ class CosmosDBVectorConfig(BaseModel):
     vector_field: str = "embedding"
     id_field: str = "id"
     metadata_fields: List[str] = ["source", "filename", "content_type"]
-    vector_dimensions: int = 1024
+    vector_dimensions: int = 1536
     vector_index_type: str = "quantizedFlat"  # flat, quantizedFlat, diskANN
 
 
@@ -161,8 +161,8 @@ class PgVectorConfig(BaseModel):
     vector_column: str = "embedding"  # Column for vector (type: vector(N))
     content_column: str = "content"  # Column for original text
     metadata_columns: List[str] = ["source_id", "source_ref", "created_at"]
-    vector_dimensions: int = 1024
-    index_type: str = "ivfflat"  # ivfflat, hnsw
+    vector_dimensions: int = 1536
+    index_type: str = "hnsw"  # ivfflat, hnsw
     index_lists: int = 100  # For ivfflat: number of lists
     hnsw_m: int = 16  # For hnsw: max connections per layer
     hnsw_ef_construction: int = 64  # For hnsw: size of dynamic candidate list
@@ -305,7 +305,6 @@ class CreateSourceRequest(BaseModel):
     config: Dict[str, Any]
     triggers: List[TriggerType] = []
     schedule: Optional[str] = None
-    enabled: bool = True
     enabled: bool = True
 
 

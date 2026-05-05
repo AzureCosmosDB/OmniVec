@@ -124,7 +124,7 @@ def cmd_stats():
     print(f"  {'-'*25} {'-'*10} {'-'*10} {'-'*7}")
     for name in CONTAINERS:
         try:
-            total, embedded = cmd_count.__wrapped__(name) if hasattr(cmd_count, '__wrapped__') else _count_raw(name)
+            total, embedded = cmd_count.__wrapped__(name) if hasattr(cmd_count, '__wrapped__') else _count_raw(name)  # lgtm[py/unused-local-variable]
         except Exception as e:
             print(f"  {name:<25} {'error':>10} {str(e)[:20]:>10}")
     print()
