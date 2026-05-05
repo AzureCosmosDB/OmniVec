@@ -1,4 +1,4 @@
-{{- if .Values.ingress.enabled }}
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.controller | default "nginx") "nginx") }}
 {{- /*
   OmniVec ingress (T-API-1 / web-CSP).
 

@@ -186,21 +186,58 @@ remediation. Documented for transparency.
 | RES-4 | Search service rate-limit | Currently per-IP at ingress; per-token rate-limit on `/search` is on the search-team backlog. |
 | RES-5 | Threat model of CI/CD | Tracked separately under `infra/` and `.github/workflows/`. |
 
-## 5. Future hardening backlog (post-batch-5)
+## 5. Future hardening backlog (post-batch-6)
 
-Ordered by ROI. Each is a future PR-sized chunk, not a release blocker.
+All six items raised in the post-batch-5 review have been shipped (PR #134,
+batch 6). What remains is below.
 
-1. **T-VEC-2 backfill**: one-shot job to add `source_id` to pre-batch-4
-   vectors so cascade purge is no longer pipeline-wide.
-2. **RES-2**: ship a baseline seccomp profile for the parser worker.
-3. **T-AAD-2**: thumbprint-pinned JWKS adapter (accepted residual today).
-4. **T-RTR-3**: cross-platform sandbox shim for non-Linux dev/CI parity.
-5. **T-ING-1 part 2**: ship Traefik `Middleware` and AGIC variants of the
-   ingress template.
-6. **RES-1**: private-endpoint migration scoped per-Azure-resource.
+Status of the six original backlog items:
 
-Each item should be filed as an issue with a `T-…` id and pulled into the
-next quarterly threat-model batch (batch 5) when it tops the queue.
+1. **T-VEC-2 backfill** — ✅ batch 6: `scripts/backfill_source_id.py`
+   (async, dry-run-safe, single-source unambiguous, multi-source via
+   `doc_id` prefix heuristic, `--strategy=primary` foot-gun behind
+   dry-run). Unit-tested at `tests/scripts/test_backfill_source_id.py`.
+2. **RES-2 seccomp** — ✅ batch 6: baseline profile at
+   `helm/omnivec/seccomp/docgrok-parser.json`; opt-in pod-spec wiring on
+   the dotnet-worker template via `.Values.security.seccompProfile`.
+   Operator must place the JSON under `/var/lib/kubelet/seccomp/` on each
+   node before flipping `enabled=true`.
+3. **T-AAD-2** — ✅ batch 6: `OMNIVEC_AAD_JWKS_CA_BUNDLE` env pins the
+   trust store used when fetching JWKS. Falls back to system defaults
+   when unset; logs a warning + uses defaults if PyJWT lacks the
+   `ssl_context` kwarg. (Full thumbprint pin still considered a residual
+   — env-CA pin closes the practical MITM gap with one line of YAML.)
+4. **T-RTR-3** — ✅ batch 6: dropped the `sys.platform == 'linux'` gate
+   in `docgrok/pipeline-worker/worker.py::pdf_extract_text_list`.
+   `_sandbox_preexec` now short-circuits on non-Linux, so dev/CI parity
+   is maintained — rlimits silently no-op while the byte-cap (T-RTR-2)
+   protection still applies.
+5. **T-ING-1 part 2** — ✅ batch 6: Traefik variant at
+   `helm/omnivec/templates/ingress-traefik.yaml` (Middleware CRDs for
+   security headers + rate-limit). Selected via
+   `ingress.controller=traefik`. AGIC remains documented-only — its
+   annotation surface differs enough from the nginx flow to merit its
+   own follow-up.
+6. **RES-1** — ✅ batch 6 (foundation): Terraform skeleton at
+   `terraform/private-endpoints.tf`. Provisions PEs for Cosmos / Blob /
+   Service Bus behind `enable_private_endpoints = true` once an operator
+   supplies the subnet + DNS-zone IDs. Per-resource rollout (PE health
+   gate before flipping `public_network_access_enabled = false`) is the
+   recommended sequencing.
+
+Ordered next-batch backlog (post-batch-6):
+
+1. **AGIC ingress variant** for `ingress.controller=agic` (T-ING-1
+   follow-up; annotations + per-listener rewrite rules).
+2. **AAD thumbprint pin** (T-AAD-2 hardening): replace the env CA-bundle
+   with a hash-of-key pin verified post-fetch.
+3. **Private-endpoint phase 2**: AOAI + Key Vault + per-resource
+   `public_network_access_enabled=false` once the FY27 hub VNet is
+   ready (RES-1 follow-up).
+4. **Seccomp tuning**: tighten the allow-list once we have parser-worker
+   strace from production (RES-2 follow-up).
+5. **Cosign image signing** (RES-3) when ACR enables it org-wide.
+6. **Search per-token rate-limit** (RES-4).
 
 ## 6. Verification
 
