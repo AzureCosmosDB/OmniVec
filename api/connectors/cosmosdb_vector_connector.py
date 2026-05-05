@@ -360,6 +360,50 @@ async def delete_chunks_by_prefix(
     return deleted
 
 
+async def delete_by_source_id(
+    config: Dict[str, Any],
+    source_id: str,
+) -> int:
+    """Delete all vector documents tagged with the given ``source_id`` (T-VEC-1).
+
+    The destination writer started persisting ``source_id`` on every embedded
+    document in batch 4. For docs predating that change, the field is absent;
+    callers should additionally call ``delete_chunks_by_prefix`` keyed by the
+    pipeline-id to mop up legacy chunks.
+    """
+    client = await get_cosmos_client(config)
+    database = client.get_database_client(config["database"])
+    container = database.get_container_client(config["container"])
+
+    pk_path = config.get("partition_key_path", "")
+    if not pk_path:
+        props = container.read()
+        pk_paths = props.get("partitionKey", {}).get("paths", [])
+        pk_path = pk_paths[0] if pk_paths else "/id"
+    pk_field = pk_path.lstrip("/")
+
+    if pk_field == "id":
+        query = "SELECT c.id FROM c WHERE c.source_id = @sid"
+    else:
+        query = f"SELECT c.id, c.{pk_field} FROM c WHERE c.source_id = @sid"
+
+    rows = list(container.query_items(
+        query,
+        parameters=[{"name": "@sid", "value": source_id}],
+        enable_cross_partition_query=True,
+    ))
+
+    deleted = 0
+    for row in rows:
+        try:
+            pk_value = row.get(pk_field, row["id"])
+            container.delete_item(row["id"], partition_key=pk_value)
+            deleted += 1
+        except Exception:  # lgtm[py/empty-except]
+            pass
+    return deleted
+
+
 async def search_vectors(
     config: Dict[str, Any],
     query_vector: List[float],

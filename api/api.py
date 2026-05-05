@@ -103,8 +103,22 @@ def _hash_token(token: str) -> str:
 def _validate_token(token: str) -> Optional[dict]:
     """Validate a bearer token. Returns token metadata or None.
 
+    Three paths (tried in order):
+      1. AAD JWT (T-API-1) — when ``OMNIVEC_AAD_TENANT_ID`` + ``..._AUDIENCE``
+         are set, treat as a JWT and verify signature + issuer + audience
+         against the configured tenant. Roles are derived from the
+         ``OMNIVEC_AAD_*_GROUP_ID`` env vars matched against the ``groups``
+         claim, falling back to the ``roles`` claim, defaulting to ``viewer``.
+      2. Env-bootstrap admin token (constant-time compare).
+      3. Persisted Cosmos ``auth_token`` records.
+
     Uses constant-time comparison to prevent timing attacks.
     """
+    # AAD path first — it lets operators dual-mode legacy tokens during cutover.
+    if token.count(".") == 2:  # JWT shape; cheap pre-filter
+        aad = _validate_aad_token(token)
+        if aad is not None:
+            return aad
     token_hash = _hash_token(token)
     # Check admin bootstrap token (constant-time comparison)
     if ADMIN_TOKEN_HASH and secrets.compare_digest(token_hash, ADMIN_TOKEN_HASH):
@@ -141,6 +155,131 @@ def _validate_token(token: str) -> Optional[dict]:
     except Exception as e:
         logger.warning("Token validation error: %s", e)
     return None
+
+
+# =============================================================================
+# AAD BEARER VALIDATION (T-API-1)
+# =============================================================================
+# Optional path: when OMNIVEC_AAD_TENANT_ID + OMNIVEC_AAD_AUDIENCE are set,
+# the API accepts AAD JWTs alongside the legacy OMNIVEC_ADMIN_TOKEN. Roles are
+# derived from group claims via OMNIVEC_AAD_ADMIN_GROUP_ID /
+# OMNIVEC_AAD_OPERATOR_GROUP_ID (optional). When the group env is unset, all
+# successfully-validated AAD identities default to ``viewer``.
+#
+# Implementation notes:
+#  * JWKS is fetched lazily and cached by jwt.PyJWKClient (TTL 1 h by default).
+#  * Issuer is pinned to the v2.0 endpoint for the configured tenant.
+#  * Audience must match the configured app-registration's API URI / client-id.
+#  * Operators wire the env vars at deployment time; with no AAD env, the
+#    function short-circuits and the legacy paths handle the request — fully
+#    backwards-compatible.
+
+_AAD_TENANT_ID = os.getenv("OMNIVEC_AAD_TENANT_ID", "").strip()
+_AAD_AUDIENCE = os.getenv("OMNIVEC_AAD_AUDIENCE", "").strip()
+_AAD_ADMIN_GROUP = os.getenv("OMNIVEC_AAD_ADMIN_GROUP_ID", "").strip()
+_AAD_OPERATOR_GROUP = os.getenv("OMNIVEC_AAD_OPERATOR_GROUP_ID", "").strip()
+_AAD_VIEWER_GROUP = os.getenv("OMNIVEC_AAD_VIEWER_GROUP_ID", "").strip()
+_aad_jwks_client = None  # lazy-initialised PyJWKClient
+
+
+def _aad_enabled() -> bool:
+    return bool(_AAD_TENANT_ID and _AAD_AUDIENCE)
+
+
+def _get_aad_jwks_client():
+    global _aad_jwks_client
+    if _aad_jwks_client is not None:
+        return _aad_jwks_client
+    try:
+        import jwt as _jwt  # PyJWT
+    except ImportError:  # pragma: no cover
+        logger.warning("PyJWT not installed; AAD bearer auth disabled")
+        return None
+    jwks_url = (
+        f"https://login.microsoftonline.com/{_AAD_TENANT_ID}/discovery/v2.0/keys"
+    )
+    _aad_jwks_client = _jwt.PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=3600)
+    return _aad_jwks_client
+
+
+def _aad_role_for_claims(claims: dict) -> str:
+    """Map AAD ``groups`` / ``roles`` claims to OmniVec role names."""
+    groups = claims.get("groups") or []
+    roles = claims.get("roles") or []
+    if isinstance(groups, str):
+        groups = [groups]
+    if isinstance(roles, str):
+        roles = [roles]
+    membership = set(groups) | set(roles)
+    if _AAD_ADMIN_GROUP and _AAD_ADMIN_GROUP in membership:
+        return "admin"
+    if _AAD_OPERATOR_GROUP and _AAD_OPERATOR_GROUP in membership:
+        return "operator"
+    if _AAD_VIEWER_GROUP and _AAD_VIEWER_GROUP in membership:
+        return "viewer"
+    # Operators who set neither admin nor operator group get the default
+    # least-privileged role; tighten by setting an explicit viewer group and
+    # rejecting unmapped tokens at the gateway.
+    return "viewer"
+
+
+def _validate_aad_token(token: str) -> Optional[dict]:
+    """Validate an AAD-issued JWT. Returns auth metadata or None on failure.
+
+    Returns ``None`` (not raise) so the caller can fall through to the legacy
+    paths. Only logs at DEBUG to avoid noise during the dual-mode cutover.
+    """
+    if not _aad_enabled():
+        return None
+    try:
+        import jwt as _jwt  # PyJWT
+    except ImportError:  # pragma: no cover
+        return None
+    client = _get_aad_jwks_client()
+    if client is None:
+        return None
+    try:
+        signing_key = client.get_signing_key_from_jwt(token).key
+        # AAD v2 issuer for a tenant. We accept both the issuer claim variants
+        # (login.microsoftonline.com vs sts.windows.net) by listing both.
+        valid_issuers = [
+            f"https://login.microsoftonline.com/{_AAD_TENANT_ID}/v2.0",
+            f"https://sts.windows.net/{_AAD_TENANT_ID}/",
+        ]
+        # PyJWT supports a list of issuers via the ``issuer`` kwarg only when
+        # given a single string; loop and try each.
+        last_err: Optional[Exception] = None
+        claims: Optional[dict] = None
+        for iss in valid_issuers:
+            try:
+                claims = _jwt.decode(
+                    token,
+                    signing_key,
+                    algorithms=["RS256"],
+                    audience=_AAD_AUDIENCE,
+                    issuer=iss,
+                    options={"require": ["exp", "iat", "iss", "aud"]},
+                )
+                break
+            except _jwt.InvalidIssuerError as e:
+                last_err = e
+                continue
+        if claims is None:
+            if last_err is not None:
+                logger.debug("AAD token issuer mismatch: %s", last_err)
+            return None
+    except Exception as e:  # signature, expiry, audience, JWKS fetch all land here
+        logger.debug("AAD token validation failed: %s", e)
+        return None
+
+    role = _aad_role_for_claims(claims)
+    return {
+        "name": claims.get("preferred_username") or claims.get("upn") or claims.get("oid", ""),
+        "role": role,
+        "id": claims.get("oid", ""),
+        "tenant": claims.get("tid", ""),
+        "auth_method": "aad",
+    }
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -1515,6 +1654,101 @@ def delete_source(source_id: str):
 
     store.delete(source_id, "source")
     return {"success": True}
+
+
+@app.delete("/api/sources/{source_id}/vectors")
+async def purge_source_vectors(source_id: str, request: Request, cascade: bool = False):
+    """Purge all vector documents derived from this source (T-VEC-1).
+
+    Iterates every pipeline that includes ``source_id`` and, for each
+    destination, calls the connector's ``delete_by_source_id`` helper.
+    For docs predating the ``source_id`` field (pre-batch-4 vectors), set
+    ``cascade=true`` to additionally fall back to ``delete_chunks_by_prefix``
+    keyed by pipeline-id; this purges legacy chunks but is **pipeline-wide**
+    (other sources feeding the same pipeline are also removed).
+
+    Admin role required. Audit-logged automatically by ``audit_middleware``.
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth or auth.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    store = get_store()
+    src = store.get(source_id, "source")
+    if not src:
+        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+
+    pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
+    using = [p for p in pipelines if any(ps.source_id == source_id for ps in p.sources)]
+
+    deleted_per_destination: List[Dict[str, Any]] = []
+    total_deleted = 0
+    total_legacy = 0
+
+    for p in using:
+        dest_doc = store.get(p.destination_id, "destination")
+        if not dest_doc:
+            continue
+        destination = _destination_from_doc(dest_doc, mask=False)
+        dtype = (destination.type or "").lower()
+        cfg = destination.config or {}
+
+        d_count = 0
+        l_count = 0
+        try:
+            if dtype in ("cosmosdb", "cosmos", "cosmosdb_vector", "cosmosdb-vector"):
+                from connectors.cosmosdb_vector_connector import (  # type: ignore
+                    delete_by_source_id, delete_chunks_by_prefix,
+                )
+                d_count = await delete_by_source_id(cfg, source_id)
+                if cascade:
+                    l_count = await delete_chunks_by_prefix(cfg, f"{p.id}-")
+            elif dtype in ("postgres", "pgvector", "postgresql"):
+                from connectors.postgres_connector import (  # type: ignore
+                    delete_by_source_id as pg_delete,
+                )
+                d_count = await pg_delete(cfg, source_id)
+            else:
+                deleted_per_destination.append({
+                    "pipeline_id": p.id,
+                    "destination_id": p.destination_id,
+                    "destination_type": dtype,
+                    "deleted": 0,
+                    "legacy_deleted": 0,
+                    "skipped": "unsupported destination type",
+                })
+                continue
+        except Exception as e:  # lgtm[py/catch-base-exception]
+            logger.warning("purge failed for pipeline %s: %s", p.id, e)
+            deleted_per_destination.append({
+                "pipeline_id": p.id,
+                "destination_id": p.destination_id,
+                "destination_type": dtype,
+                "deleted": 0,
+                "legacy_deleted": 0,
+                "error": str(e),
+            })
+            continue
+
+        deleted_per_destination.append({
+            "pipeline_id": p.id,
+            "destination_id": p.destination_id,
+            "destination_type": dtype,
+            "deleted": d_count,
+            "legacy_deleted": l_count,
+        })
+        total_deleted += d_count
+        total_legacy += l_count
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "pipelines_processed": len(using),
+        "total_deleted": total_deleted,
+        "legacy_deleted": total_legacy,
+        "cascade": cascade,
+        "details": deleted_per_destination,
+    }
 
 
 @app.post("/api/sources/{source_id}/sync")

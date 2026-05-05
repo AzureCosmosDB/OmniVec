@@ -551,6 +551,33 @@ async def delete_vectors(
     return count
 
 
+async def delete_by_source_id(
+    config: Dict[str, Any],
+    source_id: str,
+    source_id_column: str = "source_id",
+) -> int:
+    """Delete all vector rows whose ``source_id`` matches (T-VEC-1).
+
+    The column is configurable via the destination's ``source_id_column`` field
+    (default ``source_id``). Identifiers are validated to prevent SQL
+    injection — only [A-Za-z0-9_] up to 63 chars allowed.
+    """
+    from security_utils import validate_sql_identifier  # local import to avoid cycle
+    table = validate_sql_identifier(config["table"], "table")
+    col = validate_sql_identifier(
+        config.get("source_id_column", source_id_column), "source_id_column"
+    )
+
+    pool = await get_pool(config)
+    query = f'DELETE FROM "{table}" WHERE "{col}" = $1'
+    async with pool.acquire() as conn:
+        result = await conn.execute(query, source_id)
+    count = int(result.split()[-1]) if result else 0
+    logger.info("Deleted %d vectors from %s where %s=%s",
+                count, table, col, source_id)
+    return count
+
+
 # =============================================================================
 # VECTOR COLUMN DISCOVERY
 # =============================================================================

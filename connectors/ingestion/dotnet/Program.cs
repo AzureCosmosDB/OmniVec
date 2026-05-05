@@ -15,11 +15,29 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.Configure<ChangeFeedOptions>(
     builder.Configuration.GetSection("ChangeFeed"));
 
-// CosmosClient for omnivec-cosmos (lease containers)
+// CosmosClient for omnivec-cosmos (metadata) and the lease store. When
+// LeaseCosmosEndpoint is configured (T-PWK-1) they are separate accounts.
 builder.Services.AddSingleton(sp =>
 {
     var opts = sp.GetRequiredService<IOptions<ChangeFeedOptions>>().Value;
     return new CosmosClient(opts.OmniVecCosmosEndpoint, new DefaultAzureCredential(),
+        new CosmosClientOptions
+        {
+            ConnectionMode = ConnectionMode.Direct,
+            MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
+            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
+        });
+});
+
+// Dedicated lease-store client (falls back to the metadata client when no
+// separate account is configured).
+builder.Services.AddKeyedSingleton<CosmosClient>("lease", (sp, _) =>
+{
+    var opts = sp.GetRequiredService<IOptions<ChangeFeedOptions>>().Value;
+    var leaseEndpoint = string.IsNullOrWhiteSpace(opts.LeaseCosmosEndpoint)
+        ? opts.OmniVecCosmosEndpoint
+        : opts.LeaseCosmosEndpoint;
+    return new CosmosClient(leaseEndpoint, new DefaultAzureCredential(),
         new CosmosClientOptions
         {
             ConnectionMode = ConnectionMode.Direct,
@@ -52,6 +70,9 @@ logger.LogInformation("OmniVec Change Feed Processor starting");
 logger.LogInformation("  Instance: {Instance}", opts.InstanceName);
 logger.LogInformation("  API: {Api}", opts.OmniVecApiBaseUrl);
 logger.LogInformation("  Cosmos: {Cosmos}", opts.OmniVecCosmosEndpoint);
+if (!string.IsNullOrWhiteSpace(opts.LeaseCosmosEndpoint))
+    logger.LogInformation("  Lease Cosmos: {Lease}/{Db}", opts.LeaseCosmosEndpoint,
+        string.IsNullOrWhiteSpace(opts.LeaseCosmosDatabase) ? opts.OmniVecDatabase : opts.LeaseCosmosDatabase);
 logger.LogInformation("  Poll: {Poll}s, Feed: {Feed}s, Batch: {Batch}",
     opts.SourcePollIntervalSeconds, opts.FeedPollIntervalSeconds, opts.MaxItemsPerBatch);
 
