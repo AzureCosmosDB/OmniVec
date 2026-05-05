@@ -127,16 +127,33 @@ def _lookup_token_in_store(token_hash: str) -> Optional[dict]:
 
 
 class AuthResult:
-    __slots__ = ("subject", "scope", "source", "token_id")
+    __slots__ = ("subject", "scope", "source", "token_id", "rate_limit_override")
 
-    def __init__(self, subject: str, scope: str, source: str, token_id: str = ""):
+    def __init__(
+        self,
+        subject: str,
+        scope: str,
+        source: str,
+        token_id: str = "",
+        rate_limit_override: Optional[int] = None,
+    ):
         self.subject = subject
         self.scope = scope
         self.source = source
         self.token_id = token_id
+        # RES-4: optional per-token override of SEARCH_RATE_LIMIT_RPM. None
+        # = use global; 0 = uncapped; positive int = override.
+        self.rate_limit_override = rate_limit_override
 
     def __repr__(self) -> str:
         return f"AuthResult(subject={self.subject!r}, scope={self.scope!r}, source={self.source!r})"
+
+    @property
+    def rate_limit_key(self) -> str:
+        """RES-4: per-token bucket key. Falls back to subject when token id
+        is empty (env-bootstrap / api-internal). Two tokens with the same
+        ``name`` no longer share a bucket — they have distinct ids."""
+        return f"tok:{self.token_id}" if self.token_id else f"sub:{self.subject}"
 
 
 def validate_token(token: str) -> Optional[AuthResult]:
@@ -165,11 +182,23 @@ def validate_token(token: str) -> Optional[AuthResult]:
         return None
     if scope not in ("search", "admin"):
         return None
+    # RES-4: per-token rate-limit override. Tokens with a `rate_limit_rpm`
+    # field override the SEARCH_RATE_LIMIT_RPM global. Use 0 to remove the
+    # limit entirely for trusted automation tokens; positive values clamp
+    # the limit further. Negative values are ignored (fall back to global).
+    raw_limit = t.get("rate_limit_rpm")
+    try:
+        limit_override = int(raw_limit) if raw_limit is not None else None
+        if limit_override is not None and limit_override < 0:
+            limit_override = None
+    except (TypeError, ValueError):
+        limit_override = None
     return AuthResult(
         subject=t.get("name", ""),
         scope=scope,
         source="store",
         token_id=t.get("id", ""),
+        rate_limit_override=limit_override,
     )
 
 
@@ -184,16 +213,25 @@ _rate_state: dict[str, deque] = defaultdict(deque)
 _rate_lock = threading.Lock()
 
 
-def check_rate_limit(subject: str) -> bool:
-    """Return True if request is allowed, False if rate limited."""
-    if RATE_LIMIT_RPM <= 0:
+def check_rate_limit(subject: str, *, override_rpm: Optional[int] = None) -> bool:
+    """Return True if request is allowed, False if rate limited.
+
+    RES-4: callers pass the auth result's ``rate_limit_key`` (per-token
+    bucket) and optional ``override_rpm`` (per-token override). The
+    override has these semantics:
+      * ``None``           — fall back to the global ``RATE_LIMIT_RPM``.
+      * ``0``              — uncapped (trusted automation).
+      * positive integer   — clamp to that limit.
+    """
+    effective = RATE_LIMIT_RPM if override_rpm is None else override_rpm
+    if effective <= 0:
         return True
     now = time.time()
     with _rate_lock:
         dq = _rate_state[subject]
         while dq and now - dq[0] > _rate_window_s:
             dq.popleft()
-        if len(dq) >= RATE_LIMIT_RPM:
+        if len(dq) >= effective:
             return False
         dq.append(now)
         return True
