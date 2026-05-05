@@ -170,7 +170,7 @@ Legend: ✅ has mitigation in code · ⚠️ partial · ❌ open · — N/A
 ## 6. Mitigations checklist (what to do next)
 
 - [x] **High** Migration script `scripts/scrub_model_api_keys.py` clears legacy `api_key` from `docgrok_model` records (push to Key Vault first, fall back to `--force-clear` once AAD verified). *(T-MET-1, batch 1.)*
-- [ ] **High** Replace `OMNIVEC_ADMIN_TOKEN` with AAD bearer + role gating. Add `audit_log` table for admin operations.
+- [~] **High** `OMNIVEC_ADMIN_TOKEN` → AAD bearer + role gating: **batch 2 ships audit-log + per-token last-used**; AAD-bearer migration still pending. *(T-API-1.)*
 - [x] **High** `attachment_blob_account_allowlist` config + mandatory pin: absolute attachment URLs are rejected unless host matches `account_url` or the allowlist. *(T-CON-2, batch 1.)*
 - [ ] **Medium** Sandbox `pipeline-worker` parser in a subprocess with `RLIMIT_AS=1GB` and seccomp; cap pages-per-attachment to 200.
 - [ ] **Medium** Isolate change-feed lease container into its own Cosmos DB with a separate SA.
