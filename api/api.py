@@ -130,7 +130,14 @@ def _validate_token(token: str) -> Optional[dict]:
             tok_scope = (t.get("scope") or "").lower()
             if tok_scope == "search":
                 return None
-            return {"name": t.get("name", ""), "role": t.get("role", "user"), "id": t.get("id", "")}
+            return {
+                "name": t.get("name", ""),
+                "role": t.get("role", "user"),
+                "id": t.get("id", ""),
+                # Marker so the middleware knows this is a stored Cosmos token
+                # eligible for last_used tracking (vs the env-bootstrap admin).
+                "_persisted": True,
+            }
     except Exception as e:
         logger.warning("Token validation error: %s", e)
     return None
@@ -191,6 +198,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             # Attach token metadata to request state
             request.state.auth = token_meta
+            # Best-effort last-used touch for persisted Cosmos tokens (T-API-1).
+            if token_meta.get("_persisted") and token_meta.get("id"):
+                asyncio.create_task(_touch_token_last_used(token_meta["id"]))
 
         return await call_next(request)
 
@@ -254,6 +264,167 @@ async def metrics_middleware(request: Request, call_next):
         if response.status_code >= 400:
             record_error(status_code=response.status_code, path=path)
     return response
+
+
+# =============================================================================
+# AUDIT LOG (T-API-1)
+# =============================================================================
+# Records every state-changing /api/* request into a Cosmos `audit_log`
+# doc-type so admin operations leave a forensic trail. Reads (GET) are
+# excluded — they're typically high-volume probe traffic and the latency
+# middleware already records them. Internal pod-to-pod calls (skipped via
+# AUTH_SKIP_* / _INTERNAL_HOSTS in AuthMiddleware) carry no auth context
+# and are intentionally NOT audited.
+#
+# The write is fire-and-forget on a background task so the response is not
+# blocked by Cosmos latency. If the audit container is unavailable we log
+# and drop — auditing must never break the request path.
+
+_AUDIT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+# Don't audit auth-token list/login churn; they're already covered by
+# /api/auth/login rate-limiting and aren't state changes when GET-only.
+_AUDIT_SKIP_PREFIXES = ("/api/health", "/api/metrics", "/api/auth/login")
+
+
+def _redact_path(path: str) -> str:
+    """Strip query string. Path itself is the resource identifier; bodies are
+    NOT logged (could contain secrets / PII)."""
+    return path.split("?", 1)[0]
+
+
+async def _write_audit_record(
+    actor_name: str,
+    actor_role: str,
+    actor_id: str,
+    method: str,
+    path: str,
+    status: int,
+    ip: str,
+) -> None:
+    try:
+        store = get_store()
+        doc = {
+            "id": f"aud-{uuid.uuid4().hex[:12]}",
+            "doc_type": "audit_log",
+            "ts": datetime.utcnow().isoformat(),
+            "actor_name": actor_name,
+            "actor_role": actor_role,
+            "actor_id": actor_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "ip": ip,
+        }
+        await asyncio.to_thread(store.upsert, doc)
+    except Exception as e:  # lgtm[py/catch-base-exception]
+        # Never let audit-log failure break the request flow.
+        logger.warning("audit_log write failed: %s", e)
+
+
+@app.middleware("http")
+async def audit_middleware(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        if (request.method in _AUDIT_METHODS
+                and path.startswith("/api/")
+                and not any(path.startswith(p) for p in _AUDIT_SKIP_PREFIXES)
+                and not getattr(request.state, "internal", False)):
+            auth = getattr(request.state, "auth", None) or {}
+            ip = request.client.host if request.client else "unknown"
+            asyncio.create_task(_write_audit_record(
+                actor_name=auth.get("name", "anonymous"),
+                actor_role=auth.get("role", "none"),
+                actor_id=auth.get("id", ""),
+                method=request.method,
+                path=_redact_path(path),
+                status=response.status_code,
+                ip=ip,
+            ))
+    except Exception as e:  # lgtm[py/catch-base-exception]
+        logger.warning("audit_middleware error: %s", e)
+    return response
+
+
+@app.get("/api/audit-log")
+async def list_audit_log(
+    request: Request,
+    actor: Optional[str] = None,
+    path_prefix: Optional[str] = None,
+    method: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 100,
+):
+    """Return recent audit-log entries. Admin role required.
+
+    Filters (all optional, all ANDed):
+      * ``actor`` — actor_name or actor_id substring match
+      * ``path_prefix`` — startswith match on the resource path
+      * ``method`` — exact match (POST/PUT/DELETE/PATCH)
+      * ``since`` — ISO-8601 timestamp; entries with ``ts >= since`` only
+      * ``limit`` — max records (default 100, capped at 1000)
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth or auth.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    limit = max(1, min(int(limit or 100), 1000))
+    where = ["c.doc_type = 'audit_log'"]
+    params: List[Dict[str, Any]] = []
+    if since:
+        where.append("c.ts >= @since")
+        params.append({"name": "@since", "value": since})
+    if method:
+        where.append("UPPER(c.method) = @method")
+        params.append({"name": "@method", "value": method.upper()})
+    sql = (
+        "SELECT TOP @limit c.id, c.ts, c.actor_name, c.actor_role, c.actor_id, "
+        "c.method, c.path, c.status, c.ip FROM c WHERE "
+        + " AND ".join(where)
+        + " ORDER BY c.ts DESC"
+    )
+    params.append({"name": "@limit", "value": limit})
+
+    store = get_store()
+    rows = list(store.query(sql, parameters=params, partition_key="audit_log"))
+
+    # Substring/prefix filters applied client-side (cheap; result set is small).
+    if actor:
+        a = actor.lower()
+        rows = [r for r in rows if a in (r.get("actor_name", "") or "").lower()
+                or a in (r.get("actor_id", "") or "").lower()]
+    if path_prefix:
+        rows = [r for r in rows if (r.get("path", "") or "").startswith(path_prefix)]
+
+    return {"entries": rows, "count": len(rows)}
+
+
+# Per-token last-used tracking. Updates are debounced to one write per token
+# per ``_LAST_USED_DEBOUNCE_S`` to keep Cosmos writes off the hot path.
+_LAST_USED_DEBOUNCE_S = 60.0
+_last_used_seen: Dict[str, float] = {}
+
+
+async def _touch_token_last_used(token_id: str) -> None:
+    try:
+        now_mono = time.monotonic()
+        last = _last_used_seen.get(token_id, 0.0)
+        if now_mono - last < _LAST_USED_DEBOUNCE_S:
+            return
+        _last_used_seen[token_id] = now_mono
+        store = get_store()
+
+        def _update():
+            doc = store.get(token_id, "auth_token")
+            if not doc:
+                return
+            doc["last_used_at"] = datetime.utcnow().isoformat()
+            doc["use_count"] = int(doc.get("use_count", 0)) + 1
+            store.upsert(doc)
+        await asyncio.to_thread(_update)
+    except Exception as e:  # lgtm[py/catch-base-exception]
+        logger.debug("last_used update failed for %s: %s", token_id, e)
+
 
 # â”€â”€ test-connection timeout / retry config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST_CONN_TIMEOUT = 10   # seconds
@@ -643,6 +814,8 @@ async def list_tokens(request: Request, scope: Optional[str] = None):
             "created_by": t.get("created_by"),
             "expires_at": t.get("expires_at"),
             "revoked": t.get("revoked", False),
+            "last_used_at": t.get("last_used_at"),
+            "use_count": t.get("use_count", 0),
         }
         for t in tokens
     ]}
