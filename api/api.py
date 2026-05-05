@@ -248,7 +248,74 @@ async def security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Cache-Control"] = "no-store"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Content-Security-Policy. The UI ships a single static bundle from
+    # /static plus inline init script, and uses fetch() to same-origin /api/*.
+    # Operators can override via OMNIVEC_CSP env if they front the API with
+    # a different CDN/auth gateway.
+    response.headers["Content-Security-Policy"] = os.getenv(
+        "OMNIVEC_CSP",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'",
+    )
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     return response
+
+
+# =============================================================================
+# Per-actor API rate limiting (T-API-1 / web hardening)
+# =============================================================================
+# Sliding-window limiter keyed by token-id (or client IP for unauthenticated
+# requests). In-memory only — fine for single-process API; behind a
+# multi-replica deployment use an external limiter (Redis / nginx).
+_API_RATE_LIMIT = int(os.getenv("OMNIVEC_API_RATE_LIMIT", "120"))   # requests
+_API_RATE_WINDOW = float(os.getenv("OMNIVEC_API_RATE_WINDOW", "60"))  # seconds
+_API_RATE_SKIP_PREFIXES = ("/api/health", "/api/metrics")
+_api_rate_buckets: Dict[str, List[float]] = {}
+
+
+def _api_rate_check(key: str) -> bool:
+    """Return True if the request is within budget, False if it should be 429'd."""
+    if _API_RATE_LIMIT <= 0:
+        return True
+    now = time.monotonic()
+    bucket = _api_rate_buckets.get(key, [])
+    cutoff = now - _API_RATE_WINDOW
+    bucket = [t for t in bucket if t >= cutoff]
+    if len(bucket) >= _API_RATE_LIMIT:
+        _api_rate_buckets[key] = bucket
+        return False
+    bucket.append(now)
+    _api_rate_buckets[key] = bucket
+    return True
+
+
+@app.middleware("http")
+async def api_rate_limit_middleware(request: Request, call_next):
+    path = request.url.path
+    if (path.startswith("/api/")
+            and not any(path.startswith(p) for p in _API_RATE_SKIP_PREFIXES)
+            and not getattr(request.state, "internal", False)):
+        auth = getattr(request.state, "auth", None) or {}
+        token_id = auth.get("id")
+        if token_id:
+            key = f"tok:{token_id}"
+        else:
+            ip = request.client.host if request.client else "unknown"
+            key = f"ip:{ip}"
+        if not _api_rate_check(key):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Slow down."},
+                headers={"Retry-After": str(int(_API_RATE_WINDOW))},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
