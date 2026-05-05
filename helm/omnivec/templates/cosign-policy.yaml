@@ -1,0 +1,38 @@
+{{- if and .Values.security.imageSigning .Values.security.imageSigning.enabled }}
+{{- /*
+  RES-3 — sigstore policy-controller ClusterImagePolicy. Requires the
+  policy-controller to be installed in the cluster (it is NOT bundled in
+  this chart — install via:
+    helm install policy-controller sigstore/policy-controller \
+      -n cosign-system --create-namespace
+  ).
+
+  When enabled, every Pod admitted by Kubernetes must reference an image
+  whose digest has a valid cosign signature created by the OmniVec
+  build-images.yml workflow. Operators can extend the regexes / repo
+  patterns via .Values.security.imageSigning.images.
+
+  This is opt-in (default off) — enabling it before policy-controller is
+  installed will block all admissions.
+*/ -}}
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: omnivec-cosign-policy
+  labels:
+    app: omnivec
+spec:
+  images:
+    {{- range $idx, $glob := (.Values.security.imageSigning.images | default (list "omnivecregistry.azurecr.io/omnivec-*" "omnivecregistry.azurecr.io/docgrok-*")) }}
+    - glob: {{ $glob | quote }}
+    {{- end }}
+  authorities:
+    - name: gha-keyless
+      keyless:
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: https://token.actions.githubusercontent.com
+            subjectRegExp: {{ .Values.security.imageSigning.subjectRegExp | default "https://github.com/AzureCosmosDB/OmniVec/.github/workflows/build-images.yml@refs/.+" | quote }}
+        ctlog:
+          url: https://rekor.sigstore.dev
+{{- end }}

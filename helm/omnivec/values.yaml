@@ -553,3 +553,18 @@ security:
     enabled: false
     type: Localhost            # Localhost | RuntimeDefault | Unconfined
     localhostProfile: docgrok-parser.json
+  # RES-3: cosign image-signing verification. Requires sigstore
+  # policy-controller (https://docs.sigstore.dev/policy-controller/) to
+  # be installed cluster-wide. When enabled, all Pods admitted into the
+  # cluster must reference images signed by the OmniVec build workflow
+  # (verified via Fulcio + Rekor + GitHub OIDC).
+  imageSigning:
+    enabled: false
+    # Glob list of image references this policy applies to. Defaults to
+    # everything OmniVec ships from omnivecregistry.azurecr.io.
+    images: []                 # e.g. ["omnivecregistry.azurecr.io/omnivec-*"]
+    # Regex matched against the OIDC subject (= workflow URL + ref). The
+    # default accepts builds from any branch / tag of the OmniVec repo's
+    # build-images.yml — tighten to refs/heads/main if you want to block
+    # accidental dev-branch deploys at admission time.
+    subjectRegExp: ""

@@ -1,8 +1,8 @@
 {
-  "_comment": "RES-2 — baseline seccomp profile for the docgrok-pipeline-worker. Allow-list of syscalls needed by Python + PyMuPDF + Pillow + httpx + multiprocessing.spawn. All other syscalls return EPERM. Apply via Pod securityContext.seccompProfile.localhostProfile=docgrok-parser.json (file must be at /var/lib/kubelet/seccomp/ on each node). Tightened in batch 8: removed chmod/chown family, mknod, inotify*, sysv-IPC msgget/msgrcv/msgsnd, ptrace, set/getuid* — the parser does not change perms or ownership, does not watch filesystems, and does not use SysV IPC. If a workload error references one of these, run docgrok-parser-audit.json (SCMP_ACT_LOG) for one ingestion cycle and selectively re-add the syscall.",
-  "_origin": "Generated from strace of pipeline-worker on Ubuntu 22.04 + spot-checked against Docker's default profile (https://docs.docker.com/engine/security/seccomp/). Tightened batch 8.",
-  "defaultAction": "SCMP_ACT_ERRNO",
-  "defaultErrnoRet": 1,
+  "_comment": "RES-2 follow-up — AUDIT profile for the docgrok-pipeline-worker. Identical allow-list to docgrok-parser.json plus defaultAction=SCMP_ACT_LOG so that any syscall NOT in the list is logged to the kernel audit subsystem (auditd / journald) instead of being denied. Operators run this profile in pre-prod for one full ingestion cycle, harvest the syscall list via 'ausearch -k seccomp | grep SECCOMP', diff against docgrok-parser.json, and then promote the audit findings into a tightened production profile.",
+  "_origin": "Built from docgrok-parser.json. The only delta is defaultAction.",
+  "_usage": "kubectl annotate or helm value security.seccompProfile.localhostProfile=docgrok-parser-audit.json. Do NOT run in production for more than the audit window — SCMP_ACT_LOG is permissive (allows AND logs).",
+  "defaultAction": "SCMP_ACT_LOG",
   "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
   "syscalls": [
     {
@@ -40,8 +40,9 @@
         "sched_getparam", "sched_get_priority_max", "sched_get_priority_min",
         "sched_getscheduler", "sched_rr_get_interval", "sched_yield", "select",
         "send", "sendmmsg", "sendmsg", "sendto", "set_robust_list", "set_tid_address",
-        "setitimer", "setpgid", "setpriority", "setsid", "setsockopt",
-        "shutdown", "sigaltstack", "signalfd", "signalfd4", "socket",
+        "setgid", "setgroups", "setitimer", "setpgid", "setpriority", "setregid",
+        "setresgid", "setresuid", "setreuid", "setrlimit", "setsid", "setsockopt",
+        "setuid", "shutdown", "sigaltstack", "signalfd", "signalfd4", "socket",
         "socketpair", "splice", "stat", "statfs", "statx", "symlink", "symlinkat",
         "sync", "sync_file_range", "syncfs", "sysinfo", "tee", "tgkill", "time",
         "timer_create", "timer_delete", "timer_getoverrun", "timer_gettime",
