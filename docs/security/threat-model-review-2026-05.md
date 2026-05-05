@@ -76,20 +76,18 @@ Legend: ✅ mitigated · ⚠️ partial / config-dependent · ❌ open
 These are residual or *new* attack surfaces created by the fixes themselves.
 Track them under fresh `T-…-N` ids so future PRs can close them.
 
-### T-AAD-1 (Med) — Default-viewer fall-through for unmapped AAD identities
+### T-AAD-1 (Med) — Default-viewer fall-through for unmapped AAD identities ✅ batch 5
 
-* **Where:** `api/api.py::_aad_role_for_claims` returns `"viewer"` when none of
-  the configured `OMNIVEC_AAD_*_GROUP_ID` env vars are set or the token's
-  `groups`/`roles` claims don't include them.
+* **Where:** `api/api.py::_aad_role_for_claims` returned `"viewer"` when none of
+  the configured `OMNIVEC_AAD_*_GROUP_ID` env vars matched the token's
+  `groups`/`roles` claims.
 * **Risk:** any AAD principal in the tenant — including service identities or
-  guests — successfully validates and gets read access to /api/sources,
+  guests — successfully validated and got read access to /api/sources,
   /api/pipelines, etc. as a viewer.
-* **Mitigation paths:**
-  - Set `OMNIVEC_AAD_VIEWER_GROUP_ID` so unmapped tokens reject (the code
-    will still default-viewer, but operators can wire a deny-list group).
-  - Add an `OMNIVEC_AAD_REQUIRE_GROUP=1` env to flip the default to "reject"
-    (future PR — small).
-  - Document this clearly in the auth runbook.
+* **Mitigation shipped:** `OMNIVEC_AAD_REQUIRE_GROUP=1` flips the default to
+  *reject* — `_aad_role_for_claims` returns `None` for unmapped principals
+  and `_validate_aad_token` treats that as auth failure (logged at INFO).
+  Default `0` preserves the original lax behaviour for backwards compat.
 
 ### T-AAD-2 (Low) — JWKS cache poisoning if MSFT endpoint is hijacked
 
@@ -105,17 +103,17 @@ Track them under fresh `T-…-N` ids so future PRs can close them.
   - Treat as accepted residual; egress to login.microsoftonline.com is
     industry-standard.
 
-### T-RTR-2 (Med) — Sandbox child returns full page list via `multiprocessing.Queue`
+### T-RTR-2 (Med) — Sandbox child returns full page list via `multiprocessing.Queue` ✅ batch 5
 
 * **Where:** `docgrok/pipeline-worker/worker.py::_pdf_subprocess_target`
-  pickles `pages` (list of strings) over a `mp.Queue` back to the parent.
-* **Risk:** a malicious PDF that legitimately produces lots of OCR text
-  (within `RLIMIT_AS`) can still hand back a multi-hundred-MB list to the
-  parent — the parent has no rlimit. Memory pressure on the worker pod.
-* **Mitigation paths:**
-  - Stream pages back via a chunked pipe instead of materialising a list.
-  - Cap the cumulative bytes returned (e.g., 64 MiB) and abort.
-  - For now: `DOCGROK_PDF_MAX_PAGES=200` is the de-facto bound.
+  pickled the full `pages` list back to the parent.
+* **Risk:** a malicious PDF that legitimately produced lots of OCR text
+  (within `RLIMIT_AS`) could still hand back a multi-hundred-MB list to
+  the parent — the parent had no rlimit. Memory pressure on the worker pod.
+* **Mitigation shipped:** child accumulates pages until
+  `DOCGROK_PARSER_SANDBOX_MAX_BYTES` (default 64 MiB) is reached, then
+  stops and signals truncation. Parent logs a WARNING. Total bytes shipped
+  back to the parent are now hard-bounded.
 
 ### T-RTR-3 (Low) — Sandbox is Linux-only
 
@@ -141,7 +139,7 @@ Track them under fresh `T-…-N` ids so future PRs can close them.
     with `source_id` are touched.
   - Long-term: backfill `source_id` for legacy docs via a one-shot job.
 
-### T-ING-1 (Low) — Default ingress template assumes nginx-ingress
+### T-ING-1 (Low) — Default ingress template assumes nginx-ingress ✅ batch 5 (documented)
 
 * **Where:** `helm/omnivec/templates/ingress.yaml` uses
   `nginx.ingress.kubernetes.io/...` annotations for CSP, X-Frame-Options,
@@ -149,31 +147,31 @@ Track them under fresh `T-…-N` ids so future PRs can close them.
 * **Risk:** operators who deploy on a non-nginx ingress class get **no**
   defence-in-depth from the template. The in-process header set in
   batch 3 still applies, so this is genuinely "low".
-* **Mitigation paths:**
-  - Documented in `values.yaml` comment.
-  - Future PR: add controller-detection or a Traefik middleware variant.
+* **Mitigation shipped:** explicit warning + remediation guidance at the top
+  of the `ingress:` block in `helm/omnivec/values.yaml`. Operator on a
+  non-nginx controller sees it the moment they enable ingress.
 
-### T-PWK-2 (Low) — Lease isolation is opt-in
+### T-PWK-2 (Low) — Lease isolation is opt-in ✅ batch 5 (warning)
 
 * **Where:** `LeaseCosmosEndpoint` / `LeaseCosmosDatabase` default empty;
   the keyed `"lease"` `CosmosClient` falls back to the main account.
 * **Risk:** operators who don't set the new env vars stay on the original
   shared-lease topology, i.e. **the same risk T-PWK-1 originally
   surfaced**.
-* **Mitigation paths:**
-  - Default-on is breaking; opt-in is the intentional trade-off.
-  - Document strongly in the deploy runbook + helm chart values.
-  - Future PR: emit a startup warning when shared.
+* **Mitigation shipped:** `Program.cs` now emits `LogWarning` at startup
+  when `LeaseCosmosEndpoint` is empty, telling the operator the lease
+  container is shared and pointing at the T-PWK-1 guidance. Default-on is
+  still breaking; this is the safest opt-in default.
 
-### T-CON-3 (Low) — `result_cap` silent truncation
+### T-CON-3 (Low) — `result_cap` silent truncation ✅ batch 5
 
 * **Where:** `cosmosdb_connector::list_documents` stops the iterator at
   `cap` rows.
-* **Risk:** operators expecting "all rows" silently get the first 50 000.
+* **Risk:** operators expecting "all rows" silently got the first 50 000.
   Could mask data-completeness bugs.
-* **Mitigation paths:**
-  - Log a WARNING at the truncation boundary (small follow-up PR).
-  - Surface a header / response field on the API.
+* **Mitigation shipped:** WARNING log emitted whenever truncation happens,
+  naming the container and pointing at the env var. Tests assert log
+  fires on overflow and is silent under cap.
 
 ## 4. Residual / deliberately accepted risks
 
@@ -188,19 +186,18 @@ remediation. Documented for transparency.
 | RES-4 | Search service rate-limit | Currently per-IP at ingress; per-token rate-limit on `/search` is on the search-team backlog. |
 | RES-5 | Threat model of CI/CD | Tracked separately under `infra/` and `.github/workflows/`. |
 
-## 5. Future hardening backlog (post-batch-4)
+## 5. Future hardening backlog (post-batch-5)
 
 Ordered by ROI. Each is a future PR-sized chunk, not a release blocker.
 
-1. **T-AAD-1**: `OMNIVEC_AAD_REQUIRE_GROUP` env → reject unmapped AAD tokens.
-2. **T-RTR-2**: stream sandbox parser output via chunked pipe + byte cap.
-3. **T-VEC-2 backfill**: one-shot job to add `source_id` to pre-batch-4
+1. **T-VEC-2 backfill**: one-shot job to add `source_id` to pre-batch-4
    vectors so cascade purge is no longer pipeline-wide.
-4. **T-ING-1**: controller-detection in helm chart (nginx vs. Traefik vs. AGIC).
-5. **T-CON-3**: surface `result_cap` truncation in API response + log.
-6. **RES-2**: ship a baseline seccomp profile for the parser worker.
-7. **RES-1**: private-endpoint migration scoped per-Azure-resource.
-8. **PWK-2 warning**: startup log when lease is shared.
+2. **RES-2**: ship a baseline seccomp profile for the parser worker.
+3. **T-AAD-2**: thumbprint-pinned JWKS adapter (accepted residual today).
+4. **T-RTR-3**: cross-platform sandbox shim for non-Linux dev/CI parity.
+5. **T-ING-1 part 2**: ship Traefik `Middleware` and AGIC variants of the
+   ingress template.
+6. **RES-1**: private-endpoint migration scoped per-Azure-resource.
 
 Each item should be filed as an issue with a `T-…` id and pulled into the
 next quarterly threat-model batch (batch 5) when it tops the queue.

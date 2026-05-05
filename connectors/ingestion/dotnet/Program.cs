@@ -73,6 +73,8 @@ logger.LogInformation("  Cosmos: {Cosmos}", opts.OmniVecCosmosEndpoint);
 if (!string.IsNullOrWhiteSpace(opts.LeaseCosmosEndpoint))
     logger.LogInformation("  Lease Cosmos: {Lease}/{Db}", opts.LeaseCosmosEndpoint,
         string.IsNullOrWhiteSpace(opts.LeaseCosmosDatabase) ? opts.OmniVecDatabase : opts.LeaseCosmosDatabase);
+else
+    logger.LogWarning("  Lease Cosmos: SHARED with metadata account. Set ChangeFeed:LeaseCosmosEndpoint to isolate the change-feed lease container per the T-PWK-1 guidance.");
 logger.LogInformation("  Poll: {Poll}s, Feed: {Feed}s, Batch: {Batch}",
     opts.SourcePollIntervalSeconds, opts.FeedPollIntervalSeconds, opts.MaxItemsPerBatch);
 

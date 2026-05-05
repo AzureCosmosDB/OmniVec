@@ -495,6 +495,13 @@ docgrok:
 # =============================================================================
 # INGRESS (Optional)
 # =============================================================================
+# T-ING-1: the bundled annotations target nginx-ingress
+# (`nginx.ingress.kubernetes.io/...`). On Traefik / AGIC / Istio they are
+# silently ignored — the in-process CSP header set by api/api.py still
+# applies, but the ingress-layer defence in depth does not. If you run a
+# non-nginx controller, replicate the equivalent CSP / X-Frame-Options /
+# rate-limit policy in your controller's native config (e.g. Traefik
+# `Middleware` CRD, AGIC custom rewrite rules).
 ingress:
   enabled: false
   className: nginx
