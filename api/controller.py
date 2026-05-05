@@ -227,7 +227,7 @@ def restore_operational_config():
                 try:
                     autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
                         dep_name, ns, body=hpa_patch)
-                except Exception:
+                except Exception:  # lgtm[py/empty-except]
                     pass
             if hpa_field in ("both", None):
                 apps_v1.patch_namespaced_deployment_scale(

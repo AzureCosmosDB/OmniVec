@@ -27,8 +27,7 @@ USAGE:
 MODES (mutually exclusive; default = run against an existing OmniVec deployment):
   --existing            Run against an already-provisioned azd env
                         (this is also the default). Requires --env.
-  --cleanup             Delete PG server + OmniVec test entities.
-                        Requires --env.
+  --cleanup             Delete PG server + OmniVec test entities.                        Requires --env.
 
 OPTIONS:
   -h, --help            Show this help and exit.
@@ -45,6 +44,7 @@ OPTIONS:
                         (default: text-embedding-3-small).
   --dims N              Embedding dimensions (default: 1536).
   -q, --quiet           Minimal output (one line per step).
+  --skip-queue          Skip queue mode; create pipeline in inline mode.
 
 ENVIRONMENT VARIABLES (used when flag is not passed):
   AOAI_ENDPOINT, AOAI_KEY, AOAI_DEPLOYMENT, AOAI_DIMS
@@ -95,6 +95,7 @@ FROM_STEP=1
 QUIET=false
 EXISTING=false
 CLEANUP=false
+SKIP_QUEUE=false
 USER_ENV_NAME=""
 USER_ADMIN_TOKEN=""
 PG_ADMIN_PASSWORD=""
@@ -109,6 +110,7 @@ while [ $# -gt 0 ]; do
     --quiet|-q)    QUIET=true; shift ;;
     --existing)    EXISTING=true; shift ;;
     --cleanup)     CLEANUP=true; shift ;;
+    --skip-queue)  SKIP_QUEUE=true; shift ;;
     --env)         USER_ENV_NAME="$2"; shift 2 ;;
     --token)       USER_ADMIN_TOKEN="$2"; shift 2 ;;
     --pg-password) PG_ADMIN_PASSWORD="$2"; shift 2 ;;
@@ -589,7 +591,13 @@ fi
 # STEP 7: Create pipeline and wait for processing
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$FROM_STEP" -le 7 ]; then
-  log_step 7 "Creating pipeline (queue mode)..."
+  if [ "$SKIP_QUEUE" = "true" ]; then
+    log_step 7 "Creating pipeline (inline mode — queue skipped)..."
+    PIP_MODE="inline"
+  else
+    log_step 7 "Creating pipeline (queue mode)..."
+    PIP_MODE="queue"
+  fi
 
   if [ -z "${MODEL_ID:-}" ]; then
     MODELS_RAW=$(api_get "/api/docgrok/models" 2>/dev/null || true)
@@ -605,7 +613,7 @@ if [ "$FROM_STEP" -le 7 ]; then
     DEST_ID=$(echo "$_dsts" | grep -o '"id":"dst-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
   fi
 
-  PIP_BODY="{\"name\":\"pgvector-demo-pipeline\",\"sources\":[{\"source_id\":\"$SOURCE_ID\",\"filters\":{},\"content_fields\":[\"content\"]}],\"destination_id\":\"$DEST_ID\",\"docgrok_pipeline\":\"$MODEL_ID\",\"vector_index_path\":\"embedding\",\"process_existing\":true,\"processing_mode\":\"queue\",\"content_strategy\":\"truncate\"}"
+  PIP_BODY="{\"name\":\"pgvector-demo-pipeline\",\"sources\":[{\"source_id\":\"$SOURCE_ID\",\"filters\":{},\"content_fields\":[\"content\"]}],\"destination_id\":\"$DEST_ID\",\"docgrok_pipeline\":\"$MODEL_ID\",\"vector_index_path\":\"embedding\",\"process_existing\":true,\"processing_mode\":\"$PIP_MODE\",\"content_strategy\":\"truncate\"}"
   PIP_RESP=$(api_post "/api/pipelines" "$PIP_BODY")
   PIP_ID=$(echo "$PIP_RESP" | grep -o '"id":"pip-[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
   log_ok "Pipeline created: $PIP_ID"
@@ -641,7 +649,7 @@ if [ "$FROM_STEP" -le 7 ]; then
     _embedded=$(pg_exec "$PG_DB" "SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL;" 2>/dev/null | tr -d ' \r\n')
     _embedded=${_embedded:-0}
     if [ "$_embedded" -ge 3 ] 2>/dev/null; then
-      log_ok "Queue mode: $_embedded documents embedded in pgvector!"
+      log_ok "$PIP_MODE mode: $_embedded documents embedded in pgvector!"
       break
     fi
     log "  Waiting... ($_embedded/3 embedded, ${_waited}s)"

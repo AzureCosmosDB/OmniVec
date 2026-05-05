@@ -45,6 +45,8 @@ OPTIONS:
   --registry-token T    Token for the shared image registry (optional;
                         anonymous pull is tried first).
   -q, --quiet           Minimal output (one line per step).
+  --skip-queue          Skip queue-mode steps (8-9); create pipeline in
+                        inline mode directly and verify inline-only.
 
 ENVIRONMENT VARIABLES (used when flag is not passed):
   AOAI_ENDPOINT, AOAI_KEY, AOAI_DEPLOYMENT, AOAI_DIMS
@@ -99,6 +101,7 @@ FROM_STEP=1
 QUIET=false
 EXISTING=false
 CLEANUP=false
+SKIP_QUEUE=false
 AOAI_ENDPOINT="${AOAI_ENDPOINT:-}"
 AOAI_KEY="${AOAI_KEY:-}"
 AOAI_DEPLOYMENT="${AOAI_DEPLOYMENT:-text-embedding-3-small}"
@@ -113,6 +116,7 @@ while [ $# -gt 0 ]; do
     --quiet|-q) QUIET=true; shift ;;
     --existing) EXISTING=true; shift ;;
     --cleanup) CLEANUP=true; shift ;;
+    --skip-queue) SKIP_QUEUE=true; shift ;;
     --env) USER_ENV_NAME="$2"; shift 2 ;;
     --token) USER_ADMIN_TOKEN="$2"; shift 2 ;;
     --endpoint) AOAI_ENDPOINT="$2"; shift 2 ;;
@@ -774,15 +778,21 @@ fi
 # =============================================================================
 PIP_ID=""
 if [ "$FROM_STEP" -le 8 ]; then
-  log_step 8 "Creating pipeline (queue mode), inserting docs, activating..."
+  if [ "$SKIP_QUEUE" = "true" ]; then
+    log_step 8 "Creating pipeline (inline mode — queue skipped), inserting docs, activating..."
+    PIP_MODE="inline"
+  else
+    log_step 8 "Creating pipeline (queue mode), inserting docs, activating..."
+    PIP_MODE="queue"
+  fi
 
   PIP_BODY=$(cat <<PEOF
-{"name":"demo-pipeline","sources":[{"source_id":"$SOURCE_ID","filters":{},"content_fields":["content"]}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","vector_index_path":"embedding","process_existing":true,"processing_mode":"queue"}
+{"name":"demo-pipeline","sources":[{"source_id":"$SOURCE_ID","filters":{},"content_fields":["content"]}],"destination_id":"$DEST_ID","docgrok_pipeline":"$MODEL_ID","vector_index_path":"embedding","process_existing":true,"processing_mode":"$PIP_MODE"}
 PEOF
   )
   PIP_RESULT=$(api_post "/api/pipelines" "$PIP_BODY")
   PIP_ID=$(echo "$PIP_RESULT" | grep -o '"id":"pip-[^"]*"' | head -1 | cut -d'"' -f4)
-  log_ok "Pipeline created (queue mode): $PIP_ID"
+  log_ok "Pipeline created ($PIP_MODE mode): $PIP_ID"
 
   # Insert test documents (retry up to 3 times for transient connectivity)
   log "  Inserting test documents..."
@@ -822,22 +832,26 @@ print('DOCS_OK')
   log "  Resuming pipeline..."
   api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
   api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
-  log_ok "Pipeline activated (queue mode). Waiting for processing..."
-  queue_embedded=false
-  i=0
-  while [ $i -lt 12 ]; do
-    POLL=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
-    POLL_EMB=$(echo "$POLL" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
-    if [ -n "$POLL_EMB" ] && [ "$POLL_EMB" -gt 0 ] 2>/dev/null; then
-      queue_embedded=true
-      break
+  if [ "$SKIP_QUEUE" = "true" ]; then
+    log_ok "Pipeline activated (inline mode — queue wait skipped)."
+  else
+    log_ok "Pipeline activated (queue mode). Waiting for processing..."
+    queue_embedded=false
+    i=0
+    while [ $i -lt 12 ]; do
+      POLL=$(api_get "/api/pipelines/$PIP_ID" 2>/dev/null || true)
+      POLL_EMB=$(echo "$POLL" | grep -o '"embedded_count":[0-9]*' | cut -d: -f2)
+      if [ -n "$POLL_EMB" ] && [ "$POLL_EMB" -gt 0 ] 2>/dev/null; then
+        queue_embedded=true
+        break
+      fi
+      sleep 10
+      i=$((i + 1))
+    done
+    if [ "$queue_embedded" != "true" ]; then
+      log_err "Queue mode did not produce embeddings within timeout."
+      exit 1
     fi
-    sleep 10
-    i=$((i + 1))
-  done
-  if [ "$queue_embedded" != "true" ]; then
-    log_err "Queue mode did not produce embeddings within timeout."
-    exit 1
   fi
   save_checkpoint 8
 else
@@ -848,7 +862,10 @@ fi
 # =============================================================================
 # STEP 9: Verify queue mode results
 # =============================================================================
-if [ -n "$PIP_ID" ]; then
+if [ "$SKIP_QUEUE" = "true" ]; then
+  log_step 9 "Skipping queue-mode verification (--skip-queue)."
+  save_checkpoint 9
+elif [ -n "$PIP_ID" ]; then
   log_step 9 "Verifying queue mode results..."
   if [ "$QUIET" = "false" ]; then
     "$CLI" pipeline show "$PIP_ID" || true
@@ -876,23 +893,27 @@ fi
 # STEP 10: Switch to inline mode, reset, reprocess same docs
 # =============================================================================
 if [ "$FROM_STEP" -le 10 ] && [ -n "$PIP_ID" ]; then
-  log_step 10 "Switching pipeline to inline mode, resetting..."
+  if [ "$SKIP_QUEUE" = "true" ]; then
+    log_step 10 "Waiting for inline-mode embeddings (queue skipped — no reset needed)..."
+  else
+    log_step 10 "Switching pipeline to inline mode, resetting..."
 
-  # Pause pipeline before switching mode
-  api_post "/api/pipelines/$PIP_ID/pause" "{}" >/dev/null 2>&1 || true
+    # Pause pipeline before switching mode
+    api_post "/api/pipelines/$PIP_ID/pause" "{}" >/dev/null 2>&1 || true
 
-  # Switch processing mode to inline
-  api_post "/api/pipelines/$PIP_ID/processing-mode/inline" "{}" >/dev/null
-  log_ok "Switched to inline mode"
+    # Switch processing mode to inline
+    api_post "/api/pipelines/$PIP_ID/processing-mode/inline" "{}" >/dev/null
+    log_ok "Switched to inline mode"
 
-  # Reset pipeline — forces CFP to reprocess all docs from the beginning
-  api_post "/api/pipelines/$PIP_ID/reset" "{}" >/dev/null
-  log_ok "Pipeline reset — will reprocess all docs in inline mode"
+    # Reset pipeline — forces CFP to reprocess all docs from the beginning
+    api_post "/api/pipelines/$PIP_ID/reset" "{}" >/dev/null
+    log_ok "Pipeline reset — will reprocess all docs in inline mode"
 
-  # Resume pipeline
-  api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
-  api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
-  log_ok "Pipeline resumed (inline mode). Waiting for reprocessing..."
+    # Resume pipeline
+    api_post "/api/pipelines/$PIP_ID/resume" "{}" >/dev/null
+    api_post "/api/pipelines/$PIP_ID/run" "{}" >/dev/null
+    log_ok "Pipeline resumed (inline mode). Waiting for reprocessing..."
+  fi
 
   # Poll source container until embeddings appear or 120s timeout
   inline_ready=false

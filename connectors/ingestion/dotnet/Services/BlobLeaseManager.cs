@@ -157,16 +157,36 @@ public class BlobLeaseManager
                 new ItemRequestOptions { IfMatchEtag = existing.ETag },
                 cancellationToken: ct);
         }
-        catch { /* best-effort */ }
+        catch (CosmosException ex) when (
+            ex.StatusCode == HttpStatusCode.NotFound ||
+            ex.StatusCode == HttpStatusCode.PreconditionFailed)
+        {
+            // Benign: lease already gone or another pod raced us to it.
+            _logger.LogDebug(
+                "ReleaseAsync: lease {SourceId} already released/changed ({Status})",
+                sourceId, ex.StatusCode);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown path — nothing to do.
+        }
+        catch (Exception ex)
+        {
+            // Best-effort release, but log loudly so operators see lingering
+            // orphaned leases caused by persistent Cosmos failures.
+            _logger.LogWarning(ex,
+                "ReleaseAsync: failed to release lease for {SourceId} (will expire naturally)",
+                sourceId);
+        }
     }
 
     private class LeaseDoc
     {
-        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        [Newtonsoft.Json.JsonProperty("id")]
         public string Id { get; set; } = "";
-        [System.Text.Json.Serialization.JsonPropertyName("ownerId")]
+        [Newtonsoft.Json.JsonProperty("ownerId")]
         public string OwnerId { get; set; } = "";
-        [System.Text.Json.Serialization.JsonPropertyName("expiresAt")]
+        [Newtonsoft.Json.JsonProperty("expiresAt")]
         public string ExpiresAt { get; set; } = "";
     }
 }

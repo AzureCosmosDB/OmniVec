@@ -82,11 +82,74 @@ async def resolve_secret_ref(ref: str) -> str:
 
 
 async def embed_query(
-    http: httpx.AsyncClient, policy: EmbeddingPolicy, query: str, request_id: str
+    http: httpx.AsyncClient,
+    policy: EmbeddingPolicy,
+    query: str,
+    request_id: str,
+    query_image_b64: Optional[str] = None,
 ) -> Tuple[List[float], str]:
     """Return (vector, model_label) for an embedding policy."""
     if isinstance(policy, PrecomputedEmbedding):
         return list(policy.vector), "precomputed"
+
+    modality = getattr(policy, "input_modality", "text")
+    is_image = modality == "image"
+
+    if is_image:
+        # Decide payload: image bytes preferred, else fall back to the
+        # text query (CLIP is multi-modal — text and image vectors share
+        # the same space, so a text query against an image/video index
+        # is valid via the CLIP text encoder).
+        if isinstance(policy, ModelEmbedding):
+            label = policy.model_id
+            transform_name = "image-transform"
+        elif isinstance(policy, PipelineEmbedding):
+            label = policy.pipeline
+            # For text queries we always embed via image-transform (the
+            # CLIP text/image encoder pair). The pipeline used at
+            # ingestion (e.g. video-transform = extract_frames →
+            # image_embed) lives in the same 768-dim CLIP vector space,
+            # so search-time embedding via image-transform is valid and
+            # avoids running stages like extract_frames on text input.
+            transform_name = policy.pipeline if query_image_b64 else "image-transform"
+        else:
+            raise ValueError(f"Unknown embedding policy: {policy!r}")
+        if query_image_b64:
+            body = {
+                "data": query_image_b64,
+                "transform_name": transform_name,
+                "requestId": request_id,
+            }
+        elif query:
+            body = {
+                "text": query,
+                "transform_name": transform_name,
+                "requestId": request_id,
+            }
+        else:
+            raise RuntimeError("image-modality index requires either text query or query_image_b64")
+        resp = await http.post(f"{DOCGROK_URL}/embed", json=body, timeout=EMBED_TIMEOUT_S)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"embedding service returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json()
+        chunks = data.get("chunks") or []
+        vec = (chunks[0].get("embedding") if chunks else None) or []
+        if not vec:
+            # Legacy text shape fallback (defensive).
+            pages = data.get("pages") or data.get("output") or [[]]
+            vec = pages[0] if pages else []
+        if not vec:
+            raise RuntimeError("image embedding service returned empty vector")
+        if getattr(policy, "normalize", False):
+            n = math.sqrt(sum(x * x for x in vec)) or 1.0
+            vec = [x / n for x in vec]
+        return list(vec), label
+
+    # Text index, image-only query → skip with informative error.
+    if not query:
+        raise RuntimeError("text-modality index requires a text query (set query)")
 
     if isinstance(policy, ModelEmbedding):
         body = {"model_id": policy.model_id, "text": query, "requestId": request_id}
@@ -178,7 +241,7 @@ async def search_cosmos(
                     params.append({"name": name, "value": v})
 
         query = (
-            f"SELECT TOP @top_k c, VectorDistance(c.{vf}, {embedding_str}) AS distance "
+            f"SELECT TOP @top_k c, VectorDistance(c.{vf}, {embedding_str}) AS similarity "
             f"FROM c {where} ORDER BY VectorDistance(c.{vf}, {embedding_str})"
         )
 
@@ -186,7 +249,9 @@ async def search_cosmos(
         for item in container.query_items(
             query=query, parameters=params, enable_cross_partition_query=True
         ):
-            distance = float(item.get("distance", 0) or 0)
+            # Cosmos VectorDistance with cosine returns similarity in [0,1] (1 = identical).
+            # Order by VectorDistance returns most-similar first regardless of ASC/DESC.
+            similarity = float(item.get("similarity", 0) or 0)
             doc = item.get("c", {}) or {}
             text, text_parts = _extract_text(doc, content_fields)
 
@@ -197,8 +262,8 @@ async def search_cosmos(
 
             hit: Dict[str, Any] = {
                 "id": doc.get("id"),
-                "score": 1 - distance,
-                "distance": distance,
+                "score": similarity,
+                "distance": 1 - similarity,
                 "text": text,
                 "text_parts": text_parts,
                 "metadata": metadata,
@@ -222,6 +287,7 @@ async def search_pgvector(
     return_fields: List[str],
     index_filter: Optional[IndexFilter],
     include_vector: bool,
+    metric: str = "cosine",
 ) -> List[dict]:
     import asyncpg  # type: ignore
 
@@ -239,15 +305,29 @@ async def search_pgvector(
     id_col = store.id_column
     content_col = store.content_column
     vcol = vec_field
+    if not isinstance(metric, str):
+        metric = "cosine"
+    metric = metric.lower()
+
+    def q(c: str) -> str:
+        return '"' + c.replace('"', '""') + '"'
+
+    # Map metric → operator + similarity expression
+    if metric in ("l2", "euclidean"):
+        op = "<->"
+        sim_expr = f"1.0 / (1.0 + ({q(vcol)} <-> $1::vector))"
+    elif metric in ("dot", "inner_product", "ip"):
+        op = "<#>"
+        sim_expr = f"-({q(vcol)} <#> $1::vector)"
+    else:
+        op = "<=>"
+        sim_expr = f"1 - ({q(vcol)} <=> $1::vector)"
 
     select_cols = [id_col, content_col]
     extra_cols = list(dict.fromkeys([*content_fields, *return_fields, *store.metadata_columns]))
     for c in extra_cols:
         if c not in select_cols:
             select_cols.append(c)
-
-    def q(c: str) -> str:
-        return '"' + c.replace('"', '""') + '"'
 
     col_list = ", ".join(q(c) for c in select_cols)
 
@@ -264,9 +344,9 @@ async def search_pgvector(
             )
 
     sql = (
-        f"SELECT {col_list}, 1 - ({q(vcol)} <=> $1::vector) AS similarity "
+        f"SELECT {col_list}, {sim_expr} AS similarity "
         f"FROM {q(table)} {where_clause} "
-        f"ORDER BY {q(vcol)} <=> $1::vector LIMIT $2"
+        f"ORDER BY {q(vcol)} {op} $1::vector LIMIT $2"
     )
 
     conn = await asyncpg.connect(dsn, ssl=ssl if ssl else None)
@@ -315,6 +395,7 @@ async def _search_one_index(
     query: Optional[str],
     request_id: str,
     include_vector: bool,
+    query_image_b64: Optional[str] = None,
 ) -> Tuple[PerIndexInfo, List[dict]]:
     """Embed (if needed) + search one index. Never raises."""
     info = PerIndexInfo(index_id=idx.id)
@@ -323,7 +404,9 @@ async def _search_one_index(
     # Embed
     t0 = time.time()
     try:
-        embedding, label = await embed_query(http, idx.embedding, query or "", request_id)
+        embedding, label = await embed_query(
+            http, idx.embedding, query or "", request_id, query_image_b64=query_image_b64
+        )
     except Exception as e:
         info.error = f"embed: {str(e)[:180]}"
         return info, []
@@ -353,6 +436,7 @@ async def _search_one_index(
                 search_pgvector(
                     idx.store, idx.vector.field, embedding, per_top_k,
                     idx.content_fields, idx.return_fields, idx.filter, include_vector,
+                    metric=idx.vector.metric,
                 ),
                 timeout=PER_INDEX_TIMEOUT_S,
             )
@@ -459,6 +543,7 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
         _search_one_index(
             http, idx, req.merge.per_index_top_k, req.query, request_id,
             include_vector=req.include.vectors,
+            query_image_b64=req.query_image_b64,
         )
         for idx in req.indexes
     ]
@@ -498,6 +583,22 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
     merged = _merge(per_index_hits, req.merge, req.top_k)
     merge_ms = int((time.time() - t_merge) * 1000)
 
+    # Build index_id -> input_modality map for entity_type tagging.
+    idx_modality: Dict[str, str] = {}
+    for ix in req.indexes:
+        mod = getattr(ix.embedding, "input_modality", "text")
+        idx_modality[ix.id] = mod
+
+    def _classify(hit: dict) -> str:
+        ref = (hit.get("source_ref") or hit.get("id") or "").lower()
+        if any(ref.endswith(ext) for ext in (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")):
+            return "video"
+        if any(ref.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")):
+            return "image"
+        # Fall back to the index's declared modality.
+        mod = idx_modality.get(hit.get("index_id"), "text")
+        return "image" if mod == "image" else "text"
+
     out_results: List[SearchResult] = []
     for h in merged:
         out_results.append(SearchResult(
@@ -512,6 +613,7 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
             vector=(h.get("vector") if req.include.vectors else None),
             source=h.get("source"),
             source_ref=h.get("source_ref"),
+            entity_type=_classify(h),
         ))
 
     timing = SearchTiming(

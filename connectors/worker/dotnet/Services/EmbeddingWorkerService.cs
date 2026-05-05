@@ -140,7 +140,13 @@ public class EmbeddingWorkerService : BackgroundService
 
                 foreach (var group in byModel)
                 {
-                    await ProcessBatchAsync(receiver, group.ToList(), ct);
+                    // Pre-validate each message against single-text token limit,
+                    // then pack into token-bounded sub-batches before sending.
+                    var validated = await ValidateAndTruncateAsync(receiver, group.ToList(), ct);
+                    foreach (var subBatch in PackByTokenBudget(validated))
+                    {
+                        await ProcessBatchAsync(receiver, subBatch, ct);
+                    }
                 }
             }
             catch (OperationCanceledException) { break; }
@@ -241,18 +247,24 @@ public class EmbeddingWorkerService : BackgroundService
         List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> batch,
         CancellationToken ct)
     {
+        if (batch.Count == 0) return;
+
         var sw = Stopwatch.StartNew();
         var modelKey = batch[0].msg.DocgrokPipeline;
         var pipelineId = batch[0].msg.PipelineId;
 
         try
         {
-            // Phase 1: Batch embed
+            // Phase 1: Batch embed with bisect-on-4xx (oversized inputs that
+            // slipped past pre-validation are isolated and dead-lettered, rather
+            // than poisoning the whole batch).
             var texts = batch.Select(b => b.msg.Content).ToList();
-            _logger.LogInformation("Embedding {Count} docs for model={Model}, pipeline={Pipeline}",
-                texts.Count, modelKey, batch[0].msg.PipelineName);
+            _logger.LogInformation(
+                "Embedding {Count} docs (~{Tokens} tokens) for model={Model}, pipeline={Pipeline}",
+                texts.Count, texts.Sum(TokenEstimator.Estimate), modelKey, batch[0].msg.PipelineName);
 
-            var embeddings = await _docGrok.EmbedBatchAsync(modelKey, texts, ct);
+            var embeddings = await EmbedWithBisectAsync(receiver, batch, ct);
+            if (embeddings is null) return; // entire batch rejected & dead-lettered
 
             if (embeddings.Count != batch.Count)
             {
@@ -329,6 +341,188 @@ public class EmbeddingWorkerService : BackgroundService
                 try { await receiver.AbandonMessageAsync(sbMsg, cancellationToken: ct); }
                 catch { /* ignore */ }
             }
+        }
+    }
+
+    /// <summary>
+    /// Pre-validate text messages against the per-input token ceiling. Oversized
+    /// inputs are either truncated (proportional to estimated tokens) or
+    /// dead-lettered immediately, so they never enter the batch packer or
+    /// trigger a 4xx round-trip.
+    /// </summary>
+    private async Task<List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)>> ValidateAndTruncateAsync(
+        ServiceBusReceiver receiver,
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> items,
+        CancellationToken ct)
+    {
+        var kept = new List<(EmbeddingMessage, ServiceBusReceivedMessage)>(items.Count);
+        foreach (var item in items)
+        {
+            var content = item.msg.Content ?? "";
+            var tokens = TokenEstimator.Estimate(content);
+            if (tokens <= _options.MaxSingleTextTokens)
+            {
+                kept.Add(item);
+                continue;
+            }
+
+            if (_options.TruncateOversized)
+            {
+                // Truncate by chars, scaled to fit under the limit with 5% slack.
+                var ratio = (double)_options.MaxSingleTextTokens * 0.95 / tokens;
+                var newLen = Math.Max(1, (int)(content.Length * ratio));
+                item.msg.Content = content.Substring(0, newLen);
+                _logger.LogWarning(
+                    "Truncated oversized input {SourceRef}: {OrigChars} chars (~{OrigTokens} tok) → {NewChars} chars",
+                    item.msg.SourceRef, content.Length, tokens, newLen);
+                kept.Add(item);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Dead-lettering oversized input {SourceRef}: ~{Tokens} tokens > {Max}",
+                    item.msg.SourceRef, tokens, _options.MaxSingleTextTokens);
+                try
+                {
+                    await receiver.DeadLetterMessageAsync(
+                        item.sbMsg,
+                        "TokenLimitExceeded",
+                        $"Estimated {tokens} tokens exceeds MaxSingleTextTokens={_options.MaxSingleTextTokens}",
+                        ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Failed to dead-letter {Id}: {Error}", item.sbMsg.MessageId, ex.Message);
+                }
+            }
+        }
+        return kept;
+    }
+
+    /// <summary>
+    /// Pack messages into sub-batches that respect both the message-count cap
+    /// (EmbedBatchSize) and the token budget (MaxBatchTokens). A single
+    /// oversized message that already passed validation always forms its own
+    /// sub-batch.
+    /// </summary>
+    private IEnumerable<List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)>> PackByTokenBudget(
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> items)
+    {
+        var current = new List<(EmbeddingMessage, ServiceBusReceivedMessage)>();
+        int currentTokens = 0;
+
+        foreach (var item in items)
+        {
+            int t = TokenEstimator.Estimate(item.msg.Content);
+            bool wouldOverflow =
+                current.Count >= _options.EmbedBatchSize ||
+                (current.Count > 0 && currentTokens + t > _options.MaxBatchTokens);
+
+            if (wouldOverflow)
+            {
+                yield return current;
+                current = new List<(EmbeddingMessage, ServiceBusReceivedMessage)>();
+                currentTokens = 0;
+            }
+
+            current.Add(item);
+            currentTokens += t;
+        }
+
+        if (current.Count > 0) yield return current;
+    }
+
+    /// <summary>
+    /// Call /embed/batch with bisect-and-dead-letter on non-retryable client
+    /// errors. If the embed endpoint returns 4xx for the batch, we split it
+    /// in half and recurse; a single-message batch that still fails is
+    /// dead-lettered (and removed from <paramref name="batch"/>) so the rest
+    /// of the workflow can proceed.
+    /// Returns the embeddings aligned 1:1 with the (possibly shrunk)
+    /// <paramref name="batch"/>, or null if every message was dead-lettered.
+    /// </summary>
+    private async Task<List<float[]>?> EmbedWithBisectAsync(
+        ServiceBusReceiver receiver,
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> batch,
+        CancellationToken ct)
+    {
+        var modelKey = batch[0].msg.DocgrokPipeline;
+        var texts = batch.Select(b => b.msg.Content).ToList();
+
+        try
+        {
+            return await _docGrok.EmbedBatchAsync(modelKey, texts, ct);
+        }
+        catch (EmbeddingClientException ex)
+        {
+            if (batch.Count == 1)
+            {
+                var only = batch[0];
+
+                // Most common cause of a single-message 400 is "context length
+                // exceeded" — our token estimate was off. Try truncating to half
+                // and re-embedding once before giving up.
+                if (_options.TruncateOversized && only.msg.Content?.Length > 1)
+                {
+                    var orig = only.msg.Content;
+                    only.msg.Content = orig.Substring(0, orig.Length / 2);
+                    _logger.LogWarning(
+                        "Embed rejected {SourceRef} with {Status}; truncating {OrigLen}→{NewLen} chars and retrying once.",
+                        only.msg.SourceRef, ex.StatusCode, orig.Length, only.msg.Content.Length);
+                    try
+                    {
+                        return await _docGrok.EmbedBatchAsync(modelKey, new List<string> { only.msg.Content }, ct);
+                    }
+                    catch (EmbeddingClientException ex2)
+                    {
+                        ex = ex2; // fall through to dead-letter with the second error
+                    }
+                }
+
+                _logger.LogError(
+                    "Embed rejected single message {SourceRef} with {Status}: {Msg}. Dead-lettering.",
+                    only.msg.SourceRef, ex.StatusCode, ex.Message);
+                try
+                {
+                    await receiver.DeadLetterMessageAsync(
+                        only.sbMsg,
+                        $"EmbedRejected{ex.StatusCode}",
+                        ex.Message.Length > 4000 ? ex.Message.Substring(0, 4000) : ex.Message,
+                        ct);
+                }
+                catch (Exception dlqEx)
+                {
+                    _logger.LogWarning("Failed to dead-letter {Id}: {Error}",
+                        only.sbMsg.MessageId, dlqEx.Message);
+                }
+                batch.Clear();
+                return null;
+            }
+
+            // Bisect: split, recurse on each half, stitch results back together
+            // in original order. Any message that gets dead-lettered is removed
+            // from its half, and we mirror those removals in `batch`.
+            int mid = batch.Count / 2;
+            var left = batch.GetRange(0, mid);
+            var right = batch.GetRange(mid, batch.Count - mid);
+
+            _logger.LogWarning(
+                "Embed returned {Status} for batch of {Count}; bisecting into {Left}+{Right}",
+                ex.StatusCode, batch.Count, left.Count, right.Count);
+
+            var leftEmb = await EmbedWithBisectAsync(receiver, left, ct);
+            var rightEmb = await EmbedWithBisectAsync(receiver, right, ct);
+
+            // Rebuild batch from the surviving items of each half
+            batch.Clear();
+            batch.AddRange(left);
+            batch.AddRange(right);
+            if (batch.Count == 0) return null;
+
+            var combined = new List<float[]>(batch.Count);
+            if (leftEmb is not null) combined.AddRange(leftEmb);
+            if (rightEmb is not null) combined.AddRange(rightEmb);
+            return combined;
         }
     }
 }
