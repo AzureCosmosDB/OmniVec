@@ -7,10 +7,14 @@
 | Last reviewed | 2026-05-05 |
 | Scope | Full system — ingestion → embedding → vector store → search → web UI |
 
-> If you prefer the Microsoft Threat Modeling Tool (TMT) format, paste the
-> **Mermaid DFD** below into TMT manually — auto-generating a valid `.tm7`
-> from scratch is brittle, and the markdown form below is the source of
-> truth that gets diff-reviewed in PRs.
+> A companion **`threat-model.tm7`** (Microsoft Threat Modeling Tool format)
+> sits next to this file. Regenerate via
+> `python scripts/gen_threat_model_tm7.py` (requires a known-good template
+> tm7 — set `OMNIVEC_TM7_TEMPLATE=/path/to/template.tm7` if not at the default
+> location). The script clones the template's `KnowledgeBase` (so generic
+> stencils render correctly) and surgically replaces the diagram. The
+> markdown form remains the source of truth; the `.tm7` is for STRIDE in the
+> desktop UI.
 
 ---
 
