@@ -1,0 +1,9 @@
+transformers==4.45.0
+torch>=2.1.0
+qwen-vl-utils
+pillow
+pymupdf
+fastapi
+uvicorn[standard]
+python-multipart
+accelerate
