@@ -273,13 +273,8 @@ fi
 
 printf "${GREEN}All prerequisites met.${NC}\n"
 
-# Init submodules if needed
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-if [ ! -f "$REPO_ROOT/docgrok/Dockerfile" ]; then
-  printf "  ${YELLOW}Initializing git submodules...${NC}\n"
-  (cd "$REPO_ROOT" && git submodule update --init --recursive </dev/null 2>/dev/null) || true
-fi
 
 # ── Validate Azure login ────────────────────────────────────────────────────
 
