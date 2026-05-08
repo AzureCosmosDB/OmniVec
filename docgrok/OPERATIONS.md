@@ -1,13 +1,16 @@
 # DocGrok Operations Guide
 
-## Working Endpoint (Direct DSE-Qwen2 MS API)
-- **URL**: http://20.241.169.200
-- **Health**: http://20.241.169.200/health
-- **Docs**: http://20.241.169.200/docs
+> DocGrok is deployed as a Helm subchart of OmniVec. The canonical chart lives
+> at `helm/docgrok/` and is pulled in by `helm/omnivec/Chart.yaml`. The standard
+> deployment path is `helm install/upgrade omnivec ./helm/omnivec` from the
+> repository root — that brings up DocGrok along with the rest of the platform.
+>
+> Service endpoints are environment-specific; resolve them at runtime with
+> `kubectl get svc -n docgrok` rather than hard-coded IPs.
 
-## Test Request
+## Test Request (replace `<DOCGROK_HOST>` with your service IP/DNS)
 ```bash
-curl -X POST http://20.241.169.200/embed \
+curl -X POST http://<DOCGROK_HOST>/embed \
   -H "Content-Type: application/json" \
   -d '{
     "requestId": "123",
@@ -18,10 +21,6 @@ curl -X POST http://20.241.169.200/embed \
 ```
 
 ---
-
-## DocGrok Orchestrator (TODO: Fix asyncio issue)
-- **URL**: TBD (not deployed)
-- **Health**: TBD
 
 ## Helm Commands
 
@@ -106,39 +105,39 @@ kubectl rollout restart deployment -n docgrok
 
 ## Docker Build & Push
 
+DocGrok images are built and pushed by the OmniVec CI pipeline
+(`.github/workflows/build-images.yml`). To build locally against your own
+registry, set `ACR=<your-registry>.azurecr.io` and run:
+
 ```bash
-# Login to ACR
-az acr login --name <internal-acr>
+az acr login --name "${ACR%%.*}"
 
-# Build images
-cd /home/cdbmvs/docgrok
-sudo docker build -t <internal-acr>.azurecr.io/docgrok:v1 -f Dockerfile .
-sudo docker build -t <internal-acr>.azurecr.io/docgrok-dse-qwen2:v1 -f services/embedding/dse-qwen2/Dockerfile services/embedding/dse-qwen2/
-sudo docker build -t <internal-acr>.azurecr.io/docgrok-clip:v1 -f services/embedding/clip/Dockerfile services/embedding/clip/
+# From repository root
+docker build -t $ACR/docgrok:$VERSION              -f docgrok/Dockerfile docgrok/
+docker build -t $ACR/docgrok-dse-qwen2:$VERSION    -f docgrok/services/embedding/dse-qwen2/Dockerfile docgrok/services/embedding/dse-qwen2/
+docker build -t $ACR/docgrok-clip:$VERSION         -f docgrok/services/embedding/clip/Dockerfile      docgrok/services/embedding/clip/
 
-# Push images
-sudo docker push <internal-acr>.azurecr.io/docgrok:v1
-sudo docker push <internal-acr>.azurecr.io/docgrok-dse-qwen2:v1
-sudo docker push <internal-acr>.azurecr.io/docgrok-clip:v1
+docker push $ACR/docgrok:$VERSION
+docker push $ACR/docgrok-dse-qwen2:$VERSION
+docker push $ACR/docgrok-clip:$VERSION
 
-# Build and deploy new version
-VERSION=v2
-sudo docker build -t <internal-acr>.azurecr.io/docgrok:$VERSION -f Dockerfile .
-sudo docker push <internal-acr>.azurecr.io/docgrok:$VERSION
-helm upgrade docgrok ../helm/docgrok --set docgrok.image.tag=$VERSION
+# Roll out via the OmniVec umbrella chart
+helm upgrade omnivec ./helm/omnivec --set docgrok.image.tag=$VERSION
 ```
 
 ## API Endpoints
 
+Resolve `<DOCGROK_HOST>` from `kubectl get svc -n docgrok` first, then:
+
 ```bash
 # Health check
-curl http://52.191.234.73/health
+curl http://<DOCGROK_HOST>/health
 
 # Stats
-curl http://52.191.234.73/stats
+curl http://<DOCGROK_HOST>/stats
 
 # Single embed request
-curl -X POST http://52.191.234.73/embed \
+curl -X POST http://<DOCGROK_HOST>/embed \
   -H "Content-Type: application/json" \
   -d '{
     "requestId": "test-123",
@@ -147,7 +146,7 @@ curl -X POST http://52.191.234.73/embed \
   }'
 
 # Batch embed (sync)
-curl -X POST http://52.191.234.73/embed/batch \
+curl -X POST http://<DOCGROK_HOST>/embed/batch \
   -H "Content-Type: application/json" \
   -d '{
     "requests": [
@@ -157,14 +156,14 @@ curl -X POST http://52.191.234.73/embed/batch \
   }'
 
 # Batch embed (async)
-curl -X POST http://52.191.234.73/embed/batch/async \
+curl -X POST http://<DOCGROK_HOST>/embed/batch/async \
   -H "Content-Type: application/json" \
   -d '{
     "requests": [...]
   }'
 
 # Check batch status
-curl http://52.191.234.73/embed/batch/{batch_id}/status
+curl http://<DOCGROK_HOST>/embed/batch/{batch_id}/status
 ```
 
 ## Troubleshooting
@@ -177,7 +176,7 @@ kubectl describe pod -n docgrok <pod-name>
 kubectl top pods -n docgrok
 
 # Image pull errors - verify ACR login
-az acr login --name <internal-acr>
+az acr login --name "<your-acr-name>"
 
 # Network issues - exec into pod
 kubectl exec -it -n docgrok <pod-name> -- /bin/bash
@@ -189,7 +188,7 @@ kubectl exec -it -n docgrok -l app=docgrok -- curl http://dse-qwen2-svc:8000/hea
 ## Directory Structure
 
 ```
-/home/cdbmvs/omnivec/
+<repo-root>/
 ├── docgrok/
 │   ├── api.py                          # Orchestrator
 │   ├── Dockerfile
@@ -198,8 +197,10 @@ kubectl exec -it -n docgrok -l app=docgrok -- curl http://dse-qwen2-svc:8000/hea
 │   └── services/embedding/
 │       ├── dse-qwen2/                  # PDF embeddings
 │       └── clip/                       # Image embeddings
-└── helm/docgrok/                       # Canonical Helm chart
-    ├── Chart.yaml
-    ├── values.yaml                     # Model registry
-    └── templates/
+└── helm/
+    ├── omnivec/                        # Umbrella chart (entry point)
+    └── docgrok/                        # Canonical DocGrok subchart
+        ├── Chart.yaml
+        ├── values.yaml                 # Model registry
+        └── templates/
 ```
