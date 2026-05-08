@@ -245,14 +245,6 @@ if (-not (Get-Command helm -ErrorAction SilentlyContinue)) {
 
 Write-Host "`e[32mAll prerequisites met.`e[0m"
 
-# Init submodules if needed
-if (-not (Test-Path "$PSScriptRoot/../docgrok/Dockerfile")) {
-    Write-Host "  `e[33mInitializing git submodules...`e[0m"
-    Push-Location "$PSScriptRoot/.."
-    git submodule update --init --recursive 2>$null
-    Pop-Location
-}
-
 # -- Validate Azure login --
 Write-Host "`n`e[33mChecking Azure login...`e[0m"
 $acct = az account show 2>$null | ConvertFrom-Json

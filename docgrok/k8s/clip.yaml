@@ -1,0 +1,64 @@
+# CLIP ViT-Large/14 - Image Embedding Service (Internal)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clip
+  namespace: docgrok
+  labels:
+    app: clip
+    component: embedding
+    omnivec/role: model
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clip
+  template:
+    metadata:
+      labels:
+        app: clip
+        component: embedding
+    omnivec/role: model
+    spec:
+      containers:
+      - name: clip
+        image: <internal-acr>.azurecr.io/docgrok-clip:v1
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            nvidia.com/gpu: 1
+            memory: "8Gi"
+            cpu: "2"
+        env:
+        - name: HF_HOME
+          value: "/app/.cache/huggingface"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clip-svc
+  namespace: docgrok
+  labels:
+    app: clip
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+  selector:
+    app: clip

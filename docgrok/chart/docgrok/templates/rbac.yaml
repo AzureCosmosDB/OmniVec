@@ -1,0 +1,54 @@
+{{- if .Values.docgrok.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docgrok-admin
+  namespace: {{ .Values.global.namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docgrok-admin-binding
+  namespace: {{ .Values.global.namespace }}
+subjects:
+- kind: ServiceAccount
+  name: docgrok-sa
+  namespace: {{ .Values.global.namespace }}
+roleRef:
+  kind: Role
+  name: docgrok-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# ClusterRole for node info (cluster-wide)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: docgrok-node-reader
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: docgrok-node-reader-binding
+subjects:
+- kind: ServiceAccount
+  name: docgrok-sa
+  namespace: {{ .Values.global.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: docgrok-node-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
