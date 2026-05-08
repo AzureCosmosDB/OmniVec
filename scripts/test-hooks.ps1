@@ -313,7 +313,7 @@ exit 0
 
 function Initialize-RepoStubs {
     param([string]$WorkDir)
-    # The hook checks for docgrok/Dockerfile to decide whether to init submodules
+    # The hooks expect docgrok/Dockerfile to exist in the repo checkout.
     $docgrokDir = Join-Path $WorkDir "docgrok"
     New-Item -ItemType Directory -Path $docgrokDir -Force | Out-Null
     Set-Content -Path (Join-Path $docgrokDir "Dockerfile") -Value "# stub" -Encoding UTF8

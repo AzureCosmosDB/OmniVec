@@ -206,7 +206,10 @@ def _extract_attachments(doc: dict, config: Dict[str, Any]) -> List[Dict[str, An
     content_types = {t.lower() for t in content_types}
 
     src_account = config.get("account_url", "")
-    src_container = config.get("container", "")
+    # For cosmosdb attachment-mode sources, "container" names the cosmos
+    # container; honor "attachment_blob_container" as the dedicated key for
+    # the default blob container used to resolve relative attachment URLs.
+    src_container = config.get("attachment_blob_container") or config.get("container", "")
 
     matches: List[Dict[str, Any]] = []
     for item in arr:

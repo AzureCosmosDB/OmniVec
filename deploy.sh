@@ -72,8 +72,8 @@ docker build -t "$ACR_LOGIN_SERVER/omnivec-api:v1" -f Dockerfile .
 docker push "$ACR_LOGIN_SERVER/omnivec-api:v1"
 
 # Build DocGrok (if exists)
-if [ -d "$SCRIPT_DIR/../docgrok" ]; then
-    cd "$SCRIPT_DIR/../docgrok"
+if [ -d "$SCRIPT_DIR/docgrok" ]; then
+    cd "$SCRIPT_DIR/docgrok"
     docker build -t "$ACR_LOGIN_SERVER/docgrok:v22" .
     docker push "$ACR_LOGIN_SERVER/docgrok:v22"
 fi
