@@ -43,8 +43,8 @@ You also need:
 > **Windows users:** Run these commands in PowerShell 7 (`pwsh`), not Command Prompt.
 
 ```bash
-# Clone the repo (includes submodules)
-git clone --recurse-submodules https://github.com/AzureCosmosDB/OmniVec
+# Clone the repo
+git clone https://github.com/AzureCosmosDB/OmniVec
 cd OmniVec
 
 # Log in to Azure
@@ -543,7 +543,7 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `web/` | Web UI (static HTML/JS + nginx) |
 | `connectors/ingestion/dotnet/` | .NET Change Feed Processor connector |
 | `connectors/worker/dotnet/` | .NET embedding worker |
-| `docgrok/` | Document intelligence engine (git submodule) |
+| `docgrok/` | Document intelligence engine (in-repo) |
 | `cli/` | Go CLI for managing pipelines, sources, and jobs |
 | `infra/` | Azure Bicep infrastructure-as-code |
 | `helm/` | Kubernetes Helm charts |

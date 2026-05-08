@@ -408,7 +408,7 @@ if ($missingImages.Count -gt 0) {
     }
     if ($stillMissing.Count -gt 0) {
         Write-Host "`n`e[31mERROR: Required images are still missing after build attempt: $($stillMissing -join ', ')`e[0m"
-        Write-Host "  Ensure docgrok source/submodule exists, then re-run: azd hooks run postprovision"
+        Write-Host "  Ensure docgrok source exists in-repo, then re-run: azd hooks run postprovision"
         exit 1
     }
     Write-Host "`e[32mMissing images built and verified.`e[0m"
