@@ -502,7 +502,7 @@ if [ -n "$MISSING_IMAGES" ]; then
   done
   if [ -n "$STILL_MISSING" ]; then
     printf "\n${RED}ERROR: Required images are still missing after build attempt:${NC} $STILL_MISSING\n"
-    printf "  Ensure docgrok submodule/source exists, then re-run: azd hooks run postprovision\n"
+    printf "  Ensure docgrok source exists in-repo, then re-run: azd hooks run postprovision\n"
     exit 1
   fi
   printf "${GREEN}Missing images built and verified.${NC}\n"

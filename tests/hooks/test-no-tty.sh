@@ -162,11 +162,11 @@ else
     fail "helm install pipeline missing </dev/null guards"
 fi
 
-# --- Case 6: git submodule update has stdin guard ---
-if grep -q 'git submodule update.*</dev/null' "$PREPROVISION"; then
-    pass "git submodule update has </dev/null"
+# --- Case 6: preprovision no longer initializes git submodules ---
+if ! grep -q 'git submodule update' "$PREPROVISION"; then
+    pass "preprovision has no git submodule init"
 else
-    fail "git submodule update missing </dev/null"
+    fail "preprovision still initializes git submodules"
 fi
 
 # --- Case 7: kubectl calls inside while-read loop in postprovision have guards ---

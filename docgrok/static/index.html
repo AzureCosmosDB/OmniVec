@@ -1,0 +1,1871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocGrok Control Plane</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #1f2937;
+            --bg-card-hover: #262f40;
+            --bg-sidebar: #111827;
+            --bg-modal: #1f2937;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --accent-glow: rgba(99, 102, 241, 0.15);
+            --success: #10b981;
+            --success-bg: rgba(16, 185, 129, 0.1);
+            --danger: #ef4444;
+            --danger-bg: rgba(239, 68, 68, 0.1);
+            --warning: #f59e0b;
+            --warning-bg: rgba(245, 158, 11, 0.1);
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --border: #374151;
+            --border-light: #4b5563;
+            --sidebar-width: 280px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            position: fixed;
+            top: 0; left: 0;
+            width: var(--sidebar-width);
+            height: 100vh;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            transform: translateX(-100%);
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar.open { transform: translateX(0); }
+
+        .sidebar-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .sidebar-logo { display: flex; align-items: center; gap: 12px; }
+
+        .logo-icon {
+            width: 44px; height: 44px;
+            background: linear-gradient(135deg, var(--accent) 0%, #8b5cf6 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: 700;
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .logo-text h1 { font-size: 20px; font-weight: 700; }
+        .logo-text span { font-size: 11px; color: var(--text-secondary); }
+
+        .close-btn {
+            width: 36px; height: 36px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-radius: 8px;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .close-btn:hover { background: rgba(255,255,255,0.1); color: var(--text-primary); }
+
+        .sidebar-nav { flex: 1; padding: 16px; overflow-y: auto; }
+
+        .nav-section { margin-bottom: 24px; }
+
+        .nav-section-title {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            padding: 8px 12px;
+            font-weight: 600;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 16px;
+            border-radius: 12px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 14px;
+            margin-bottom: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .nav-item:hover { background: rgba(255,255,255,0.05); color: var(--text-primary); }
+
+        .nav-item.active {
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+            color: white;
+            box-shadow: 0 4px 16px var(--accent-glow);
+        }
+
+        .nav-icon { font-size: 18px; width: 24px; text-align: center; }
+
+        .sidebar-footer { padding: 16px; border-top: 1px solid var(--border); }
+
+        .sidebar-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: var(--success-bg);
+            border: 1px solid var(--success);
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--success);
+        }
+
+        .status-dot {
+            width: 8px; height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        /* Main Content */
+        .main-content {
+            min-height: 100vh;
+            transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .main-content.shifted { margin-left: var(--sidebar-width); }
+
+        .top-bar {
+            position: sticky;
+            top: 0;
+            background: rgba(26, 26, 46, 0.9);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            z-index: 100;
+        }
+
+        .menu-btn {
+            width: 44px; height: 44px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            cursor: pointer;
+            border-radius: 12px;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .menu-btn:hover { background: var(--bg-card-hover); }
+
+        .page-title { font-size: 20px; font-weight: 600; }
+
+        .top-bar-actions { display: flex; align-items: center; gap: 12px; }
+
+        .container { max-width: 1400px; margin: 0 auto; padding: 32px; }
+
+        /* Panel Header */
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .panel-header h2 { font-size: 16px; color: var(--text-secondary); font-weight: 500; }
+
+        /* Search & Filters */
+        .search-filters {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+        }
+
+        .search-input {
+            flex: 1;
+            min-width: 200px;
+            max-width: 320px;
+            padding: 12px 16px;
+            padding-left: 44px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: inherit;
+            position: relative;
+        }
+
+        .search-input:focus { outline: none; border-color: var(--accent); }
+        .search-input::placeholder { color: var(--text-muted); }
+
+        .search-wrapper {
+            position: relative;
+            flex: 1;
+            min-width: 200px;
+            max-width: 320px;
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 6px;
+            background: var(--bg-card);
+            padding: 4px;
+            border-radius: 10px;
+        }
+
+        .filter-btn {
+            padding: 8px 14px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            font-family: inherit;
+            transition: all 0.2s ease;
+        }
+
+        .filter-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
+        .filter-btn.active { background: var(--accent); color: white; }
+
+        /* Panels */
+        .panel { display: none; animation: fadeIn 0.3s ease; }
+        .panel.active { display: block; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Model Table */
+        .model-table-wrapper {
+            background: var(--bg-card);
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .model-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .model-table thead {
+            background: rgba(0,0,0,0.2);
+        }
+
+        .model-table th {
+            padding: 16px 20px;
+            text-align: left;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .model-table tbody tr {
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .model-table tbody tr:hover {
+            background: rgba(99, 102, 241, 0.05);
+        }
+
+        .model-table tbody tr:not(:last-child) td {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .model-table td {
+            padding: 16px 20px;
+            vertical-align: middle;
+        }
+
+        .model-name-cell {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .model-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .model-icon.native {
+            background: linear-gradient(135deg, var(--success), #059669);
+        }
+
+        .model-icon.external {
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+        }
+
+        .model-name-text {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .model-subtext {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-native { background: var(--success-bg); color: var(--success); }
+        .badge-external { background: rgba(99, 102, 241, 0.1); color: var(--accent); }
+        .badge-running { background: var(--success-bg); color: var(--success); }
+        .badge-stopped { background: var(--danger-bg); color: var(--danger); }
+        .badge-active { background: var(--success-bg); color: var(--success); }
+        .badge-vision { background: rgba(245, 158, 11, 0.1); color: var(--warning); }
+        .badge-text { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
+
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+        .metric {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .metric-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .table-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .action-btn {
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            transition: all 0.2s ease;
+            background: rgba(255,255,255,0.05);
+            color: var(--text-secondary);
+        }
+
+        .action-btn:hover {
+            background: var(--accent);
+            color: white;
+        }
+
+        .action-btn.danger:hover {
+            background: var(--danger);
+        }
+
+        @media (max-width: 900px) {
+            .model-table th:nth-child(4),
+            .model-table td:nth-child(4),
+            .model-table th:nth-child(5),
+            .model-table td:nth-child(5) {
+                display: none;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .model-table th:nth-child(3),
+            .model-table td:nth-child(3) {
+                display: none;
+            }
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: var(--accent-hover); }
+
+        .btn-success { background: var(--success); color: white; }
+        .btn-success:hover { background: #0d9668; }
+
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-danger:hover { background: #dc2626; }
+
+        .btn-ghost { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+        .btn-ghost:hover { background: rgba(255,255,255,0.05); color: var(--text-primary); }
+
+        .btn-lg { padding: 14px 24px; font-size: 14px; }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            padding: 20px;
+        }
+
+        .modal-overlay.show { display: flex; }
+
+        .modal {
+            background: var(--bg-modal);
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            width: 100%;
+            max-width: 600px;
+            max-height: 90vh;
+            overflow-y: auto;
+            animation: modalIn 0.3s ease;
+        }
+
+        @keyframes modalIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .modal-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .modal-title { font-size: 20px; font-weight: 600; }
+
+        .modal-body { padding: 24px; }
+
+        .modal-footer {
+            padding: 20px 24px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        /* Detail Sections */
+        .detail-section { margin-bottom: 24px; }
+
+        .detail-section-title {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+
+        .detail-item {
+            background: rgba(0,0,0,0.2);
+            padding: 16px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .detail-value {
+            font-size: 24px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .detail-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-row:last-child { border-bottom: none; }
+
+        .detail-row-label { color: var(--text-secondary); font-size: 14px; }
+
+        .detail-row-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            word-break: break-all;
+            text-align: right;
+            max-width: 60%;
+        }
+
+        .detail-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+
+        .scale-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .scale-input {
+            width: 64px;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            text-align: center;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+
+        .scale-input:focus { outline: none; border-color: var(--accent); }
+
+        /* Form */
+        .form-group { margin-bottom: 20px; }
+
+        .form-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .form-input, .form-select {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: inherit;
+        }
+
+        .form-input:focus, .form-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .form-hint { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+
+        /* Logs */
+        .logs-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+
+        .log-select {
+            padding: 12px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: inherit;
+            min-width: 200px;
+        }
+
+        .logs-container {
+            background: #0d1117;
+            border-radius: 16px;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.8;
+            max-height: 500px;
+            overflow-y: auto;
+            color: #8b949e;
+            border: 1px solid var(--border);
+        }
+
+        /* System Grid */
+        .system-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .system-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid var(--border);
+        }
+
+        .system-card-title {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+
+        .system-card-value {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .system-card-subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 8px; }
+
+        /* Refresh & Toast */
+        .refresh-btn {
+            position: fixed;
+            bottom: 32px; right: 32px;
+            width: 56px; height: 56px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, var(--accent), #8b5cf6);
+            border: none;
+            color: white;
+            font-size: 22px;
+            cursor: pointer;
+            box-shadow: 0 8px 32px var(--accent-glow);
+        }
+
+        .refresh-btn:hover { transform: scale(1.05); }
+
+        .toast {
+            position: fixed;
+            bottom: 100px; right: 32px;
+            padding: 16px 24px;
+            border-radius: 12px;
+            color: white;
+            font-size: 14px;
+            font-weight: 500;
+            display: none;
+            z-index: 3000;
+        }
+
+        .toast.success { background: linear-gradient(135deg, #059669, #10b981); }
+        .toast.error { background: linear-gradient(135deg, #dc2626, #ef4444); }
+        .toast.show { display: flex; align-items: center; gap: 10px; }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+        .empty-state-icon { font-size: 48px; margin-bottom: 16px; }
+
+        /* Responsive */
+        @media (min-width: 768px) { .overlay { display: none !important; } }
+        @media (max-width: 767px) { .main-content.shifted { margin-left: 0; } }
+
+        .overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            opacity: 0;
+            visibility: hidden;
+            z-index: 999;
+        }
+
+        .overlay.show { opacity: 1; visibility: visible; }
+
+        .tag-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+        .tag {
+            padding: 6px 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 12px;
+        }
+
+        /* Pipeline Styles */
+        .pipeline-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 20px;
+        }
+
+        .pipeline-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .pipeline-card:hover {
+            border-color: var(--accent);
+            transform: translateY(-2px);
+        }
+
+        .pipeline-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+
+        .pipeline-card-name {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .pipeline-card-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        .pipeline-steps {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .pipeline-step {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            font-size: 12px;
+        }
+
+        .pipeline-step.local { border-left: 3px solid var(--success); }
+        .pipeline-step.api { border-left: 3px solid var(--accent); }
+        .pipeline-step.external { border-left: 3px solid #8b5cf6; }
+
+        .pipeline-arrow {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .step-builder {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+
+        .step-builder-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .step-builder-title {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .step-builder-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .step-builder-row.two-col {
+            grid-template-columns: 1fr 1fr;
+        }
+
+        .add-step-btn {
+            width: 100%;
+            padding: 16px;
+            border: 2px dashed var(--border);
+            border-radius: 12px;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+
+        .add-step-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .remove-step-btn {
+            width: 28px;
+            height: 28px;
+            border: none;
+            border-radius: 6px;
+            background: var(--danger-bg);
+            color: var(--danger);
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .remove-step-btn:hover {
+            background: var(--danger);
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar open" id="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-logo">
+                <div class="logo-icon">D</div>
+                <div class="logo-text">
+                    <h1>DocGrok</h1>
+                    <span>Control Plane</span>
+                </div>
+            </div>
+            <button class="close-btn" onclick="toggleSidebar()">&#10005;</button>
+        </div>
+
+        <nav class="sidebar-nav">
+            <div class="nav-section">
+                <div class="nav-section-title">Dashboard</div>
+                <div class="nav-item active" data-panel="models">
+                    <span class="nav-icon">&#9881;</span>
+                    <span>Models</span>
+                </div>
+                <div class="nav-item" data-panel="pipelines">
+                    <span class="nav-icon">&#128260;</span>
+                    <span>Pipelines</span>
+                </div>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">Monitoring</div>
+                <div class="nav-item" data-panel="logs">
+                    <span class="nav-icon">&#128196;</span>
+                    <span>Logs</span>
+                </div>
+                <div class="nav-item" data-panel="system">
+                    <span class="nav-icon">&#128187;</span>
+                    <span>System</span>
+                </div>
+            </div>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="sidebar-status" id="sidebar-health">
+                <span class="status-dot"></span>
+                <span>Checking...</span>
+            </div>
+        </div>
+    </aside>
+
+    <div class="overlay" id="overlay" onclick="toggleSidebar()"></div>
+
+    <!-- Main Content -->
+    <div class="main-content shifted" id="main-content">
+        <div class="top-bar">
+            <button class="menu-btn" onclick="toggleSidebar()">&#9776;</button>
+            <span class="page-title" id="page-title">Models</span>
+            <div class="top-bar-actions">
+                <div id="health-status" class="sidebar-status" style="padding: 8px 16px;">
+                    <span class="status-dot"></span>
+                    <span>Checking...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <!-- Models Panel -->
+            <div id="models" class="panel active">
+                <div class="panel-header">
+                    <h2 id="model-count">Loading models...</h2>
+                    <button class="btn btn-primary btn-lg" onclick="openAddModelModal()">
+                        + Add External Model
+                    </button>
+                </div>
+                <div class="search-filters">
+                    <div class="search-wrapper">
+                        <span class="search-icon">&#128269;</span>
+                        <input type="text" class="search-input" id="model-search" placeholder="Search models..." oninput="filterModels()">
+                    </div>
+                    <div class="filter-group">
+                        <button class="filter-btn active" data-source="all" onclick="setSourceFilter('all')">All</button>
+                        <button class="filter-btn" data-source="native" onclick="setSourceFilter('native')">Native</button>
+                        <button class="filter-btn" data-source="external" onclick="setSourceFilter('external')">External</button>
+                    </div>
+                    <div class="filter-group">
+                        <button class="filter-btn active" data-type="all" onclick="setTypeFilter('all')">All Types</button>
+                        <button class="filter-btn" data-type="vision" onclick="setTypeFilter('vision')">Vision</button>
+                        <button class="filter-btn" data-type="text" onclick="setTypeFilter('text')">Text</button>
+                    </div>
+                </div>
+                <div class="model-table-wrapper">
+                    <table class="model-table">
+                        <thead>
+                            <tr>
+                                <th>Model</th>
+                                <th>Source</th>
+                                <th>Type</th>
+                                <th>Status</th>
+                                <th>Resources</th>
+                                <th style="text-align: right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="all-models"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Logs Panel -->
+            <div id="logs" class="panel">
+                <div class="logs-header">
+                    <select id="log-model" class="log-select">
+                        <option value="">Select a model...</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="loadLogs()">Load Logs</button>
+                </div>
+                <div class="logs-container" id="logs-content">
+                    Select a model above to view its logs...
+                </div>
+            </div>
+
+            <!-- System Panel -->
+            <div id="system" class="panel">
+                <div class="system-grid" id="system-grid"></div>
+            </div>
+
+            <!-- Pipelines Panel -->
+            <div id="pipelines" class="panel">
+                <div class="panel-header">
+                    <h2 id="pipeline-count">Loading pipelines...</h2>
+                    <button class="btn btn-primary btn-lg" onclick="openCreatePipelineModal()">
+                        + Create Pipeline
+                    </button>
+                </div>
+                <div class="pipeline-grid" id="pipeline-grid"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Model Detail Modal -->
+    <div class="modal-overlay" id="model-detail-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title" id="detail-modal-title">Model Details</span>
+                <button class="close-btn" onclick="closeDetailModal()">&#10005;</button>
+            </div>
+            <div class="modal-body" id="detail-modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Add External Model Modal -->
+    <div class="modal-overlay" id="add-model-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title">Add External Model</span>
+                <button class="close-btn" onclick="closeAddModelModal()">&#10005;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Provider Name</label>
+                    <input type="text" class="form-input" id="provider-name" placeholder="e.g., my-azure-openai">
+                    <div class="form-hint">Unique identifier for this provider</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Provider Type</label>
+                    <select class="form-select" id="provider-type">
+                        <option value="azure-openai">Azure OpenAI</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="cohere">Cohere</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Endpoint URL</label>
+                    <input type="text" class="form-input" id="provider-endpoint" placeholder="https://...">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">API Key</label>
+                    <input type="password" class="form-input" id="provider-api-key" placeholder="Enter API key">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">API Version (Azure only)</label>
+                    <input type="text" class="form-input" id="provider-api-version" placeholder="e.g., 2024-06-01">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Model / Deployment Name</label>
+                    <input type="text" class="form-input" id="provider-model" placeholder="e.g., text-embedding-3-large">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Embedding Dimensions</label>
+                    <input type="number" class="form-input" id="provider-dimensions" value="3072">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" onclick="closeAddModelModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addExternalModel()">Add Model</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pipeline Modal -->
+    <div class="modal-overlay" id="pipeline-modal">
+        <div class="modal" style="max-width: 700px;">
+            <div class="modal-header">
+                <span class="modal-title" id="pipeline-modal-title">Create Pipeline</span>
+                <button class="close-btn" onclick="closePipelineModal()">&#10005;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Pipeline Name</label>
+                    <input type="text" class="form-input" id="pipeline-name" placeholder="e.g., my-pdf-pipeline">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Description</label>
+                    <input type="text" class="form-input" id="pipeline-desc" placeholder="What does this pipeline do?">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Steps</label>
+                    <div id="pipeline-steps"></div>
+                    <button class="add-step-btn" onclick="addPipelineStep()">+ Add Step</button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" onclick="closePipelineModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="savePipeline()">Save Pipeline</button>
+            </div>
+        </div>
+    </div>
+
+    <button class="refresh-btn" onclick="refresh()" title="Refresh">&#8635;</button>
+    <div id="toast" class="toast"></div>
+
+    <script>
+        const API_BASE = '';
+        let allModels = { native: [], external: {} };
+        let filters = { search: '', source: 'all', type: 'all' };
+
+        // Model type mapping (for filtering)
+        const modelTypes = {
+            'dse-qwen2': 'vision',
+            'clip': 'vision',
+            'bge': 'text',
+            'text-embedding': 'text',
+            'ada': 'text'
+        };
+
+        function getModelType(name) {
+            name = name.toLowerCase();
+            for (const [key, type] of Object.entries(modelTypes)) {
+                if (name.includes(key)) return type;
+            }
+            return 'text'; // default
+        }
+
+        function setSourceFilter(source) {
+            filters.source = source;
+            document.querySelectorAll('[data-source]').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.source === source);
+            });
+            renderModels();
+        }
+
+        function setTypeFilter(type) {
+            filters.type = type;
+            document.querySelectorAll('[data-type]').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.type === type);
+            });
+            renderModels();
+        }
+
+        function filterModels() {
+            filters.search = document.getElementById('model-search').value.toLowerCase();
+            renderModels();
+        }
+
+        function renderModels() {
+            const tbody = document.getElementById('all-models');
+            tbody.innerHTML = '';
+            let count = 0;
+
+            // Render native models
+            if (filters.source === 'all' || filters.source === 'native') {
+                allModels.native.forEach(model => {
+                    const modelType = getModelType(model.name);
+                    if (filters.type !== 'all' && modelType !== filters.type) return;
+                    if (filters.search && !model.name.toLowerCase().includes(filters.search)) return;
+
+                    count++;
+                    const icon = modelType === 'vision' ? '&#128065;' : '&#128221;';
+                    tbody.innerHTML += `
+                        <tr onclick="showNativeDetail('${model.name}')">
+                            <td>
+                                <div class="model-name-cell">
+                                    <div class="model-icon native">${icon}</div>
+                                    <div>
+                                        <div class="model-name-text">${model.name}</div>
+                                        <div class="model-subtext">Kubernetes Deployment</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td><span class="badge badge-native">Native</span></td>
+                            <td><span class="badge badge-${modelType}">${modelType}</span></td>
+                            <td>
+                                <span class="badge badge-${model.status}">
+                                    <span class="status-dot"></span>
+                                    ${model.status}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="metric">${model.readyReplicas}/${model.replicas} replicas</div>
+                                <div class="metric-label">${model.gpu} GPU &middot; ${model.memory}</div>
+                            </td>
+                            <td>
+                                <div class="table-actions">
+                                    ${model.status === 'running'
+                                        ? `<button class="action-btn danger" onclick="event.stopPropagation(); disableModel('${model.name}')" title="Stop">&#9632;</button>`
+                                        : `<button class="action-btn" onclick="event.stopPropagation(); enableModel('${model.name}')" title="Start">&#9654;</button>`
+                                    }
+                                    <button class="action-btn" onclick="event.stopPropagation(); restartModel('${model.name}')" title="Restart">&#8635;</button>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                });
+            }
+
+            // Render external providers
+            if (filters.source === 'all' || filters.source === 'external') {
+                Object.entries(allModels.external).forEach(([name, provider]) => {
+                    const modelType = getModelType(name);
+                    if (filters.type !== 'all' && modelType !== filters.type) return;
+                    if (filters.search && !name.toLowerCase().includes(filters.search)) return;
+
+                    count++;
+                    tbody.innerHTML += `
+                        <tr onclick="showExternalDetail('${name}')">
+                            <td>
+                                <div class="model-name-cell">
+                                    <div class="model-icon external">&#9729;</div>
+                                    <div>
+                                        <div class="model-name-text">${name}</div>
+                                        <div class="model-subtext">${provider.type}</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td><span class="badge badge-external">External</span></td>
+                            <td><span class="badge badge-${modelType}">${modelType}</span></td>
+                            <td>
+                                <span class="badge badge-active">
+                                    <span class="status-dot"></span>
+                                    Active
+                                </span>
+                            </td>
+                            <td>
+                                <div class="metric">${provider.models.length} model(s)</div>
+                                <div class="metric-label">${provider.endpoint.split('/')[2] || provider.endpoint}</div>
+                            </td>
+                            <td>
+                                <div class="table-actions">
+                                    <button class="action-btn" onclick="event.stopPropagation(); testProvider('${name}')" title="Test">&#128269;</button>
+                                    <button class="action-btn danger" onclick="event.stopPropagation(); removeProvider('${name}')" title="Remove">&#128465;</button>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                });
+            }
+
+            if (count === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><div class="empty-state-icon">&#128269;</div><div>No models match your filters</div></td></tr>';
+            }
+
+            document.getElementById('model-count').textContent = `${count} model${count !== 1 ? 's' : ''} found`;
+        }
+
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('open');
+            document.getElementById('main-content').classList.toggle('shifted');
+            if (window.innerWidth < 768) {
+                document.getElementById('overlay').classList.toggle('show');
+            }
+        }
+
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', () => {
+                document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                item.classList.add('active');
+                document.getElementById(item.dataset.panel).classList.add('active');
+                document.getElementById('page-title').textContent = item.querySelector('span:last-child').textContent;
+                if (window.innerWidth < 768) toggleSidebar();
+            });
+        });
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.innerHTML = `${type === 'success' ? '&#10003;' : '&#10007;'} ${message}`;
+            toast.className = `toast ${type} show`;
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Load all models (native + external)
+        async function loadAllModels() {
+            const logSelect = document.getElementById('log-model');
+            logSelect.innerHTML = '<option value="">Select a model...</option>';
+
+            // Load native models
+            try {
+                const res = await fetch(`${API_BASE}/admin/models`);
+                const data = await res.json();
+                allModels.native = data.models || [];
+
+                allModels.native.forEach(model => {
+                    logSelect.innerHTML += `<option value="${model.name}">${model.name}</option>`;
+                });
+            } catch (e) {
+                console.error('Failed to load native models:', e);
+            }
+
+            // Load external providers
+            try {
+                const res = await fetch(`${API_BASE}/admin/providers`);
+                const data = await res.json();
+                allModels.external = data.providers || {};
+            } catch (e) {
+                console.error('Failed to load external providers:', e);
+            }
+
+            renderModels();
+        }
+
+        // Show native model detail
+        function showNativeDetail(name) {
+            const model = allModels.native.find(m => m.name === name);
+            if (!model) return;
+
+            document.getElementById('detail-modal-title').textContent = model.name;
+            document.getElementById('detail-modal-body').innerHTML = `
+                <div class="detail-section">
+                    <div class="detail-section-title">Status</div>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <div class="detail-value">${model.readyReplicas}/${model.replicas}</div>
+                            <div class="detail-label">Replicas</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-value">${model.gpu}</div>
+                            <div class="detail-label">GPUs</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-value">${model.memory}</div>
+                            <div class="detail-label">Memory</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-section-title">Configuration</div>
+                    <div class="detail-row">
+                        <span class="detail-row-label">Type</span>
+                        <span class="detail-row-value">Kubernetes Deployment</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-row-label">Status</span>
+                        <span class="detail-row-value" style="color: ${model.status === 'running' ? 'var(--success)' : 'var(--danger)'}">${model.status.toUpperCase()}</span>
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-section-title">Actions</div>
+                    <div class="detail-actions">
+                        ${model.status === 'running'
+                            ? `<button class="btn btn-danger" onclick="disableModel('${name}')">Stop</button>`
+                            : `<button class="btn btn-success" onclick="enableModel('${name}')">Start</button>`
+                        }
+                        <button class="btn btn-ghost" onclick="restartModel('${name}')">Restart</button>
+                        <div class="scale-group">
+                            <input type="number" class="scale-input" value="${model.replicas}" min="0" max="10" id="scale-${name}">
+                            <button class="btn btn-primary" onclick="scaleModel('${name}')">Scale</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('model-detail-modal').classList.add('show');
+        }
+
+        // Show external model detail
+        function showExternalDetail(name) {
+            const provider = allModels.external[name];
+            if (!provider) return;
+
+            document.getElementById('detail-modal-title').textContent = name;
+            document.getElementById('detail-modal-body').innerHTML = `
+                <div class="detail-section">
+                    <div class="detail-section-title">Provider Info</div>
+                    <div class="detail-row">
+                        <span class="detail-row-label">Type</span>
+                        <span class="detail-row-value">${provider.type}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-row-label">Endpoint</span>
+                        <span class="detail-row-value">${provider.endpoint}</span>
+                    </div>
+                    ${provider.api_version ? `
+                    <div class="detail-row">
+                        <span class="detail-row-label">API Version</span>
+                        <span class="detail-row-value">${provider.api_version}</span>
+                    </div>` : ''}
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-section-title">Available Models</div>
+                    <div class="tag-list">
+                        ${provider.models.map(m => `<span class="tag">${m}</span>`).join('')}
+                    </div>
+                </div>
+
+                <div class="detail-section">
+                    <div class="detail-section-title">Actions</div>
+                    <div class="detail-actions">
+                        <button class="btn btn-ghost" onclick="testProvider('${name}')">Test Connection</button>
+                        <button class="btn btn-danger" onclick="removeProvider('${name}')">Remove</button>
+                    </div>
+                </div>
+            `;
+            document.getElementById('model-detail-modal').classList.add('show');
+        }
+
+        function closeDetailModal() {
+            document.getElementById('model-detail-modal').classList.remove('show');
+        }
+
+        function openAddModelModal() {
+            document.getElementById('add-model-modal').classList.add('show');
+        }
+
+        function closeAddModelModal() {
+            document.getElementById('add-model-modal').classList.remove('show');
+            ['provider-name', 'provider-endpoint', 'provider-api-key', 'provider-api-version', 'provider-model'].forEach(id => {
+                document.getElementById(id).value = '';
+            });
+            document.getElementById('provider-dimensions').value = '3072';
+        }
+
+        async function addExternalModel() {
+            const data = {
+                name: document.getElementById('provider-name').value,
+                type: document.getElementById('provider-type').value,
+                endpoint: document.getElementById('provider-endpoint').value,
+                apiKey: document.getElementById('provider-api-key').value,
+                apiVersion: document.getElementById('provider-api-version').value,
+                model: document.getElementById('provider-model').value,
+                dimensions: parseInt(document.getElementById('provider-dimensions').value)
+            };
+
+            if (!data.name || !data.endpoint || !data.apiKey || !data.model) {
+                showToast('Please fill in all required fields', 'error');
+                return;
+            }
+
+            try {
+                const res = await fetch(`${API_BASE}/admin/providers`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                if (res.ok) {
+                    showToast(`Added ${data.name} successfully`);
+                    closeAddModelModal();
+                    loadAllModels();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || 'Failed to add model', 'error');
+                }
+            } catch (e) {
+                showToast('Failed to add model', 'error');
+            }
+        }
+
+        async function enableModel(name) {
+            await fetch(`${API_BASE}/admin/models/${name}/enable`, { method: 'POST' });
+            showToast(`${name} starting...`);
+            closeDetailModal();
+            setTimeout(loadAllModels, 2000);
+        }
+
+        async function disableModel(name) {
+            await fetch(`${API_BASE}/admin/models/${name}/disable`, { method: 'POST' });
+            showToast(`${name} stopping...`);
+            closeDetailModal();
+            setTimeout(loadAllModels, 2000);
+        }
+
+        async function restartModel(name) {
+            await fetch(`${API_BASE}/admin/models/${name}/restart`, { method: 'POST' });
+            showToast(`${name} restarting...`);
+            closeDetailModal();
+            setTimeout(loadAllModels, 3000);
+        }
+
+        async function scaleModel(name) {
+            const replicas = parseInt(document.getElementById(`scale-${name}`).value);
+            await fetch(`${API_BASE}/admin/models/${name}/scale`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ replicas })
+            });
+            showToast(`Scaling ${name} to ${replicas} replicas`);
+            closeDetailModal();
+            setTimeout(loadAllModels, 2000);
+        }
+
+        function testProvider(name) {
+            showToast(`Testing ${name}...`);
+        }
+
+        async function removeProvider(name) {
+            if (!confirm(`Remove "${name}"?`)) return;
+            const res = await fetch(`${API_BASE}/admin/providers/${name}`, { method: 'DELETE' });
+            if (res.ok) {
+                showToast(`Removed ${name}`);
+                closeDetailModal();
+                loadAllModels();
+            } else {
+                showToast('Failed to remove', 'error');
+            }
+        }
+
+        async function loadHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/health`);
+                const data = await res.json();
+                const isHealthy = data.status === 'healthy';
+                ['health-status', 'sidebar-health'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) {
+                        el.innerHTML = `<span class="status-dot"></span><span>${isHealthy ? 'Operational' : 'Issues'}</span>`;
+                        el.style.borderColor = isHealthy ? 'var(--success)' : 'var(--danger)';
+                        el.style.background = isHealthy ? 'var(--success-bg)' : 'var(--danger-bg)';
+                        el.style.color = isHealthy ? 'var(--success)' : 'var(--danger)';
+                    }
+                });
+            } catch (e) {}
+        }
+
+        async function loadLogs() {
+            const model = document.getElementById('log-model').value;
+            if (!model) { showToast('Please select a model', 'error'); return; }
+            document.getElementById('logs-content').textContent = 'Loading...';
+            try {
+                const res = await fetch(`${API_BASE}/admin/logs/${model}?lines=200`);
+                const data = await res.json();
+                document.getElementById('logs-content').textContent = data.logs || 'No logs';
+            } catch (e) {
+                document.getElementById('logs-content').textContent = 'Failed to load';
+            }
+        }
+
+        async function loadSystem() {
+            try {
+                const res = await fetch(`${API_BASE}/admin/system`);
+                const data = await res.json();
+                const totalGpus = data.gpu_nodes ? data.gpu_nodes.reduce((sum, n) => sum + parseInt(n.gpus), 0) : 0;
+                document.getElementById('system-grid').innerHTML = `
+                    <div class="system-card">
+                        <div class="system-card-title">Namespace</div>
+                        <div class="system-card-value">${data.namespace}</div>
+                        <div class="system-card-subtitle">Kubernetes namespace</div>
+                    </div>
+                    <div class="system-card">
+                        <div class="system-card-title">Cluster Nodes</div>
+                        <div class="system-card-value">${data.nodes || 0}</div>
+                        <div class="system-card-subtitle">Active worker nodes</div>
+                    </div>
+                    <div class="system-card">
+                        <div class="system-card-title">Total GPUs</div>
+                        <div class="system-card-value">${totalGpus}</div>
+                        <div class="system-card-subtitle">${data.gpu_nodes ? data.gpu_nodes.map(n => n.node.split('-').pop() + ': ' + n.gpus).join(', ') : 'No GPU nodes'}</div>
+                    </div>
+                    <div class="system-card">
+                        <div class="system-card-title">K8s Connection</div>
+                        <div class="system-card-value" style="color: ${data.k8s_available ? 'var(--success)' : 'var(--danger)'}">${data.k8s_available ? 'Connected' : 'Disconnected'}</div>
+                        <div class="system-card-subtitle">Kubernetes API status</div>
+                    </div>
+                `;
+            } catch (e) {}
+        }
+
+        // =========================================
+        // PIPELINE MANAGEMENT
+        // =========================================
+
+        let pipelineOptions = { local_functions: [], models: [], external: [] };
+        let allPipelines = [];
+        let editingPipeline = null;
+        let currentSteps = [];
+
+        async function loadPipelineOptions() {
+            try {
+                const res = await fetch(`${API_BASE}/admin/pipelines/options`);
+                pipelineOptions = await res.json();
+            } catch (e) {
+                console.error('Failed to load pipeline options:', e);
+            }
+        }
+
+        async function loadPipelines() {
+            try {
+                const res = await fetch(`${API_BASE}/admin/pipelines`);
+                const data = await res.json();
+                allPipelines = data.pipelines || [];
+                renderPipelines();
+            } catch (e) {
+                console.error('Failed to load pipelines:', e);
+            }
+        }
+
+        function renderPipelines() {
+            const grid = document.getElementById('pipeline-grid');
+            grid.innerHTML = '';
+
+            if (allPipelines.length === 0) {
+                grid.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#128260;</div><div>No pipelines defined</div></div>';
+                document.getElementById('pipeline-count').textContent = '0 pipelines';
+                return;
+            }
+
+            allPipelines.forEach(p => {
+                const stepsHtml = p.steps.map((s, i) => {
+                    const label = s.function || s.model || `${s.provider}/${s.model}`;
+                    return `<span class="pipeline-step ${s.type}">${label}</span>` +
+                           (i < p.steps.length - 1 ? '<span class="pipeline-arrow">→</span>' : '');
+                }).join('');
+
+                grid.innerHTML += `
+                    <div class="pipeline-card" onclick="editPipeline('${p.name}')">
+                        <div class="pipeline-card-header">
+                            <span class="pipeline-card-name">${p.name}</span>
+                            <button class="action-btn danger" onclick="event.stopPropagation(); deletePipeline('${p.name}')" title="Delete">&#128465;</button>
+                        </div>
+                        <div class="pipeline-card-desc">${p.description}</div>
+                        <div class="pipeline-steps">${stepsHtml}</div>
+                    </div>
+                `;
+            });
+
+            document.getElementById('pipeline-count').textContent = `${allPipelines.length} pipeline${allPipelines.length !== 1 ? 's' : ''}`;
+        }
+
+        function openCreatePipelineModal() {
+            editingPipeline = null;
+            currentSteps = [];
+            document.getElementById('pipeline-modal-title').textContent = 'Create Pipeline';
+            document.getElementById('pipeline-name').value = '';
+            document.getElementById('pipeline-desc').value = '';
+            renderStepBuilders();
+            document.getElementById('pipeline-modal').classList.add('show');
+        }
+
+        function editPipeline(name) {
+            const p = allPipelines.find(x => x.name === name);
+            if (!p) return;
+
+            editingPipeline = name;
+            currentSteps = p.steps.map(s => ({...s}));
+            document.getElementById('pipeline-modal-title').textContent = 'Edit Pipeline';
+            document.getElementById('pipeline-name').value = p.name;
+            document.getElementById('pipeline-desc').value = p.description;
+            renderStepBuilders();
+            document.getElementById('pipeline-modal').classList.add('show');
+        }
+
+        function closePipelineModal() {
+            document.getElementById('pipeline-modal').classList.remove('show');
+        }
+
+        function renderStepBuilders() {
+            const container = document.getElementById('pipeline-steps');
+            container.innerHTML = '';
+
+            currentSteps.forEach((step, i) => {
+                container.innerHTML += createStepBuilder(step, i);
+            });
+
+            // Update depends_on options
+            document.querySelectorAll('.step-depends-select').forEach((sel, i) => {
+                const currentValue = currentSteps[i]?.depends_on?.[0] || '';
+                sel.innerHTML = '<option value="">None (use input)</option>';
+                currentSteps.forEach((s, j) => {
+                    if (j < i) {
+                        sel.innerHTML += `<option value="${s.id}" ${currentValue === s.id ? 'selected' : ''}>${s.id}</option>`;
+                    }
+                });
+            });
+        }
+
+        function createStepBuilder(step, index) {
+            const localOpts = pipelineOptions.local_functions.map(f =>
+                `<option value="${f.name}" ${step.function === f.name ? 'selected' : ''}>${f.name}</option>`
+            ).join('');
+
+            const modelOpts = pipelineOptions.models.map(m =>
+                `<option value="${m.name}" ${step.model === m.name && step.type === 'api' ? 'selected' : ''}>${m.name} (${m.type})</option>`
+            ).join('');
+
+            const extOpts = pipelineOptions.external.map(e =>
+                `<option value="${e.provider}:${e.model}" ${step.provider === e.provider && step.model === e.model ? 'selected' : ''}>${e.provider} / ${e.model}</option>`
+            ).join('');
+
+            return `
+                <div class="step-builder" data-index="${index}">
+                    <div class="step-builder-header">
+                        <span class="step-builder-title">Step ${index + 1}</span>
+                        <button class="remove-step-btn" onclick="removeStep(${index})">×</button>
+                    </div>
+                    <div class="step-builder-row two-col">
+                        <div class="form-group" style="margin-bottom:0">
+                            <label class="form-label">Step ID</label>
+                            <input type="text" class="form-input step-id" value="${step.id || ''}" placeholder="unique_id" onchange="updateStep(${index}, 'id', this.value)">
+                        </div>
+                        <div class="form-group" style="margin-bottom:0">
+                            <label class="form-label">Type</label>
+                            <select class="form-select step-type" onchange="updateStepType(${index}, this.value)">
+                                <option value="local" ${step.type === 'local' ? 'selected' : ''}>Local Function</option>
+                                <option value="api" ${step.type === 'api' ? 'selected' : ''}>Internal Model</option>
+                                <option value="external" ${step.type === 'external' ? 'selected' : ''}>External Provider</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="step-builder-row two-col" style="margin-top:12px">
+                        <div class="form-group" style="margin-bottom:0">
+                            <label class="form-label">${step.type === 'local' ? 'Function' : step.type === 'api' ? 'Model' : 'Provider/Model'}</label>
+                            <select class="form-select step-target" onchange="updateStepTarget(${index}, this.value)">
+                                ${step.type === 'local' ? localOpts : step.type === 'api' ? modelOpts : extOpts}
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:0">
+                            <label class="form-label">Depends On</label>
+                            <select class="form-select step-depends-select" onchange="updateStep(${index}, 'depends_on', this.value ? [this.value] : [])">
+                                <option value="">None</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function addPipelineStep() {
+            currentSteps.push({
+                id: `step${currentSteps.length + 1}`,
+                type: 'local',
+                function: pipelineOptions.local_functions[0]?.name || '',
+                depends_on: currentSteps.length > 0 ? [currentSteps[currentSteps.length - 1].id] : []
+            });
+            renderStepBuilders();
+        }
+
+        function removeStep(index) {
+            currentSteps.splice(index, 1);
+            renderStepBuilders();
+        }
+
+        function updateStep(index, field, value) {
+            currentSteps[index][field] = value;
+        }
+
+        function updateStepType(index, type) {
+            currentSteps[index].type = type;
+            currentSteps[index].function = null;
+            currentSteps[index].model = null;
+            currentSteps[index].provider = null;
+
+            if (type === 'local') {
+                currentSteps[index].function = pipelineOptions.local_functions[0]?.name || '';
+            } else if (type === 'api') {
+                currentSteps[index].model = pipelineOptions.models[0]?.name || '';
+            } else if (type === 'external' && pipelineOptions.external.length > 0) {
+                currentSteps[index].provider = pipelineOptions.external[0].provider;
+                currentSteps[index].model = pipelineOptions.external[0].model;
+            }
+
+            renderStepBuilders();
+        }
+
+        function updateStepTarget(index, value) {
+            const step = currentSteps[index];
+            if (step.type === 'local') {
+                step.function = value;
+            } else if (step.type === 'api') {
+                step.model = value;
+            } else if (step.type === 'external') {
+                const [provider, model] = value.split(':');
+                step.provider = provider;
+                step.model = model;
+            }
+        }
+
+        async function savePipeline() {
+            const name = document.getElementById('pipeline-name').value.trim();
+            const desc = document.getElementById('pipeline-desc').value.trim();
+
+            if (!name) {
+                showToast('Please enter a pipeline name', 'error');
+                return;
+            }
+
+            if (currentSteps.length === 0) {
+                showToast('Please add at least one step', 'error');
+                return;
+            }
+
+            const payload = {
+                name,
+                description: desc,
+                steps: currentSteps
+            };
+
+            try {
+                const method = editingPipeline ? 'PUT' : 'POST';
+                const url = editingPipeline
+                    ? `${API_BASE}/admin/pipelines/${editingPipeline}`
+                    : `${API_BASE}/admin/pipelines`;
+
+                const res = await fetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.ok) {
+                    showToast(`Pipeline ${editingPipeline ? 'updated' : 'created'}`);
+                    closePipelineModal();
+                    loadPipelines();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || 'Failed to save', 'error');
+                }
+            } catch (e) {
+                showToast('Failed to save pipeline', 'error');
+            }
+        }
+
+        async function deletePipeline(name) {
+            if (!confirm(`Delete pipeline "${name}"?`)) return;
+
+            try {
+                const res = await fetch(`${API_BASE}/admin/pipelines/${name}`, { method: 'DELETE' });
+                if (res.ok) {
+                    showToast('Pipeline deleted');
+                    loadPipelines();
+                } else {
+                    showToast('Failed to delete', 'error');
+                }
+            } catch (e) {
+                showToast('Failed to delete', 'error');
+            }
+        }
+
+        function refresh() {
+            loadHealth();
+            loadAllModels();
+            loadSystem();
+            loadPipelines();
+            loadPipelineOptions();
+            showToast('Dashboard refreshed');
+        }
+
+        refresh();
+        setInterval(() => { loadHealth(); loadAllModels(); }, 30000);
+    </script>
+</body>
+</html>
