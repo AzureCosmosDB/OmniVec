@@ -27,10 +27,10 @@ curl -X POST http://20.241.169.200/embed \
 
 ```bash
 # Install
-helm install docgrok ./chart/docgrok
+helm install docgrok ../helm/docgrok
 
 # Upgrade after changes
-helm upgrade docgrok ./chart/docgrok
+helm upgrade docgrok ../helm/docgrok
 
 # Uninstall
 helm uninstall docgrok
@@ -39,7 +39,7 @@ helm uninstall docgrok
 helm status docgrok
 
 # View what will be deployed (dry-run)
-helm template docgrok ./chart/docgrok
+helm template docgrok ../helm/docgrok
 ```
 
 ## Scaling
@@ -62,13 +62,13 @@ kubectl scale deployment clip -n docgrok --replicas=0
 
 ```bash
 # Disable CLIP at deploy time
-helm upgrade docgrok ./chart/docgrok --set models.embedding.clip.enabled=false
+helm upgrade docgrok ../helm/docgrok --set models.embedding.clip.enabled=false
 
 # Enable OCR model
-helm upgrade docgrok ./chart/docgrok --set models.ocr.doctr.enabled=true
+helm upgrade docgrok ../helm/docgrok --set models.ocr.doctr.enabled=true
 
 # Multiple changes
-helm upgrade docgrok ./chart/docgrok \
+helm upgrade docgrok ../helm/docgrok \
   --set models.embedding.clip.replicaCount=1 \
   --set models.embedding.dse-qwen2.replicaCount=2
 ```
@@ -125,7 +125,7 @@ sudo docker push <internal-acr>.azurecr.io/docgrok-clip:v1
 VERSION=v2
 sudo docker build -t <internal-acr>.azurecr.io/docgrok:$VERSION -f Dockerfile .
 sudo docker push <internal-acr>.azurecr.io/docgrok:$VERSION
-helm upgrade docgrok ./chart/docgrok --set docgrok.image.tag=$VERSION
+helm upgrade docgrok ../helm/docgrok --set docgrok.image.tag=$VERSION
 ```
 
 ## API Endpoints
@@ -189,16 +189,17 @@ kubectl exec -it -n docgrok -l app=docgrok -- curl http://dse-qwen2-svc:8000/hea
 ## Directory Structure
 
 ```
-/home/cdbmvs/docgrok/
-├── api.py                              # Orchestrator
-├── Dockerfile
-├── requirements.txt
-├── OPERATIONS.md                       # This file
-├── chart/docgrok/                      # Helm chart
-│   ├── Chart.yaml
-│   ├── values.yaml                     # Model registry
-│   └── templates/
-└── services/embedding/
-    ├── dse-qwen2/                      # PDF embeddings
-    └── clip/                           # Image embeddings
+/home/cdbmvs/omnivec/
+├── docgrok/
+│   ├── api.py                          # Orchestrator
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── OPERATIONS.md                   # This file
+│   └── services/embedding/
+│       ├── dse-qwen2/                  # PDF embeddings
+│       └── clip/                       # Image embeddings
+└── helm/docgrok/                       # Canonical Helm chart
+    ├── Chart.yaml
+    ├── values.yaml                     # Model registry
+    └── templates/
 ```
