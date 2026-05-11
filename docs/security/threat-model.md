@@ -72,17 +72,19 @@ flowchart LR
   api --> sb
   api --> router
   search --> cvec
+  search -->|/embed (query)| router
+  search --> cmeta
   router -->|API key OR AAD| aoai
   router --> incluster
   router --> cmeta
   router --> pworker
   pworker --> sb
   pworker --> bsrc
-  pworker --> blob
+  pworker -->|fetch attachment binary| blob
   pworker --> router
   pworker --> cvec
   ingestor -->|change-feed read| csrc
-  ingestor -->|stage attachments| blob
+  ingestor -->|fetch attachment binary| blob
   ingestor -->|enqueue work (queue mode)| sb
   ingestor -->|"/embed/batch (inline mode)"| router
   ingestor -->|vector patch (inline mode)| csrc
@@ -90,6 +92,7 @@ flowchart LR
   dotnetworker -->|"/embed/batch (queue mode)"| router
   dotnetworker -->|vector write| cvec
   dotnetworker -->|model record read| cmeta
+  dotnetworker -->|fetch attachment binary| blob
 ```
 
 ## 2. Trust boundaries
