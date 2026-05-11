@@ -86,6 +86,8 @@ flowchart LR
   pworker --> cvec
   ingestor -->|change-feed read| csrc
   ingestor -->|fetch attachment binary| blob
+  ingestor -->|enumerate (azure-blob source)| bsrc
+  ingestor -->|pipeline / source config read| cmeta
   ingestor -->|enqueue work (queue mode)| sb
   ingestor -->|"/embed/batch (inline mode)"| router
   ingestor -->|vector patch (inline mode)| csrc
@@ -93,7 +95,6 @@ flowchart LR
   dotnetworker -->|"/embed/batch (queue mode)"| router
   dotnetworker -->|vector write| cvec
   dotnetworker -->|model record read| cmeta
-  dotnetworker -->|fetch attachment binary| blob
   api -->|telemetry| appinsights
   search -->|telemetry| appinsights
   ingestor -->|telemetry| appinsights
