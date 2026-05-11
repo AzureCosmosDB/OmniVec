@@ -11,12 +11,50 @@
 
 ---
 
+## 0. Threat Model Information
+
+Documents assumptions that are not visible on the diagrams.
+
+### 0.1 Deployment & operating model
+
+- **Single-tenant.** One customer = one AKS cluster + one set of Azure data-plane resources. There is no shared OmniVec backplane and no cross-tenant traffic.
+- **Customer is operator.** The customer (or their operator) deploys via Helm, configures Azure resources, and owns the cluster's day-2 operations (upgrades, patching, scaling).
+- **Logical, not physical.** Diagrams in this document are **logical** views of trust relationships. Pod replicas, node pools, AZ topology, and Helm release naming are deployment concerns and are intentionally omitted.
+
+### 0.2 Identity assumptions
+
+- End users authenticate to **Azure AD** (customer's tenant). OmniVec validates JWTs against AAD JWKS; no local user database.
+- **Workload Identity Federation (WIF)** is the default auth between AKS pods and Azure managed services (CosmosDB, AOAI, Service Bus, Key Vault). Pods present federated tokens; no Azure access keys in pod env.
+- A long-lived `OMNIVEC_ADMIN_TOKEN` exists as a **breakglass** path only; production deployments are expected to rely on AAD groups → roles.
+
+### 0.3 Networking assumptions
+
+- All public ingress goes through an **HTTPS-terminating ingress controller** (NGINX or AKS Application Gateway). Plain `LoadBalancer` Services are not used in production (search Service defaults to `ClusterIP`; see T-SRCH-1).
+- In-cluster traffic is **plain HTTP** today. The `networkPolicy.enabled=true` toggle activates default-deny + per-component allow rules (see T-NET-1). mTLS / service-mesh is roadmap.
+- Customer data-plane endpoints (CosmosDB, Blob) are reached over HTTPS via the public Azure backbone; Private Endpoints are supported but not required.
+
+### 0.4 Customer assumptions
+
+- Customer **owns** their source CosmosDB / Blob and the destination vector store. Schemas, attachment names, MIME types, and blob URLs in their data are treated as **untrusted input** by OmniVec.
+- Customer is responsible for hardening *their* CosmosDB / Blob accounts (firewall, RBAC, data classification). OmniVec only assumes it can reach them.
+- Customer configures `attachment_blob_account_allowlist` (storage-account hostnames OmniVec is permitted to fetch from). Misconfiguration = open SSRF (see T-CON-2).
+
+### 0.5 What this model does NOT cover
+
+| Out of scope | Why |
+|---|---|
+| CI/CD supply chain | Has its own model: [`cicd-threat-model.md`](./cicd-threat-model.md) |
+| Helm chart / Bicep infra | Operator concern; tracked under `infra/` review |
+| Code-level vulns (SQLi, XSS, deserialization) | Covered by SDL / CodeQL / SAST policy |
+| Operational SIEM / alerting design | Handled by AppInsights consumer team |
+| Customer's hardening of their CosmosDB / Blob | Customer responsibility (we assume *they* did it) |
+| Pod replicas, node-pool / AZ layout | Deployment concern; not a security-design risk in a single-tenant cluster |
+
+---
+
 ## 1. Scope
 
-OmniVec is a **single-tenant** retrieval-augmented vector platform. One customer = one
-AKS cluster + one set of Azure data-plane resources. The customer brings their own
-source data (CosmosDB or Blob) and their own destination vector store; OmniVec runs
-ingestion, embedding, and search inside the cluster.
+OmniVec is a **single-tenant** retrieval-augmented vector platform that ingests customer documents, generates embeddings, and serves search/RAG. See §0 for deployment, identity, networking, and customer assumptions.
 
 **In scope for this threat model:**
 - Cluster-internal services (web, api, search, ingestor, dotnet-worker, docgrok router/pipeline-worker, in-cluster embedders)
@@ -24,43 +62,39 @@ ingestion, embedding, and search inside the cluster.
 - Bootstrap/admin authentication and AAD integration
 - Inter-component data plane
 
-**Out of scope** (covered elsewhere or by other Microsoft policy):
-- CI/CD supply chain — see [`cicd-threat-model.md`](./cicd-threat-model.md)
-- Helm chart / Bicep infra threat model — tracked under `infra/`
-- Code-level vulnerabilities (SQLi, XSS, etc.) — addressed by CodeQL / SAST / SDL
-- Operational/SIEM ingestion design — handled by AppInsights consumer
-- Customer-side hardening of *their* CosmosDB / Blob — customer responsibility
+**Out of scope:** see §0.5.
 
-## 2. What we're working on
+## 2. What we're working on — high-level view
 
-OmniVec is three components plus their dependencies. **Detailed 19-element view in [Appendix A](#appendix-a-detailed-dfd-19-elements).**
+**One diagram, ≤10 shapes, logical view.** Boxes are *logical components* (not pods, not Helm releases). Trust boundaries are red dashed lines. External interactors (outside our security responsibility) are marked `[ext]` with a justification in §0.5.
 
 ```mermaid
 flowchart LR
-  user["End user<br/>(browser)"]
-  aad["Azure AD"]
+  user(["End user<br/>[ext]"])
+  aad(["Azure AD<br/>[ext]"])
 
-  subgraph cluster["AKS cluster (single tenant)"]
+  subgraph cluster["AKS cluster — OmniVec single-tenant trust boundary"]
     direction TB
-    api["**API**<br/>(web + api + search)"]
-    docgrok["**DocGrok**<br/>(router + pipeline-worker + embedders)"]
-    ingest["**Ingestion**<br/>(ingestor + dotnet-worker)"]
+    api["**API**<br/>(user-facing HTTPS · RAG · admin CRUD)"]
+    docgrok["**DocGrok**<br/>(parsing · embedding orchestration)"]
+    ingest["**Ingestion**<br/>(change-feed watcher · vector writer)"]
   end
 
-  azure["Azure managed services<br/>(AOAI · CosmosDB · Key Vault · Service Bus · App Insights)"]
-  customer["Customer data plane<br/>(source CosmosDB / Blob, vectors destination)"]
+  azure(["Azure managed services<br/>AOAI · CosmosDB · Service Bus · Key Vault · App Insights<br/>[ext]"])
+  customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext, untrusted input]"])
 
-  user -. TB-1 .-> api
-  user -. TB-1 .-> aad
-  api -. TB-2 .-> docgrok
-  api -. TB-2 .-> ingest
-  ingest -. TB-2 .-> docgrok
-  api -. TB-3 .-> azure
-  docgrok -. TB-3 .-> azure
-  ingest -. TB-3 .-> azure
-  ingest -. TB-4 .-> customer
-  docgrok -. TB-4 .-> customer
+  user -->|sign-in / RAG queries<br/>HTTPS · AAD bearer| api
+  user -.->|OIDC sign-in<br/>HTTPS| aad
+  api -->|embed / parse · admin ops<br/>in-cluster HTTP · NetworkPolicy| docgrok
+  ingest -->|enqueue work<br/>in-cluster HTTP · NetworkPolicy| docgrok
+  api -->|metadata read/write<br/>HTTPS · WIF| azure
+  docgrok -->|embeddings · model registry<br/>HTTPS · WIF / API key| azure
+  ingest -->|change-feed lease · queue<br/>HTTPS · WIF| azure
+  ingest -->|read documents/attachments<br/>HTTPS · WIF or SAS| customer
+  ingest -->|write vectors<br/>HTTPS · WIF| customer
 ```
+
+> **What this view shows**: the four trust crossings (User→API, In-cluster, OmniVec→Azure, OmniVec→Customer) and which components touch which boundary. Detailed flows are split into scenario diagrams in §3.
 
 **Components**
 
@@ -74,12 +108,83 @@ flowchart LR
 
 | Id | Boundary | Threat-model relevance |
 |---|---|---|
-| TB-1 | Internet ↔ API | Public HTTP surface; AAD as identity provider |
-| TB-2 | Inter-component within cluster | Plain HTTP today; cross-component compromise = lateral movement |
+| TB-1 | Internet ↔ API | Public HTTPS surface; AAD as identity provider |
+| TB-2 | Inter-component within cluster | Plain HTTP today; cross-component compromise = lateral movement (mitigated by NetworkPolicy) |
 | TB-3 | AKS ↔ Azure managed services | Workload Identity Federation (HTTPS + AAD), not key-based |
 | TB-4 | OmniVec ↔ customer data plane | Customer data is **untrusted** (schemas, attachment names, MIME types, blob URLs) |
 
-## 3. Assets
+## 3. Scenario diagrams
+
+Per reviewer guidance: scenario-focused, request flows only (responses omitted unless they cross a new boundary), two-line labels (purpose / how secured), authorization noted.
+
+### 3.1 Scenario A — Search / RAG (read path)
+
+> **Authorization:** all flows from user require an AAD bearer in the `Reader` or `Admin` group. Search results are filtered by source-id ACL.
+
+```mermaid
+flowchart LR
+  user(["End user<br/>[ext]"])
+  aad(["Azure AD<br/>[ext]"])
+  api["API"]
+  search["Search"]
+  docgrok["DocGrok"]
+  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
+  cvec(["Customer vectors<br/>[ext]"])
+  aoai(["Azure OpenAI<br/>[ext]"])
+
+  user -->|"RAG query<br/>HTTPS · AAD bearer (Reader)"| api
+  api -->|"validate token<br/>HTTPS · cached JWKS"| aad
+  api -->|"forward query<br/>in-cluster HTTP · NetworkPolicy"| search
+  search -->|"embed query text<br/>in-cluster HTTP · admin token"| docgrok
+  docgrok -->|"embed call<br/>HTTPS · WIF (preferred) or API key"| aoai
+  search -->|"vector kNN search<br/>HTTPS · WIF · source-id ACL"| cvec
+  api -->|"pipeline / source lookup<br/>HTTPS · WIF · read-only"| cmeta
+```
+
+### 3.2 Scenario B — Ingestion (write path)
+
+> **Authorization:** Ingestion runs unattended under a workload identity. There is no end-user authorization on this path; the customer's RBAC on their own CosmosDB / Blob *is* the authorization boundary.
+
+```mermaid
+flowchart LR
+  csrc(["Customer source<br/>CosmosDB / Blob<br/>[ext, untrusted input]"])
+  ingest["Ingestion"]
+  sb(["Service Bus<br/>[ext, Azure-managed]"])
+  worker["dotnet-worker<br/>(part of Ingestion)"]
+  docgrok["DocGrok"]
+  cvec(["Customer vectors<br/>[ext]"])
+  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
+
+  ingest -->|"change-feed read<br/>HTTPS · WIF · lease per source"| csrc
+  ingest -->|"fetch attachment<br/>HTTPS · WIF or SAS · host allowlist"| csrc
+  ingest -->|"pipeline / source config read<br/>HTTPS · WIF"| cmeta
+  ingest -->|"enqueue work item<br/>HTTPS · WIF · per-source topic"| sb
+  worker -->|"drain topic<br/>HTTPS · WIF"| sb
+  worker -->|"parse + embed batch<br/>in-cluster HTTP · NetworkPolicy"| docgrok
+  worker -->|"write vectors<br/>HTTPS · WIF"| cvec
+```
+
+### 3.3 Scenario C — Admin / Configuration
+
+> **Authorization:** all flows require AAD bearer in the `Admin` group (or breakglass `OMNIVEC_ADMIN_TOKEN`, audit-logged). Admin token is residual risk T-API-1.
+
+```mermaid
+flowchart LR
+  admin(["Operator<br/>[ext]"])
+  aad(["Azure AD<br/>[ext]"])
+  api["API"]
+  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
+  kv(["Key Vault<br/>[ext, Azure-managed]"])
+
+  admin -->|"CRUD pipelines / sources / models<br/>HTTPS · AAD bearer (Admin)"| api
+  api -->|"validate token + group claim<br/>HTTPS · cached JWKS"| aad
+  api -->|"persist config<br/>HTTPS · WIF · write"| cmeta
+  api -->|"resolve secret refs<br/>HTTPS · WIF · read-only"| kv
+```
+
+
+
+## 4. Assets
 
 | Asset | Sensitivity | Where it lives |
 |---|---|---|
@@ -92,7 +197,7 @@ flowchart LR
 | Pipeline / model definitions | Medium | `omnivec.metadata` |
 | Service Bus messages (blob URLs + IDs) | Medium | Service Bus |
 
-## 4. What can go wrong (top 10 design threats)
+## 5. What can go wrong (top 10 design threats)
 
 Selected manually at boundary crossings. Risk rating uses the SDL scale: **Critical / Important / Moderate / Low / DefenseInDepth**. *Status*: ✅ shipped · ⚠️ partial · ❌ open.
 
@@ -111,7 +216,7 @@ Selected manually at boundary crossings. Risk rating uses the SDL scale: **Criti
 
 > The CI/CD pipeline itself (the GitHub Actions runner that produces those signatures) has its own threat model in [`cicd-threat-model.md`](./cicd-threat-model.md).
 
-## 5. What we did about it (mitigation backlog)
+## 6. What we did about it (mitigation backlog)
 
 Open items only — closed items are the ✅ rows above.
 
@@ -122,29 +227,30 @@ Open items only — closed items are the ✅ rows above.
 | T-API-1 (residual) | Document admin-token rotation runbook + deletion-after-AAD-cutover policy | OmniVec | follow-up |
 | T-NET-1 (residual) | mTLS or service-mesh between tiers (defence in depth on top of NetworkPolicy) | OmniVec | follow-up |
 
-## 6. Did we do enough? (review log)
+## 7. Did we do enough? (review log)
 
 | Date | Reviewer | Outcome | Notes |
 |---|---|---|---|
 | 2026-05-06 | Internal | Initial STRIDE-per-element pass | See `threat-model.md.bak` (pre-DPSS-refactor structure) |
 | 2026-05-11 | Internal (DPSS-style refactor) | Trimmed to 10 boundary threats; collapsed DFD; surfaced T-SRCH-1, T-NET-1, T-SUP-1 from inter-component audit | Ready for SQL Security Review Board submission |
 | 2026-05-11 | Internal (T-SRCH-1, T-NET-1 closure) | Search default switched to `ClusterIP` + new `searchIngress` template; `templates/networkpolicy.yaml` adds default-deny + per-tier allow rules behind `networkPolicy.enabled` toggle | Both threats now ✅ |
+| 2026-05-11 | Reviewer feedback (Curzi-style) | Restructured: added §0 *Threat Model Information* (deployment / identity / networking / customer assumptions), replaced single complex DFD with one ≤10-shape high-level view + 3 scenario diagrams (Search, Ingestion, Admin), two-line flow labels (`purpose` / `how secured`), authorization noted per scenario, external interactors marked `[ext]` with justifications, response flows omitted | Doc now matches DPSS readability guidance |
 
 **To request a Threat Model Review:** upload `threat-model.tm7` + this `.md` via the Threat Modeling Portal ([aka.ms/dpgtrack](https://aka.ms/dpgtrack)). Per DPSS guidance, the review meeting is a 2–3 hour call; this document is sized to fit.
 
-## 7. How to update this model
+## 8. How to update this model
 
 1. Edit this file. Diff is the source of truth; `.tm7` is the visualization.
-2. If the architecture changes, update the collapsed DFD in §2 *and* the detailed DFD in [Appendix A](#appendix-a-detailed-dfd-19-elements).
+2. If the architecture changes, update the high-level view in §2 *and* the affected scenario diagram in §3.
 3. Regenerate `.tm7` with `python scripts/gen_threat_model_tm7.py`.
-4. Add new boundary threats to §4 with id `T-XXX-N` and a risk rating from the SDL scale.
-5. Update §6 review log on every formal review or material refactor.
+4. Add new boundary threats to §5 with id `T-XXX-N` and a risk rating from the SDL scale.
+5. Update §7 review log on every formal review or material refactor.
 
 ---
 
-## Appendix A — Detailed DFD (19 elements)
+## Appendix A — Detailed DFD (19 elements, archived)
 
-The collapsed view in §2 hides per-pod detail. The full diagram below is the source for the `.tm7` artifact.
+> **Note:** This view is preserved for historical context only. The high-level view in §2 plus the 3 scenario diagrams in §3 are the **current** source for `.tm7`. Per reviewer feedback, the doc no longer relies on a single dense diagram.
 
 ```mermaid
 flowchart LR
@@ -232,6 +338,6 @@ That format was flagged by reviewers as **too detailed and lacking clarity from
 a security-design standpoint** — most rows duplicated SDL/CodeQL coverage
 rather than calling out boundary risks specific to OmniVec.
 
-The 10 threats in §4 are the curated subset of those rows that represent
+The 10 threats in §5 are the curated subset of those rows that represent
 *design risk that STRIDE-at-boundaries surfaces and SDL/CodeQL does not*. If you
 need the historical per-element matrix for context, see `threat-model.md.bak`.
