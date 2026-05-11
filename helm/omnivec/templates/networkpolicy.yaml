@@ -1,0 +1,142 @@
+{{- /*
+  T-NET-1: default-deny + per-tier ingress allow rules.
+
+  Renders only when `networkPolicy.enabled=true`. Egress is left
+  unrestricted because the workload talks to Azure-managed services
+  whose IP ranges shift over time; lock egress down at the cluster
+  egress gateway / Azure Firewall instead.
+
+  Pod selectors below match the `app: omnivec-*` labels set by each
+  deployment template in this chart.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $ns := .Release.Namespace -}}
+{{- $ingNsSel := .Values.networkPolicy.ingressControllerNamespaceSelector | default (dict "matchLabels" (dict "kubernetes.io/metadata.name" "ingress-nginx")) -}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: omnivec-default-deny
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  # No ingress rules → all ingress denied unless another policy allows it.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: omnivec-api-allow
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: omnivec-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $ingNsSel | nindent 12 }}
+        - podSelector:
+            matchLabels:
+              app: omnivec-web
+        - podSelector:
+            matchLabels:
+              app: omnivec-search
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: omnivec-search-allow
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: omnivec-search
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $ingNsSel | nindent 12 }}
+        - podSelector:
+            matchLabels:
+              app: omnivec-api
+        - podSelector:
+            matchLabels:
+              app: omnivec-web
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: omnivec-web-allow
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: omnivec-web
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $ingNsSel | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: docgrok-router-allow
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: docgrok-router
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: omnivec-api
+        - podSelector:
+            matchLabels:
+              app: omnivec-search
+        - podSelector:
+            matchLabels:
+              app: omnivec-ingestor
+        - podSelector:
+            matchLabels:
+              app: omnivec-dotnet-worker
+        - podSelector:
+            matchLabels:
+              app: docgrok-pipeline-worker
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: docgrok-embedders-allow
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [clip, bge, dse-qwen2, docgrok-pipeline-worker]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: docgrok-router
+{{- end }}

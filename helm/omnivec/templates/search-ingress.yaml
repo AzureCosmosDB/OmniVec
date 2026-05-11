@@ -1,0 +1,49 @@
+{{- /*
+  T-SRCH-1: separate TLS-terminating ingress for omnivec-search.
+
+  Only renders when `searchIngress.enabled=true`. The Service backing this
+  ingress is `omnivec-search` (rendered by search-deployment.yaml as
+  ClusterIP by default per T-SRCH-1).
+
+  This is intentionally a separate Ingress resource from the main one
+  (templates/ingress.yaml) so search can run on a dedicated host with its
+  own cert and rate-limit policy without disturbing the API ingress.
+*/ -}}
+{{- if .Values.searchIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "omnivec.fullname" . | default "omnivec" }}-search
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: omnivec-search
+  annotations:
+    {{- /* security defaults — defence in depth on top of in-process headers */}}
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+    {{- with .Values.searchIngress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.searchIngress.className | default "nginx" }}
+  {{- if .Values.searchIngress.tls }}
+  tls:
+    {{- toYaml .Values.searchIngress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.searchIngress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: omnivec-search
+                port:
+                  number: 80
+          {{- end }}
+    {{- end }}
+{{- end }}
