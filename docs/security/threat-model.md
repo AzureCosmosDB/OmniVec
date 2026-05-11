@@ -31,9 +31,9 @@ ingestion, embedding, and search inside the cluster.
 - Operational/SIEM ingestion design — handled by AppInsights consumer
 - Customer-side hardening of *their* CosmosDB / Blob — customer responsibility
 
-## 2. What we're working on (collapsed DFD)
+## 2. What we're working on
 
-Six logical zones across four trust boundaries. **Detailed 19-element view in [Appendix A](#appendix-a-detailed-dfd-19-elements).**
+OmniVec is three components plus their dependencies. **Detailed 19-element view in [Appendix A](#appendix-a-detailed-dfd-19-elements).**
 
 ```mermaid
 flowchart LR
@@ -42,34 +42,42 @@ flowchart LR
 
   subgraph cluster["AKS cluster (single tenant)"]
     direction TB
-    webtier["Web / API tier<br/>(omnivec-web, -api, -search)"]
-    docgrok["DocGrok tier<br/>(router + pipeline-worker + embedders)"]
-    ingest["Ingest tier<br/>(ingestor + dotnet-worker)"]
+    api["**API**<br/>(web + api + search)"]
+    docgrok["**DocGrok**<br/>(router + pipeline-worker + embedders)"]
+    ingest["**Ingestion**<br/>(ingestor + dotnet-worker)"]
   end
 
-  azure["Azure managed services<br/>(AOAI, CosmosDB metadata, Key Vault, Service Bus, App Insights)"]
-  customer["Customer data plane<br/>(source CosmosDB, source Blob, vectors CosmosDB, attachment Blob)"]
+  azure["Azure managed services<br/>(AOAI · CosmosDB · Key Vault · Service Bus · App Insights)"]
+  customer["Customer data plane<br/>(source CosmosDB / Blob, vectors destination)"]
 
-  user -. TB-1 .-> webtier
+  user -. TB-1 .-> api
   user -. TB-1 .-> aad
-  webtier -. TB-2 .-> docgrok
-  webtier -. TB-2 .-> ingest
-  webtier -. TB-3 .-> azure
+  api -. TB-2 .-> docgrok
+  api -. TB-2 .-> ingest
+  ingest -. TB-2 .-> docgrok
+  api -. TB-3 .-> azure
   docgrok -. TB-3 .-> azure
   ingest -. TB-3 .-> azure
   ingest -. TB-4 .-> customer
   docgrok -. TB-4 .-> customer
-  webtier -. TB-4 .-> customer
 ```
+
+**Components**
+
+| Component | Responsibility | Untrusted input from |
+|---|---|---|
+| **API** | User-facing HTTP surface; assistant RAG; admin CRUD on pipelines/sources | Internet (TB-1) |
+| **DocGrok** | Embedding + parsing of customer documents; routes to in-cluster or AOAI embedders | Customer documents (via Ingestion) |
+| **Ingestion** | Watches customer Cosmos / Blob, fetches attachments, dispatches to DocGrok, writes vectors | Customer Cosmos / Blob (TB-4) |
 
 **Trust boundaries**
 
 | Id | Boundary | Threat-model relevance |
 |---|---|---|
-| TB-1 | Internet ↔ AKS | Public web/api/search endpoints; AAD as identity provider |
-| TB-2 | Inter-tier within cluster | Plain HTTP today, no NetworkPolicy; cross-tier compromise is the main lateral-movement path |
-| TB-3 | AKS ↔ Azure managed services | Workload Identity Federation (HTTPS + AAD); not key-based |
-| TB-4 | OmniVec ↔ customer data plane | Customer data is **untrusted**: schemas, attachment names, MIME types, blob URLs |
+| TB-1 | Internet ↔ API | Public HTTP surface; AAD as identity provider |
+| TB-2 | Inter-component within cluster | Plain HTTP today; cross-component compromise = lateral movement |
+| TB-3 | AKS ↔ Azure managed services | Workload Identity Federation (HTTPS + AAD), not key-based |
+| TB-4 | OmniVec ↔ customer data plane | Customer data is **untrusted** (schemas, attachment names, MIME types, blob URLs) |
 
 ## 3. Assets
 
@@ -90,16 +98,16 @@ Selected manually at boundary crossings. Risk rating uses the SDL scale: **Criti
 
 | Id | Boundary | STRIDE | Threat | Risk | Status | Mitigation & residual |
 |---|---|---|---|---|---|---|
-| **T-API-1** | TB-1 → API | S/E/R | Static `OMNIVEC_ADMIN_TOKEN` replay grants full admin; no rotation, no per-call audit | **Important** | ✅ | AAD bearer + group→role mapping shipped (batch 2 + 4); admin token is now breakglass-only. Residual: token still exists; documented rotation runbook needed. |
-| **T-MET-1** | TB-2 (router → cmeta) | I/T | AOAI API keys stored cleartext in `docgrok_model.api_key`; Cosmos breach exfiltrates keys | **Important** | ✅ | AAD-only model records (no `api_key`); `scripts/scrub_model_api_keys.py` purges legacy values. Residual: legacy fallback path still readable if ever populated. |
-| **T-PWK-1** | TB-4 → pipeline-worker | D/E | Malicious customer document (PDF/Office/image) crashes parser or escapes via Pillow/PyMuPDF CVE; same address space as embedding HTTP client | **Important** | ⚠️ | Subprocess sandbox with `RLIMIT_AS`/`RLIMIT_CPU`/`RLIMIT_NOFILE` shipped behind `DOCGROK_PARSER_SANDBOX=1` (batch 4); page-cap 200. **Residual: full seccomp-bpf profile not yet enforced; flag default-off.** |
-| **T-CON-2** | TB-4 → ingestor (SSRF) | T/I | Customer Cosmos attachment value points at attacker-controlled storage account; ingestor downloads it | **Important** | ✅ | Mandatory `attachment_blob_account_allowlist`; absolute URLs whose host doesn't match are rejected (batch 1). Residual: relies on operator config; misconfig = open. |
-| **T-CON-1** | TB-2 (lease container) | T/D | Change-feed lease container shares Cosmos DB with metadata; cross-write can DoS or replay ingestion | **Moderate** | ✅ | Optional `LeaseCosmosEndpoint` / `LeaseCosmosDatabase` route lease to dedicated account (batch 4). Residual: not enabled by default. |
-| **T-VEC-1** | TB-4 (data at rest) | I | Vectors are PII-derived and partially invertible (embedding-inversion attacks); residency / right-to-erasure obligations apply | **Moderate** | ✅ | Documented PII classification; `DELETE /api/sources/{id}/vectors` cascade-purge endpoint (batch 4). Residual: classification doc must propagate to customer-facing data agreements. |
-| **T-RL-1** | TB-3 (router → AOAI) | D | One pipeline saturates AOAI tier RPM → 429 cascade starves other pipelines | **Moderate** | ✅ | Per-deployment embed semaphore (`OMNIVEC_EMBED_CONCURRENCY=4` default) + jittered exponential backoff (batch 1). Residual: no circuit-breaker yet. |
-| **T-SRCH-1** | TB-1 → search | I/T | `omnivec-search` Service is type `LoadBalancer` on plain HTTP — query embeddings (PII per T-VEC-1) and bearer tokens travel in cleartext over public internet | **Important** | ✅ | Default service type changed to `ClusterIP`; new `searchIngress` template provides TLS-terminating ingress on a dedicated host. Operators who keep `type: LoadBalancer` are responsible for terminating TLS at the LB themselves. |
-| **T-NET-1** | TB-2 (in-cluster) | S/T/I | No `NetworkPolicy` in `helm/`; all in-cluster traffic plain HTTP on ClusterIP. A compromised pod can call any service unauth (no mTLS, no service mesh) | **Moderate** | ✅ | `templates/networkpolicy.yaml` ships default-deny + per-tier allow rules behind `networkPolicy.enabled` toggle (off by default to avoid breaking clusters whose CNI doesn't support NetworkPolicy). Residual: mTLS / service-mesh still roadmap. |
-| **T-SUP-1** | Pre-cluster (image source) | T | Compromised registry or MITM swaps an OmniVec image; cluster pulls and runs malicious code | **Moderate** | ⚠️ | Cosign keyless signing on every push (RES-3, batch 4 build pipeline); Helm template `cosign-policy.yaml` exists. **Residual: cluster admission verification (Ratify/Kyverno) not enforced by default — signature is generated but not yet checked at deploy.** |
+| **T-API-1** | TB-1 → API | S/E/R | Static admin bearer token grants full admin; no rotation, no per-call audit | **Important** | ✅ | AAD bearer + group→role mapping; admin token now breakglass-only. Residual: rotation runbook needed. |
+| **T-MET-1** | API/DocGrok → metadata | I/T | AOAI API keys stored cleartext in metadata Cosmos | **Important** | ✅ | AAD-only model records; legacy keys purged. Residual: legacy fallback path still readable. |
+| **T-PWK-1** | TB-4 → DocGrok | D/E | Malicious customer document crashes parser or escapes via Pillow/PyMuPDF CVE | **Important** | ⚠️ | Subprocess sandbox with `RLIMIT_*` behind `DOCGROK_PARSER_SANDBOX=1`. Residual: seccomp-bpf not enforced; flag default-off. |
+| **T-CON-2** | TB-4 → Ingestion (SSRF) | T/I | Customer attachment URL points at attacker storage account | **Important** | ✅ | `attachment_blob_account_allowlist` mandatory; URL host pinned. Residual: relies on operator config. |
+| **T-CON-1** | TB-2 (Ingestion lease) | T/D | Change-feed lease container shares Cosmos DB with metadata; cross-write can DoS | **Moderate** | ✅ | Optional dedicated lease account. Residual: not enabled by default. |
+| **T-VEC-1** | TB-4 (data at rest) | I | Vectors are PII-derived, partially invertible (embedding-inversion); residency obligations apply | **Moderate** | ✅ | PII classification documented; `DELETE /api/sources/{id}/vectors` cascade-purge. Residual: must propagate to data agreements. |
+| **T-RL-1** | TB-3 (DocGrok → AOAI) | D | One pipeline saturates AOAI tier RPM → 429 cascade starves others | **Moderate** | ✅ | Per-deployment embed semaphore + jittered backoff. Residual: no circuit-breaker. |
+| **T-SRCH-1** | TB-1 → API (search) | I/T | Search endpoint was exposed via plain-HTTP `LoadBalancer` | **Important** | ✅ | Default `ClusterIP`; new `searchIngress` template provides TLS-terminating ingress. |
+| **T-NET-1** | TB-2 (in-cluster) | S/T/I | No NetworkPolicy / mTLS — compromised pod can call any service unauth | **Moderate** | ✅ | Default-deny + per-component allow rules behind `networkPolicy.enabled`. Residual: mTLS / mesh roadmap. |
+| **T-SUP-1** | Pre-cluster (image source) | T | Compromised registry / MITM swaps an OmniVec image | **Moderate** | ⚠️ | Cosign keyless signing on every push. Residual: admission verification (Ratify/Kyverno) not enforced by default. |
 
 > The CI/CD pipeline itself (the GitHub Actions runner that produces those signatures) has its own threat model in [`cicd-threat-model.md`](./cicd-threat-model.md).
 
