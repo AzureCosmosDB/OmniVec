@@ -44,8 +44,6 @@ flowchart LR
   subgraph "Azure managed services"
     aoai["Azure OpenAI"]
     cmeta["CosmosDB<br/>omnivec.metadata"]
-    cvec["CosmosDB<br/>e2eblob.vectors"]
-    blob["Azure Blob<br/>(attachment store)"]
     kv["Azure Key Vault"]
     sb["Azure Service Bus"]
   end
@@ -53,6 +51,8 @@ flowchart LR
   subgraph "Customer-owned (external trust)"
     csrc["Customer CosmosDB<br/>(source w/ attachments)"]
     bsrc["Customer Blob source"]
+    cvec["Customer CosmosDB<br/>(vectors destination)"]
+    blob["Customer Blob<br/>(attachment staging)"]
   end
 
   user -->|HTTPS + AAD SSO| web

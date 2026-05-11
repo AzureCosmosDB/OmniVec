@@ -54,8 +54,8 @@ ELEMENTS: list[dict] = [
     {"k": "process",  "name": "in-cluster embedders",             "x": 760,  "y": 220},
     {"k": "process",  "name": "Azure OpenAI",                     "x": 1000, "y": 220},
     {"k": "store",    "name": "CosmosDB omnivec.metadata",        "x": 1000, "y": 360},
-    {"k": "store",    "name": "CosmosDB e2eblob.vectors",         "x": 1000, "y": 500},
-    {"k": "store",    "name": "Azure Blob (attachment store)",    "x": 1000, "y": 640},
+    {"k": "store",    "name": "Customer CosmosDB (vectors destination)", "x": 760, "y": 880},
+    {"k": "store",    "name": "Customer Blob (attachment staging)", "x": 1000, "y": 880},
     {"k": "store",    "name": "Azure Key Vault",                  "x": 760,  "y": 360},
     {"k": "store",    "name": "Azure Service Bus",                "x": 760,  "y": 500},
     {"k": "store",    "name": "Customer CosmosDB (source)",       "x": 760,  "y": 780},
@@ -67,7 +67,7 @@ TBS: list[dict] = [
     {"name": "TB-1 Internet / AAD",         "x": 30,   "y": 320, "w": 220,  "h": 100},
     {"name": "TB-2 AKS cluster",            "x": 250,  "y": 180, "w": 480,  "h": 600},
     {"name": "TB-3 Azure managed services", "x": 730,  "y": 180, "w": 360,  "h": 500},
-    {"name": "TB-4 Customer-owned",         "x": 730,  "y": 740, "w": 360,  "h": 140},
+    {"name": "TB-4 Customer-owned",         "x": 730,  "y": 740, "w": 380,  "h": 260},
 ]
 
 FLOWS: list[tuple[int, int, str]] = [
