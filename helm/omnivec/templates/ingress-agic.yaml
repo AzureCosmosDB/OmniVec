@@ -1,0 +1,65 @@
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.controller | default "nginx") "agic") }}
+{{- /*
+  T-ING-1 part 3 — AGIC (Application Gateway Ingress Controller) variant.
+
+  AGIC translates plain Kubernetes Ingress objects into App Gateway
+  rules. Unlike nginx, it does NOT honour `nginx.ingress.kubernetes.io/...`
+  annotations; defence-in-depth headers + rate-limits must be expressed
+  via:
+    - appgw.ingress.kubernetes.io/rewrite-rule-set: <name of a rewrite rule
+      set provisioned out-of-band on the App Gateway> — used here to inject
+      response headers (CSP / X-Frame-Options / Permissions-Policy).
+    - A WAF policy attached to the listener for rate-limit + bot rules
+      (App Gateway WAF v2 rate-limit rules are managed at the gateway,
+      not in the Ingress object).
+
+  Operators MUST provision the rewrite rule set + WAF policy on the App
+  Gateway before this Ingress is admitted, otherwise admission succeeds
+  but the headers / rate-limit are silently absent. Names are passed via
+  values.ingress.agic.* so the same chart works across environments.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "omnivec.fullname" . | default "omnivec" }}-agic
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: omnivec
+  annotations:
+    kubernetes.io/ingress.class: azure/application-gateway
+    {{- with .Values.ingress.agic.rewriteRuleSet }}
+    appgw.ingress.kubernetes.io/rewrite-rule-set: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.agic.wafPolicy }}
+    appgw.ingress.kubernetes.io/waf-policy-for-path: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.agic.sslRedirect }}
+    appgw.ingress.kubernetes.io/ssl-redirect: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.agic.backendProtocol }}
+    appgw.ingress.kubernetes.io/backend-protocol: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "omnivec.fullname" $ | default "omnivec" }}-api
+                port:
+                  number: 8000
+          {{- end }}
+    {{- end }}
+{{- end }}

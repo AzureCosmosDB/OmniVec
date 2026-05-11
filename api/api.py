@@ -103,8 +103,22 @@ def _hash_token(token: str) -> str:
 def _validate_token(token: str) -> Optional[dict]:
     """Validate a bearer token. Returns token metadata or None.
 
+    Three paths (tried in order):
+      1. AAD JWT (T-API-1) — when ``OMNIVEC_AAD_TENANT_ID`` + ``..._AUDIENCE``
+         are set, treat as a JWT and verify signature + issuer + audience
+         against the configured tenant. Roles are derived from the
+         ``OMNIVEC_AAD_*_GROUP_ID`` env vars matched against the ``groups``
+         claim, falling back to the ``roles`` claim, defaulting to ``viewer``.
+      2. Env-bootstrap admin token (constant-time compare).
+      3. Persisted Cosmos ``auth_token`` records.
+
     Uses constant-time comparison to prevent timing attacks.
     """
+    # AAD path first — it lets operators dual-mode legacy tokens during cutover.
+    if token.count(".") == 2:  # JWT shape; cheap pre-filter
+        aad = _validate_aad_token(token)
+        if aad is not None:
+            return aad
     token_hash = _hash_token(token)
     # Check admin bootstrap token (constant-time comparison)
     if ADMIN_TOKEN_HASH and secrets.compare_digest(token_hash, ADMIN_TOKEN_HASH):
@@ -130,10 +144,259 @@ def _validate_token(token: str) -> Optional[dict]:
             tok_scope = (t.get("scope") or "").lower()
             if tok_scope == "search":
                 return None
-            return {"name": t.get("name", ""), "role": t.get("role", "user"), "id": t.get("id", "")}
+            return {
+                "name": t.get("name", ""),
+                "role": t.get("role", "user"),
+                "id": t.get("id", ""),
+                # Marker so the middleware knows this is a stored Cosmos token
+                # eligible for last_used tracking (vs the env-bootstrap admin).
+                "_persisted": True,
+            }
     except Exception as e:
         logger.warning("Token validation error: %s", e)
     return None
+
+
+# =============================================================================
+# AAD BEARER VALIDATION (T-API-1)
+# =============================================================================
+# Optional path: when OMNIVEC_AAD_TENANT_ID + OMNIVEC_AAD_AUDIENCE are set,
+# the API accepts AAD JWTs alongside the legacy OMNIVEC_ADMIN_TOKEN. Roles are
+# derived from group claims via OMNIVEC_AAD_ADMIN_GROUP_ID /
+# OMNIVEC_AAD_OPERATOR_GROUP_ID (optional). When the group env is unset, all
+# successfully-validated AAD identities default to ``viewer``.
+#
+# Implementation notes:
+#  * JWKS is fetched lazily and cached by jwt.PyJWKClient (TTL 1 h by default).
+#  * Issuer is pinned to the v2.0 endpoint for the configured tenant.
+#  * Audience must match the configured app-registration's API URI / client-id.
+#  * Operators wire the env vars at deployment time; with no AAD env, the
+#    function short-circuits and the legacy paths handle the request — fully
+#    backwards-compatible.
+
+_AAD_TENANT_ID = os.getenv("OMNIVEC_AAD_TENANT_ID", "").strip()
+_AAD_AUDIENCE = os.getenv("OMNIVEC_AAD_AUDIENCE", "").strip()
+_AAD_ADMIN_GROUP = os.getenv("OMNIVEC_AAD_ADMIN_GROUP_ID", "").strip()
+_AAD_OPERATOR_GROUP = os.getenv("OMNIVEC_AAD_OPERATOR_GROUP_ID", "").strip()
+_AAD_VIEWER_GROUP = os.getenv("OMNIVEC_AAD_VIEWER_GROUP_ID", "").strip()
+# T-AAD-1: when ``1``, AAD identities whose ``groups``/``roles`` claims do not
+# match any configured role group are *rejected* rather than defaulting to
+# viewer. Operators in tenants with guests / service identities should set
+# this. Default ``0`` preserves the original behaviour.
+_AAD_REQUIRE_GROUP = os.getenv("OMNIVEC_AAD_REQUIRE_GROUP", "0").strip() == "1"
+# T-AAD-2: optional path to a CA bundle pin used when fetching the JWKS
+# from login.microsoftonline.com. Defaults to the system trust store (which
+# certifi keeps in sync). Operators in high-assurance environments can pin
+# to a copy of the Microsoft IT CA chain to fail closed if egress is
+# MITM-able. Empty string = use defaults.
+_AAD_JWKS_CA_BUNDLE = os.getenv("OMNIVEC_AAD_JWKS_CA_BUNDLE", "").strip()
+# T-AAD-2 hardening: optional comma-separated SHA-256 thumbprints (hex,
+# lowercased, colons-or-spaces allowed) of the leaf certificate served by
+# login.microsoftonline.com. When set, the JWKS HTTPS connection is
+# verified against the CA bundle AS WELL AS pinned to one of these
+# fingerprints — fail closed on mismatch. The pin is checked the first
+# time we connect; PyJWKClient caches the keys for ``lifespan`` seconds.
+# Empty string disables the pin entirely (default).
+_AAD_JWKS_PIN_SHA256 = os.getenv("OMNIVEC_AAD_JWKS_PIN_SHA256", "").strip()
+_aad_jwks_client = None  # lazy-initialised PyJWKClient
+
+
+def _normalise_thumbprint(value: str) -> str:
+    """Strip separators and lower-case a SHA-256 hex digest.
+
+    Operators paste fingerprints in many shapes (``aa:bb:cc:..``, ``AA BB CC``,
+    ``aabbcc..``) — accept all and compare canonical forms.
+    """
+    return "".join(ch for ch in value.lower() if ch in "0123456789abcdef")
+
+
+def _parse_pinned_thumbprints(raw: str) -> list[str]:
+    """Split + canonicalise the pin env var; ignore empty + malformed entries."""
+    out: list[str] = []
+    for chunk in (raw or "").split(","):
+        norm = _normalise_thumbprint(chunk.strip())
+        if len(norm) == 64:  # SHA-256 = 32 bytes = 64 hex chars
+            out.append(norm)
+        elif chunk.strip():
+            logger.warning(
+                "AAD JWKS pin %r is not a 64-char SHA-256 hex digest; ignored",
+                chunk.strip(),
+            )
+    return out
+
+
+def _verify_jwks_thumbprint(host: str, port: int, pinned: list[str], cafile: str) -> bool:
+    """Open a TLS handshake to ``host:port`` and return True iff the leaf
+    cert SHA-256 matches one of ``pinned`` thumbprints.
+
+    Raises on TLS failure (network, hostname, CA). Used as a one-shot pre-check
+    before letting PyJWKClient cache the JWKS keys for the day.
+    """
+    import hashlib
+    import socket
+    import ssl
+    ctx = ssl.create_default_context(cafile=cafile or None)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    with socket.create_connection((host, port), timeout=10) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            der = tls.getpeercert(binary_form=True)
+    fp = hashlib.sha256(der).hexdigest()
+    if fp in pinned:
+        return True
+    logger.error(
+        "AAD JWKS thumbprint pin MISMATCH for %s — got %s, expected one of %s",
+        host, fp, pinned,
+    )
+    return False
+
+
+def _aad_enabled() -> bool:
+    return bool(_AAD_TENANT_ID and _AAD_AUDIENCE)
+
+
+def _get_aad_jwks_client():
+    global _aad_jwks_client
+    if _aad_jwks_client is not None:
+        return _aad_jwks_client
+    try:
+        import jwt as _jwt  # PyJWT
+    except ImportError:  # pragma: no cover
+        logger.warning("PyJWT not installed; AAD bearer auth disabled")
+        return None
+    jwks_url = (
+        f"https://login.microsoftonline.com/{_AAD_TENANT_ID}/discovery/v2.0/keys"
+    )
+    # T-AAD-2 hardening: when a thumbprint pin is configured, do a one-shot
+    # TLS probe to login.microsoftonline.com and abort initialisation if
+    # the leaf cert SHA-256 doesn't match. Failing here returns ``None`` so
+    # AAD auth is unavailable rather than silently downgraded.
+    pinned = _parse_pinned_thumbprints(_AAD_JWKS_PIN_SHA256)
+    if pinned:
+        try:
+            ok = _verify_jwks_thumbprint(
+                "login.microsoftonline.com", 443, pinned, _AAD_JWKS_CA_BUNDLE,
+            )
+        except Exception as e:
+            logger.error("AAD JWKS thumbprint probe failed: %s", e)
+            return None
+        if not ok:
+            return None
+        logger.info("AAD JWKS thumbprint pin verified (%d candidate(s))", len(pinned))
+    # T-AAD-2: pass an explicit CA bundle when one is pinned via env. PyJWT's
+    # PyJWKClient uses urllib under the hood; surface SSL context via the
+    # ``ssl_context`` kwarg when available, otherwise fall back to default.
+    kwargs: dict = {"cache_jwk_set": True, "lifespan": 3600}
+    if _AAD_JWKS_CA_BUNDLE and os.path.isfile(_AAD_JWKS_CA_BUNDLE):
+        try:
+            import ssl
+            ctx = ssl.create_default_context(cafile=_AAD_JWKS_CA_BUNDLE)
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            kwargs["ssl_context"] = ctx
+            logger.info("AAD JWKS pinned to CA bundle %s (T-AAD-2)", _AAD_JWKS_CA_BUNDLE)
+        except Exception as e:
+            logger.warning("AAD JWKS CA bundle %s ignored: %s", _AAD_JWKS_CA_BUNDLE, e)
+    try:
+        _aad_jwks_client = _jwt.PyJWKClient(jwks_url, **kwargs)
+    except TypeError:
+        # Older PyJWT without ssl_context kwarg; fall back to default.
+        kwargs.pop("ssl_context", None)
+        _aad_jwks_client = _jwt.PyJWKClient(jwks_url, **kwargs)
+    return _aad_jwks_client
+
+
+def _aad_role_for_claims(claims: dict) -> Optional[str]:
+    """Map AAD ``groups`` / ``roles`` claims to OmniVec role names.
+
+    Returns ``None`` only when ``OMNIVEC_AAD_REQUIRE_GROUP=1`` is set and the
+    token has no matching role group — caller treats that as auth failure
+    (T-AAD-1). Otherwise unmapped tokens fall through to ``viewer``.
+    """
+    groups = claims.get("groups") or []
+    roles = claims.get("roles") or []
+    if isinstance(groups, str):
+        groups = [groups]
+    if isinstance(roles, str):
+        roles = [roles]
+    membership = set(groups) | set(roles)
+    if _AAD_ADMIN_GROUP and _AAD_ADMIN_GROUP in membership:
+        return "admin"
+    if _AAD_OPERATOR_GROUP and _AAD_OPERATOR_GROUP in membership:
+        return "operator"
+    if _AAD_VIEWER_GROUP and _AAD_VIEWER_GROUP in membership:
+        return "viewer"
+    if _AAD_REQUIRE_GROUP:
+        # Strict mode: refuse to grant any role to an unmapped principal.
+        return None
+    # Default: least-privileged viewer for unmapped principals.
+    return "viewer"
+
+
+def _validate_aad_token(token: str) -> Optional[dict]:
+    """Validate an AAD-issued JWT. Returns auth metadata or None on failure.
+
+    Returns ``None`` (not raise) so the caller can fall through to the legacy
+    paths. Only logs at DEBUG to avoid noise during the dual-mode cutover.
+    """
+    if not _aad_enabled():
+        return None
+    try:
+        import jwt as _jwt  # PyJWT
+    except ImportError:  # pragma: no cover
+        return None
+    client = _get_aad_jwks_client()
+    if client is None:
+        return None
+    try:
+        signing_key = client.get_signing_key_from_jwt(token).key
+        # AAD v2 issuer for a tenant. We accept both the issuer claim variants
+        # (login.microsoftonline.com vs sts.windows.net) by listing both.
+        valid_issuers = [
+            f"https://login.microsoftonline.com/{_AAD_TENANT_ID}/v2.0",
+            f"https://sts.windows.net/{_AAD_TENANT_ID}/",
+        ]
+        # PyJWT supports a list of issuers via the ``issuer`` kwarg only when
+        # given a single string; loop and try each.
+        last_err: Optional[Exception] = None
+        claims: Optional[dict] = None
+        for iss in valid_issuers:
+            try:
+                claims = _jwt.decode(
+                    token,
+                    signing_key,
+                    algorithms=["RS256"],
+                    audience=_AAD_AUDIENCE,
+                    issuer=iss,
+                    options={"require": ["exp", "iat", "iss", "aud"]},
+                )
+                break
+            except _jwt.InvalidIssuerError as e:
+                last_err = e
+                continue
+        if claims is None:
+            if last_err is not None:
+                logger.debug("AAD token issuer mismatch: %s", last_err)
+            return None
+    except Exception as e:  # signature, expiry, audience, JWKS fetch all land here
+        logger.debug("AAD token validation failed: %s", e)
+        return None
+
+    role = _aad_role_for_claims(claims)
+    if role is None:
+        # T-AAD-1 strict mode: principal is authenticated but unmapped.
+        logger.info(
+            "AAD token rejected (no matching role group; OMNIVEC_AAD_REQUIRE_GROUP=1): oid=%s",
+            claims.get("oid", "")[:8],
+        )
+        return None
+    return {
+        "name": claims.get("preferred_username") or claims.get("upn") or claims.get("oid", ""),
+        "role": role,
+        "id": claims.get("oid", ""),
+        "tenant": claims.get("tid", ""),
+        "auth_method": "aad",
+    }
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -191,6 +454,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             # Attach token metadata to request state
             request.state.auth = token_meta
+            # Best-effort last-used touch for persisted Cosmos tokens (T-API-1).
+            if token_meta.get("_persisted") and token_meta.get("id"):
+                asyncio.create_task(_touch_token_last_used(token_meta["id"]))
 
         return await call_next(request)
 
@@ -238,7 +504,74 @@ async def security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Cache-Control"] = "no-store"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Content-Security-Policy. The UI ships a single static bundle from
+    # /static plus inline init script, and uses fetch() to same-origin /api/*.
+    # Operators can override via OMNIVEC_CSP env if they front the API with
+    # a different CDN/auth gateway.
+    response.headers["Content-Security-Policy"] = os.getenv(
+        "OMNIVEC_CSP",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'",
+    )
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     return response
+
+
+# =============================================================================
+# Per-actor API rate limiting (T-API-1 / web hardening)
+# =============================================================================
+# Sliding-window limiter keyed by token-id (or client IP for unauthenticated
+# requests). In-memory only — fine for single-process API; behind a
+# multi-replica deployment use an external limiter (Redis / nginx).
+_API_RATE_LIMIT = int(os.getenv("OMNIVEC_API_RATE_LIMIT", "120"))   # requests
+_API_RATE_WINDOW = float(os.getenv("OMNIVEC_API_RATE_WINDOW", "60"))  # seconds
+_API_RATE_SKIP_PREFIXES = ("/api/health", "/api/metrics")
+_api_rate_buckets: Dict[str, List[float]] = {}
+
+
+def _api_rate_check(key: str) -> bool:
+    """Return True if the request is within budget, False if it should be 429'd."""
+    if _API_RATE_LIMIT <= 0:
+        return True
+    now = time.monotonic()
+    bucket = _api_rate_buckets.get(key, [])
+    cutoff = now - _API_RATE_WINDOW
+    bucket = [t for t in bucket if t >= cutoff]
+    if len(bucket) >= _API_RATE_LIMIT:
+        _api_rate_buckets[key] = bucket
+        return False
+    bucket.append(now)
+    _api_rate_buckets[key] = bucket
+    return True
+
+
+@app.middleware("http")
+async def api_rate_limit_middleware(request: Request, call_next):
+    path = request.url.path
+    if (path.startswith("/api/")
+            and not any(path.startswith(p) for p in _API_RATE_SKIP_PREFIXES)
+            and not getattr(request.state, "internal", False)):
+        auth = getattr(request.state, "auth", None) or {}
+        token_id = auth.get("id")
+        if token_id:
+            key = f"tok:{token_id}"
+        else:
+            ip = request.client.host if request.client else "unknown"
+            key = f"ip:{ip}"
+        if not _api_rate_check(key):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Slow down."},
+                headers={"Retry-After": str(int(_API_RATE_WINDOW))},
+            )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -254,6 +587,167 @@ async def metrics_middleware(request: Request, call_next):
         if response.status_code >= 400:
             record_error(status_code=response.status_code, path=path)
     return response
+
+
+# =============================================================================
+# AUDIT LOG (T-API-1)
+# =============================================================================
+# Records every state-changing /api/* request into a Cosmos `audit_log`
+# doc-type so admin operations leave a forensic trail. Reads (GET) are
+# excluded — they're typically high-volume probe traffic and the latency
+# middleware already records them. Internal pod-to-pod calls (skipped via
+# AUTH_SKIP_* / _INTERNAL_HOSTS in AuthMiddleware) carry no auth context
+# and are intentionally NOT audited.
+#
+# The write is fire-and-forget on a background task so the response is not
+# blocked by Cosmos latency. If the audit container is unavailable we log
+# and drop — auditing must never break the request path.
+
+_AUDIT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+# Don't audit auth-token list/login churn; they're already covered by
+# /api/auth/login rate-limiting and aren't state changes when GET-only.
+_AUDIT_SKIP_PREFIXES = ("/api/health", "/api/metrics", "/api/auth/login")
+
+
+def _redact_path(path: str) -> str:
+    """Strip query string. Path itself is the resource identifier; bodies are
+    NOT logged (could contain secrets / PII)."""
+    return path.split("?", 1)[0]
+
+
+async def _write_audit_record(
+    actor_name: str,
+    actor_role: str,
+    actor_id: str,
+    method: str,
+    path: str,
+    status: int,
+    ip: str,
+) -> None:
+    try:
+        store = get_store()
+        doc = {
+            "id": f"aud-{uuid.uuid4().hex[:12]}",
+            "doc_type": "audit_log",
+            "ts": datetime.utcnow().isoformat(),
+            "actor_name": actor_name,
+            "actor_role": actor_role,
+            "actor_id": actor_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "ip": ip,
+        }
+        await asyncio.to_thread(store.upsert, doc)
+    except Exception as e:  # lgtm[py/catch-base-exception]
+        # Never let audit-log failure break the request flow.
+        logger.warning("audit_log write failed: %s", e)
+
+
+@app.middleware("http")
+async def audit_middleware(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        if (request.method in _AUDIT_METHODS
+                and path.startswith("/api/")
+                and not any(path.startswith(p) for p in _AUDIT_SKIP_PREFIXES)
+                and not getattr(request.state, "internal", False)):
+            auth = getattr(request.state, "auth", None) or {}
+            ip = request.client.host if request.client else "unknown"
+            asyncio.create_task(_write_audit_record(
+                actor_name=auth.get("name", "anonymous"),
+                actor_role=auth.get("role", "none"),
+                actor_id=auth.get("id", ""),
+                method=request.method,
+                path=_redact_path(path),
+                status=response.status_code,
+                ip=ip,
+            ))
+    except Exception as e:  # lgtm[py/catch-base-exception]
+        logger.warning("audit_middleware error: %s", e)
+    return response
+
+
+@app.get("/api/audit-log")
+async def list_audit_log(
+    request: Request,
+    actor: Optional[str] = None,
+    path_prefix: Optional[str] = None,
+    method: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 100,
+):
+    """Return recent audit-log entries. Admin role required.
+
+    Filters (all optional, all ANDed):
+      * ``actor`` — actor_name or actor_id substring match
+      * ``path_prefix`` — startswith match on the resource path
+      * ``method`` — exact match (POST/PUT/DELETE/PATCH)
+      * ``since`` — ISO-8601 timestamp; entries with ``ts >= since`` only
+      * ``limit`` — max records (default 100, capped at 1000)
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth or auth.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    limit = max(1, min(int(limit or 100), 1000))
+    where = ["c.doc_type = 'audit_log'"]
+    params: List[Dict[str, Any]] = []
+    if since:
+        where.append("c.ts >= @since")
+        params.append({"name": "@since", "value": since})
+    if method:
+        where.append("UPPER(c.method) = @method")
+        params.append({"name": "@method", "value": method.upper()})
+    sql = (
+        "SELECT TOP @limit c.id, c.ts, c.actor_name, c.actor_role, c.actor_id, "
+        "c.method, c.path, c.status, c.ip FROM c WHERE "
+        + " AND ".join(where)
+        + " ORDER BY c.ts DESC"
+    )
+    params.append({"name": "@limit", "value": limit})
+
+    store = get_store()
+    rows = list(store.query(sql, parameters=params, partition_key="audit_log"))
+
+    # Substring/prefix filters applied client-side (cheap; result set is small).
+    if actor:
+        a = actor.lower()
+        rows = [r for r in rows if a in (r.get("actor_name", "") or "").lower()
+                or a in (r.get("actor_id", "") or "").lower()]
+    if path_prefix:
+        rows = [r for r in rows if (r.get("path", "") or "").startswith(path_prefix)]
+
+    return {"entries": rows, "count": len(rows)}
+
+
+# Per-token last-used tracking. Updates are debounced to one write per token
+# per ``_LAST_USED_DEBOUNCE_S`` to keep Cosmos writes off the hot path.
+_LAST_USED_DEBOUNCE_S = 60.0
+_last_used_seen: Dict[str, float] = {}
+
+
+async def _touch_token_last_used(token_id: str) -> None:
+    try:
+        now_mono = time.monotonic()
+        last = _last_used_seen.get(token_id, 0.0)
+        if now_mono - last < _LAST_USED_DEBOUNCE_S:
+            return
+        _last_used_seen[token_id] = now_mono
+        store = get_store()
+
+        def _update():
+            doc = store.get(token_id, "auth_token")
+            if not doc:
+                return
+            doc["last_used_at"] = datetime.utcnow().isoformat()
+            doc["use_count"] = int(doc.get("use_count", 0)) + 1
+            store.upsert(doc)
+        await asyncio.to_thread(_update)
+    except Exception as e:  # lgtm[py/catch-base-exception]
+        logger.debug("last_used update failed for %s: %s", token_id, e)
+
 
 # â”€â”€ test-connection timeout / retry config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 TEST_CONN_TIMEOUT = 10   # seconds
@@ -643,6 +1137,8 @@ async def list_tokens(request: Request, scope: Optional[str] = None):
             "created_by": t.get("created_by"),
             "expires_at": t.get("expires_at"),
             "revoked": t.get("revoked", False),
+            "last_used_at": t.get("last_used_at"),
+            "use_count": t.get("use_count", 0),
         }
         for t in tokens
     ]}
@@ -1275,6 +1771,101 @@ def delete_source(source_id: str):
 
     store.delete(source_id, "source")
     return {"success": True}
+
+
+@app.delete("/api/sources/{source_id}/vectors")
+async def purge_source_vectors(source_id: str, request: Request, cascade: bool = False):
+    """Purge all vector documents derived from this source (T-VEC-1).
+
+    Iterates every pipeline that includes ``source_id`` and, for each
+    destination, calls the connector's ``delete_by_source_id`` helper.
+    For docs predating the ``source_id`` field (pre-batch-4 vectors), set
+    ``cascade=true`` to additionally fall back to ``delete_chunks_by_prefix``
+    keyed by pipeline-id; this purges legacy chunks but is **pipeline-wide**
+    (other sources feeding the same pipeline are also removed).
+
+    Admin role required. Audit-logged automatically by ``audit_middleware``.
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth or auth.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    store = get_store()
+    src = store.get(source_id, "source")
+    if not src:
+        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+
+    pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
+    using = [p for p in pipelines if any(ps.source_id == source_id for ps in p.sources)]
+
+    deleted_per_destination: List[Dict[str, Any]] = []
+    total_deleted = 0
+    total_legacy = 0
+
+    for p in using:
+        dest_doc = store.get(p.destination_id, "destination")
+        if not dest_doc:
+            continue
+        destination = _destination_from_doc(dest_doc, mask=False)
+        dtype = (destination.type or "").lower()
+        cfg = destination.config or {}
+
+        d_count = 0
+        l_count = 0
+        try:
+            if dtype in ("cosmosdb", "cosmos", "cosmosdb_vector", "cosmosdb-vector"):
+                from connectors.cosmosdb_vector_connector import (  # type: ignore
+                    delete_by_source_id, delete_chunks_by_prefix,
+                )
+                d_count = await delete_by_source_id(cfg, source_id)
+                if cascade:
+                    l_count = await delete_chunks_by_prefix(cfg, f"{p.id}-")
+            elif dtype in ("postgres", "pgvector", "postgresql"):
+                from connectors.postgres_connector import (  # type: ignore
+                    delete_by_source_id as pg_delete,
+                )
+                d_count = await pg_delete(cfg, source_id)
+            else:
+                deleted_per_destination.append({
+                    "pipeline_id": p.id,
+                    "destination_id": p.destination_id,
+                    "destination_type": dtype,
+                    "deleted": 0,
+                    "legacy_deleted": 0,
+                    "skipped": "unsupported destination type",
+                })
+                continue
+        except Exception as e:  # lgtm[py/catch-base-exception]
+            logger.warning("purge failed for pipeline %s: %s", p.id, e)
+            deleted_per_destination.append({
+                "pipeline_id": p.id,
+                "destination_id": p.destination_id,
+                "destination_type": dtype,
+                "deleted": 0,
+                "legacy_deleted": 0,
+                "error": str(e),
+            })
+            continue
+
+        deleted_per_destination.append({
+            "pipeline_id": p.id,
+            "destination_id": p.destination_id,
+            "destination_type": dtype,
+            "deleted": d_count,
+            "legacy_deleted": l_count,
+        })
+        total_deleted += d_count
+        total_legacy += l_count
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "pipelines_processed": len(using),
+        "total_deleted": total_deleted,
+        "legacy_deleted": total_legacy,
+        "cascade": cascade,
+        "details": deleted_per_destination,
+    }
 
 
 @app.post("/api/sources/{source_id}/sync")

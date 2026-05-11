@@ -172,6 +172,9 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                         ["pipeline_name"] = doc.PipelineName,
                         ["content_hash"] = doc.ContentHash,
                     };
+                    // T-VEC-1: persist source_id so purge-by-source can target rows.
+                    if (!string.IsNullOrEmpty(doc.SourceId))
+                        item["source_id"] = doc.SourceId;
                     // Copy source content fields with their original names (e.g. "summary", "title")
                     if (doc.SourceContentFields != null)
                     {

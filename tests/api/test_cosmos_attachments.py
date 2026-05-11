@@ -39,7 +39,7 @@ def test_disabled_when_no_attachments_field():
 
 
 def test_basic_match():
-    cfg = {"attachments_field": "attachments"}
+    cfg = {"attachments_field": "attachments", "account_url": ACCOUNT}
     out = _extract_attachments(_doc(_att("a.pdf")), cfg)
     assert len(out) == 1
     assert out[0]["blob_name"] == "a.pdf"
@@ -48,21 +48,24 @@ def test_basic_match():
 
 
 def test_filter_by_regex():
-    cfg = {"attachments_field": "attachments", "attachment_name_regex": r"^report-"}
+    cfg = {"attachments_field": "attachments", "account_url": ACCOUNT,
+           "attachment_name_regex": r"^report-"}
     doc = _doc(_att("report-2024.pdf"), _att("invoice.pdf"))
     out = _extract_attachments(doc, cfg)
     assert [a["name"] for a in out] == ["report-2024.pdf"]
 
 
 def test_filter_by_file_types():
-    cfg = {"attachments_field": "attachments", "attachment_file_types": ["pdf"]}
+    cfg = {"attachments_field": "attachments", "account_url": ACCOUNT,
+           "attachment_file_types": ["pdf"]}
     doc = _doc(_att("a.pdf"), _att("b.docx", content_type="application/msword"))
     out = _extract_attachments(doc, cfg)
     assert [a["name"] for a in out] == ["a.pdf"]
 
 
 def test_filter_by_content_types_csv():
-    cfg = {"attachments_field": "attachments", "attachment_content_types": "application/pdf, text/plain"}
+    cfg = {"attachments_field": "attachments", "account_url": ACCOUNT,
+           "attachment_content_types": "application/pdf, text/plain"}
     doc = _doc(_att("a.pdf"), _att("b.bin", content_type="application/octet-stream"))
     out = _extract_attachments(doc, cfg)
     assert [a["name"] for a in out] == ["a.pdf"]
@@ -99,7 +102,7 @@ def test_relative_url_prefers_attachment_blob_container():
 
 
 def test_ssrf_rejects_non_blob_host():
-    cfg = {"attachments_field": "attachments"}
+    cfg = {"attachments_field": "attachments", "account_url": ACCOUNT}
     doc = _doc({"name": "x.pdf", "url": "https://evil.example.com/c/x.pdf",
                 "contentType": "application/pdf"})
     assert _extract_attachments(doc, cfg) == []
@@ -128,6 +131,7 @@ def test_resolve_blob_decodes_path():
 def test_combined_filters_all_must_match():
     cfg = {
         "attachments_field": "attachments",
+        "account_url": ACCOUNT,
         "attachment_name_regex": r"\.pdf$",
         "attachment_file_types": ["pdf"],
         "attachment_content_types": ["application/pdf"],
@@ -139,6 +143,104 @@ def test_combined_filters_all_must_match():
     )
     out = _extract_attachments(doc, cfg)
     assert [a["name"] for a in out] == ["a.pdf"]
+
+
+# ── T-CON-2: SSRF allowlist hardening ─────────────────────────────────
+
+def test_absolute_url_rejected_when_no_account_pin_or_allowlist():
+    # Without source_account_url or allowlist, an absolute *.blob.core.windows.net
+    # URL must NOT be accepted — defense against SSRF via attacker-crafted
+    # attachments pointing at any same-tenant storage account.
+    acct, ctnr, blob = _resolve_blob_location(
+        f"{ACCOUNT}/{CONTAINER}/x.pdf", source_account_url="", source_container="")
+    assert (acct, ctnr, blob) == (None, None, "")
+
+
+def test_absolute_url_accepted_when_in_allowlist_only():
+    # source_account_url is unset but the host appears in the allowlist —
+    # accepted because the operator explicitly declared it OK.
+    acct, ctnr, blob = _resolve_blob_location(
+        f"{ACCOUNT}/{CONTAINER}/x.pdf",
+        source_account_url="",
+        source_container="",
+        allowlist=["acct.blob.core.windows.net"])
+    assert acct == ACCOUNT and ctnr == CONTAINER and blob == "x.pdf"
+
+
+def test_allowlist_rejects_non_listed_host():
+    acct, ctnr, blob = _resolve_blob_location(
+        "https://other.blob.core.windows.net/c/x.pdf",
+        source_account_url="",
+        source_container="",
+        allowlist=["acct.blob.core.windows.net"])
+    assert (acct, ctnr, blob) == (None, None, "")
+
+
+def test_extract_attachments_honors_allowlist_config():
+    cfg = {
+        "attachments_field": "attachments",
+        "attachment_blob_account_allowlist": [
+            "acct.blob.core.windows.net",
+            "second.blob.core.windows.net",
+        ],
+    }
+    doc = _doc(
+        {"name": "a.pdf", "url": f"{ACCOUNT}/{CONTAINER}/a.pdf", "contentType": "application/pdf"},
+        {"name": "b.pdf", "url": "https://second.blob.core.windows.net/c/b.pdf", "contentType": "application/pdf"},
+        {"name": "c.pdf", "url": "https://nope.blob.core.windows.net/c/c.pdf", "contentType": "application/pdf"},
+    )
+    out = _extract_attachments(doc, cfg)
+    assert sorted(a["name"] for a in out) == ["a.pdf", "b.pdf"]
+
+
+# ── T-BLB-1: Blob name sanitization ────────────────────────────────────
+
+@pytest.mark.parametrize("evil_name", [
+    "../../etc/passwd",
+    "..\\..\\system32\\sam",
+    "/abs/path",
+    "good/../bad",
+    "a//b",                       # empty middle segment
+    " leading-space",
+    "trailing-space ",
+    "ctrl\x01char",
+    "",
+    "   ",
+])
+def test_relative_url_rejects_unsafe_blob_names(evil_name):
+    acct, ctnr, blob = _resolve_blob_location(
+        evil_name, source_account_url=ACCOUNT, source_container=CONTAINER)
+    assert (acct, ctnr, blob) == (None, None, ""), f"unexpectedly accepted: {evil_name!r}"
+
+
+def test_relative_url_accepts_normal_nested_path():
+    acct, ctnr, blob = _resolve_blob_location(
+        "case-2026-001/exhibit-A.pdf",
+        source_account_url=ACCOUNT, source_container=CONTAINER)
+    assert acct == ACCOUNT and ctnr == CONTAINER and blob == "case-2026-001/exhibit-A.pdf"
+
+
+def test_absolute_url_rejects_traversal_in_decoded_path():
+    # Percent-encoded "../" survived the prior implementation because
+    # unquote() ran *after* the host check; now blocked by _safe_blob_name.
+    acct, ctnr, blob = _resolve_blob_location(
+        f"{ACCOUNT}/{CONTAINER}/a/..%2F..%2Fsecret.pdf",
+        source_account_url=ACCOUNT, source_container=CONTAINER)
+    assert (acct, ctnr, blob) == (None, None, "")
+
+
+def test_extract_attachments_drops_unsafe_relative_url():
+    cfg = {
+        "attachments_field": "attachments",
+        "account_url": ACCOUNT,
+        "attachment_blob_container": CONTAINER,
+    }
+    doc = _doc(
+        {"name": "good", "url": "case-1/a.pdf", "contentType": "application/pdf"},
+        {"name": "bad",  "url": "../escape.pdf", "contentType": "application/pdf"},
+    )
+    out = _extract_attachments(doc, cfg)
+    assert [a["name"] for a in out] == ["good"]
 
 
 if __name__ == "__main__":

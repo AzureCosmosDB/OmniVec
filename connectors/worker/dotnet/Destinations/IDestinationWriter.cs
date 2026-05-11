@@ -10,7 +10,8 @@ public record EmbeddingResult(
     string PipelineName,
     string PipelineGeneration,
     string Content,
-    Dictionary<string, string>? SourceContentFields = null);
+    Dictionary<string, string>? SourceContentFields = null,
+    string SourceId = "");
 
 public interface IDestinationWriter
 {
