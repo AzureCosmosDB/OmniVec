@@ -4,7 +4,7 @@
 |---|---|
 | Owner | OmniVec Team |
 | Methodology | STRIDE per element + per trust-boundary crossing |
-| Last reviewed | 2026-05-05 |
+| Last reviewed | 2026-05-06 |
 | Scope | Full system — ingestion → embedding → vector store → search → web UI |
 
 > A companion **`threat-model.tm7`** (Microsoft Threat Modeling Tool format)
@@ -15,6 +15,10 @@
 > stencils render correctly) and surgically replaces the diagram. The
 > markdown form remains the source of truth; the `.tm7` is for STRIDE in the
 > desktop UI.
+>
+> For the latest current-state assessment across the markdown model, the `.tm7`
+> artifact, and the CI/CD model, see
+> [`threat-model-review-2026-05.md`](./threat-model-review-2026-05.md).
 
 ---
 
@@ -32,7 +36,8 @@ flowchart LR
     search["omnivec-search<br/>(Go)"]
     router["docgrok-router<br/>(Rust)"]
     pworker["docgrok-pipeline-worker"]
-    connector["connector .NET worker<br/>(change-feed watcher)"]
+    ingestor["omnivec-ingestor (.NET)<br/>change-feed watcher"]
+    dotnetworker["omnivec-dotnet-worker<br/>(Service Bus consumer)"]
     incluster["in-cluster embedders<br/>CLIP / BGE / DSE-Qwen2"]
   end
 
@@ -68,9 +73,15 @@ flowchart LR
   pworker --> blob
   pworker --> router
   pworker --> cvec
-  connector -->|change-feed read| csrc
-  connector -->|stage attachments| blob
-  connector -->|enqueue work| sb
+  ingestor -->|change-feed read| csrc
+  ingestor -->|stage attachments| blob
+  ingestor -->|enqueue work (queue mode)| sb
+  ingestor -->|"/embed/batch (inline mode)"| router
+  ingestor -->|vector patch (inline mode)| csrc
+  dotnetworker -->|drain SB topic| sb
+  dotnetworker -->|"/embed/batch (queue mode)"| router
+  dotnetworker -->|vector write| cvec
+  dotnetworker -->|model record read| cmeta
 ```
 
 ## 2. Trust boundaries
