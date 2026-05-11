@@ -1,0 +1,28 @@
+# Hardening flags applied at link time. See SECURITY.md for the BinSkim mapping.
+#
+# What each flag does:
+#   control-flow-guard=yes   -> /guard:cf + /DYNAMICBASE   (BA2008)
+#   /CETCOMPAT               -> CET shadow stack            (BA2025)
+#   /guard:ehcont            -> EH continuation guard       (defense in depth)
+#   /DEPENDENTLOADFLAG:0x800 -> RestrictedDLLLoad           (defense in depth)
+#
+# BA2024 (Spectre): requires VS "C++ Spectre-mitigated libs" workload AND
+# rebuilding libstd with `-Z build-std` (nightly). Tracked in SECURITY.md.
+#
+# BA2014 (stack protection): a handful of functions in Rust's standard
+# library opt out of /GS for perf. A full fix needs `-Z build-std` on a
+# nightly toolchain. Documented in SECURITY.md.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-C", "control-flow-guard=yes",
+  "-C", "link-arg=/CETCOMPAT",
+  "-C", "link-arg=/DEPENDENTLOADFLAG:0x800",
+  "-Z", "stack-protector=all",
+  "-Z", "src-hash-algorithm=sha256",
+]
+
+# Used together with `RUSTC_BOOTSTRAP=1` or a +nightly toolchain to rebuild
+# libstd with hardening flags above. See SECURITY.md.
+[unstable]
+build-std = ["std", "panic_abort"]
