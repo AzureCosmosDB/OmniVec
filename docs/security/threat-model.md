@@ -28,6 +28,7 @@
 flowchart LR
   subgraph "INTERNET / AAD trust boundary"
     user["End-user browser"]
+    aad["Azure AD<br/>(login.microsoftonline.com)"]
   end
 
   subgraph "AKS cluster (omnivec namespace)"
@@ -61,8 +62,9 @@ flowchart LR
     blob["Customer Blob<br/>(attachments source)"]
   end
 
-  user -->|HTTPS + AAD SSO| web
-  user -->|HTTPS + admin token| api
+  user -->|HTTPS + Bearer token| web
+  user -->|HTTPS + Bearer token| api
+  api -->|JWKS fetch (cached)| aad
   web --> api
   web --> search
   api --> cmeta
