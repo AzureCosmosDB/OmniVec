@@ -44,6 +44,7 @@ W, H = 100, 100  # default stencil size
 #  7 incluster      15 bsrc
 #                   16 dotnet-worker (queue consumer)
 #                   17 aad (login.microsoftonline.com)
+#                   18 appinsights (Azure Monitor)
 ELEMENTS: list[dict] = [
     {"k": "external", "name": "End-user browser",                 "x": 60,   "y": 540},
     {"k": "process",  "name": "omnivec-web (Next.js)",            "x": 360,  "y": 320},
@@ -63,6 +64,7 @@ ELEMENTS: list[dict] = [
     {"k": "store",    "name": "Customer Blob source",             "x": 1800, "y": 1120},
     {"k": "process",  "name": "omnivec-dotnet-worker (queue)",    "x": 720,  "y": 1120},
     {"k": "external", "name": "Azure AD (login.microsoftonline.com)", "x": 60, "y": 240},
+    {"k": "store",    "name": "Azure Monitor / App Insights",     "x": 2160, "y": 320},
 ]
 
 TBS: list[dict] = [
@@ -71,7 +73,7 @@ TBS: list[dict] = [
     {"name": "TB-2a Web / API tier",        "x": 340,  "y": 290, "w": 960,  "h": 220},
     {"name": "TB-2b DocGrok tier",          "x": 340,  "y": 690, "w": 960,  "h": 220},
     {"name": "TB-2c Ingestor tier",         "x": 340,  "y": 1090, "w": 600, "h": 220},
-    {"name": "TB-3 Azure managed services", "x": 1410, "y": 290, "w": 480,  "h": 480},
+    {"name": "TB-3 Azure managed services", "x": 1410, "y": 290, "w": 840,  "h": 480},
     {"name": "TB-4 Customer-owned",         "x": 1410, "y": 1090, "w": 480, "h": 480},
 ]
 
@@ -107,6 +109,10 @@ FLOWS: list[tuple[int, int, str]] = [
     (16, 10, "vector write"),
     (16, 9,  "model record read"),
     (16, 11, "fetch attachment binary"),
+    (2, 18, "telemetry / traces / metrics"),
+    (3, 18, "telemetry / traces / metrics"),
+    (6, 18, "telemetry / traces / metrics"),
+    (16, 18, "telemetry / traces / metrics"),
 ]
 
 # --- Helpers ----------------------------------------------------------------

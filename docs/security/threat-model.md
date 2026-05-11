@@ -53,6 +53,7 @@ flowchart LR
     cmeta["CosmosDB<br/>omnivec.metadata"]
     kv["Azure Key Vault"]
     sb["Azure Service Bus"]
+    appinsights["Azure Monitor<br/>App Insights"]
   end
 
   subgraph "Customer-owned (external trust)"
@@ -93,6 +94,10 @@ flowchart LR
   dotnetworker -->|vector write| cvec
   dotnetworker -->|model record read| cmeta
   dotnetworker -->|fetch attachment binary| blob
+  api -->|telemetry| appinsights
+  search -->|telemetry| appinsights
+  ingestor -->|telemetry| appinsights
+  dotnetworker -->|telemetry| appinsights
 ```
 
 ## 2. Trust boundaries
