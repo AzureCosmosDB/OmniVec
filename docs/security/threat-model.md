@@ -31,14 +31,20 @@ flowchart LR
   end
 
   subgraph "AKS cluster (omnivec namespace)"
-    web["omnivec-web<br/>(Next.js)"]
-    api["omnivec-api<br/>(FastAPI)"]
-    search["omnivec-search<br/>(Go)"]
-    router["docgrok-router<br/>(Rust)"]
-    pworker["docgrok-pipeline-worker"]
-    ingestor["omnivec-ingestor (.NET)<br/>change-feed watcher"]
-    dotnetworker["omnivec-dotnet-worker<br/>(Service Bus consumer)"]
-    incluster["in-cluster embedders<br/>CLIP / BGE / DSE-Qwen2"]
+    subgraph "Web / API tier"
+      web["omnivec-web<br/>(Next.js)"]
+      api["omnivec-api<br/>(FastAPI)"]
+      search["omnivec-search<br/>(Go)"]
+    end
+    subgraph "DocGrok tier"
+      router["docgrok-router<br/>(Rust)"]
+      pworker["docgrok-pipeline-worker"]
+      incluster["in-cluster embedders<br/>CLIP / BGE / DSE-Qwen2"]
+    end
+    subgraph "Ingestor tier (.NET)"
+      ingestor["omnivec-ingestor (.NET)<br/>change-feed watcher"]
+      dotnetworker["omnivec-dotnet-worker<br/>(Service Bus consumer)"]
+    end
   end
 
   subgraph "Azure managed services"
@@ -52,7 +58,7 @@ flowchart LR
     csrc["Customer CosmosDB<br/>(source w/ attachments)"]
     bsrc["Customer Blob source"]
     cvec["Customer CosmosDB<br/>(vectors destination)"]
-    blob["Customer Blob<br/>(attachment staging)"]
+    blob["Customer Blob<br/>(attachments source)"]
   end
 
   user -->|HTTPS + AAD SSO| web
