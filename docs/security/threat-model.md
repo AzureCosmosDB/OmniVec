@@ -43,6 +43,7 @@ Documents assumptions that are not visible on the diagrams.
 
 | Out of scope | Why |
 |---|---|
+| **Azure AI Foundry / Azure OpenAI** (consumed by DocGrok) | Lives in the **customer's** Azure subscription. OmniVec only consumes it as a service over HTTPS+AAD; we have no control over the model deployment, content filters, network ACLs, or RBAC on the resource. Shown on diagrams (DocGrok calls it) but the security of the resource itself is the customer's responsibility. |
 | CI/CD supply chain | Has its own model: [`cicd-threat-model.md`](./cicd-threat-model.md) |
 | Helm chart / Bicep infra | Operator concern; tracked under `infra/` review |
 | Code-level vulns (SQLi, XSS, deserialization) | Covered by SDL / CodeQL / SAST policy |
@@ -80,7 +81,8 @@ flowchart LR
     ingest["**Ingestion**<br/>(change-feed watcher · vector writer)"]
   end
 
-  azure(["Azure managed services<br/>AOAI · CosmosDB · Service Bus · Key Vault · App Insights<br/>[ext]"])
+  azure(["Azure managed services<br/>CosmosDB · Service Bus · Key Vault · App Insights<br/>[ext]"])
+  foundry(["Azure AI Foundry / Azure OpenAI<br/>(in customer subscription)<br/>[ext, out of scope — see §0.5]"])
   customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext, untrusted input]"])
 
   user -->|sign-in / RAG queries<br/>HTTPS · AAD bearer| api
@@ -88,7 +90,8 @@ flowchart LR
   api -->|embed / parse · admin ops<br/>in-cluster HTTP · NetworkPolicy| docgrok
   ingest -->|enqueue work<br/>in-cluster HTTP · NetworkPolicy| docgrok
   api -->|metadata read/write<br/>HTTPS · WIF| azure
-  docgrok -->|embeddings · model registry<br/>HTTPS · WIF / API key| azure
+  docgrok -->|metadata · model registry<br/>HTTPS · WIF| azure
+  docgrok -->|embed call (consume only)<br/>HTTPS · WIF or API key| foundry
   ingest -->|change-feed lease · queue<br/>HTTPS · WIF| azure
   ingest -->|read documents/attachments<br/>HTTPS · WIF or SAS| customer
   ingest -->|write vectors<br/>HTTPS · WIF| customer
@@ -130,13 +133,13 @@ flowchart LR
   docgrok["DocGrok"]
   cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
   cvec(["Customer vectors<br/>[ext]"])
-  aoai(["Azure OpenAI<br/>[ext]"])
+  foundry(["Azure AI Foundry / Azure OpenAI<br/>(customer subscription)<br/>[ext, out of scope]"])
 
   user -->|"RAG query<br/>HTTPS · AAD bearer (Reader)"| api
   api -->|"validate token<br/>HTTPS · cached JWKS"| aad
   api -->|"forward query<br/>in-cluster HTTP · NetworkPolicy"| search
   search -->|"embed query text<br/>in-cluster HTTP · admin token"| docgrok
-  docgrok -->|"embed call<br/>HTTPS · WIF (preferred) or API key"| aoai
+  docgrok -->|"embed call (consume only)<br/>HTTPS · WIF (preferred) or API key"| foundry
   search -->|"vector kNN search<br/>HTTPS · WIF · source-id ACL"| cvec
   api -->|"pipeline / source lookup<br/>HTTPS · WIF · read-only"| cmeta
 ```
