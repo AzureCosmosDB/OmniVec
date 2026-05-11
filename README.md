@@ -1,5 +1,9 @@
 # OmniVec
 
+> **⚠️ Public Preview Notice**
+> This repository is currently available as a **public preview** and is **not yet fully ready for production use**.
+> Expect breaking changes, incomplete features, and limited support during this phase.
+
 **Any data source → embeddings → vector search, deployed on Azure in one command.**
 
 OmniVec automates the full vector ingestion pipeline: connect a data source, extract content, generate embeddings, and store vectors in a searchable destination. It runs on Azure Kubernetes Service and comes with a web UI, CLI, and REST API.
