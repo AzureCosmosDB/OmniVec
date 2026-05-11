@@ -1,5 +1,9 @@
 # OmniVec
 
+> **⚠️ Public Preview Notice**
+> This repository is currently available as a **public preview** and is **not yet fully ready for production use**.
+> Expect breaking changes, incomplete features, and limited support during this phase.
+
 **Any data source → embeddings → vector search, deployed on Azure in one command.**
 
 OmniVec automates the full vector ingestion pipeline: connect a data source, extract content, generate embeddings, and store vectors in a searchable destination. It runs on Azure Kubernetes Service and comes with a web UI, CLI, and REST API.
@@ -43,8 +47,8 @@ You also need:
 > **Windows users:** Run these commands in PowerShell 7 (`pwsh`), not Command Prompt.
 
 ```bash
-# Clone the repo (includes submodules)
-git clone --recurse-submodules https://github.com/AzureCosmosDB/OmniVec
+# Clone the repo
+git clone https://github.com/AzureCosmosDB/OmniVec
 cd OmniVec
 
 # Log in to Azure
@@ -543,7 +547,7 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `web/` | Web UI (static HTML/JS + nginx) |
 | `connectors/ingestion/dotnet/` | .NET Change Feed Processor connector |
 | `connectors/worker/dotnet/` | .NET embedding worker |
-| `docgrok/` | Document intelligence engine (git submodule) |
+| `docgrok/` | Document intelligence engine (in-repo) |
 | `cli/` | Go CLI for managing pipelines, sources, and jobs |
 | `infra/` | Azure Bicep infrastructure-as-code |
 | `helm/` | Kubernetes Helm charts |

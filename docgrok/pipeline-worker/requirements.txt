@@ -1,0 +1,10 @@
+paddlepaddle==3.0.0
+paddleocr==2.9.1
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+Pillow==11.1.0
+PyMuPDF==1.25.3
+azure-storage-blob>=12.19.0
+azure-identity>=1.15.0
+opencv-python-headless==4.10.0.84
