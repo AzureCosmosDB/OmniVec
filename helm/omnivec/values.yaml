@@ -83,10 +83,14 @@ search:
     tag: latest
     pullPolicy: Always
   service:
-    type: LoadBalancer     # external public IP
+    # T-SRCH-1: default to ClusterIP so search is not exposed over plain HTTP.
+    # Public exposure is via `searchIngress` below (TLS-terminated by the
+    # ingress controller). Operators who want a direct LB endpoint can
+    # override to `LoadBalancer`, but should also wire TLS at that LB.
+    type: ClusterIP
     port: 80
     targetPort: 8080
-    dnsLabel: ""           # optional: <label>.<region>.cloudapp.azure.com
+    dnsLabel: ""           # only used when type=LoadBalancer
   resources:
     requests:
       memory: "256Mi"
@@ -528,6 +532,58 @@ ingress:
     enabled: false
     rps: 50          # nginx.ingress.kubernetes.io/limit-rps
     connections: 20  # nginx.ingress.kubernetes.io/limit-connections
+
+# =============================================================================
+# SEARCH INGRESS (T-SRCH-1)
+# =============================================================================
+# Separate ingress for omnivec-search. Search is on its own host/path so it
+# can have a different TLS cert / rate-limit policy from the API. Disabled
+# by default — enable + supply hosts/tls in your values overlay.
+#
+# When `searchIngress.enabled=false` and `search.service.type=ClusterIP`
+# (the new default), search is reachable only from inside the cluster.
+# Operators who flip `search.service.type` back to `LoadBalancer` are
+# responsible for terminating TLS at that LB themselves.
+searchIngress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: search.omnivec.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - hosts:
+    #     - search.omnivec.example.com
+    #   secretName: omnivec-search-tls
+
+# =============================================================================
+# NETWORK POLICY (T-NET-1)
+# =============================================================================
+# Default-deny ingress + explicit per-tier allow rules. Off by default
+# because deployments without a CNI that supports NetworkPolicy (e.g.
+# kubenet) will silently drop traffic. Enable on AKS with Azure CNI +
+# Calico/Cilium, or any other CNI advertising NetworkPolicy support.
+#
+# When enabled, the chart renders one NetworkPolicy resource per tier:
+#   * default-deny     — deny all ingress not explicitly allowed
+#   * api-allow        — ingress controller + omnivec-web + omnivec-search
+#   * search-allow     — ingress controller + omnivec-api + omnivec-web
+#   * web-allow        — ingress controller only
+#   * docgrok-router-allow — api, search, ingestor, dotnet-worker,
+#                            pipeline-worker
+#   * embedders-allow  — docgrok-router only
+# Egress is left unrestricted (Azure managed services, AOAI, etc.).
+networkPolicy:
+  enabled: false
+  # Label selector for the ingress controller namespace (used in the
+  # `from` clause of allow rules). Default matches the kubernetes.io
+  # convention for the kube-system namespace where most ingress
+  # controllers run; override if your controller lives elsewhere.
+  ingressControllerNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
 
 # =============================================================================
 # SERVICE ACCOUNT
