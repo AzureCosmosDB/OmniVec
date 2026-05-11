@@ -1,0 +1,54 @@
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.controller | default "nginx") "nginx") }}
+{{- /*
+  OmniVec ingress (T-API-1 / web-CSP).
+
+  Ships sensible defaults for nginx-ingress that operators rarely override:
+    * CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+    * Per-IP rate-limit (configuration-snippet `limit_req`)
+  Values can be overridden via `ingress.csp`, `ingress.rateLimit.*`, or by
+  putting any annotation under `ingress.annotations` (which wins).
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "omnivec.fullname" . | default "omnivec" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: omnivec
+  annotations:
+    {{- /* security defaults — defence in depth on top of in-process headers */}}
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Content-Security-Policy: {{ .Values.ingress.csp | default "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" }}";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+      more_set_headers "Permissions-Policy: geolocation=(), microphone=(), camera=()";
+    {{- if .Values.ingress.rateLimit.enabled }}
+    nginx.ingress.kubernetes.io/limit-rps: {{ .Values.ingress.rateLimit.rps | quote }}
+    nginx.ingress.kubernetes.io/limit-connections: {{ .Values.ingress.rateLimit.connections | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className | default "nginx" }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: omnivec-api
+                port:
+                  number: 80
+          {{- end }}
+    {{- end }}
+{{- end }}

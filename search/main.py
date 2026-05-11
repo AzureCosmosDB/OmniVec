@@ -97,7 +97,7 @@ def _require_search_token(request: Request):
             status_code=403,
             detail=f"Token scope '{result.scope}' cannot access the search API",
         )
-    if not check_rate_limit(result.subject):
+    if not check_rate_limit(result.rate_limit_key, override_rpm=result.rate_limit_override):
         raise HTTPException(
             status_code=429,
             detail="Rate limit exceeded",

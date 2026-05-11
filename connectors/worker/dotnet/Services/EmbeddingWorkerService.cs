@@ -209,7 +209,8 @@ public class EmbeddingWorkerService : BackgroundService
                     PipelineName: msg.PipelineName,
                     PipelineGeneration: msg.PipelineGeneration,
                     Content: chunkText,
-                    SourceContentFields: new Dictionary<string, string>()));
+                    SourceContentFields: new Dictionary<string, string>(),
+                    SourceId: msg.SourceId));
             }
 
             // Write to destination
@@ -295,7 +296,8 @@ public class EmbeddingWorkerService : BackgroundService
                     PipelineName: msg.PipelineName,
                     PipelineGeneration: msg.PipelineGeneration,
                     Content: msg.Content,
-                    SourceContentFields: msg.SourceContentFields);
+                    SourceContentFields: msg.SourceContentFields,
+                    SourceId: msg.SourceId);
 
                 var destKey = msg.DestinationId;
                 if (!resultsByDest.ContainsKey(destKey))

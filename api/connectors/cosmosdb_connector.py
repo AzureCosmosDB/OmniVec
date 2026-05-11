@@ -2,9 +2,12 @@
 
 import os
 import hashlib
-from typing import List, Dict, Any
+import logging
+from typing import List, Dict, Any, Optional
 from azure.cosmos import CosmosClient
 from azure.identity import ManagedIdentityCredential, DefaultAzureCredential
+
+logger = logging.getLogger(__name__)
 
 
 class SkipDocument(Exception):
@@ -58,14 +61,22 @@ async def test_cosmosdb_connection(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> List[Dict[str, Any]]:
-    """List documents in container."""
+    """List documents in container.
+
+    The ``query`` config field is operator-controlled (set when the source is
+    configured), so it's trusted input — but we still wrap it with a hard
+    result cap (``result_cap``, default 50_000) so a runaway query can't
+    drain the worker (T-CON-1).
+    """
     client = await get_cosmos_client(config)
     database = client.get_database_client(config["database"])
     container = database.get_container_client(config["container"])
 
     query = config.get("query", "SELECT * FROM c")
+    cap = int(config.get("result_cap", 50_000))
 
     documents = []
+    truncated = False
     for item in container.query_items(query, enable_cross_partition_query=True):
         documents.append({
             "ref": item.get("id"),
@@ -75,12 +86,29 @@ async def list_documents(config: Dict[str, Any], full_sync: bool = False) -> Lis
                 "_ts": item.get("_ts")
             }
         })
+        if len(documents) >= cap:
+            truncated = True
+            break
+
+    if truncated:
+        logger.warning(
+            "cosmosdb list_documents truncated at result_cap=%d (container=%s); "
+            "raise OMNIVEC_COSMOS_RESULT_CAP or set 'result_cap' on the source config "
+            "if you need the full set (T-CON-3).",
+            cap, config.get("container", ""),
+        )
 
     return documents
 
 
 async def get_document(config: Dict[str, Any], doc_id: str, content_fields: list = None) -> str:
-    """Get document content. Raises SkipDocument if embedding already exists."""
+    """Get document content. Raises SkipDocument if embedding already exists.
+
+    T-CON-1: ``doc_id`` is interpolated into a Cosmos SQL string. Cosmos SDK
+    parameterized queries are the safe form; previously we used an f-string
+    which let a doc_id like ``foo' OR 1=1--`` smuggle filter clauses past
+    the connector. Fixed by switching to ``parameters=[…]``.
+    """
     client = await get_cosmos_client(config)
     database = client.get_database_client(config["database"])
     container = database.get_container_client(config["container"])
@@ -88,10 +116,10 @@ async def get_document(config: Dict[str, Any], doc_id: str, content_fields: list
     if content_fields is None:
         content_fields = ["content"]
 
-    # Try to read document
     items = list(container.query_items(
-        f"SELECT * FROM c WHERE c.id = '{doc_id}'",
-        enable_cross_partition_query=True
+        "SELECT * FROM c WHERE c.id = @id",
+        parameters=[{"name": "@id", "value": doc_id}],
+        enable_cross_partition_query=True,
     ))
 
     if not items:
@@ -140,12 +168,68 @@ def _extract_extension(s: str):
     return ext or None
 
 
-def _resolve_blob_location(url: str, source_account_url: str = "", source_container: str = ""):
+_MAX_BLOB_NAME_LEN = 1024
+
+
+def _safe_blob_name(name: str) -> bool:
+    """Validate a (URL-decoded) blob key. Rejects traversal segments, control
+    chars, leading/trailing whitespace per segment, empty segments, and
+    absolute-path forms — defense-in-depth against an attacker-crafted
+    attachment ID smuggling itself into a different container/key (T-BLB-1)."""
+    if not name or not name.strip():
+        return False
+    if len(name) > _MAX_BLOB_NAME_LEN:
+        return False
+    if name.startswith(("/", "\\")):
+        return False
+    for ch in name:
+        if ch == "\0" or (ord(ch) < 0x20 and ch != "\t"):
+            return False
+    for seg in name.replace("\\", "/").split("/"):
+        if seg == "" or seg in (".", ".."):
+            return False
+        if seg.strip() != seg:
+            return False
+    return True
+
+
+def _safe_container_name(ctnr: str) -> bool:
+    if not ctnr or not ctnr.strip():
+        return False
+    if len(ctnr) > 63:
+        return False
+    for ch in ctnr:
+        if ch in ("/", "\\", ".") or ord(ch) < 0x20:
+            return False
+    return True
+
+
+def _extract_host(url_or_host: str) -> str:
+    if not url_or_host:
+        return ""
+    s = url_or_host.strip()
+    if "://" in s:
+        return urlparse(s).netloc.lower()
+    return s.rstrip("/").lower()
+
+
+def _resolve_blob_location(
+    url: str,
+    source_account_url: str = "",
+    source_container: str = "",
+    allowlist: Optional[List[str]] = None,
+):
     """Resolve an attachment URL to (account_url, container, blob_name).
 
-    Returns (None, None, "") for invalid / disallowed (non-Azure-Blob) URLs.
-    SSRF guard: when ``source_account_url`` is set, only URLs whose host matches
-    that account are accepted.
+    Returns (None, None, "") for invalid / disallowed URLs.
+
+    SSRF guard (T-CON-2): for absolute URLs, ``source_account_url`` OR
+    ``allowlist`` must be configured; the URL's host must match one of them.
+    Without either, any ``*.blob.core.windows.net`` host would be reachable
+    from the worker's network identity.
+
+    Path-traversal guard (T-BLB-1): the resolved blob key is validated via
+    :func:`_safe_blob_name` after URL-decoding.
     """
     if not url:
         return None, None, ""
@@ -155,22 +239,33 @@ def _resolve_blob_location(url: str, source_account_url: str = "", source_contai
             return None, None, ""
         if not parsed.netloc.lower().endswith(".blob.core.windows.net"):
             return None, None, ""
-        if source_account_url:
-            pinned = urlparse(source_account_url)
-            if pinned.netloc.lower() != parsed.netloc.lower():
-                return None, None, ""
+        pinned_host = _extract_host(source_account_url)
+        allowed_hosts = {_extract_host(h) for h in (allowlist or []) if h}
+        if not pinned_host and not allowed_hosts:
+            return None, None, ""
+        host = parsed.netloc.lower()
+        if host != pinned_host and host not in allowed_hosts:
+            return None, None, ""
         path = parsed.path.lstrip("/")
         if "/" not in path:
             return None, None, ""
-        ctnr, blob = path.split("/", 1)
-        if not blob:
+        ctnr, raw_blob = path.split("/", 1)
+        if not raw_blob:
             return None, None, ""
-        return f"https://{parsed.netloc}", ctnr, unquote(blob)
+        decoded = unquote(raw_blob)
+        if not _safe_blob_name(decoded) or not _safe_container_name(ctnr):
+            return None, None, ""
+        return f"https://{parsed.netloc}", ctnr, decoded
 
-    # Relative path
+    # Relative path — also sanitize before trusting it as a blob key.
+    # Defense-in-depth: do NOT auto-strip a leading slash; treat absolute-style
+    # relative URLs as invalid so attackers can't smuggle a different key shape.
     if not source_account_url or not source_container:
         return None, None, ""
-    return source_account_url, source_container, url.lstrip("/")
+    rel = unquote(url)
+    if not _safe_blob_name(rel):
+        return None, None, ""
+    return source_account_url, source_container, rel
 
 
 def _extract_attachments(doc: dict, config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -210,6 +305,9 @@ def _extract_attachments(doc: dict, config: Dict[str, Any]) -> List[Dict[str, An
     # container; honor "attachment_blob_container" as the dedicated key for
     # the default blob container used to resolve relative attachment URLs.
     src_container = config.get("attachment_blob_container") or config.get("container", "")
+    allowlist = config.get("attachment_blob_account_allowlist") or []
+    if isinstance(allowlist, str):
+        allowlist = [a.strip() for a in allowlist.split(",") if a.strip()]
 
     matches: List[Dict[str, Any]] = []
     for item in arr:
@@ -229,7 +327,7 @@ def _extract_attachments(doc: dict, config: Dict[str, Any]) -> List[Dict[str, An
         if content_types:
             if not ctype or str(ctype).lower() not in content_types:
                 continue
-        acct, ctnr, blob = _resolve_blob_location(url, src_account, src_container)
+        acct, ctnr, blob = _resolve_blob_location(url, src_account, src_container, allowlist)
         if not blob:
             continue
         matches.append({

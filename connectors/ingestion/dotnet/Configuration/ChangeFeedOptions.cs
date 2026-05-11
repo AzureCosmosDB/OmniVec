@@ -11,6 +11,19 @@ public class ChangeFeedOptions
     /// <summary>OmniVec CosmosDB database name</summary>
     public string OmniVecDatabase { get; set; } = "omnivec";
 
+    /// <summary>
+    /// T-PWK-1 — Optional separate Cosmos endpoint for lease containers.
+    /// When set, all CFP lease containers are created in this account/database
+    /// instead of the main OmniVec metadata account, isolating lease-store
+    /// blast radius (a compromised CFP cannot scan/exfiltrate metadata).
+    /// Falls back to <see cref="OmniVecCosmosEndpoint"/> when empty.
+    /// </summary>
+    public string LeaseCosmosEndpoint { get; set; } = "";
+
+    /// <summary>T-PWK-1 — Database name for the dedicated lease account.
+    /// Falls back to <see cref="OmniVecDatabase"/> when empty.</summary>
+    public string LeaseCosmosDatabase { get; set; } = "";
+
     /// <summary>How often to poll the API for source/pipeline changes</summary>
     public int SourcePollIntervalSeconds { get; set; } = 30;
 

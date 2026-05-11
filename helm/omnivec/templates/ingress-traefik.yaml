@@ -1,0 +1,40 @@
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.controller | default "nginx") "traefik") }}
+{{- /*
+  T-ING-1 part 2 — Traefik Middleware variant of the security headers and
+  rate-limit. Apply by setting `ingress.controller: traefik` in values.yaml.
+
+  The Middleware CRD must be referenced from the IngressRoute (not Ingress);
+  most operators using Traefik already use IngressRoute. We ship the
+  Middleware here; a separate IngressRoute should pull it in via
+  `middlewares: [{name: omnivec-headers, namespace: ...}, {name: omnivec-ratelimit, ...}]`.
+*/ -}}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: omnivec-headers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: omnivec
+spec:
+  headers:
+    contentSecurityPolicy: {{ .Values.ingress.csp | default "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" | quote }}
+    customResponseHeaders:
+      X-Content-Type-Options: "nosniff"
+      X-Frame-Options: "DENY"
+      Referrer-Policy: "strict-origin-when-cross-origin"
+      Permissions-Policy: "geolocation=(), microphone=(), camera=()"
+{{- if .Values.ingress.rateLimit.enabled }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: omnivec-ratelimit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: omnivec
+spec:
+  rateLimit:
+    average: {{ .Values.ingress.rateLimit.rps }}
+    burst: {{ mul .Values.ingress.rateLimit.rps 2 }}
+{{- end }}
+{{- end }}

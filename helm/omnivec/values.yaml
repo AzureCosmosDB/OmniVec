@@ -495,8 +495,14 @@ docgrok:
 # =============================================================================
 # INGRESS (Optional)
 # =============================================================================
+# T-ING-1 (closed): nginx is the default. Set `ingress.controller: traefik`
+# to render the Traefik Middleware variant (templates/ingress-traefik.yaml)
+# instead — it ships the same CSP / X-Frame-Options / rate-limit policy via
+# the native Traefik CRD. Other controllers (AGIC, Istio) ignore the bundled
+# annotations; in-process headers from api/api.py still apply.
 ingress:
   enabled: false
+  controller: nginx   # nginx | traefik | agic
   className: nginx
   annotations: {}
   hosts:
@@ -505,6 +511,23 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+  # AGIC (Azure Application Gateway Ingress Controller) — values consumed
+  # by templates/ingress-agic.yaml when controller=agic. Rewrite rule sets
+  # and WAF policies are managed on the App Gateway resource (out of
+  # band); supply their names here.
+  agic:
+    rewriteRuleSet: ""        # e.g. "omnivec-security-headers"
+    wafPolicy: ""             # e.g. "/subscriptions/.../wafPolicies/omnivec-waf"
+    sslRedirect: "true"
+    backendProtocol: "http"
+  # Content-Security-Policy applied at the ingress layer (defence in depth on
+  # top of the in-process header set by api/api.py). Override per deployment
+  # if you need additional script-src / connect-src origins.
+  csp: ""
+  rateLimit:
+    enabled: false
+    rps: 50          # nginx.ingress.kubernetes.io/limit-rps
+    connections: 20  # nginx.ingress.kubernetes.io/limit-connections
 
 # =============================================================================
 # SERVICE ACCOUNT
@@ -514,3 +537,34 @@ serviceAccount:
   name: omnivec-api
   annotations: {}
     # azure.workload.identity/client-id: <client-id>
+
+
+# =============================================================================
+# SECURITY (RES-2 — seccomp + future hardening switches)
+# =============================================================================
+# RES-2: opt-in seccomp profile for parser-heavy workers. Off by default —
+# operators must first place the profile JSON
+# (helm/omnivec/seccomp/docgrok-parser.json) at
+# /var/lib/kubelet/seccomp/<localhostProfile> on every node (DaemonSet or
+# node-init script), THEN flip enabled=true. Otherwise pods will fail to
+# admit with 'cannot load seccomp profile'.
+security:
+  seccompProfile:
+    enabled: false
+    type: Localhost            # Localhost | RuntimeDefault | Unconfined
+    localhostProfile: docgrok-parser.json
+  # RES-3: cosign image-signing verification. Requires sigstore
+  # policy-controller (https://docs.sigstore.dev/policy-controller/) to
+  # be installed cluster-wide. When enabled, all Pods admitted into the
+  # cluster must reference images signed by the OmniVec build workflow
+  # (verified via Fulcio + Rekor + GitHub OIDC).
+  imageSigning:
+    enabled: false
+    # Glob list of image references this policy applies to. Defaults to
+    # everything OmniVec ships from omnivecregistry.azurecr.io.
+    images: []                 # e.g. ["omnivecregistry.azurecr.io/omnivec-*"]
+    # Regex matched against the OIDC subject (= workflow URL + ref). The
+    # default accepts builds from any branch / tag of the OmniVec repo's
+    # build-images.yml — tighten to refs/heads/main if you want to block
+    # accidental dev-branch deploys at admission time.
+    subjectRegExp: ""
