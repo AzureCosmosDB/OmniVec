@@ -40,8 +40,9 @@ W, H = 100, 100  # default stencil size
 #  3 search         11 blob
 #  4 router         12 kv
 #  5 pworker        13 sb
-#  6 connector      14 csrc
+#  6 ingestor       14 csrc
 #  7 incluster      15 bsrc
+#                   16 dotnet-worker (queue consumer)
 ELEMENTS: list[dict] = [
     {"k": "external", "name": "End-user browser",                 "x": 60,   "y": 360},
     {"k": "process",  "name": "omnivec-web (Next.js)",            "x": 280,  "y": 220},
@@ -49,7 +50,7 @@ ELEMENTS: list[dict] = [
     {"k": "process",  "name": "omnivec-search (Go)",              "x": 280,  "y": 500},
     {"k": "process",  "name": "docgrok-router (Rust)",            "x": 520,  "y": 220},
     {"k": "process",  "name": "docgrok-pipeline-worker",          "x": 520,  "y": 360},
-    {"k": "process",  "name": "connector .NET worker",            "x": 520,  "y": 500},
+    {"k": "process",  "name": "omnivec-ingestor (.NET)",          "x": 520,  "y": 500},
     {"k": "process",  "name": "in-cluster embedders",             "x": 760,  "y": 220},
     {"k": "process",  "name": "Azure OpenAI",                     "x": 1000, "y": 220},
     {"k": "store",    "name": "CosmosDB omnivec.metadata",        "x": 1000, "y": 360},
@@ -59,11 +60,12 @@ ELEMENTS: list[dict] = [
     {"k": "store",    "name": "Azure Service Bus",                "x": 760,  "y": 500},
     {"k": "store",    "name": "Customer CosmosDB (source)",       "x": 760,  "y": 780},
     {"k": "store",    "name": "Customer Blob source",             "x": 1000, "y": 780},
+    {"k": "process",  "name": "omnivec-dotnet-worker (queue)",    "x": 280,  "y": 640},
 ]
 
 TBS: list[dict] = [
     {"name": "TB-1 Internet / AAD",         "x": 30,   "y": 320, "w": 220,  "h": 100},
-    {"name": "TB-2 AKS cluster",            "x": 250,  "y": 180, "w": 480,  "h": 460},
+    {"name": "TB-2 AKS cluster",            "x": 250,  "y": 180, "w": 480,  "h": 600},
     {"name": "TB-3 Azure managed services", "x": 730,  "y": 180, "w": 360,  "h": 500},
     {"name": "TB-4 Customer-owned",         "x": 730,  "y": 740, "w": 360,  "h": 140},
 ]
@@ -89,7 +91,13 @@ FLOWS: list[tuple[int, int, str]] = [
     (5, 10, "vector write"),
     (6, 14, "change-feed read"),
     (6, 11, "stage attachments"),
-    (6, 13, "enqueue work"),
+    (6, 13, "enqueue work (queue mode)"),
+    (6, 4,  "/embed/batch (inline mode)"),
+    (6, 14, "vector patch (inline mode)"),
+    (16, 13, "drain SB topic"),
+    (16, 4,  "/embed/batch (queue mode)"),
+    (16, 10, "vector write"),
+    (16, 9,  "model record read"),
 ]
 
 # --- Helpers ----------------------------------------------------------------
