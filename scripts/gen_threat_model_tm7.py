@@ -40,23 +40,27 @@ W, H = 100, 100  # default stencil size
 # Indices used by FLOWS:
 #  0 user (external)         5 Azure managed services (external)
 #  1 Azure AD (external)     6 Customer data plane (external, untrusted)
-#  2 API (component)
+#  2 API (component)         7 Azure AI Foundry / AOAI (external, OOS — customer subscription)
 #  3 DocGrok (component)
 #  4 Ingestion (component)
 ELEMENTS: list[dict] = [
     {"k": "external", "name": "End user (browser)",                                "x": 80,   "y": 540},
-    {"k": "external", "name": "Azure AD (login.microsoftonline.com)",              "x": 80,   "y": 240},
+    {"k": "external", "name": "Azure AD (login.microsoftonline.com)",              "x": 80,   "y": 240,
+        "oos": True, "oos_reason": "Microsoft-operated identity provider; OmniVec only validates JWTs."},
     {"k": "process",  "name": "API\n(user-facing HTTPS, RAG, admin CRUD)",         "x": 600,  "y": 360},
     {"k": "process",  "name": "DocGrok\n(parsing, embedding orchestration)",       "x": 600,  "y": 720},
     {"k": "process",  "name": "Ingestion\n(change-feed watcher, vector writer)",   "x": 600,  "y": 1080},
-    {"k": "external", "name": "Azure managed services\n(AOAI, CosmosDB, SB, KV, App Insights)", "x": 1200, "y": 360},
+    {"k": "external", "name": "Azure managed services\n(CosmosDB, Service Bus, Key Vault, App Insights)", "x": 1200, "y": 360},
     {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1200, "y": 1080},
+    {"k": "external", "name": "Azure AI Foundry / Azure OpenAI\n(in customer subscription)", "x": 1200, "y": 720,
+        "oos": True, "oos_reason": "Lives in customer subscription; OmniVec consumes the model endpoint over HTTPS+AAD only. Customer owns model deployment, content filters, network ACLs, and RBAC."},
 ]
 
 TBS: list[dict] = [
     {"name": "TB-1 Internet / AAD",         "x": 30,   "y": 200, "w": 280,  "h": 460},
     {"name": "TB-2 AKS cluster (single tenant)", "x": 540, "y": 280, "w": 480, "h": 1000},
     {"name": "TB-3 Azure managed services", "x": 1170, "y": 280, "w": 380,  "h": 280},
+    {"name": "TB-3a Azure AI Foundry / AOAI (out of scope)", "x": 1170, "y": 640, "w": 380, "h": 220},
     {"name": "TB-4 Customer data plane (untrusted input)", "x": 1170, "y": 1000, "w": 380, "h": 280},
 ]
 
@@ -69,7 +73,8 @@ FLOWS: list[tuple[int, int, str]] = [
     (2, 3, "Embed / parse / admin ops\nin-cluster HTTP · NetworkPolicy · admin token"),
     (4, 3, "Enqueue work to embed\nin-cluster HTTP · NetworkPolicy · admin token"),
     (2, 5, "Metadata read/write\nHTTPS · WIF · least-privilege RBAC"),
-    (3, 5, "Embeddings, model registry, secrets\nHTTPS · WIF (preferred) or API key"),
+    (3, 5, "Model registry / metadata\nHTTPS · WIF"),
+    (3, 7, "Embed call (consume only)\nHTTPS · WIF (preferred) or API key"),
     (4, 5, "Change-feed lease, queue, telemetry\nHTTPS · WIF"),
     (4, 6, "Read documents/attachments (untrusted)\nHTTPS · WIF or SAS · host allowlist"),
     (4, 6, "Write vectors\nHTTPS · WIF · least-privilege RBAC"),
@@ -145,12 +150,14 @@ def shape_xml(el: dict) -> str:
 
     x, y = el["x"], el["y"]
     w, h = el.get("w", W), el.get("h", H)
+    oos = bool(el.get("oos", False))
+    oos_reason = el.get("oos_reason", "")
     props = (
         f'<Properties xmlns="{ABS}">'
         + _hdr(header)
         + _str("Name", el["name"])
-        + _bool("Out Of Scope", False, NAME_OUT_OF_SCOPE)
-        + _str("Reason For Out Of Scope", "", NAME_REASON_OOS)
+        + _bool("Out Of Scope", oos, NAME_OUT_OF_SCOPE)
+        + _str("Reason For Out Of Scope", oos_reason, NAME_REASON_OOS)
         + "</Properties>"
     )
     geom = (
