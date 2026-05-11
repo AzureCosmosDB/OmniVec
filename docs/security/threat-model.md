@@ -97,8 +97,8 @@ Selected manually at boundary crossings. Risk rating uses the SDL scale: **Criti
 | **T-CON-1** | TB-2 (lease container) | T/D | Change-feed lease container shares Cosmos DB with metadata; cross-write can DoS or replay ingestion | **Moderate** | ✅ | Optional `LeaseCosmosEndpoint` / `LeaseCosmosDatabase` route lease to dedicated account (batch 4). Residual: not enabled by default. |
 | **T-VEC-1** | TB-4 (data at rest) | I | Vectors are PII-derived and partially invertible (embedding-inversion attacks); residency / right-to-erasure obligations apply | **Moderate** | ✅ | Documented PII classification; `DELETE /api/sources/{id}/vectors` cascade-purge endpoint (batch 4). Residual: classification doc must propagate to customer-facing data agreements. |
 | **T-RL-1** | TB-3 (router → AOAI) | D | One pipeline saturates AOAI tier RPM → 429 cascade starves other pipelines | **Moderate** | ✅ | Per-deployment embed semaphore (`OMNIVEC_EMBED_CONCURRENCY=4` default) + jittered exponential backoff (batch 1). Residual: no circuit-breaker yet. |
-| **T-SRCH-1** | TB-1 → search | I/T | `omnivec-search` Service is type `LoadBalancer` on plain HTTP — query embeddings (PII per T-VEC-1) and bearer tokens travel in cleartext over public internet | **Important** | ❌ | **Open.** Front search behind the omnivec ingress with TLS, OR put it behind App Gateway / Front Door, OR switch service to ClusterIP + dedicated TLS ingress. |
-| **T-NET-1** | TB-2 (in-cluster) | S/T/I | No `NetworkPolicy` in `helm/`; all in-cluster traffic plain HTTP on ClusterIP. A compromised pod can call any service unauth (no mTLS, no service mesh) | **Moderate** | ❌ | **Open.** Add default-deny `NetworkPolicy` per namespace + per-tier allow rules. mTLS/service-mesh is roadmap. |
+| **T-SRCH-1** | TB-1 → search | I/T | `omnivec-search` Service is type `LoadBalancer` on plain HTTP — query embeddings (PII per T-VEC-1) and bearer tokens travel in cleartext over public internet | **Important** | ✅ | Default service type changed to `ClusterIP`; new `searchIngress` template provides TLS-terminating ingress on a dedicated host. Operators who keep `type: LoadBalancer` are responsible for terminating TLS at the LB themselves. |
+| **T-NET-1** | TB-2 (in-cluster) | S/T/I | No `NetworkPolicy` in `helm/`; all in-cluster traffic plain HTTP on ClusterIP. A compromised pod can call any service unauth (no mTLS, no service mesh) | **Moderate** | ✅ | `templates/networkpolicy.yaml` ships default-deny + per-tier allow rules behind `networkPolicy.enabled` toggle (off by default to avoid breaking clusters whose CNI doesn't support NetworkPolicy). Residual: mTLS / service-mesh still roadmap. |
 | **T-SUP-1** | Pre-cluster (image source) | T | Compromised registry or MITM swaps an OmniVec image; cluster pulls and runs malicious code | **Moderate** | ⚠️ | Cosign keyless signing on every push (RES-3, batch 4 build pipeline); Helm template `cosign-policy.yaml` exists. **Residual: cluster admission verification (Ratify/Kyverno) not enforced by default — signature is generated but not yet checked at deploy.** |
 
 > The CI/CD pipeline itself (the GitHub Actions runner that produces those signatures) has its own threat model in [`cicd-threat-model.md`](./cicd-threat-model.md).
@@ -109,11 +109,10 @@ Open items only — closed items are the ✅ rows above.
 
 | Threat | Action | Owner | ETA |
 |---|---|---|---|
-| T-SRCH-1 | Front `omnivec-search` behind shared ingress + TLS, or add dedicated TLS ingress; remove public LoadBalancer in default values | OmniVec | next batch |
-| T-NET-1 | Author default-deny + per-tier `NetworkPolicy` for `omnivec` and `docgrok` namespaces | OmniVec | next batch |
 | T-PWK-1 | Switch `DOCGROK_PARSER_SANDBOX` default to `1`; ship seccomp-bpf profile and require it via PSA `restricted` | DocGrok / OmniVec | next batch |
 | T-SUP-1 | Add Ratify or Kyverno admission-controller chart that requires cosign signature on every OmniVec image | OmniVec | follow-up |
 | T-API-1 (residual) | Document admin-token rotation runbook + deletion-after-AAD-cutover policy | OmniVec | follow-up |
+| T-NET-1 (residual) | mTLS or service-mesh between tiers (defence in depth on top of NetworkPolicy) | OmniVec | follow-up |
 
 ## 6. Did we do enough? (review log)
 
@@ -121,6 +120,7 @@ Open items only — closed items are the ✅ rows above.
 |---|---|---|---|
 | 2026-05-06 | Internal | Initial STRIDE-per-element pass | See `threat-model.md.bak` (pre-DPSS-refactor structure) |
 | 2026-05-11 | Internal (DPSS-style refactor) | Trimmed to 10 boundary threats; collapsed DFD; surfaced T-SRCH-1, T-NET-1, T-SUP-1 from inter-component audit | Ready for SQL Security Review Board submission |
+| 2026-05-11 | Internal (T-SRCH-1, T-NET-1 closure) | Search default switched to `ClusterIP` + new `searchIngress` template; `templates/networkpolicy.yaml` adds default-deny + per-tier allow rules behind `networkPolicy.enabled` toggle | Both threats now ✅ |
 
 **To request a Threat Model Review:** upload `threat-model.tm7` + this `.md` via the Threat Modeling Portal ([aka.ms/dpgtrack](https://aka.ms/dpgtrack)). Per DPSS guidance, the review meeting is a 2–3 hour call; this document is sized to fit.
 
