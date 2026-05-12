@@ -69,7 +69,8 @@ FLOWS: list[tuple[int, int, str]] = [
     (0, 1, "OIDC sign-in\nHTTPS · OIDC code flow"),
     (2, 1, "JWT validation (JWKS fetch)\nHTTPS · public endpoint · cached 1h"),
     (2, 3, "Embed call (consume only)\nHTTPS · Managed Identity (UAMI) or API key"),
-    (2, 4, "Read documents/attachments, write vectors, change-feed\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
+    (4, 2, "Read source documents/attachments · change-feed\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
+    (2, 4, "Write embeddings/vectors\nHTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"),
 ]
 
 # --- Helpers ----------------------------------------------------------------

@@ -90,7 +90,8 @@ flowchart LR
   callers -.->|OIDC sign-in<br/>HTTPS| aad
   omnivec -.->|JWT validation (JWKS fetch)<br/>HTTPS · public| aad
   omnivec -->|"embed call (consume only)<br/>HTTPS · Managed Identity (UAMI) or API key"| foundry
-  omnivec -->|"read documents/attachments · write vectors · change-feed<br/>HTTPS · Managed Identity (UAMI) or SAS · host allowlist"| customer
+  customer -->|"read source documents/attachments · change-feed<br/>HTTPS · Managed Identity (UAMI) or SAS · host allowlist"| omnivec
+  omnivec -->|"write embeddings/vectors<br/>HTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"| customer
 
   style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
   style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
