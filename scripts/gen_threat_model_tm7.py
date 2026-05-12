@@ -57,7 +57,8 @@ ELEMENTS: list[dict] = [
 ]
 
 TBS: list[dict] = [
-    {"name": "TB-1 Internet (public HTTPS surface)",         "x": 30,   "y": 200, "w": 280,  "h": 460},
+    {"name": "TB-1 Internet (public HTTPS surface)",         "x": 30,   "y": 480, "w": 280,  "h": 200},
+    {"name": "TB-1a Microsoft-operated identity (out of scope)", "x": 30, "y": 180, "w": 280, "h": 200},
     {"name": "TB-2 AKS cluster (single tenant)", "x": 540, "y": 280, "w": 480, "h": 1000},
     {"name": "TB-3 Azure managed services", "x": 1170, "y": 280, "w": 380,  "h": 280},
     {"name": "TB-3a Azure AI Foundry / AOAI (out of scope)", "x": 1170, "y": 640, "w": 380, "h": 220},
