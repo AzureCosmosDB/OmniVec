@@ -36,6 +36,31 @@ from typing import Optional, List, Iterator, Any, Dict
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [pipeline-worker] %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+
+# CR/LF/control-char scrubber on root logger — mitigates py/log-injection by
+# preventing user-controlled fields from injecting fake log lines or terminal
+# escapes. Runs across record.msg AND record.args so %-formatting is covered.
+class _CtrlCharLogFilter(logging.Filter):
+    _CTRL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]|\r\n|\r|\n')
+
+    @classmethod
+    def _scrub(cls, value):
+        return cls._CTRL_RE.sub(' ', value) if isinstance(value, str) else value
+
+    def filter(self, record):
+        record.msg = self._scrub(str(record.msg))
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: self._scrub(v) for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(self._scrub(a) for a in record.args)
+        return True
+
+
+logging.getLogger().addFilter(_CtrlCharLogFilter())
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_CtrlCharLogFilter())
+
 # ── Config (defaults — can be overridden per-request) ──────────────────
 DOCGROK_ROUTER_URL = os.environ.get("DOCGROK_ROUTER_URL", "http://docgrok:80")
 # CLIP image-embedding endpoint (Azure ML managed online endpoint exposing

@@ -62,11 +62,28 @@ class _SensitiveFilter(logging.Filter):
         (re.compile(r'(api[_-]?key|password|secret|token|credential)[=:]\s*["\']?([^\s"\'&,}{]{8})[^\s"\'&,}{]*', re.I), r'\1=\2***'),
         (re.compile(r'(Bearer\s+)(\S{8})\S+', re.I), r'\1\2***'),
     ]
+    # CR/LF/control-char scrubber — mitigates py/log-injection by ensuring
+    # user-controlled fields cannot inject fake log lines or terminal escapes.
+    # Applied to both the format string (record.msg) AND the formatted arguments
+    # (record.args, which is what %-formatting interpolates).
+    _CTRL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]|\r\n|\r|\n')
+
+    @classmethod
+    def _scrub_ctrl(cls, value):
+        if isinstance(value, str):
+            return cls._CTRL_RE.sub(' ', value)
+        return value
+
     def filter(self, record):
-        msg = str(record.msg)
+        msg = self._scrub_ctrl(str(record.msg))
         for pattern, replacement in self._patterns:
             msg = pattern.sub(replacement, msg)
         record.msg = msg
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: self._scrub_ctrl(v) for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(self._scrub_ctrl(a) for a in record.args)
         return True
 
 logging.getLogger().addFilter(_SensitiveFilter())
