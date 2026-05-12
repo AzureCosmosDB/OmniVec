@@ -73,7 +73,10 @@ OmniVec is a **single-tenant** retrieval-augmented vector platform that ingests 
 ```mermaid
 flowchart LR
   user(["End user<br/>[ext]"])
-  aad(["Azure AD<br/>(Microsoft-operated identity provider)<br/>[ext, out of scope — see §0.5]"])
+
+  subgraph msft["Microsoft-operated — out of scope"]
+    aad(["Azure AD<br/>(identity provider)<br/>[ext, OOS]"])
+  end
 
   subgraph cluster["AKS cluster — OmniVec single-tenant trust boundary"]
     direction TB
@@ -83,11 +86,16 @@ flowchart LR
   end
 
   azure(["Azure managed services<br/>CosmosDB · Service Bus · Key Vault · App Insights<br/>[ext]"])
-  foundry(["Azure AI Foundry / Azure OpenAI<br/>(in customer subscription)<br/>[ext, out of scope — see §0.5]"])
+
+  subgraph custsub["Customer Azure subscription — out of scope"]
+    foundry(["Azure AI Foundry / Azure OpenAI<br/>[ext, OOS]"])
+  end
+
   customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext · parser-hardened content path]"])
 
   user -->|sign-in / RAG queries<br/>HTTPS · AAD bearer| api
   user -.->|OIDC sign-in<br/>HTTPS| aad
+  api -.->|JWT validation (JWKS fetch)<br/>HTTPS · public endpoint| aad
   api -->|POST /embed,/parse,/admin (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy allow rule| docgrok
   ingest -->|POST /embed/batch (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy allow rule| docgrok
   api -->|metadata read/write<br/>HTTPS · WIF| azure
@@ -96,6 +104,9 @@ flowchart LR
   ingest -->|change-feed lease · queue<br/>HTTPS · WIF| azure
   ingest -->|read documents/attachments<br/>HTTPS · WIF or SAS| customer
   ingest -->|write vectors<br/>HTTPS · WIF| customer
+
+  style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
+  style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
 > **What this view shows**: the four trust crossings (User→API, In-cluster, OmniVec→Azure, OmniVec→Customer) and which components touch which boundary. Detailed flows are split into scenario diagrams in §3.
@@ -128,13 +139,20 @@ Per reviewer guidance: scenario-focused, request flows only (responses omitted u
 ```mermaid
 flowchart LR
   user(["End user<br/>[ext]"])
-  aad(["Azure AD<br/>(Microsoft-operated)<br/>[ext, out of scope]"])
+
+  subgraph msft["Microsoft-operated — out of scope"]
+    aad(["Azure AD<br/>[ext, OOS]"])
+  end
+
   api["API"]
   search["Search"]
   docgrok["DocGrok"]
   cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
   cvec(["Customer vectors<br/>[ext]"])
-  foundry(["Azure AI Foundry / Azure OpenAI<br/>(customer subscription)<br/>[ext, out of scope]"])
+
+  subgraph custsub["Customer Azure subscription — out of scope"]
+    foundry(["Azure AI Foundry / Azure OpenAI<br/>[ext, OOS]"])
+  end
 
   user -->|"A1 · POST /api/assistant/query<br/>HTTPS (TLS 1.2+ via NGINX) · AAD bearer (Reader)"| api
   api -->|"A2 · GET /common/discovery/v2.0/keys<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
@@ -143,6 +161,9 @@ flowchart LR
   docgrok -->|"A5 · POST /openai/deployments/{name}/embeddings<br/>HTTPS · WIF federated token (or legacy API key)"| foundry
   search -->|"A6 · POST /dbs/{db}/colls/{c}/docs (vector kNN)<br/>HTTPS · WIF · Cosmos data-plane RBAC + source-id ACL"| cvec
   api -->|"A7 · GET /dbs/{db}/colls/{c}/docs (pipeline lookup)<br/>HTTPS · WIF · Cosmos read-only RBAC"| cmeta
+
+  style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
+  style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
 **Flow details — Scenario A**
@@ -199,7 +220,11 @@ flowchart LR
 ```mermaid
 flowchart LR
   admin(["Operator<br/>[ext]"])
-  aad(["Azure AD<br/>(Microsoft-operated)<br/>[ext, out of scope]"])
+
+  subgraph msft["Microsoft-operated — out of scope"]
+    aad(["Azure AD<br/>[ext, OOS]"])
+  end
+
   api["API"]
   cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
   kv(["Key Vault<br/>[ext, Azure-managed]"])
@@ -208,6 +233,8 @@ flowchart LR
   api -->|"C2 · GET /common/discovery/v2.0/keys<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
   api -->|"C3 · POST/PATCH /dbs/{db}/colls/{c}/docs<br/>HTTPS · WIF · Cosmos write on omnivec.metadata"| cmeta
   api -->|"C4 · GET /secrets/{name}<br/>HTTPS to {vault}.vault.azure.net · WIF · Key Vault Secret Reader"| kv
+
+  style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
 **Flow details — Scenario C**
