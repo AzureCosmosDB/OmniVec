@@ -41,23 +41,24 @@ W, H = 100, 100  # default stencil size
 #  0 user (external)         5 Azure managed services (external)
 #  1 Azure AD (external)     6 Customer data plane (external; parser-hardened content path)
 #  2 API (component)         7 Azure AI Foundry / AOAI (external, OOS — customer subscription)
-#  3 DocGrok (component)
+#  3 DocGrok (component)     8 Service caller (external; backend app / script / partner)
 #  4 Ingestion (component)
 ELEMENTS: list[dict] = [
     {"k": "external", "name": "End user (browser)",                                "x": 80,   "y": 540},
     {"k": "external", "name": "Azure AD (login.microsoftonline.com)",              "x": 80,   "y": 240,
         "oos": True, "oos_reason": "Microsoft-operated identity provider in the customer's tenant. OmniVec does not run, secure, configure, or rotate keys for AAD — it only consumes JWTs. Security of AAD itself is Microsoft's and the tenant admin's responsibility."},
-    {"k": "process",  "name": "API\n(user-facing HTTPS, RAG, admin CRUD)",         "x": 600,  "y": 360},
+    {"k": "process",  "name": "API\n(user-facing HTTPS, RAG, admin CRUD; also fronts in-cluster Search)",         "x": 600,  "y": 360},
     {"k": "process",  "name": "DocGrok\n(parsing, embedding orchestration)",       "x": 600,  "y": 720},
     {"k": "process",  "name": "Ingestion\n(change-feed watcher, vector writer)",   "x": 600,  "y": 1080},
     {"k": "external", "name": "Azure managed services\n(CosmosDB, Service Bus, Key Vault, App Insights)", "x": 1200, "y": 360},
     {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1200, "y": 1080},
     {"k": "external", "name": "Azure AI Foundry / Azure OpenAI\n(in customer subscription)", "x": 1200, "y": 720,
-        "oos": True, "oos_reason": "Lives in customer subscription; OmniVec consumes the model endpoint over HTTPS+AAD only. Customer owns model deployment, content filters, network ACLs, and RBAC."},
+        "oos": True, "oos_reason": "Lives in customer subscription; OmniVec consumes the model endpoint over HTTPS via Managed Identity only. Customer owns model deployment, content filters, network ACLs, and RBAC."},
+    {"k": "external", "name": "Service caller\n(backend app / script / partner)", "x": 80, "y": 840},
 ]
 
 TBS: list[dict] = [
-    {"name": "TB-1 Internet (public HTTPS surface)",         "x": 30,   "y": 480, "w": 280,  "h": 200},
+    {"name": "TB-1 Internet (public HTTPS surface)",         "x": 30,   "y": 480, "w": 280,  "h": 520},
     {"name": "TB-1a Microsoft-operated identity (out of scope)", "x": 30, "y": 180, "w": 280, "h": 200},
     {"name": "TB-2 AKS cluster (single tenant)", "x": 540, "y": 280, "w": 480, "h": 1000},
     {"name": "TB-3 Azure managed services", "x": 1170, "y": 280, "w": 380,  "h": 280},
@@ -71,14 +72,15 @@ TBS: list[dict] = [
 FLOWS: list[tuple[int, int, str]] = [
     (0, 2, "Sign-in / RAG queries\nHTTPS · AAD bearer (Reader/Admin)"),
     (0, 1, "OIDC sign-in\nHTTPS · OIDC code flow"),
+    (8, 2, "Programmatic search (Scenario D)\nHTTPS via searchIngress · Bearer scope=search (OmniVec-issued, hashed at rest)"),
     (2, 3, "POST /embed,/parse,/admin (HTTP/1.1, in-cluster)\nX-Admin-Token · NetworkPolicy: api -> docgrok-router"),
     (4, 3, "POST /v1/embed/batch (HTTP/1.1, in-cluster)\nX-Admin-Token · NetworkPolicy: ingestion -> docgrok-router"),
-    (2, 5, "Metadata read/write\nHTTPS · WIF · least-privilege RBAC"),
-    (3, 5, "Model registry / metadata\nHTTPS · WIF"),
-    (3, 7, "Embed call (consume only)\nHTTPS · WIF (preferred) or API key"),
-    (4, 5, "Change-feed lease, queue, telemetry\nHTTPS · WIF"),
-    (4, 6, "Read documents/attachments (third-party content possible)\nHTTPS · WIF or SAS · host allowlist · parser sandbox"),
-    (4, 6, "Write vectors\nHTTPS · WIF · least-privilege RBAC"),
+    (2, 5, "Metadata read/write + search-token lookup\nHTTPS · Managed Identity (UAMI) · least-privilege RBAC"),
+    (3, 5, "Model registry / metadata\nHTTPS · Managed Identity (UAMI)"),
+    (3, 7, "Embed call (consume only)\nHTTPS · Managed Identity (preferred) or API key"),
+    (4, 5, "Change-feed lease, queue, telemetry\nHTTPS · Managed Identity (UAMI)"),
+    (4, 6, "Read documents/attachments (third-party content possible)\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
+    (4, 6, "Write vectors\nHTTPS · Managed Identity (UAMI) · least-privilege RBAC"),
 ]
 
 # --- Helpers ----------------------------------------------------------------
