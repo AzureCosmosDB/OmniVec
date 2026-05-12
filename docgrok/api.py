@@ -31,6 +31,32 @@ TEXT_TYPES = {
 
 app = FastAPI(title="DocGrok", version="6.0.0")
 
+
+# CR/LF/control-char scrubber on root logger — mitigates py/log-injection.
+import logging as _logging
+import re as _re
+
+class _CtrlCharLogFilter(_logging.Filter):
+    _CTRL_RE = _re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]|\r\n|\r|\n')
+
+    @classmethod
+    def _scrub(cls, v):
+        return cls._CTRL_RE.sub(' ', v) if isinstance(v, str) else v
+
+    def filter(self, record):
+        record.msg = self._scrub(str(record.msg))
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: self._scrub(v) for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(self._scrub(a) for a in record.args)
+        return True
+
+
+_logging.getLogger().addFilter(_CtrlCharLogFilter())
+for _h in _logging.getLogger().handlers:
+    _h.addFilter(_CtrlCharLogFilter())
+
 # ---------------------------------------------------------------------------
 # Outbound URL allowlist (mitigates py/full-ssrf, py/partial-ssrf)
 # ---------------------------------------------------------------------------
