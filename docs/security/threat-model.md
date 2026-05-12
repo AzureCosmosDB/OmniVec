@@ -68,64 +68,41 @@ OmniVec is a **single-tenant** retrieval-augmented vector platform that ingests 
 
 ## 2. What we're working on — high-level view
 
-**One diagram, ≤10 shapes, logical view.** Boxes are *logical components* (not pods, not Helm releases). Trust boundaries are red dashed lines. External interactors (outside our security responsibility) are marked `[ext]` with a justification in §0.5.
+**One diagram, 5 shapes, logical view.** Everything OmniVec owns is collapsed into a single black box. Trust boundaries are red dashed lines. External interactors (outside our security responsibility) are marked `[ext]` with a justification in §0.5. Per-component breakdowns live in §3 scenarios.
 
 ```mermaid
 flowchart LR
-  user(["End user<br/>(browser)<br/>[ext]"])
-  app(["Embedded user app<br/>(backend service · script · partner)<br/>[ext]"])
+  callers(["Callers<br/>browser · CLI · embedded user app<br/>[ext]"])
 
   subgraph msft["Microsoft-operated — out of scope"]
     aad(["Azure AD<br/>(identity provider)<br/>[ext, OOS]"])
   end
 
-  subgraph cluster["AKS cluster — OmniVec single-tenant trust boundary"]
-    direction TB
-    api["**API**<br/>(user-facing HTTPS · RAG · admin CRUD)"]
-    search["**Search**<br/>(programmatic endpoint via searchIngress)"]
-    docgrok["**DocGrok**<br/>(parsing · embedding orchestration)"]
-    ingest["**Ingestion**<br/>(change-feed watcher · vector writer)"]
-  end
-
-  azure(["Azure managed services<br/>CosmosDB · Service Bus · Key Vault · App Insights<br/>[ext]"])
+  omnivec["**OmniVec**<br/>(API · Search · DocGrok · Ingestion)<br/>single-tenant in customer AKS"]
 
   subgraph custsub["Customer Azure subscription — out of scope"]
-    foundry(["Azure AI Foundry / Azure OpenAI<br/>[ext, OOS]"])
+    foundry(["Azure OpenAI / Foundry<br/>[ext, OOS]"])
   end
 
-  customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext · parser-hardened content path]"])
+  customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext]"])
 
-  user -->|sign-in / RAG queries<br/>HTTPS · AAD bearer (Reader/Admin)| api
-  user -.->|OIDC sign-in<br/>HTTPS| aad
-  api -.->|JWT validation (JWKS fetch)<br/>HTTPS · public endpoint| aad
-  app -->|"programmatic RAG queries<br/>HTTPS via searchIngress · Bearer scope=search (opaque, hashed in Cosmos)"| search
-  api -->|in-cluster search<br/>HTTP · internal token · NetworkPolicy: api → search| search
-  api -->|POST /embed,/parse,/admin (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy allow rule| docgrok
-  search -->|POST /v1/embed (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy: search → docgrok-router| docgrok
-  ingest -->|POST /embed/batch (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy allow rule| docgrok
-  api -->|metadata read/write + search-token lookup<br/>HTTPS · Managed Identity (UAMI)| azure
-  search -->|search-token validation lookup<br/>HTTPS · Managed Identity (UAMI)| azure
-  docgrok -->|metadata · model registry<br/>HTTPS · Managed Identity (UAMI)| azure
-  docgrok -->|embed call (consume only)<br/>HTTPS · Managed Identity (UAMI) or API key| foundry
-  ingest -->|change-feed lease · queue<br/>HTTPS · Managed Identity (UAMI)| azure
-  ingest -->|read documents/attachments<br/>HTTPS · Managed Identity (UAMI) or SAS| customer
-  ingest -->|write vectors<br/>HTTPS · Managed Identity (UAMI)| customer
-  search -->|vector kNN<br/>HTTPS · Managed Identity (UAMI)| customer
+  callers -->|"queries · admin · token-mint<br/>HTTPS · AAD bearer (browser/CLI) or scope=search bearer (embedded app)"| omnivec
+  callers -.->|OIDC sign-in<br/>HTTPS| aad
+  omnivec -.->|JWT validation (JWKS fetch)<br/>HTTPS · public| aad
+  omnivec -->|"embed call (consume only)<br/>HTTPS · Managed Identity (UAMI) or API key"| foundry
+  omnivec -->|"read documents/attachments · write vectors · change-feed<br/>HTTPS · Managed Identity (UAMI) or SAS · host allowlist"| customer
 
   style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
   style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
-> **What this view shows**: the trust crossings (User→API, **Embedded app→Search**, In-cluster, OmniVec→Azure, OmniVec→Customer) and which components touch which boundary. 10 shapes total (Curzi cap). Detailed flows are split into scenario diagrams in §3.
+> **What this view shows**: the only things OmniVec interacts with — Callers, AAD, customer's Azure OpenAI, and the customer data plane. Everything inside OmniVec (API, Search, DocGrok, Ingestion) is a black box at this level; per-component breakdowns live in §3 scenarios.
 
 **Components**
 
 | Component | Responsibility | Receives external content from |
 |---|---|---|
-| **API** | User-facing HTTP surface; assistant RAG; admin CRUD on pipelines/sources; mints search-scope tokens for embedded apps | End-user query text + admin payloads (TB-1) |
-| **Search** | Vector kNN service. Reached **in-cluster** by the API (Scenario A) and **directly** by embedded apps via `searchIngress` using opaque scope=`search` bearer tokens (Scenario D — *not* AAD) | Embedded-app query text + bearer token (TB-1) |
-| **DocGrok** | Embedding + parsing of customer documents; routes to in-cluster or AOAI embedders | Document bytes from Ingestion (TB-4) |
-| **Ingestion** | Watches customer Cosmos / Blob, fetches attachments, dispatches to DocGrok, writes vectors | Customer Cosmos docs + Blob attachments (TB-4) |
+| **OmniVec (black box)** | API + Search + DocGrok + Ingestion. Validates AAD JWTs (browser/CLI) and opaque `scope=search` bearer tokens (embedded apps). Calls Azure OpenAI to embed; reads/writes the customer data plane. | Callers (TB-1) and Customer documents (TB-4) |
 
 **Trust boundaries**
 
