@@ -35,7 +35,7 @@ Documents assumptions that are not visible on the diagrams.
 
 ### 0.4 Customer assumptions
 
-- Customer **owns** their source CosmosDB / Blob and the destination vector store. Schemas, attachment names, MIME types, and blob URLs in their data are treated as **untrusted input** by OmniVec.
+- Customer **owns** their source CosmosDB / Blob and the destination vector store. The customer trusts their own data; what OmniVec must defend against is **content-level risk** — a third party (an end user, an upstream system) can place a malicious document (crafted PDF/Office/image) into the customer's Blob, or set an attachment URL pointing at an attacker-controlled storage account. Our parsers and SSRF guards must therefore treat document bytes and blob URLs as hostile content (see T-PWK-1, T-CON-2 in §5).
 - Customer is responsible for hardening *their* CosmosDB / Blob accounts (firewall, RBAC, data classification). OmniVec only assumes it can reach them.
 - Customer configures `attachment_blob_account_allowlist` (storage-account hostnames OmniVec is permitted to fetch from). Misconfiguration = open SSRF (see T-CON-2).
 
@@ -83,7 +83,7 @@ flowchart LR
 
   azure(["Azure managed services<br/>CosmosDB · Service Bus · Key Vault · App Insights<br/>[ext]"])
   foundry(["Azure AI Foundry / Azure OpenAI<br/>(in customer subscription)<br/>[ext, out of scope — see §0.5]"])
-  customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext, untrusted input]"])
+  customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext · parser-hardened content path]"])
 
   user -->|sign-in / RAG queries<br/>HTTPS · AAD bearer| api
   user -.->|OIDC sign-in<br/>HTTPS| aad
@@ -101,7 +101,7 @@ flowchart LR
 
 **Components**
 
-| Component | Responsibility | Untrusted input from |
+| Component | Responsibility | External content reaches it from |
 |---|---|---|
 | **API** | User-facing HTTP surface; assistant RAG; admin CRUD on pipelines/sources | Internet (TB-1) |
 | **DocGrok** | Embedding + parsing of customer documents; routes to in-cluster or AOAI embedders | Customer documents (via Ingestion) |
@@ -114,7 +114,7 @@ flowchart LR
 | TB-1 | Internet ↔ API | Public HTTPS surface; AAD as identity provider |
 | TB-2 | Inter-component within cluster | Plain HTTP today; cross-component compromise = lateral movement (mitigated by NetworkPolicy) |
 | TB-3 | AKS ↔ Azure managed services | Workload Identity Federation (HTTPS + AAD), not key-based |
-| TB-4 | OmniVec ↔ customer data plane | Customer data is **untrusted** (schemas, attachment names, MIME types, blob URLs) |
+| TB-4 | OmniVec ↔ customer data plane | Customer-supplied document content and attachment URLs may originate from a third party; parser must assume hostile content (T-PWK-1) and SSRF guard the URL host (T-CON-2) |
 
 ## 3. Scenario diagrams
 
@@ -162,7 +162,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  csrc(["Customer source<br/>CosmosDB / Blob<br/>[ext, untrusted input]"])
+  csrc(["Customer source<br/>CosmosDB / Blob<br/>[ext · parser must assume hostile content]"])
   ingest["Ingestion"]
   sb(["Service Bus<br/>[ext, Azure-managed]"])
   worker["dotnet-worker<br/>(part of Ingestion)"]
@@ -183,8 +183,8 @@ flowchart LR
 
 | # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
 |---|---|---|---|---|---|---|
-| **B1** | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | WIF (federated token) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (untrusted; may contain PII) | T-CON-1 (optional dedicated lease account) |
-| **B2** | Ingestor downloads attachment binaries (PDF/Office/images) referenced by docs | HTTPS to customer Blob endpoint | WIF (federated token) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Untrusted binary content | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning) |
+| **B1** | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | WIF (federated token) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (third-party-supplied content possible; may contain PII) | T-CON-1 (optional dedicated lease account) |
+| **B2** | Ingestor downloads attachment binaries (PDF/Office/images) referenced by docs | HTTPS to customer Blob endpoint | WIF (federated token) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Binary content from a customer-configured (potentially third-party-authored) source | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning), T-PWK-1 (parser sandbox) |
 | **B3** | Ingestor loads pipeline / source definition from OmniVec metadata | HTTPS to Azure Cosmos endpoint | WIF (federated token) | Cosmos data-plane RBAC; **read** scope on `omnivec.metadata` | Pipeline / source records | T-MET-1 |
 | **B4** | Ingestor publishes per-document work items to Service Bus | HTTPS to `*.servicebus.windows.net` | WIF (federated token) | Service Bus RBAC; **send** on per-source topic | Document id + source ref + blob URL (no body) | T-NET-1 (out-of-cluster traffic on TLS) |
 | **B5** | dotnet-worker drains work items from Service Bus | HTTPS to `*.servicebus.windows.net` | WIF (federated token) | Service Bus RBAC; **receive** on per-source subscription | Document id + source ref + blob URL | — |
@@ -272,6 +272,7 @@ Open items only — closed items are the ✅ rows above.
 | 2026-05-11 | Internal (T-SRCH-1, T-NET-1 closure) | Search default switched to `ClusterIP` + new `searchIngress` template; `templates/networkpolicy.yaml` adds default-deny + per-tier allow rules behind `networkPolicy.enabled` toggle | Both threats now ✅ |
 | 2026-05-11 | Reviewer feedback (Curzi-style) | Restructured: added §0 *Threat Model Information* (deployment / identity / networking / customer assumptions), replaced single complex DFD with one ≤10-shape high-level view + 3 scenario diagrams (Search, Ingestion, Admin), two-line flow labels (`purpose` / `how secured`), authorization noted per scenario, external interactors marked `[ext]` with justifications, response flows omitted | Doc now matches DPSS readability guidance |
 | 2026-05-12 | Reviewer follow-up (per-flow detail) | Added flow IDs (A1–A7, B1–B7, C1–C4) on every arrow; added a **Flow Details** table after each scenario with columns: Purpose, Transport, AuthN, AuthZ, Data on the wire, Mitigations (cross-referenced to §5 threats) | Reviewers can now read per-flow security measures without crowding the diagram |
+| 2026-05-12 | Reviewer follow-up (terminology) | Dropped "untrusted input" framing on the customer data plane (the customer trusts their own data). Replaced with the actual concern: third-party-supplied document content + URL hosts must be parser-hardened and SSRF-guarded (links to T-PWK-1, T-CON-2). Updated diagrams, tables, and TM7 stencil text | Avoids implying customer data is hostile; keeps the concrete risk visible |
 
 **To request a Threat Model Review:** upload `threat-model.tm7` + this `.md` via the Threat Modeling Portal ([aka.ms/dpgtrack](https://aka.ms/dpgtrack)). Per DPSS guidance, the review meeting is a 2–3 hour call; this document is sized to fit.
 
