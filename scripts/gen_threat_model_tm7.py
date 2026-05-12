@@ -46,7 +46,7 @@ W, H = 100, 100  # default stencil size
 ELEMENTS: list[dict] = [
     {"k": "external", "name": "End user (browser)",                                "x": 80,   "y": 540},
     {"k": "external", "name": "Azure AD (login.microsoftonline.com)",              "x": 80,   "y": 240,
-        "oos": True, "oos_reason": "Microsoft-operated identity provider; OmniVec only validates JWTs."},
+        "oos": True, "oos_reason": "Microsoft-operated identity provider in the customer's tenant. OmniVec does not run, secure, configure, or rotate keys for AAD — it only consumes JWTs. Security of AAD itself is Microsoft's and the tenant admin's responsibility."},
     {"k": "process",  "name": "API\n(user-facing HTTPS, RAG, admin CRUD)",         "x": 600,  "y": 360},
     {"k": "process",  "name": "DocGrok\n(parsing, embedding orchestration)",       "x": 600,  "y": 720},
     {"k": "process",  "name": "Ingestion\n(change-feed watcher, vector writer)",   "x": 600,  "y": 1080},
@@ -57,7 +57,7 @@ ELEMENTS: list[dict] = [
 ]
 
 TBS: list[dict] = [
-    {"name": "TB-1 Internet / AAD",         "x": 30,   "y": 200, "w": 280,  "h": 460},
+    {"name": "TB-1 Internet (public HTTPS surface)",         "x": 30,   "y": 200, "w": 280,  "h": 460},
     {"name": "TB-2 AKS cluster (single tenant)", "x": 540, "y": 280, "w": 480, "h": 1000},
     {"name": "TB-3 Azure managed services", "x": 1170, "y": 280, "w": 380,  "h": 280},
     {"name": "TB-3a Azure AI Foundry / AOAI (out of scope)", "x": 1170, "y": 640, "w": 380, "h": 220},
