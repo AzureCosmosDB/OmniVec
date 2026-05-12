@@ -47,7 +47,7 @@ async def get_blob_client(config: Dict[str, Any]) -> BlobServiceClient:
     elif config.get("account_url"):
         account_url = _validate_account_url(config["account_url"])
         credential = DefaultAzureCredential()
-        return BlobServiceClient(account_url, credential=credential)  # lgtm[py/full-ssrf]
+        return BlobServiceClient(account_url, credential=credential)
     else:
         raise ValueError("Either connection_string or account_url required")
 

@@ -77,8 +77,14 @@ def set_model_api_key(model_id: str, api_key: str) -> bool:
         with _cache_lock:
             _cache[name] = (api_key, time.time() + _CACHE_TTL)
     except Exception as e:
-        _log_kv_store_failure(model_id, type(e).__name__)
+        # Drop the secret from scope before logging so CodeQL's
+        # py/clear-text-logging-sensitive-data taint analysis can prove the
+        # logger calls below cannot reach the api_key value.
+        exc_type_name = type(e).__name__
+        del api_key
+        _log_kv_store_failure(model_id, exc_type_name)
         return False
+    del api_key
     _log_kv_store_success(model_id)
     return True
 

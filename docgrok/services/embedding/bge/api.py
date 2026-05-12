@@ -123,9 +123,9 @@ def _validate_blob_url(url: str) -> str:
 
 def download_azure_blob(url: str) -> bytes:
     """Download blob using managed identity with timeout."""
-    _validate_blob_url(url)
+    url = _validate_blob_url(url)
     credential = DefaultAzureCredential()
-    blob_client = BlobClient.from_blob_url(url, credential=credential)  # lgtm[py/full-ssrf]
+    blob_client = BlobClient.from_blob_url(url, credential=credential)
     return blob_client.download_blob(timeout=DOWNLOAD_TIMEOUT_SECONDS).readall()
 
 
@@ -185,12 +185,12 @@ async def embed(request: Request):
         # Download text content
         download_start = time.time()
         try:
-            _validate_blob_url(blob_url)
+            blob_url = _validate_blob_url(blob_url)
             if is_azure_blob_url(blob_url):
                 content_bytes = download_azure_blob(blob_url)
             else:
                 async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=False) as client:
-                    resp = await client.get(blob_url)  # lgtm[py/full-ssrf]
+                    resp = await client.get(blob_url)
                     resp.raise_for_status()
                     content_bytes = resp.content
 
