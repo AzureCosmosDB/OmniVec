@@ -118,7 +118,7 @@ flowchart LR
 
 ## 3. Scenario diagrams
 
-Per reviewer guidance: scenario-focused, request flows only (responses omitted unless they cross a new boundary), two-line labels (purpose / how secured), authorization noted.
+Per reviewer guidance: scenario-focused, request flows only (responses omitted unless they cross a new boundary), two-line labels (purpose / how secured), authorization noted. Each scenario is followed by a **Flow Details** table that documents per-flow purpose, transport, authentication, authorization, data sensitivity, and applied mitigations — so the diagram stays readable and the detail lives in text.
 
 ### 3.1 Scenario A — Search / RAG (read path)
 
@@ -135,14 +135,26 @@ flowchart LR
   cvec(["Customer vectors<br/>[ext]"])
   foundry(["Azure AI Foundry / Azure OpenAI<br/>(customer subscription)<br/>[ext, out of scope]"])
 
-  user -->|"RAG query<br/>HTTPS · AAD bearer (Reader)"| api
-  api -->|"validate token<br/>HTTPS · cached JWKS"| aad
-  api -->|"forward query<br/>in-cluster HTTP · NetworkPolicy"| search
-  search -->|"embed query text<br/>in-cluster HTTP · admin token"| docgrok
-  docgrok -->|"embed call (consume only)<br/>HTTPS · WIF (preferred) or API key"| foundry
-  search -->|"vector kNN search<br/>HTTPS · WIF · source-id ACL"| cvec
-  api -->|"pipeline / source lookup<br/>HTTPS · WIF · read-only"| cmeta
+  user -->|"A1 · RAG query<br/>HTTPS · AAD bearer (Reader)"| api
+  api -->|"A2 · validate token<br/>HTTPS · cached JWKS"| aad
+  api -->|"A3 · forward query<br/>in-cluster HTTP · NetworkPolicy"| search
+  search -->|"A4 · embed query text<br/>in-cluster HTTP · admin token"| docgrok
+  docgrok -->|"A5 · embed call (consume only)<br/>HTTPS · WIF or API key"| foundry
+  search -->|"A6 · vector kNN search<br/>HTTPS · WIF · source-id ACL"| cvec
+  api -->|"A7 · pipeline / source lookup<br/>HTTPS · WIF · read-only"| cmeta
 ```
+
+**Flow details — Scenario A**
+
+| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
+|---|---|---|---|---|---|---|
+| **A1** | User submits a natural-language search / RAG question to OmniVec | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (Bearer) validated against tenant JWKS; signature, `aud`, `iss`, `exp` checked | AAD group claim must contain `Reader` or `Admin`; per-source ACL applied downstream | Query text (may contain PII) + Bearer token | T-API-1 (AAD enforced), T-SRCH-1 (TLS at ingress, ClusterIP) |
+| **A2** | API verifies the user's JWT signature against Microsoft's signing keys | HTTPS to `login.microsoftonline.com` (egress) | JWKS endpoint (public); response cached 1 h with `Cache-Control` honored | n/a | JWKS keys (public) | DefenseInDepth: optional cert pin via env var |
+| **A3** | API hands the question to the Search service in the same cluster | In-cluster HTTP (port 8080) | Service-account-derived admin token in header | NetworkPolicy: only `omnivec-api` pods may reach `omnivec-search` | Query text | T-NET-1 (NetworkPolicy default-deny + allow rule) |
+| **A4** | Search asks DocGrok to embed the query text into a vector | In-cluster HTTP (port 8080) | `X-Admin-Token` header (rotated at deploy) | NetworkPolicy: only `omnivec-search` may reach `docgrok-router` | Query text | T-NET-1, T-API-1 (token confined to in-cluster) |
+| **A5** | DocGrok calls **customer's** Azure AI Foundry / AOAI to produce the embedding | HTTPS to `*.openai.azure.com` | WIF (preferred) — federated token; or legacy API key from `omnivec.metadata.docgrok_model.api_key` | RBAC on the AOAI resource (customer-managed); content filters (customer-managed) | Query text → embedding vector | T-MET-1 (legacy keys deprecated; AAD-only model records); out-of-scope: Foundry resource itself |
+| **A6** | Search runs vector kNN against the customer's vector store | HTTPS to customer Cosmos endpoint | WIF (federated token) | Cosmos data-plane RBAC; OmniVec further filters results by source-id ACL in code | Query embedding + retrieved chunks (may contain PII) | T-VEC-1 (PII classification; cascade purge), T-NET-1 |
+| **A7** | API resolves pipeline / source configuration to apply ACL + ranker settings | HTTPS to Azure Cosmos endpoint | WIF (federated token) | Cosmos data-plane RBAC; **read-only** scope on `omnivec.metadata` | Pipeline / source records | T-MET-1 (no key material in records) |
 
 ### 3.2 Scenario B — Ingestion (write path)
 
@@ -158,14 +170,26 @@ flowchart LR
   cvec(["Customer vectors<br/>[ext]"])
   cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
 
-  ingest -->|"change-feed read<br/>HTTPS · WIF · lease per source"| csrc
-  ingest -->|"fetch attachment<br/>HTTPS · WIF or SAS · host allowlist"| csrc
-  ingest -->|"pipeline / source config read<br/>HTTPS · WIF"| cmeta
-  ingest -->|"enqueue work item<br/>HTTPS · WIF · per-source topic"| sb
-  worker -->|"drain topic<br/>HTTPS · WIF"| sb
-  worker -->|"parse + embed batch<br/>in-cluster HTTP · NetworkPolicy"| docgrok
-  worker -->|"write vectors<br/>HTTPS · WIF"| cvec
+  ingest -->|"B1 · change-feed read<br/>HTTPS · WIF · lease per source"| csrc
+  ingest -->|"B2 · fetch attachment<br/>HTTPS · WIF or SAS · host allowlist"| csrc
+  ingest -->|"B3 · pipeline / source config read<br/>HTTPS · WIF"| cmeta
+  ingest -->|"B4 · enqueue work item<br/>HTTPS · WIF · per-source topic"| sb
+  worker -->|"B5 · drain topic<br/>HTTPS · WIF"| sb
+  worker -->|"B6 · parse + embed batch<br/>in-cluster HTTP · NetworkPolicy"| docgrok
+  worker -->|"B7 · write vectors<br/>HTTPS · WIF"| cvec
 ```
+
+**Flow details — Scenario B**
+
+| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
+|---|---|---|---|---|---|---|
+| **B1** | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | WIF (federated token) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (untrusted; may contain PII) | T-CON-1 (optional dedicated lease account) |
+| **B2** | Ingestor downloads attachment binaries (PDF/Office/images) referenced by docs | HTTPS to customer Blob endpoint | WIF (federated token) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Untrusted binary content | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning) |
+| **B3** | Ingestor loads pipeline / source definition from OmniVec metadata | HTTPS to Azure Cosmos endpoint | WIF (federated token) | Cosmos data-plane RBAC; **read** scope on `omnivec.metadata` | Pipeline / source records | T-MET-1 |
+| **B4** | Ingestor publishes per-document work items to Service Bus | HTTPS to `*.servicebus.windows.net` | WIF (federated token) | Service Bus RBAC; **send** on per-source topic | Document id + source ref + blob URL (no body) | T-NET-1 (out-of-cluster traffic on TLS) |
+| **B5** | dotnet-worker drains work items from Service Bus | HTTPS to `*.servicebus.windows.net` | WIF (federated token) | Service Bus RBAC; **receive** on per-source subscription | Document id + source ref + blob URL | — |
+| **B6** | dotnet-worker asks DocGrok to parse + embed a batch | In-cluster HTTP (port 8080) | `X-Admin-Token` header | NetworkPolicy: only `omnivec-dotnet-worker` may reach `docgrok-router` | Parsed text chunks (may contain PII) | T-PWK-1 (subprocess sandbox in DocGrok parser), T-NET-1 |
+| **B7** | dotnet-worker writes resulting vectors to the customer's vector store | HTTPS to customer Cosmos endpoint | WIF (federated token) | Cosmos data-plane RBAC; **write** scope on `e2eblob.vectors` | Embedding vectors + chunk metadata (PII-derived) | T-VEC-1 (cascade-purge endpoint; PII classification) |
 
 ### 3.3 Scenario C — Admin / Configuration
 
@@ -179,11 +203,20 @@ flowchart LR
   cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
   kv(["Key Vault<br/>[ext, Azure-managed]"])
 
-  admin -->|"CRUD pipelines / sources / models<br/>HTTPS · AAD bearer (Admin)"| api
-  api -->|"validate token + group claim<br/>HTTPS · cached JWKS"| aad
-  api -->|"persist config<br/>HTTPS · WIF · write"| cmeta
-  api -->|"resolve secret refs<br/>HTTPS · WIF · read-only"| kv
+  admin -->|"C1 · CRUD pipelines / sources / models<br/>HTTPS · AAD bearer (Admin)"| api
+  api -->|"C2 · validate token + group claim<br/>HTTPS · cached JWKS"| aad
+  api -->|"C3 · persist config<br/>HTTPS · WIF · write"| cmeta
+  api -->|"C4 · resolve secret refs<br/>HTTPS · WIF · read-only"| kv
 ```
+
+**Flow details — Scenario C**
+
+| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
+|---|---|---|---|---|---|---|
+| **C1** | Operator creates/updates/deletes pipelines, sources, model records | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (Bearer) — or breakglass `OMNIVEC_ADMIN_TOKEN` for emergency access | AAD group `Admin` required; admin-token path is audit-logged | Config payloads (may contain secret *refs*, never secret values) | T-API-1 (AAD enforced; admin token = breakglass; audit log) |
+| **C2** | API validates the admin JWT signature + group claim | HTTPS to `login.microsoftonline.com` | JWKS endpoint (public), cached | n/a | JWKS keys (public) | DefenseInDepth |
+| **C3** | API persists config records to OmniVec metadata | HTTPS to Azure Cosmos endpoint | WIF (federated token) | Cosmos data-plane RBAC; **write** scope on `omnivec.metadata` | Config records (refs to secrets only) | T-MET-1 (no API keys persisted in records) |
+| **C4** | API resolves secret references at runtime (never stores secret values) | HTTPS to Key Vault | WIF (federated token) | Key Vault RBAC; **get** scope on a named secret | Secret value (in-memory only) | T-MET-1 |
 
 
 
@@ -238,6 +271,7 @@ Open items only — closed items are the ✅ rows above.
 | 2026-05-11 | Internal (DPSS-style refactor) | Trimmed to 10 boundary threats; collapsed DFD; surfaced T-SRCH-1, T-NET-1, T-SUP-1 from inter-component audit | Ready for SQL Security Review Board submission |
 | 2026-05-11 | Internal (T-SRCH-1, T-NET-1 closure) | Search default switched to `ClusterIP` + new `searchIngress` template; `templates/networkpolicy.yaml` adds default-deny + per-tier allow rules behind `networkPolicy.enabled` toggle | Both threats now ✅ |
 | 2026-05-11 | Reviewer feedback (Curzi-style) | Restructured: added §0 *Threat Model Information* (deployment / identity / networking / customer assumptions), replaced single complex DFD with one ≤10-shape high-level view + 3 scenario diagrams (Search, Ingestion, Admin), two-line flow labels (`purpose` / `how secured`), authorization noted per scenario, external interactors marked `[ext]` with justifications, response flows omitted | Doc now matches DPSS readability guidance |
+| 2026-05-12 | Reviewer follow-up (per-flow detail) | Added flow IDs (A1–A7, B1–B7, C1–C4) on every arrow; added a **Flow Details** table after each scenario with columns: Purpose, Transport, AuthN, AuthZ, Data on the wire, Mitigations (cross-referenced to §5 threats) | Reviewers can now read per-flow security measures without crowding the diagram |
 
 **To request a Threat Model Review:** upload `threat-model.tm7` + this `.md` via the Threat Modeling Portal ([aka.ms/dpgtrack](https://aka.ms/dpgtrack)). Per DPSS guidance, the review meeting is a 2–3 hour call; this document is sized to fit.
 
