@@ -32,46 +32,157 @@ NAME_DATAFLOW_ORDER = "15ccd509-98eb-49ad-b9c2-b4a2926d1780"
 
 W, H = 100, 100  # default stencil size
 
-# --- OmniVec architecture (mirrors threat-model.md §2 — high-level view) ----
+# --- OmniVec architecture (mirrors threat-model.md §2 + §3 scenarios) ------
 # Per reviewer feedback: ≤10 shapes, logical components, two-line flow labels
-# (line 1 = purpose, line 2 = how secured). Detailed per-pod / per-flow views
-# live in the scenario mermaid diagrams in threat-model.md §3.
+# (line 1 = purpose, line 2 = how secured).
 #
-# Indices used by FLOWS:
-#  0 Callers (external — browser, CLI, embedded user app)
-#  1 Azure AD (external, OOS)
-#  2 OmniVec (process — API + Search + DocGrok + Ingestion, single-tenant in customer AKS)
-#  3 Azure OpenAI / Foundry (external, OOS — customer subscription)
-#  4 Customer data plane (external — source CosmosDB/Blob, vectors destination)
-ELEMENTS: list[dict] = [
-    {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)",        "x": 80,   "y": 540},
-    {"k": "external", "name": "Azure AD (login.microsoftonline.com)",              "x": 80,   "y": 200,
-        "oos": True, "oos_reason": "Microsoft-operated identity provider in the customer's tenant. OmniVec does not run, secure, configure, or rotate keys for AAD — it only consumes JWTs. Security of AAD itself is Microsoft's and the tenant admin's responsibility."},
-    {"k": "process",  "name": "OmniVec\n(API, Search, DocGrok, Ingestion)\nsingle-tenant in customer AKS", "x": 700, "y": 540},
-    {"k": "external", "name": "Azure OpenAI / Foundry\n(in customer subscription)", "x": 1300, "y": 200,
-        "oos": True, "oos_reason": "Lives in customer subscription; OmniVec consumes the model endpoint over HTTPS via Managed Identity only. Customer owns model deployment, content filters, network ACLs, and RBAC."},
-    {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1300, "y": 540},
-]
+# Each diagram is its own self-contained dict: { name, out, elements, tbs, flows }.
+# `out` is the basename written to docs/security/.
+# `elements` indices are referenced by 0-based position in the FLOWS tuples.
 
-TBS: list[dict] = [
-    {"name": "TB-1 Internet (callers — public HTTPS surface)",         "x": 30,   "y": 480, "w": 280,  "h": 240},
-    {"name": "TB-1a Microsoft-operated identity (out of scope)",       "x": 30,   "y": 140, "w": 280,  "h": 200},
-    {"name": "TB-2 OmniVec / AKS (single tenant)",                     "x": 600,  "y": 440, "w": 460,  "h": 340},
-    {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1240, "y": 140, "w": 380, "h": 220},
-    {"name": "TB-4 Customer data plane",                               "x": 1240, "y": 480, "w": 380,  "h": 240},
-]
+_AAD_OOS = (
+    "Microsoft-operated identity provider in the customer's tenant. "
+    "OmniVec does not run, secure, configure, or rotate keys for AAD — "
+    "it only consumes JWTs. Security of AAD itself is Microsoft's and "
+    "the tenant admin's responsibility."
+)
+_FOUNDRY_OOS = (
+    "Lives in customer subscription; OmniVec consumes the model endpoint "
+    "over HTTPS via Managed Identity only. Customer owns model deployment, "
+    "content filters, network ACLs, and RBAC."
+)
 
-# Flow label format (two lines, per reviewer guidance):
-#   line 1: purpose / what it does
-#   line 2: how it is secured (protocol · auth · authorization)
-FLOWS: list[tuple[int, int, str]] = [
-    (0, 2, "Queries / admin / token-mint\nHTTPS · AAD bearer (browser/CLI) or scope=search bearer (embedded app)"),
-    (0, 1, "OIDC sign-in\nHTTPS · OIDC code flow"),
-    (2, 1, "JWT validation (JWKS fetch)\nHTTPS · public endpoint · cached 1h"),
-    (2, 3, "Embed call (consume only)\nHTTPS · Managed Identity (UAMI) or API key"),
-    (4, 2, "Read source documents/attachments · change-feed\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
-    (2, 4, "Write embeddings/vectors\nHTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"),
-]
+
+# ---------- Diagram 1: Overall (5-shape) — matches threat-model.md §2 -------
+DIAG_OVERALL = {
+    "name": "OmniVec — Overall (high-level)",
+    "out": "threat-model.tm7",
+    "elements": [
+        {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)",            "x": 80,   "y": 540},
+        {"k": "external", "name": "Azure AD (login.microsoftonline.com)",                  "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        {"k": "process",  "name": "OmniVec\n(API, Search, DocGrok, Ingestion)\nsingle-tenant in customer AKS", "x": 700, "y": 540},
+        {"k": "external", "name": "Azure OpenAI / Foundry\n(in customer subscription)",    "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1300, "y": 540},
+    ],
+    "tbs": [
+        {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
+        {"name": "TB-1a Microsoft-operated identity (out of scope)",        "x": 30,   "y": 140, "w": 280,  "h": 200},
+        {"name": "TB-2 OmniVec / AKS (single tenant)",                      "x": 600,  "y": 440, "w": 460,  "h": 340},
+        {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1240, "y": 140, "w": 380, "h": 220},
+        {"name": "TB-4 Customer data plane",                                "x": 1240, "y": 480, "w": 380,  "h": 240},
+    ],
+    "flows": [
+        (0, 2, "Queries / admin / token-mint\nHTTPS · AAD bearer (browser/CLI) or scope=search bearer (embedded app)"),
+        (0, 1, "OIDC sign-in\nHTTPS · OIDC code flow"),
+        (2, 1, "JWT validation (JWKS fetch)\nHTTPS · public endpoint · cached 1h"),
+        (2, 3, "Embed call (consume only)\nHTTPS · Managed Identity (UAMI) or API key"),
+        (4, 2, "Read source documents/attachments · change-feed\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
+        (2, 4, "Write embeddings/vectors\nHTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"),
+    ],
+}
+
+
+# ---------- Diagram 2: User control plane — matches §3.2 -------------------
+# Indices: 0 callers, 1 aad, 2 web, 3 api, 4 cmeta, 5 kv
+DIAG_CONTROL = {
+    "name": "OmniVec — User control plane",
+    "out": "threat-model-control.tm7",
+    "elements": [
+        {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)", "x": 80,   "y": 540},
+        {"k": "external", "name": "Azure AD",                                   "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        {"k": "process",  "name": "Web\n(UI static assets)",                    "x": 480,  "y": 380},
+        {"k": "process",  "name": "API\n(admin CRUD · token mint)",             "x": 480,  "y": 700},
+        {"k": "store",    "name": "CosmosDB metadata\nomnivec.metadata + tokens", "x": 1100, "y": 540},
+        {"k": "store",    "name": "Key Vault",                                  "x": 1100, "y": 880},
+    ],
+    "tbs": [
+        {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
+        {"name": "TB-1a Microsoft-operated identity (out of scope)",        "x": 30,   "y": 140, "w": 280,  "h": 200},
+        {"name": "TB-2 OmniVec / AKS (single tenant)",                      "x": 420,  "y": 320, "w": 320,  "h": 600},
+        {"name": "TB-3 Azure managed services (Cosmos · Key Vault)",        "x": 1040, "y": 480, "w": 320,  "h": 540},
+    ],
+    "flows": [
+        (0, 2, "U1 · GET / (UI assets)\nHTTPS · static, no auth"),
+        (0, 1, "U2 · OIDC sign-in (browser)\nHTTPS · OIDC code flow + PKCE"),
+        (0, 3, "U3 · {GET,POST,PUT,DELETE} /api/* (admin CRUD · token mint)\nHTTPS · AAD JWT or scope=admin bearer · role: Admin/Reader"),
+        (3, 1, "U4 · JWKS validation\nHTTPS to login.microsoftonline.com · cached 1h"),
+        (3, 4, "U5 · {read,write} omnivec.metadata + tokens\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC · tokens hashed (SHA-256)"),
+        (3, 5, "U6 · GET /secrets/{name}\nHTTPS · Managed Identity (UAMI) · Key Vault Secret Reader"),
+    ],
+}
+
+
+# ---------- Diagram 3: Search read path — matches §3.3 ---------------------
+# Indices: 0 callers, 1 aad, 2 api, 3 search, 4 docgrok, 5 foundry, 6 cmeta, 7 cvec
+DIAG_SEARCH = {
+    "name": "OmniVec — Search read path",
+    "out": "threat-model-search.tm7",
+    "elements": [
+        {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)", "x": 80,   "y": 540},
+        {"k": "external", "name": "Azure AD",                                   "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        {"k": "process",  "name": "API\n(query proxy)",                         "x": 480,  "y": 380},
+        {"k": "process",  "name": "Search\n(direct via searchIngress)",         "x": 480,  "y": 700},
+        {"k": "process",  "name": "DocGrok\n(router + embedder)",               "x": 880,  "y": 540},
+        {"k": "external", "name": "Azure OpenAI / Foundry\n(customer subscription)", "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        {"k": "store",    "name": "CosmosDB metadata\ntokens partition (SHA-256)", "x": 1300, "y": 540},
+        {"k": "store",    "name": "Customer vectors",                           "x": 1300, "y": 880},
+    ],
+    "tbs": [
+        {"name": "TB-1 Internet (callers — public HTTPS surface)",            "x": 30,   "y": 480, "w": 280,  "h": 240},
+        {"name": "TB-1a Microsoft-operated identity (out of scope)",          "x": 30,   "y": 140, "w": 280,  "h": 200},
+        {"name": "TB-2 OmniVec / AKS (single tenant)",                        "x": 420,  "y": 320, "w": 540,  "h": 600},
+        {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1240, "y": 140, "w": 380, "h": 220},
+        {"name": "TB-4 Customer data plane / metadata",                       "x": 1240, "y": 480, "w": 380,  "h": 540},
+    ],
+    "flows": [
+        (0, 2, "S1 · POST /api/assistant/query (browser/CLI)\nHTTPS · AAD JWT (Reader/Admin) or scope=admin bearer"),
+        (0, 3, "S2 · POST /api/search (programmatic)\nHTTPS via dedicated searchIngress · scope=search bearer (opaque)"),
+        (2, 1, "S3 · JWKS validation\nHTTPS to login.microsoftonline.com · cached 1h"),
+        (2, 3, "S4 · in-cluster /v1/search\nHTTP · X-Admin-Token · NetworkPolicy: api → search"),
+        (3, 6, "S5 · token verify (SHA-256 lookup)\nHTTPS · Managed Identity (UAMI) · read-only on tokens partition"),
+        (3, 4, "S6 · POST /v1/embed (in-cluster)\nHTTP · X-Admin-Token · NetworkPolicy: search → docgrok-router"),
+        (4, 5, "S7 · POST /openai/deployments/{name}/embeddings\nHTTPS · Managed Identity (UAMI) or legacy API key"),
+        (3, 7, "S8 · vector kNN (POST /dbs/{db}/colls/{c}/docs)\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC + source-id ACL"),
+    ],
+}
+
+
+# ---------- Diagram 4: Ingestion / embedding — matches §3.4 ----------------
+# Indices: 0 csrc, 1 cmeta, 2 ingest, 3 sb, 4 worker, 5 docgrok, 6 foundry, 7 cvec
+DIAG_INGEST = {
+    "name": "OmniVec — Ingestion / embedding data plane",
+    "out": "threat-model-ingestion.tm7",
+    "elements": [
+        {"k": "store",    "name": "Customer source\nCosmosDB / Blob",          "x": 80,   "y": 540},
+        {"k": "store",    "name": "CosmosDB metadata\npipeline / source / model (read-only)", "x": 80,   "y": 200},
+        {"k": "process",  "name": "Ingestion\n(change-feed watcher · queue producer)", "x": 480,  "y": 540},
+        {"k": "store",    "name": "Service Bus",                                "x": 880,  "y": 200},
+        {"k": "process",  "name": "dotnet-worker\n(queue consumer)",            "x": 880,  "y": 540},
+        {"k": "process",  "name": "DocGrok\n(router + parser sandbox + embedder)", "x": 880,  "y": 880},
+        {"k": "external", "name": "Azure OpenAI / Foundry\n(customer subscription)", "x": 1300, "y": 880, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        {"k": "store",    "name": "Customer vectors destination\ne2eblob.vectors / pgvector", "x": 1300, "y": 540},
+    ],
+    "tbs": [
+        {"name": "TB-4 Customer data plane (source · vectors)",               "x": 30,   "y": 480, "w": 280,  "h": 240},
+        {"name": "TB-3 Azure managed services (Cosmos · Service Bus)",        "x": 30,   "y": 140, "w": 280,  "h": 200},
+        {"name": "TB-2 OmniVec / AKS (single tenant)",                        "x": 420,  "y": 140, "w": 540,  "h": 880},
+        {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1240, "y": 820, "w": 380, "h": 200},
+        {"name": "TB-4b Customer vectors destination",                        "x": 1240, "y": 480, "w": 380,  "h": 240},
+    ],
+    "flows": [
+        (0, 2, "I1 · GET /_changefeed (source docs)\nHTTPS · Managed Identity (UAMI) · Cosmos read on source + lease container"),
+        (0, 2, "I2 · GET attachment blob (PDF/Office/image)\nHTTPS · UAMI or SAS · attachment_blob_account_allowlist"),
+        (1, 2, "I3 · GET pipeline/source/model record\nHTTPS · UAMI · Cosmos read-only on omnivec.metadata"),
+        (2, 3, "I4 · POST topics/{source}/messages\nHTTPS to *.servicebus.windows.net · UAMI · SB Send"),
+        (3, 4, "I5 · receive subs/{source}/messages\nHTTPS · UAMI · SB Receive"),
+        (4, 5, "I6 · POST /v1/embed/batch (in-cluster)\nHTTP · X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"),
+        (5, 6, "I7 · POST /openai/deployments/{name}/embeddings\nHTTPS · Managed Identity (UAMI) or legacy API key"),
+        (4, 7, "I8 · PATCH /dbs/{db}/colls/{c}/docs (vector upsert)\nHTTPS · UAMI · Cosmos write on e2eblob.vectors"),
+    ],
+}
+
+
+DIAGRAMS: list[dict] = [DIAG_OVERALL, DIAG_CONTROL, DIAG_SEARCH, DIAG_INGEST]
 
 # --- Helpers ----------------------------------------------------------------
 _zid = [200]  # start above the template KB's max z:Id (~78)
@@ -221,35 +332,36 @@ def replace_block(s: str, opening_tag_re: str, close_tag: str, new_inner: str) -
     return s[:open_end] + new_inner + s[close_start:]
 
 
-def main() -> None:
-    template_path = Path(os.environ.get(
-        "OMNIVEC_TM7_TEMPLATE",
-        r"C:\Users\prsasatt\Downloads\CmasBoA-ThreatModel 2025-01-20 (2).tm7",
-    ))
-    if not template_path.exists():
-        raise SystemExit(
-            f"Template tm7 not found: {template_path}\n"
-            "Set OMNIVEC_TM7_TEMPLATE to a known-good .tm7 file."
-        )
-    out = Path(__file__).resolve().parent.parent / "docs" / "security" / "threat-model.tm7"
+def build_one(template_text: str, diagram: dict) -> str:
+    """Render a single diagram into a complete .tm7 string."""
+    # Reset z:Id counter so each diagram starts from a clean baseline.
+    _zid[0] = 200
 
-    s = template_path.read_text(encoding="utf-8")
+    # Reset element GUIDs (shape_xml stamps `_guid` on each element dict).
+    for el in diagram["elements"]:
+        el.pop("_guid", None)
 
-    borders = "".join(shape_xml(e) for e in ELEMENTS) + "".join(boundary_xml(t) for t in TBS)
+    elements = diagram["elements"]
+    tbs = diagram["tbs"]
+    flows = diagram["flows"]
+    name = diagram["name"]
+
+    borders = "".join(shape_xml(e) for e in elements) + "".join(boundary_xml(t) for t in tbs)
     lines = []
-    for src, dst, label in FLOWS:
-        sg = ELEMENTS[src]["_guid"]
-        dg = ELEMENTS[dst]["_guid"]
-        sx = ELEMENTS[src]["x"] + W // 2
-        sy = ELEMENTS[src]["y"] + H // 2
-        dx = ELEMENTS[dst]["x"] + W // 2
-        dy = ELEMENTS[dst]["y"] + H // 2
+    for src, dst, label in flows:
+        sg = elements[src]["_guid"]
+        dg = elements[dst]["_guid"]
+        sx = elements[src]["x"] + W // 2
+        sy = elements[src]["y"] + H // 2
+        dx = elements[dst]["x"] + W // 2
+        dy = elements[dst]["y"] + H // 2
         lines.append(line_xml(sg, dg, label, sx, sy, dx, dy))
     lines_inner = "".join(lines)
 
+    s = template_text
     s = replace_block(s, r"<Borders[^>]*>", "</Borders>", borders)
     s = replace_block(s, r"<Lines[^>]*>",   "</Lines>",   lines_inner)
-    s = re.sub(r"<Header>[^<]*</Header>", "<Header>OmniVec</Header>", s, count=1)
+    s = re.sub(r"<Header>[^<]*</Header>", f"<Header>{escape(name)}</Header>", s, count=1)
 
     new_meta = (
         "<MetaInformation>"
@@ -259,7 +371,7 @@ def main() -> None:
         "<HighLevelSystemDescription>OmniVec ingests customer documents from CosmosDB / Blob sources, extracts text via docgrok-router, embeds via Azure OpenAI or in-cluster models (CLIP / BGE / DSE-Qwen2), and stores vectors in CosmosDB for similarity search served by omnivec-search. Browser UI served by omnivec-web with AAD SSO; admin and CLI use a bearer token to omnivec-api.</HighLevelSystemDescription>"
         "<Owner>OmniVec Team</Owner>"
         "<Reviewer>OmniVec Team</Reviewer>"
-        "<ThreatModelName>OmniVec</ThreatModelName>"
+        f"<ThreatModelName>{escape(name)}</ThreatModelName>"
         "</MetaInformation>"
     )
     s = re.sub(r"<MetaInformation>.*?</MetaInformation>", new_meta, s, count=1, flags=re.DOTALL)
@@ -276,14 +388,37 @@ def main() -> None:
         r'(<a:anyType i:type="b:StringDisplayAttribute"[^>]*>'
         r"<b:DisplayName>Name</b:DisplayName><b:Name/>"
         r'<b:Value i:type="c:string"[^>]*>)[^<]*(</b:Value>)',
-        r"\1OmniVec System\2",
+        rf"\1{escape(name)}\2",
         s, count=1,
     )
+    return s
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(s, encoding="utf-8")
-    print(f"wrote {out} ({len(s):,} bytes)")
-    print(f"elements={len(ELEMENTS)} trust-boundaries={len(TBS)} flows={len(FLOWS)}")
+
+def main() -> None:
+    template_path = Path(os.environ.get(
+        "OMNIVEC_TM7_TEMPLATE",
+        r"C:\Users\prsasatt\Downloads\CmasBoA-ThreatModel 2025-01-20 (2).tm7",
+    ))
+    if not template_path.exists():
+        raise SystemExit(
+            f"Template tm7 not found: {template_path}\n"
+            "Set OMNIVEC_TM7_TEMPLATE to a known-good .tm7 file."
+        )
+    out_dir = Path(__file__).resolve().parent.parent / "docs" / "security"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    template_text = template_path.read_text(encoding="utf-8")
+
+    for diagram in DIAGRAMS:
+        rendered = build_one(template_text, diagram)
+        out = out_dir / diagram["out"]
+        out.write_text(rendered, encoding="utf-8")
+        print(
+            f"wrote {out} ({len(rendered):,} bytes) — "
+            f"elements={len(diagram['elements'])} "
+            f"trust-boundaries={len(diagram['tbs'])} "
+            f"flows={len(diagram['flows'])}"
+        )
 
 
 if __name__ == "__main__":
