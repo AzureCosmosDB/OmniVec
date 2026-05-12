@@ -39,7 +39,7 @@ W, H = 100, 100  # default stencil size
 #
 # Indices used by FLOWS:
 #  0 user (external)         5 Azure managed services (external)
-#  1 Azure AD (external)     6 Customer data plane (external, untrusted)
+#  1 Azure AD (external)     6 Customer data plane (external; parser-hardened content path)
 #  2 API (component)         7 Azure AI Foundry / AOAI (external, OOS — customer subscription)
 #  3 DocGrok (component)
 #  4 Ingestion (component)
@@ -61,7 +61,7 @@ TBS: list[dict] = [
     {"name": "TB-2 AKS cluster (single tenant)", "x": 540, "y": 280, "w": 480, "h": 1000},
     {"name": "TB-3 Azure managed services", "x": 1170, "y": 280, "w": 380,  "h": 280},
     {"name": "TB-3a Azure AI Foundry / AOAI (out of scope)", "x": 1170, "y": 640, "w": 380, "h": 220},
-    {"name": "TB-4 Customer data plane (untrusted input)", "x": 1170, "y": 1000, "w": 380, "h": 280},
+    {"name": "TB-4 Customer data plane (parser-hardened content path)", "x": 1170, "y": 1000, "w": 380, "h": 280},
 ]
 
 # Flow label format (two lines, per reviewer guidance):
@@ -76,7 +76,7 @@ FLOWS: list[tuple[int, int, str]] = [
     (3, 5, "Model registry / metadata\nHTTPS · WIF"),
     (3, 7, "Embed call (consume only)\nHTTPS · WIF (preferred) or API key"),
     (4, 5, "Change-feed lease, queue, telemetry\nHTTPS · WIF"),
-    (4, 6, "Read documents/attachments (untrusted)\nHTTPS · WIF or SAS · host allowlist"),
+    (4, 6, "Read documents/attachments (third-party content possible)\nHTTPS · WIF or SAS · host allowlist · parser sandbox"),
     (4, 6, "Write vectors\nHTTPS · WIF · least-privilege RBAC"),
 ]
 
