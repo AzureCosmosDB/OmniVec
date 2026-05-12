@@ -225,13 +225,17 @@ flowchart LR
 
 > **Audience:** data-plane / SRE reviewers. Shows how customer documents become embeddings and land in the customer's vector store. **No user identities, no AAD, no API ingress on this path** — everything runs unattended under workload identities.
 >
+> **Two processing modes** (per `pipeline.processing_mode`):
+> - **`queue` (default)** — Ingestor enqueues work to Service Bus; `dotnet-worker` drains, asks DocGrok to embed, writes to a separate vectors destination. Higher latency, higher throughput, decoupled retry. Flows **I1–I8**.
+> - **`inline`** — Ingestor calls DocGrok directly and **patches the source document** with the embedding (source = destination; no Service Bus, no `dotnet-worker`). Lower latency, no queue overhead, suitable when source and destination are the same Cosmos container. Flows **I1–I3, I9–I11** (skips I4–I8).
+>
 > **Authorization:** every flow uses Managed Identity (UAMI). The customer's RBAC on their own CosmosDB / Blob / Service Bus *is* the authorization boundary; OmniVec applies host-allowlists for SSRF and a parser sandbox for hostile content.
 
 ```mermaid
 flowchart LR
   csrc(["Customer source<br/>CosmosDB / Blob<br/>[ext · hostile content assumed]"])
   cmeta(["CosmosDB metadata<br/>pipeline / source / model config<br/>[ext, Azure-managed · read-only here]"])
-  ingest["Ingestion<br/>(change-feed watcher + queue producer)"]
+  ingest["Ingestion<br/>(change-feed watcher · queue producer · inline embedder)"]
   sb(["Service Bus<br/>[ext, Azure-managed]"])
   worker["dotnet-worker<br/>(queue consumer)"]
   docgrok["DocGrok<br/>(router + pipeline-worker · parser sandbox)"]
@@ -244,29 +248,39 @@ flowchart LR
   csrc -->|"I1 · GET /dbs/{db}/colls/{c}/_changefeed (source docs)<br/>HTTPS · Managed Identity (UAMI) · Cosmos read on source + lease container"| ingest
   csrc -->|"I2 · GET attachment blob (PDF/Office/image)<br/>HTTPS · UAMI or SAS · attachment_blob_account_allowlist"| ingest
   cmeta -->|"I3 · GET pipeline/source/model record<br/>HTTPS · UAMI · Cosmos read-only on omnivec.metadata"| ingest
-  ingest -->|"I4 · POST topics/{source}/messages<br/>HTTPS to *.servicebus.windows.net · UAMI · SB Send"| sb
-  sb -->|"I5 · receive subs/{source}/messages<br/>HTTPS · UAMI · SB Receive"| worker
-  worker -->|"I6 · POST /v1/embed/batch (in-cluster)<br/>HTTP · X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"| docgrok
+
+  ingest -->|"I4 [queue] · POST topics/{source}/messages<br/>HTTPS to *.servicebus.windows.net · UAMI · SB Send"| sb
+  sb -->|"I5 [queue] · receive subs/{source}/messages<br/>HTTPS · UAMI · SB Receive"| worker
+  worker -->|"I6 [queue] · POST /v1/embed/batch (in-cluster)<br/>HTTP · X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"| docgrok
   docgrok -->|"I7 · POST /openai/deployments/{name}/embeddings<br/>HTTPS · UAMI access token (or legacy API key)"| foundry
-  worker -->|"I8 · PATCH /dbs/{db}/colls/{c}/docs (vector upsert)<br/>HTTPS · UAMI · Cosmos write on e2eblob.vectors"| cvec
+  worker -->|"I8 [queue] · PATCH /dbs/{db}/colls/{c}/docs (vector upsert)<br/>HTTPS · UAMI · Cosmos write on e2eblob.vectors"| cvec
+
+  ingest -.->|"I9 [inline] · POST /v1/embed (in-cluster)<br/>HTTP · X-Admin-Token · NetworkPolicy: ingestion → docgrok-router"| docgrok
+  ingest -.->|"I10 [inline] · PATCH /dbs/{db}/colls/{c}/docs (embed inline into source doc)<br/>HTTPS · UAMI · Cosmos write on source container"| csrc
+  ingest -.->|"I11 [inline · optional] · PATCH /dbs/{db}/colls/{c}/docs (vector upsert to separate destination)<br/>HTTPS · UAMI · Cosmos write on e2eblob.vectors"| cvec
 
   style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
-> **Note:** the **same** `docgrok → foundry` hop (I6 → I7) is reused by Search to embed query text on the read path (see §3.3 flows S6 → S7). Threats on this hop apply to both directions.
+> **Note 1 (shared embed hop):** the **same** `docgrok → foundry` hop (I7) is reused on **all three** embed paths — queue (I6 → I7), inline (I9 → I7), and Search read path (S6 → S7). Threats on this hop apply uniformly.
+>
+> **Note 2 (inline-mode write target):** in inline mode, the default is to write the embedding back into the *source* document (I10), so `csrc` becomes its own destination. A pipeline can also be configured to write to a separate destination container (I11) — same UAMI, same Cosmos RBAC, same threats as I8.
 
 **Flow details — Ingestion / embedding**
 
-| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
-|---|---|---|---|---|---|---|
-| **I1** | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (third-party-supplied content possible; may contain PII) | T-CON-1 (optional dedicated lease account) |
-| **I2** | Ingestor downloads attachment binaries referenced by docs | HTTPS to customer Blob endpoint | Managed Identity (UAMI) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Binary content from a customer-configured (potentially third-party-authored) source | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning), T-PWK-1 (parser sandbox) |
-| **I3** | Ingestor loads pipeline / source / model definition from OmniVec metadata | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read** scope on `omnivec.metadata` | Pipeline / source records (refs only) | T-MET-1 |
-| **I4** | Ingestor publishes per-document work items to Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **send** on per-source topic | Document id + source ref + blob URL (no body) | T-NET-1 (out-of-cluster traffic on TLS) |
-| **I5** | dotnet-worker drains work items from Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **receive** on per-source subscription | Document id + source ref + blob URL | — |
-| **I6** | dotnet-worker (and Search, on the read path) asks DocGrok to parse and/or embed | In-cluster HTTP (port 8080) | `X-Admin-Token` header (rotated at deploy) | NetworkPolicy: only `omnivec-dotnet-worker` / `omnivec-search` may reach `docgrok-router` | Parsed text chunks (may contain PII) | T-PWK-1 (subprocess sandbox in DocGrok parser), T-NET-1 |
-| **I7** | DocGrok calls **customer's** Azure OpenAI / Foundry to produce the embedding | HTTPS to `*.openai.azure.com` | Managed Identity (UAMI, preferred); or legacy API key from `omnivec.metadata.docgrok_model.api_key` | RBAC on the AOAI resource (customer-managed); content filters (customer-managed) | Text → embedding vector | T-MET-1 (legacy keys deprecated; AAD-only model records), T-RL-1 (per-deployment embed semaphore); out-of-scope: Foundry resource itself |
-| **I8** | dotnet-worker writes resulting vectors to the customer's vector store | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on `e2eblob.vectors` | Embedding vectors + chunk metadata (PII-derived) | T-VEC-1 (cascade-purge endpoint; PII classification) |
+| # | Mode | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
+|---|---|---|---|---|---|---|---|
+| **I1** | both | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (third-party-supplied content possible; may contain PII) | T-CON-1 (optional dedicated lease account) |
+| **I2** | both | Ingestor downloads attachment binaries referenced by docs | HTTPS to customer Blob endpoint | Managed Identity (UAMI) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Binary content from a customer-configured (potentially third-party-authored) source | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning), T-PWK-1 (parser sandbox) |
+| **I3** | both | Ingestor loads pipeline / source / model definition from OmniVec metadata | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read** scope on `omnivec.metadata` | Pipeline / source records (refs only) | T-MET-1 |
+| **I4** | queue | Ingestor publishes per-document work items to Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **send** on per-source topic | Document id + source ref + blob URL (no body) | T-NET-1 (out-of-cluster traffic on TLS) |
+| **I5** | queue | dotnet-worker drains work items from Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **receive** on per-source subscription | Document id + source ref + blob URL | — |
+| **I6** | queue | dotnet-worker asks DocGrok to parse and embed a batch | In-cluster HTTP (port 8080) | `X-Admin-Token` header (rotated at deploy) | NetworkPolicy: only `omnivec-dotnet-worker` may reach `docgrok-router` | Parsed text chunks (may contain PII) | T-PWK-1 (subprocess sandbox in DocGrok parser), T-NET-1 |
+| **I7** | both | DocGrok calls **customer's** Azure OpenAI / Foundry to produce the embedding (shared with I6, I9, S6) | HTTPS to `*.openai.azure.com` | Managed Identity (UAMI, preferred); or legacy API key from `omnivec.metadata.docgrok_model.api_key` | RBAC on the AOAI resource (customer-managed); content filters (customer-managed) | Text → embedding vector | T-MET-1 (legacy keys deprecated; AAD-only model records), T-RL-1 (per-deployment embed semaphore); out-of-scope: Foundry resource itself |
+| **I8** | queue | dotnet-worker writes resulting vectors to the customer's vector store | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on `e2eblob.vectors` | Embedding vectors + chunk metadata (PII-derived) | T-VEC-1 (cascade-purge endpoint; PII classification) |
+| **I9** | inline | Ingestor itself asks DocGrok to embed (no queue, no worker) | In-cluster HTTP (port 8080) | `X-Admin-Token` header | NetworkPolicy: only `omnivec-ingestion` may reach `docgrok-router` | Parsed text chunks (may contain PII) | T-PWK-1, T-NET-1; **inline-mode-specific:** failures are not retried via queue, so transient DocGrok / Foundry errors bubble straight to the change-feed checkpoint and are retried only on the next poll |
+| **I10** | inline | Ingestor patches the **source document** in-place with the embedding (source = destination) | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on the *source* container (broader than queue mode, which only writes to the vectors destination) | Embedding vectors + chunk metadata patched onto source doc | T-VEC-1; **inline-mode-specific:** broader write surface — UAMI now needs Cosmos write on source data, not just destination |
+| **I11** | inline (opt.) | Ingestor writes vectors to a separate destination (when configured) | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on `e2eblob.vectors` | Embedding vectors + chunk metadata | T-VEC-1 (same as I8) |
 
 
 

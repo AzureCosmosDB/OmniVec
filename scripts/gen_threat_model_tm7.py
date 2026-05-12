@@ -173,11 +173,14 @@ DIAG_INGEST = {
         (0, 2, "I1 · GET /_changefeed (source docs)\nHTTPS · Managed Identity (UAMI) · Cosmos read on source + lease container"),
         (0, 2, "I2 · GET attachment blob (PDF/Office/image)\nHTTPS · UAMI or SAS · attachment_blob_account_allowlist"),
         (1, 2, "I3 · GET pipeline/source/model record\nHTTPS · UAMI · Cosmos read-only on omnivec.metadata"),
-        (2, 3, "I4 · POST topics/{source}/messages\nHTTPS to *.servicebus.windows.net · UAMI · SB Send"),
-        (3, 4, "I5 · receive subs/{source}/messages\nHTTPS · UAMI · SB Receive"),
-        (4, 5, "I6 · POST /v1/embed/batch (in-cluster)\nHTTP · X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"),
+        (2, 3, "I4 [queue] · POST topics/{source}/messages\nHTTPS to *.servicebus.windows.net · UAMI · SB Send"),
+        (3, 4, "I5 [queue] · receive subs/{source}/messages\nHTTPS · UAMI · SB Receive"),
+        (4, 5, "I6 [queue] · POST /v1/embed/batch (in-cluster)\nHTTP · X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"),
         (5, 6, "I7 · POST /openai/deployments/{name}/embeddings\nHTTPS · Managed Identity (UAMI) or legacy API key"),
-        (4, 7, "I8 · PATCH /dbs/{db}/colls/{c}/docs (vector upsert)\nHTTPS · UAMI · Cosmos write on e2eblob.vectors"),
+        (4, 7, "I8 [queue] · PATCH /dbs/{db}/colls/{c}/docs (vector upsert to destination)\nHTTPS · UAMI · Cosmos write on e2eblob.vectors"),
+        (2, 5, "I9 [inline] · POST /v1/embed (in-cluster)\nHTTP · X-Admin-Token · NetworkPolicy: ingestion → docgrok-router"),
+        (2, 0, "I10 [inline] · PATCH source doc (embed inline; source = destination)\nHTTPS · UAMI · Cosmos write on source container"),
+        (2, 7, "I11 [inline · optional] · PATCH /dbs/{db}/colls/{c}/docs (vector upsert to separate destination)\nHTTPS · UAMI · Cosmos write on e2eblob.vectors"),
     ],
 }
 
