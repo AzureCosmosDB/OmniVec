@@ -116,162 +116,157 @@ flowchart LR
 
 ## 3. Scenario diagrams
 
-Per reviewer guidance: scenario-focused, request flows only (responses omitted unless they cross a new boundary), two-line labels (purpose / how secured), authorization noted. Each scenario is followed by a **Flow Details** table that documents per-flow purpose, transport, authentication, authorization, data sensitivity, and applied mitigations — so the diagram stays readable and the detail lives in text.
+Four views, each focused on a distinct audience. Per reviewer guidance: request flows only (responses omitted unless they cross a new boundary), two-line labels (purpose / how secured), authorization noted. Each scenario is followed by a **Flow Details** table that documents per-flow purpose, transport, authentication, authorization, data sensitivity, and applied mitigations.
 
-### 3.1 Scenario A — Search / RAG (read path)
+| # | View | Audience | What it shows | What it hides |
+|---|---|---|---|---|
+| **3.1** | Overall (5-shape) | Exec / SQL board | OmniVec as a black box vs. its 4 external interactors | All internals |
+| **3.2** | User control plane | App-sec / API reviewers | Callers, AAD, Web, API, metadata, Key Vault — admin CRUD, token mint, sign-in, secret resolve | Search, Ingestion, DocGrok, Foundry |
+| **3.3** | Search read path | App-sec / API reviewers | Browser-side search via API **and** programmatic search via `searchIngress`; embed hop to DocGrok / Foundry | Ingestion, dotnet-worker, customer source data |
+| **3.4** | Ingestion / embedding data plane | Data-plane / SRE reviewers | Customer source → Ingestor → Service Bus → dotnet-worker → DocGrok → Foundry → customer vectors | Callers, AAD, Web, API |
 
-> **Authorization:** all flows from user require an AAD bearer in the `Reader` or `Admin` group. Search results are filtered by source-id ACL.
+### 3.1 Overall (high-level view)
+
+The 5-shape black-box diagram is in **§2 above** — it is the canonical overall view. The three remaining diagrams below zoom into the OmniVec black box from three different angles.
+
+### 3.2 User control plane (admin CRUD · token mint · sign-in)
+
+> **Audience:** anyone reviewing the user-facing control surface — who can sign in, what they can change, and where config / token records live. Search is *not* on this diagram (see §3.3).
+>
+> **Authorization:** admin CRUD and token-mint endpoints (`POST/GET/DELETE /api/auth/tokens`, `POST/PUT/DELETE /api/{pipelines,sources,models}`) require `role=admin` — obtainable via AAD JWT in the `Admin` group, an opaque `scope=admin` bearer, or the breakglass `OMNIVEC_ADMIN_TOKEN`. Read-only endpoints require `Reader`.
 
 ```mermaid
 flowchart LR
-  user(["End user<br/>[ext]"])
+  callers(["Callers<br/>browser · CLI · embedded user app<br/>[ext]"])
 
   subgraph msft["Microsoft-operated — out of scope"]
     aad(["Azure AD<br/>[ext, OOS]"])
   end
 
-  api["API"]
-  search["Search"]
-  docgrok["DocGrok"]
-  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
-  cvec(["Customer vectors<br/>[ext]"])
-
-  subgraph custsub["Customer Azure subscription — out of scope"]
-    foundry(["Azure AI Foundry / Azure OpenAI<br/>[ext, OOS]"])
-  end
-
-  user -->|"A1 · POST /api/assistant/query<br/>HTTPS (TLS 1.2+ via NGINX) · AAD bearer (Reader)"| api
-  api -->|"A2 · GET /common/discovery/v2.0/keys<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
-  api -->|"A3 · POST /v1/search (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy: api → search"| search
-  search -->|"A4 · POST /v1/embed (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy: search → docgrok-router"| docgrok
-  docgrok -->|"A5 · POST /openai/deployments/{name}/embeddings<br/>HTTPS · UAMI access token (or legacy API key)"| foundry
-  search -->|"A6 · POST /dbs/{db}/colls/{c}/docs (vector kNN)<br/>HTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC + source-id ACL"| cvec
-  api -->|"A7 · GET /dbs/{db}/colls/{c}/docs (pipeline lookup)<br/>HTTPS · Managed Identity (UAMI) · Cosmos read-only RBAC"| cmeta
-
-  style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
-  style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
-```
-
-**Flow details — Scenario A**
-
-| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
-|---|---|---|---|---|---|---|
-| **A1** | User submits a natural-language search / RAG question to OmniVec | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (Bearer) validated against tenant JWKS; signature, `aud`, `iss`, `exp` checked | AAD group claim must contain `Reader` or `Admin`; per-source ACL applied downstream | Query text (may contain PII) + Bearer token | T-API-1 (AAD enforced), T-SRCH-1 (TLS at ingress, ClusterIP) |
-| **A2** | API verifies the user's JWT signature against Microsoft's signing keys | HTTPS to `login.microsoftonline.com` (egress) | JWKS endpoint (public); response cached 1 h with `Cache-Control` honored | n/a | JWKS keys (public) | DefenseInDepth: optional cert pin via env var |
-| **A3** | API hands the question to the Search service in the same cluster | In-cluster HTTP (port 8080) | Service-account-derived admin token in header | NetworkPolicy: only `omnivec-api` pods may reach `omnivec-search` | Query text | T-NET-1 (NetworkPolicy default-deny + allow rule) |
-| **A4** | Search asks DocGrok to embed the query text into a vector | In-cluster HTTP (port 8080) | `X-Admin-Token` header (rotated at deploy) | NetworkPolicy: only `omnivec-search` may reach `docgrok-router` | Query text | T-NET-1, T-API-1 (token confined to in-cluster) |
-| **A5** | DocGrok calls **customer's** Azure AI Foundry / AOAI to produce the embedding | HTTPS to `*.openai.azure.com` | Managed Identity (UAMI, preferred); or legacy API key from `omnivec.metadata.docgrok_model.api_key` | RBAC on the AOAI resource (customer-managed); content filters (customer-managed) | Query text → embedding vector | T-MET-1 (legacy keys deprecated; AAD-only model records); out-of-scope: Foundry resource itself |
-| **A6** | Search runs vector kNN against the customer's vector store | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; OmniVec further filters results by source-id ACL in code | Query embedding + retrieved chunks (may contain PII) | T-VEC-1 (PII classification; cascade purge), T-NET-1 |
-| **A7** | API resolves pipeline / source configuration to apply ACL + ranker settings | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read-only** scope on `omnivec.metadata` | Pipeline / source records | T-MET-1 (no key material in records) |
-
-### 3.2 Scenario B — Ingestion (write path)
-
-> **Authorization:** Ingestion runs unattended under a workload identity. There is no end-user authorization on this path; the customer's RBAC on their own CosmosDB / Blob *is* the authorization boundary.
-
-```mermaid
-flowchart LR
-  csrc(["Customer source<br/>CosmosDB / Blob<br/>[ext · parser must assume hostile content]"])
-  ingest["Ingestion"]
-  sb(["Service Bus<br/>[ext, Azure-managed]"])
-  worker["dotnet-worker<br/>(part of Ingestion)"]
-  docgrok["DocGrok"]
-  cvec(["Customer vectors<br/>[ext]"])
-  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
-
-  ingest -->|"B1 · GET /dbs/{db}/colls/{c}/_changefeed<br/>HTTPS · Managed Identity (UAMI) · Cosmos read on source container + lease container"| csrc
-  ingest -->|"B2 · GET https://{allowlisted-account}.blob.core.windows.net/...<br/>HTTPS · Managed Identity (UAMI) or SAS · attachment_blob_account_allowlist"| csrc
-  ingest -->|"B3 · GET /dbs/{db}/colls/{c}/docs (source/pipeline)<br/>HTTPS · Managed Identity (UAMI) · Cosmos read-only RBAC"| cmeta
-  ingest -->|"B4 · POST topics/{source}/messages<br/>HTTPS to *.servicebus.windows.net · Managed Identity (UAMI) · SB Send role"| sb
-  worker -->|"B5 · receive on subs/{source}/messages<br/>HTTPS · Managed Identity (UAMI) · SB Receive role"| sb
-  worker -->|"B6 · POST /v1/embed/batch (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"| docgrok
-  worker -->|"B7 · PATCH /dbs/{db}/colls/{c}/docs (vector upsert)<br/>HTTPS · Managed Identity (UAMI) · Cosmos write on e2eblob.vectors"| cvec
-```
-
-**Flow details — Scenario B**
-
-| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
-|---|---|---|---|---|---|---|
-| **B1** | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (third-party-supplied content possible; may contain PII) | T-CON-1 (optional dedicated lease account) |
-| **B2** | Ingestor downloads attachment binaries (PDF/Office/images) referenced by docs | HTTPS to customer Blob endpoint | Managed Identity (UAMI) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Binary content from a customer-configured (potentially third-party-authored) source | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning), T-PWK-1 (parser sandbox) |
-| **B3** | Ingestor loads pipeline / source definition from OmniVec metadata | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read** scope on `omnivec.metadata` | Pipeline / source records | T-MET-1 |
-| **B4** | Ingestor publishes per-document work items to Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **send** on per-source topic | Document id + source ref + blob URL (no body) | T-NET-1 (out-of-cluster traffic on TLS) |
-| **B5** | dotnet-worker drains work items from Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **receive** on per-source subscription | Document id + source ref + blob URL | — |
-| **B6** | dotnet-worker asks DocGrok to parse + embed a batch | In-cluster HTTP (port 8080) | `X-Admin-Token` header | NetworkPolicy: only `omnivec-dotnet-worker` may reach `docgrok-router` | Parsed text chunks (may contain PII) | T-PWK-1 (subprocess sandbox in DocGrok parser), T-NET-1 |
-| **B7** | dotnet-worker writes resulting vectors to the customer's vector store | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on `e2eblob.vectors` | Embedding vectors + chunk metadata (PII-derived) | T-VEC-1 (cascade-purge endpoint; PII classification) |
-
-### 3.3 Scenario C — Admin / Configuration
-
-> **Authorization:** all flows require AAD bearer in the `Admin` group (or breakglass `OMNIVEC_ADMIN_TOKEN`, audit-logged). Admin token is residual risk T-API-1.
-
-```mermaid
-flowchart LR
-  admin(["Operator<br/>[ext]"])
-
-  subgraph msft["Microsoft-operated — out of scope"]
-    aad(["Azure AD<br/>[ext, OOS]"])
-  end
-
-  api["API"]
-  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
+  web["Web<br/>(UI static assets)"]
+  api["API<br/>(admin CRUD · token mint)"]
+  cmeta(["CosmosDB metadata<br/>omnivec.metadata + tokens<br/>[ext, Azure-managed]"])
   kv(["Key Vault<br/>[ext, Azure-managed]"])
 
-  admin -->|"C1 · {GET,POST,PUT,DELETE} /api/admin/*<br/>HTTPS (TLS 1.2+ via NGINX) · AAD bearer (Admin) — or breakglass OMNIVEC_ADMIN_TOKEN"| api
-  api -->|"C2 · GET /common/discovery/v2.0/keys<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
-  api -->|"C3 · POST/PATCH /dbs/{db}/colls/{c}/docs<br/>HTTPS · Managed Identity (UAMI) · Cosmos write on omnivec.metadata"| cmeta
-  api -->|"C4 · GET /secrets/{name}<br/>HTTPS to {vault}.vault.azure.net · Managed Identity (UAMI) · Key Vault Secret Reader"| kv
+  callers -->|"U1 · GET / (UI assets)<br/>HTTPS · static, no auth"| web
+  callers -.->|"U2 · OIDC sign-in (browser)<br/>HTTPS · OIDC code flow + PKCE"| aad
+  callers -->|"U3 · {GET,POST,PUT,DELETE} /api/* (admin CRUD · token mint)<br/>HTTPS · AAD JWT (browser) or scope=admin bearer (CLI/script) — role: Admin/Reader"| api
+  api -->|"U4 · JWKS validation<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
+  api -->|"U5 · {read,write} /dbs/omnivec/colls/metadata/docs<br/>HTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC"| cmeta
+  api -->|"U6 · GET /secrets/{name}<br/>HTTPS · Managed Identity (UAMI) · Key Vault Secret Reader"| kv
 
   style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
-**Flow details — Scenario C**
+**Flow details — User control plane**
 
 | # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
 |---|---|---|---|---|---|---|
-| **C1** | Operator creates/updates/deletes pipelines, sources, model records | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (Bearer) — or breakglass `OMNIVEC_ADMIN_TOKEN` for emergency access | AAD group `Admin` required; admin-token path is audit-logged | Config payloads (may contain secret *refs*, never secret values) | T-API-1 (AAD enforced; admin token = breakglass; audit log) |
-| **C2** | API validates the admin JWT signature + group claim | HTTPS to `login.microsoftonline.com` | JWKS endpoint (public), cached | n/a | JWKS keys (public) | DefenseInDepth |
-| **C3** | API persists config records to OmniVec metadata | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on `omnivec.metadata` | Config records (refs to secrets only) | T-MET-1 (no API keys persisted in records) |
-| **C4** | API resolves secret references at runtime (never stores secret values) | HTTPS to Key Vault | Managed Identity (UAMI) | Key Vault RBAC; **get** scope on a named secret | Secret value (in-memory only) | T-MET-1 |
+| **U1** | Browser fetches static UI assets | HTTPS (TLS 1.2+) terminated at NGINX | None (static) | n/a | HTML/JS/CSS | DefenseInDepth: CSP header set by web image |
+| **U2** | Browser-only OIDC sign-in against tenant AAD | HTTPS to `login.microsoftonline.com` | OIDC authorization-code flow + PKCE | Tenant admin defines conditional access, MFA, group membership | Auth code → JWT (Bearer) | AAD itself is OOS (§0.5) |
+| **U3** | Caller invokes admin CRUD / token mint endpoints | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (browser) or opaque `scope=admin` bearer (CLI/script); JWT validated against tenant JWKS — signature, `aud`, `iss`, `exp` | AAD group claim `Admin` or `Reader`; token-mint endpoints require `role=admin` | Config payloads (refs to secrets only); new-token plaintext (returned **once** at mint) | T-API-1 (AAD enforced; admin token = breakglass; audit log) |
+| **U4** | API verifies the user's JWT signature against Microsoft's signing keys | HTTPS to `login.microsoftonline.com` (egress) | JWKS endpoint (public); response cached 1 h with `Cache-Control` honored | n/a | JWKS keys (public) | DefenseInDepth: optional cert pin via env var |
+| **U5** | API persists/reads config records (pipelines, sources, model records, hashed tokens) | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read/write** on `omnivec.metadata`; tokens stored as SHA-256 hashes only | Config records (refs to secrets only), token records (hashed) | T-MET-1 (no key material in records; tokens hashed-at-rest) |
+| **U6** | API resolves secret references at runtime (never stores secret values) | HTTPS to Key Vault | Managed Identity (UAMI) | Key Vault RBAC; **get** scope on a named secret | Secret value (in-memory only) | T-MET-1 |
 
-### 3.4 Scenario D — Service-application search (programmatic / direct)
+### 3.3 Search read path (browser + programmatic)
 
-> **Why this is separate from Scenario A:** the Search service exposes its own public HTTPS surface via the `searchIngress` Helm template (separate from the API ingress) so that backend apps, scripts, and partner systems can run RAG queries without going through the browser-facing API. This path does **not** use AAD JWTs — it uses bearer tokens with `scope="search"` issued by the API's token endpoint and stored hashed (SHA-256) in `omnivec.metadata`. The bootstrap token `OMNIVEC_SEARCH_TOKEN` is a residual breakglass identity.
+> **Audience:** anyone reviewing the read/RAG surface. Shows both query entry points — **browser/CLI via the API** (AAD JWT or `scope=admin` bearer) and **programmatic via the dedicated `searchIngress`** (`scope=search` opaque bearer) — and the shared embed hop into DocGrok / Foundry.
+>
+> **Authorization:** browser/CLI queries require AAD `Reader`/`Admin` (or `scope=admin` bearer); programmatic queries require an opaque `scope=search` bearer minted by an Admin and validated by SHA-256 lookup in Cosmos. Results are filtered by source-id ACL.
 
 ```mermaid
 flowchart LR
-  app(["Service caller<br/>(backend app · script · partner system)<br/>[ext]"])
+  callers(["Callers<br/>browser · CLI · embedded user app<br/>[ext]"])
 
-  api["API<br/>(token vending only)"]
-  search["Search"]
-  docgrok["DocGrok"]
-  cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
+  subgraph msft["Microsoft-operated — out of scope"]
+    aad(["Azure AD<br/>[ext, OOS]"])
+  end
+
+  api["API<br/>(query proxy)"]
+  search["Search<br/>(direct via searchIngress for programmatic callers)"]
+  docgrok["DocGrok<br/>(router + pipeline-worker)"]
+  cmeta(["CosmosDB metadata<br/>tokens partition (SHA-256)<br/>[ext, Azure-managed]"])
   cvec(["Customer vectors<br/>[ext]"])
 
   subgraph custsub["Customer Azure subscription — out of scope"]
-    foundry(["Azure AI Foundry / Azure OpenAI<br/>[ext, OOS]"])
+    foundry(["Azure OpenAI / Foundry<br/>[ext, OOS]"])
   end
 
-  app -.->|"D0 · POST /api/auth/tokens (one-time, by Admin)<br/>HTTPS · AAD bearer (Admin) · scope=search · TTL"| api
-  app -->|"D1 · POST /api/search<br/>HTTPS (TLS 1.2+ via searchIngress) · Authorization: Bearer &lt;search-token&gt;"| search
-  search -->|"D2 · GET /dbs/omnivec/colls/metadata/docs (token lookup)<br/>HTTPS · Managed Identity (UAMI) · Cosmos read on tokens partition · SHA-256 compare"| cmeta
-  search -->|"D3 · POST /v1/embed (HTTP/1.1, in-cluster)<br/>X-Admin-Token · NetworkPolicy: search → docgrok-router"| docgrok
-  docgrok -->|"D4 · POST /openai/deployments/{name}/embeddings<br/>HTTPS · UAMI access token (or legacy API key)"| foundry
-  search -->|"D5 · POST /dbs/{db}/colls/{c}/docs (vector kNN)<br/>HTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC + source-id ACL"| cvec
+  callers -->|"S1 · POST /api/assistant/query (browser/CLI)<br/>HTTPS · AAD JWT (Reader/Admin) or scope=admin bearer"| api
+  callers -->|"S2 · POST /api/search (programmatic)<br/>HTTPS via dedicated searchIngress · scope=search bearer (opaque · SHA-256 in Cosmos)"| search
+  api -.->|"S3 · JWKS validation<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
+  api -->|"S4 · in-cluster /v1/search (browser query)<br/>HTTP · X-Admin-Token · NetworkPolicy: api → search"| search
+  search -->|"S5 · GET /dbs/omnivec/colls/metadata/docs (token verify · SHA-256)<br/>HTTPS · Managed Identity (UAMI) · read-only on tokens partition"| cmeta
+  search -->|"S6 · POST /v1/embed (in-cluster)<br/>HTTP · X-Admin-Token · NetworkPolicy: search → docgrok-router"| docgrok
+  docgrok -->|"S7 · POST /openai/deployments/{name}/embeddings<br/>HTTPS · UAMI access token (or legacy API key)"| foundry
+  search -->|"S8 · POST /dbs/{db}/colls/{c}/docs (vector kNN)<br/>HTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC + source-id ACL"| cvec
+
+  style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
+  style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
+```
+
+**Flow details — Search read path**
+
+| # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
+|---|---|---|---|---|---|---|
+| **S1** | Browser/CLI submits a natural-language RAG question via the API | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (Bearer) validated against tenant JWKS, **or** opaque `scope=admin` bearer (CLI) | AAD group `Reader`/`Admin`; per-source ACL downstream | Query text (may contain PII) + Bearer token | T-API-1 (AAD enforced), T-SRCH-1 (TLS at ingress, ClusterIP) |
+| **S2** | Backend service / embedded app queries Search directly without the API in path | HTTPS (TLS 1.2+) terminated at NGINX `searchIngress` (dedicated host, dedicated cert, dedicated rate-limit policy) | `Authorization: Bearer <search-token>`; server-side SHA-256 compare against `omnivec.metadata.tokens`; admin-scope tokens **rejected** unless `SEARCH_ACCEPT_ADMIN_TOKEN=true` | scope=`search` required; per-source ACL downstream | Query text (may contain PII) + bearer token | T-SRCH-1 (TLS at dedicated ingress), T-SRCH-2 (long-lived static tokens), T-RL-1 (rate limit on searchIngress) |
+| **S3** | API verifies the user's JWT signature against Microsoft's signing keys | HTTPS to `login.microsoftonline.com` (egress) | JWKS endpoint (public); response cached 1 h | n/a | JWKS keys (public) | DefenseInDepth: optional cert pin via env var |
+| **S4** | API hands a browser-side query to Search in the same cluster | In-cluster HTTP (port 8080) | Service-account-derived admin token in header | NetworkPolicy: only `omnivec-api` pods may reach `omnivec-search` | Query text | T-NET-1 (NetworkPolicy default-deny + allow rule) |
+| **S5** | Search validates a `scope=search` bearer presented at `searchIngress` | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read-only** on `omnivec.metadata.tokens` partition | Token hash + caller label + scope + TTL | T-MET-1 (hashed-at-rest), T-SRCH-2 (rotation) |
+| **S6** | Search asks DocGrok to embed the query text into a vector | In-cluster HTTP (port 8080) | `X-Admin-Token` header (rotated at deploy) | NetworkPolicy: only `omnivec-search` may reach `docgrok-router` | Query text | T-NET-1, T-API-1 (token confined to in-cluster) |
+| **S7** | DocGrok calls **customer's** Azure OpenAI / Foundry to produce the embedding (shared with I7 in §3.4) | HTTPS to `*.openai.azure.com` | Managed Identity (UAMI, preferred); or legacy API key from `omnivec.metadata.docgrok_model.api_key` | RBAC on the AOAI resource (customer-managed); content filters (customer-managed) | Query text → embedding vector | T-MET-1 (legacy keys deprecated; AAD-only model records), T-RL-1 (per-deployment embed semaphore); out-of-scope: Foundry resource itself |
+| **S8** | Search runs vector kNN against the customer's vector store | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; OmniVec further filters results by source-id ACL in code | Query embedding + retrieved chunks (may contain PII) | T-VEC-1 (PII classification; cascade purge), T-NET-1 |
+
+> **Identity model on S1 vs S2:** S1 uses AAD JWT (browser) or opaque `scope=admin` bearer (CLI / scripts that don't want an AAD app registration). S2 always uses an opaque `scope=search` bearer, never AAD. Customers who want AAD-only on the search path can leave `searchIngress.enabled=false` and rely on S1 → S4 only.
+
+### 3.4 Ingestion / embedding data plane
+
+> **Audience:** data-plane / SRE reviewers. Shows how customer documents become embeddings and land in the customer's vector store. **No user identities, no AAD, no API ingress on this path** — everything runs unattended under workload identities.
+>
+> **Authorization:** every flow uses Managed Identity (UAMI). The customer's RBAC on their own CosmosDB / Blob / Service Bus *is* the authorization boundary; OmniVec applies host-allowlists for SSRF and a parser sandbox for hostile content.
+
+```mermaid
+flowchart LR
+  csrc(["Customer source<br/>CosmosDB / Blob<br/>[ext · hostile content assumed]"])
+  cmeta(["CosmosDB metadata<br/>pipeline / source / model config<br/>[ext, Azure-managed · read-only here]"])
+  ingest["Ingestion<br/>(change-feed watcher + queue producer)"]
+  sb(["Service Bus<br/>[ext, Azure-managed]"])
+  worker["dotnet-worker<br/>(queue consumer)"]
+  docgrok["DocGrok<br/>(router + pipeline-worker · parser sandbox)"]
+  cvec(["Customer vectors destination<br/>e2eblob.vectors / pgvector<br/>[ext]"])
+
+  subgraph custsub["Customer Azure subscription — out of scope"]
+    foundry(["Azure OpenAI / Foundry<br/>[ext, OOS]"])
+  end
+
+  csrc -->|"I1 · GET /dbs/{db}/colls/{c}/_changefeed (source docs)<br/>HTTPS · Managed Identity (UAMI) · Cosmos read on source + lease container"| ingest
+  csrc -->|"I2 · GET attachment blob (PDF/Office/image)<br/>HTTPS · UAMI or SAS · attachment_blob_account_allowlist"| ingest
+  cmeta -->|"I3 · GET pipeline/source/model record<br/>HTTPS · UAMI · Cosmos read-only on omnivec.metadata"| ingest
+  ingest -->|"I4 · POST topics/{source}/messages<br/>HTTPS to *.servicebus.windows.net · UAMI · SB Send"| sb
+  sb -->|"I5 · receive subs/{source}/messages<br/>HTTPS · UAMI · SB Receive"| worker
+  worker -->|"I6 · POST /v1/embed/batch (in-cluster)<br/>HTTP · X-Admin-Token · NetworkPolicy: dotnet-worker → docgrok-router"| docgrok
+  docgrok -->|"I7 · POST /openai/deployments/{name}/embeddings<br/>HTTPS · UAMI access token (or legacy API key)"| foundry
+  worker -->|"I8 · PATCH /dbs/{db}/colls/{c}/docs (vector upsert)<br/>HTTPS · UAMI · Cosmos write on e2eblob.vectors"| cvec
 
   style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
 
-**Flow details — Scenario D**
+> **Note:** the **same** `docgrok → foundry` hop (I6 → I7) is reused by Search to embed query text on the read path (see §3.3 flows S6 → S7). Threats on this hop apply to both directions.
+
+**Flow details — Ingestion / embedding**
 
 | # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
 |---|---|---|---|---|---|---|
-| **D0** | Operator mints a search-scope bearer token for a named service caller (provisioning, not request-path) | HTTPS (TLS 1.2+) terminated at API ingress | AAD JWT (Bearer) in `Admin` group | AAD group `Admin` only; token persisted **hashed** (SHA-256) in `omnivec.metadata.tokens`; minted value returned **once** | New token (returned once, then discarded server-side); caller identity label; TTL | T-API-1 (AAD-gated issuance), T-SRCH-2 (token rotation gap) |
-| **D1** | Backend service queries Search directly (no browser, no API in path) | HTTPS (TLS 1.2+) terminated at NGINX `searchIngress` (dedicated host, dedicated cert, dedicated rate-limit policy) | `Authorization: Bearer <search-token>`; server-side SHA-256 compare against `omnivec.metadata.tokens`; admin-scope tokens **rejected** unless `SEARCH_ACCEPT_ADMIN_TOKEN=true` | scope=`search` required; per-source ACL applied downstream | Query text (may contain PII) + bearer token | T-SRCH-1 (TLS at dedicated ingress, ClusterIP service), T-SRCH-2 (long-lived static tokens — see §5), T-RL-1 (rate limit on `searchIngress`) |
-| **D2** | Search validates the bearer token | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read-only** on `omnivec.metadata.tokens` partition | Token hash + caller label + scope + TTL | T-MET-1 (tokens stored hashed only; bootstrap token in env is breakglass) |
-| **D3** | Search asks DocGrok to embed the query (same as A4) | In-cluster HTTP (port 8080) | `X-Admin-Token` header | NetworkPolicy: only `omnivec-search` may reach `docgrok-router` | Query text | T-NET-1 |
-| **D4** | DocGrok calls customer's Foundry/AOAI (same as A5) | HTTPS to `*.openai.azure.com` | Managed Identity (UAMI, preferred); or legacy API key | RBAC on the AOAI resource (customer-managed) | Query text → embedding vector | T-MET-1; out-of-scope: Foundry resource itself |
-| **D5** | Search runs vector kNN (same as A6) | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; source-id ACL in code | Query embedding + retrieved chunks (may contain PII) | T-VEC-1, T-NET-1 |
-
-> **Identity model:** the search-scope token is **not** an AAD token — it is an OmniVec-issued opaque bearer. This is intentional (lets a script/CI runner authenticate without an AAD app registration) but introduces a new identity surface separate from §0.2. Customers who want AAD-only on this path can leave `searchIngress.enabled=false` and call Search only from inside the cluster (Scenario A).
+| **I1** | Ingestor reads new/updated documents from customer Cosmos change-feed | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane read on customer's source container; dedicated lease container | Document JSON (third-party-supplied content possible; may contain PII) | T-CON-1 (optional dedicated lease account) |
+| **I2** | Ingestor downloads attachment binaries referenced by docs | HTTPS to customer Blob endpoint | Managed Identity (UAMI) or pre-shared SAS URL | **Host allowlist** (`attachment_blob_account_allowlist`) — only configured storage accounts accepted | Binary content from a customer-configured (potentially third-party-authored) source | T-CON-2 (SSRF: mandatory allowlist; absolute-URL host pinning), T-PWK-1 (parser sandbox) |
+| **I3** | Ingestor loads pipeline / source / model definition from OmniVec metadata | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read** scope on `omnivec.metadata` | Pipeline / source records (refs only) | T-MET-1 |
+| **I4** | Ingestor publishes per-document work items to Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **send** on per-source topic | Document id + source ref + blob URL (no body) | T-NET-1 (out-of-cluster traffic on TLS) |
+| **I5** | dotnet-worker drains work items from Service Bus | HTTPS to `*.servicebus.windows.net` | Managed Identity (UAMI) | Service Bus RBAC; **receive** on per-source subscription | Document id + source ref + blob URL | — |
+| **I6** | dotnet-worker (and Search, on the read path) asks DocGrok to parse and/or embed | In-cluster HTTP (port 8080) | `X-Admin-Token` header (rotated at deploy) | NetworkPolicy: only `omnivec-dotnet-worker` / `omnivec-search` may reach `docgrok-router` | Parsed text chunks (may contain PII) | T-PWK-1 (subprocess sandbox in DocGrok parser), T-NET-1 |
+| **I7** | DocGrok calls **customer's** Azure OpenAI / Foundry to produce the embedding | HTTPS to `*.openai.azure.com` | Managed Identity (UAMI, preferred); or legacy API key from `omnivec.metadata.docgrok_model.api_key` | RBAC on the AOAI resource (customer-managed); content filters (customer-managed) | Text → embedding vector | T-MET-1 (legacy keys deprecated; AAD-only model records), T-RL-1 (per-deployment embed semaphore); out-of-scope: Foundry resource itself |
+| **I8** | dotnet-worker writes resulting vectors to the customer's vector store | HTTPS to customer Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **write** scope on `e2eblob.vectors` | Embedding vectors + chunk metadata (PII-derived) | T-VEC-1 (cascade-purge endpoint; PII classification) |
 
 
 
