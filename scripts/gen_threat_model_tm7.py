@@ -70,8 +70,8 @@ TBS: list[dict] = [
 FLOWS: list[tuple[int, int, str]] = [
     (0, 2, "Sign-in / RAG queries\nHTTPS · AAD bearer (Reader/Admin)"),
     (0, 1, "OIDC sign-in\nHTTPS · OIDC code flow"),
-    (2, 3, "Embed / parse / admin ops\nin-cluster HTTP · NetworkPolicy · admin token"),
-    (4, 3, "Enqueue work to embed\nin-cluster HTTP · NetworkPolicy · admin token"),
+    (2, 3, "POST /embed,/parse,/admin (HTTP/1.1, in-cluster)\nX-Admin-Token · NetworkPolicy: api -> docgrok-router"),
+    (4, 3, "POST /v1/embed/batch (HTTP/1.1, in-cluster)\nX-Admin-Token · NetworkPolicy: ingestion -> docgrok-router"),
     (2, 5, "Metadata read/write\nHTTPS · WIF · least-privilege RBAC"),
     (3, 5, "Model registry / metadata\nHTTPS · WIF"),
     (3, 7, "Embed call (consume only)\nHTTPS · WIF (preferred) or API key"),
