@@ -43,6 +43,7 @@ Documents assumptions that are not visible on the diagrams.
 
 | Out of scope | Why |
 |---|---|
+| **Azure AD / Microsoft Entra ID** (identity provider) | Microsoft-operated service in the customer's tenant. OmniVec only *consumes* it: validates JWTs against the public JWKS endpoint and reads group claims. We do not run, secure, configure, or rotate keys for AAD — Microsoft does. Shown on diagrams because the API talks to it, but the security of AAD itself (sign-in protection, conditional access, key rotation, tenant configuration) is Microsoft's + the customer tenant admin's responsibility. |
 | **Azure AI Foundry / Azure OpenAI** (consumed by DocGrok) | Lives in the **customer's** Azure subscription. OmniVec only consumes it as a service over HTTPS+AAD; we have no control over the model deployment, content filters, network ACLs, or RBAC on the resource. Shown on diagrams (DocGrok calls it) but the security of the resource itself is the customer's responsibility. |
 | CI/CD supply chain | Has its own model: [`cicd-threat-model.md`](./cicd-threat-model.md) |
 | Helm chart / Bicep infra | Operator concern; tracked under `infra/` review |
@@ -72,7 +73,7 @@ OmniVec is a **single-tenant** retrieval-augmented vector platform that ingests 
 ```mermaid
 flowchart LR
   user(["End user<br/>[ext]"])
-  aad(["Azure AD<br/>[ext]"])
+  aad(["Azure AD<br/>(Microsoft-operated identity provider)<br/>[ext, out of scope — see §0.5]"])
 
   subgraph cluster["AKS cluster — OmniVec single-tenant trust boundary"]
     direction TB
@@ -111,7 +112,7 @@ flowchart LR
 
 | Id | Boundary | Threat-model relevance |
 |---|---|---|
-| TB-1 | Internet ↔ API | Public HTTPS surface; AAD as identity provider |
+| TB-1 | Internet ↔ API | Public HTTPS surface to OmniVec (in scope). AAD itself sits *outside* this boundary as a Microsoft-operated external interactor — out of scope; only token validation is in scope. |
 | TB-2 | Inter-component within cluster | Plain HTTP today; cross-component compromise = lateral movement (mitigated by NetworkPolicy) |
 | TB-3 | AKS ↔ Azure managed services | Workload Identity Federation (HTTPS + AAD), not key-based |
 | TB-4 | OmniVec ↔ customer data plane | Customer-supplied document content and attachment URLs may originate from a third party; parser must assume hostile content (T-PWK-1) and SSRF guard the URL host (T-CON-2) |
@@ -127,7 +128,7 @@ Per reviewer guidance: scenario-focused, request flows only (responses omitted u
 ```mermaid
 flowchart LR
   user(["End user<br/>[ext]"])
-  aad(["Azure AD<br/>[ext]"])
+  aad(["Azure AD<br/>(Microsoft-operated)<br/>[ext, out of scope]"])
   api["API"]
   search["Search"]
   docgrok["DocGrok"]
@@ -198,7 +199,7 @@ flowchart LR
 ```mermaid
 flowchart LR
   admin(["Operator<br/>[ext]"])
-  aad(["Azure AD<br/>[ext]"])
+  aad(["Azure AD<br/>(Microsoft-operated)<br/>[ext, out of scope]"])
   api["API"]
   cmeta(["CosmosDB metadata<br/>[ext, Azure-managed]"])
   kv(["Key Vault<br/>[ext, Azure-managed]"])
@@ -274,6 +275,7 @@ Open items only — closed items are the ✅ rows above.
 | 2026-05-12 | Reviewer follow-up (per-flow detail) | Added flow IDs (A1–A7, B1–B7, C1–C4) on every arrow; added a **Flow Details** table after each scenario with columns: Purpose, Transport, AuthN, AuthZ, Data on the wire, Mitigations (cross-referenced to §5 threats) | Reviewers can now read per-flow security measures without crowding the diagram |
 | 2026-05-12 | Reviewer follow-up (terminology) | Dropped "untrusted input" framing on the customer data plane (the customer trusts their own data). Replaced with the actual concern: third-party-supplied document content + URL hosts must be parser-hardened and SSRF-guarded (links to T-PWK-1, T-CON-2). Updated diagrams, tables, and TM7 stencil text | Avoids implying customer data is hostile; keeps the concrete risk visible |
 | 2026-05-12 | Reviewer audit (vague labels) | Replaced remaining vague flow labels (e.g., "in-cluster HTTP · NetworkPolicy", "embed call", "fetch attachment") with concrete labels naming the actual route/verb (e.g., `POST /v1/embed/batch (HTTP/1.1, in-cluster)`), the auth header (`X-Admin-Token`), the specific NetworkPolicy allow rule, and Azure RBAC role names. Tightened §2 Components-table column wording. Verified all 16 reviewer recommendations are met | Audit complete; no vague labels remain |
+| 2026-05-12 | Reviewer follow-up (AAD scoping) | Marked **Azure AD** explicitly as `[ext, out of scope]` in all three scenario diagrams and the high-level view; added it to the §0.5 OOS table with reason ("Microsoft-operated identity provider; OmniVec only validates JWTs, does not run/secure/rotate AAD"); reworded TB-1 to state that AAD sits *outside* the boundary and only token validation is in scope; renamed TM7 trust boundary from "TB-1 Internet / AAD" to "TB-1 Internet (public HTTPS surface)" to remove the implication that AAD is enclosed | AAD now treated consistently with Foundry — shown because API calls it, OOS because Microsoft operates it |
 
 **To request a Threat Model Review:** upload `threat-model.tm7` + this `.md` via the Threat Modeling Portal ([aka.ms/dpgtrack](https://aka.ms/dpgtrack)). Per DPSS guidance, the review meeting is a 2–3 hour call; this document is sized to fit.
 
