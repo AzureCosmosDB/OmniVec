@@ -122,9 +122,9 @@ def _validate_blob_url(url: str) -> str:
 
 def download_azure_blob(url: str) -> bytes:
     """Download blob using managed identity with timeout."""
-    _validate_blob_url(url)
+    url = _validate_blob_url(url)
     credential = DefaultAzureCredential()
-    blob_client = BlobClient.from_blob_url(url, credential=credential)  # lgtm[py/full-ssrf]
+    blob_client = BlobClient.from_blob_url(url, credential=credential)
     return blob_client.download_blob(timeout=DOWNLOAD_TIMEOUT_SECONDS).readall()
 
 
@@ -171,13 +171,13 @@ async def embed(request: Request):
 
     # Download image
     try:
-        _validate_blob_url(blob_url)
+        blob_url = _validate_blob_url(blob_url)
         if is_azure_blob_url(blob_url):
             # Use managed identity for Azure Blob Storage
             image_bytes = download_azure_blob(blob_url)
         else:
             # Use HTTP for other URLs
-            resp = http_requests.get(blob_url, timeout=DOWNLOAD_TIMEOUT_SECONDS, allow_redirects=False)  # lgtm[py/full-ssrf]
+            resp = http_requests.get(blob_url, timeout=DOWNLOAD_TIMEOUT_SECONDS, allow_redirects=False)
             resp.raise_for_status()
             image_bytes = resp.content
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")

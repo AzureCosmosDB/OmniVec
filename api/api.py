@@ -238,6 +238,10 @@ def _verify_jwks_thumbprint(host: str, port: int, pinned: list[str], cafile: str
     ctx = ssl.create_default_context(cafile=cafile or None)
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
+    # Pin minimum TLS to 1.2 — Python's default already disables TLSv1/1.1,
+    # but make it explicit so static analyzers (CodeQL py/insecure-protocol)
+    # can see the floor and so future Python ABI changes can't lower it.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection((host, port), timeout=10) as raw:
         with ctx.wrap_socket(raw, server_hostname=host) as tls:
             der = tls.getpeercert(binary_form=True)

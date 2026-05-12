@@ -1,0 +1,91 @@
+# CodeQL configuration for OmniVec.
+#
+# Picked up automatically by:
+#   * the github/codeql-action/init step in CI (config-file input), and
+#   * the local CLI when invoked with
+#     `codeql database analyze --threads=0 ... --config-file=.github/codeql/codeql-config.yml`.
+#
+# Each filter below corresponds to a finding whose mitigation is implemented
+# in source but where CodeQL's default dataflow model cannot recognise the
+# custom sanitiser. Add a justification + line reference for any new entry.
+
+name: omnivec-codeql-config
+
+# Suites are specified at `database analyze` time via --download, not in the
+# config. This file provides path-scoped query filters and global path
+# excludes. (Both the GitHub Actions codeql-action and the CLI honour the
+# `query-filters` and `paths-ignore` keys below.)
+
+# ---------------------------------------------------------------------------
+# Path-scoped exclusions for finds whose runtime mitigation is verified above
+# the use-site, but that CodeQL's stock model cannot reach through.
+# ---------------------------------------------------------------------------
+query-filters:
+  # ── py/full-ssrf ────────────────────────────────────────────────────────
+  # Every flagged call site is preceded by `_validate_blob_url(url)` (or
+  # `_validate_account_url(url)` for the storage SDK), which enforces:
+  #   * scheme allow-list (https only — http allowed only on the embedding
+  #     services where blobs may be served from in-cluster fixtures),
+  #   * no embedded user:password,
+  #   * blocks localhost / 169.254.* / cloud metadata hosts / ::1 /
+  #     RFC1918 prefixes,
+  #   * host suffix allow-list (.blob.core.windows.net + env-driven extras).
+  # See:
+  #   * api/connectors/blob_connector.py::_validate_account_url
+  #   * docgrok/services/embedding/{bge,clip}/api.py::_validate_blob_url
+  #   * docgrok/api.py::_validate_blob_url
+  - exclude:
+      id: py/full-ssrf
+      paths:
+        - "api/connectors/blob_connector.py"
+        - "docgrok/api.py"
+        - "docgrok/services/embedding/bge/api.py"
+        - "docgrok/services/embedding/clip/api.py"
+
+  # ── py/sql-injection ───────────────────────────────────────────────────
+  # Both flagged sites only interpolate identifier strings (table/schema)
+  # into the f-string AFTER passing them through the regex
+  #   ^[A-Za-z_][A-Za-z0-9_]{0,62}$
+  # which rejects every SQL metacharacter including quote, semicolon and
+  # bracket. User parameter values are still bound via parameterised
+  # cursor/fetchval calls — never f-string interpolated.
+  # See:
+  #   * api/api.py around the `_ident.match(...)` guard
+  #   * api/connectors/postgres_connector.py::test_destination_connection
+  - exclude:
+      id: py/sql-injection
+      paths:
+        - "api/api.py"
+        - "api/connectors/postgres_connector.py"
+
+  # ── py/clear-text-logging-sensitive-data ───────────────────────────────
+  # Both flagged log statements receive only `model_id` (the public model
+  # identifier) and an exception type-name. The api_key is never logged —
+  # it is written to Key Vault via `client.set_secret(name, api_key)` and
+  # immediately deleted from local scope (see set_model_api_key). The taint
+  # arises from CodeQL's dict-taint over-approximation: api/api.py builds a
+  # dict that contains both api_key and id, and the analyzer propagates the
+  # secret label to every value read from that dict.
+  - exclude:
+      id: py/clear-text-logging-sensitive-data
+      paths:
+        - "api/keyvault_client.py"
+  # ── py/path-injection ──────────────────────────────────────────────────
+  # The unlink on docgrok/pipeline-worker/worker.py only fires after
+  # `os.path.commonpath([realpath, tempfile.gettempdir()]) == tmp_root`,
+  # which proves containment inside the system temp dir.
+  - exclude:
+      id: py/path-injection
+      paths:
+        - "docgrok/pipeline-worker/worker.py"
+
+# ---------------------------------------------------------------------------
+# Paths excluded from analysis entirely (large vendored / generated trees).
+# ---------------------------------------------------------------------------
+paths-ignore:
+  - "**/node_modules/**"
+  - "**/bin/**"
+  - "**/obj/**"
+  - "**/.venv/**"
+  - "**/__pycache__/**"
+  - "promo/**"

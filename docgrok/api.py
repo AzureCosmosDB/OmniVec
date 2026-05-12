@@ -373,8 +373,8 @@ async def embed(request: Request):
             elif text:
                 input_data = text
             elif body.get("blobUrl"):
-                _validate_blob_url(body["blobUrl"])
-                blob_resp = await http_client.get(body["blobUrl"])  # lgtm[py/full-ssrf]
+                safe_url = _validate_blob_url(body["blobUrl"])
+                blob_resp = await http_client.get(safe_url)
                 blob_resp.raise_for_status()
                 input_data = blob_resp.content
             else:
