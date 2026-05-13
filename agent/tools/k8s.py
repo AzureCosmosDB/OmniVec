@@ -72,6 +72,23 @@ class _KubeClient:
             for e in events.items
         ]
 
+    # --- Phase 2 mutating shims --------------------------------------------
+    async def delete_pod(self, namespace: str, name: str) -> dict:  # pragma: no cover
+        api = self._api()
+        api.delete_namespaced_pod(name=name, namespace=namespace)
+        return {"deleted": True, "namespace": namespace, "pod": name}
+
+    async def scale_deployment(self, namespace: str, deployment: str, replicas: int) -> dict:  # pragma: no cover
+        from kubernetes import client as kclient, config as kconfig
+        try:
+            kconfig.load_incluster_config()
+        except Exception:
+            kconfig.load_kube_config()
+        apps = kclient.AppsV1Api()
+        body = {"spec": {"replicas": int(replicas)}}
+        apps.patch_namespaced_deployment_scale(name=deployment, namespace=namespace, body=body)
+        return {"scaled": True, "namespace": namespace, "deployment": deployment, "replicas": replicas}
+
 
 _KUBE: _KubeClient = _KubeClient()
 

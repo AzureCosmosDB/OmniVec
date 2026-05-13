@@ -1115,6 +1115,44 @@ async def agent_chat_proxy(request: Request):
     return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/agent/chat/approve")
+async def agent_chat_approve_proxy(request: Request):
+    """Forward an approve/deny decision to omnivec-agent and stream the resumed SSE back."""
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    body = await request.body()
+    headers = _agent_headers(request)
+    headers["Content-Type"] = "application/json"
+
+    async def _stream():
+        timeout = httpx.Timeout(300.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", f"{_AGENT_URL}/v1/chat/approve", content=body, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    yield (
+                        b"data: " + json.dumps({"type": "error", "stage": "proxy",
+                                                 "status": resp.status_code,
+                                                 "detail": detail.decode("utf-8", "replace")[:500]}).encode("utf-8") + b"\n\n"
+                    )
+                    return
+                async for chunk in resp.aiter_raw():
+                    if chunk:
+                        yield chunk
+
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/agent/sessions/{session_id}/approvals")
+async def agent_session_approvals(session_id: str, request: Request):
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    user = _caller_id(request)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        r = await client.get(f"{_AGENT_URL}/v1/sessions/{user}/{session_id}/approvals", headers=_agent_headers(request))
+        return JSONResponse(status_code=r.status_code, content=r.json())
+
+
 @app.get("/api/agent/tools")
 async def agent_tools_proxy(request: Request):
     if not _INTERNAL_API_TOKEN:

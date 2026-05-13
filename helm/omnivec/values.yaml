@@ -633,18 +633,14 @@ agent:
   enabled: true
   replicas: 1
   image:
-    repository: omnivec/agent
+    repository: omnivec-agent
     tag: latest
     pullPolicy: Always
   defaultModelId: ""
-  docgrokUrl: "http://omnivec-docgrok-router"
+  docgrokUrl: "http://docgrok"
   omnivecApiUrl: "http://omnivec-api"
   servicebusFqns: ""
   logLevel: "INFO"
-  aoai:
-    endpoint: ""
-    deployment: "gpt-4o-mini"
-    apiVersion: "2024-08-01-preview"
   internalTokenSecret:
     name: "omnivec-agent-internal"
     key: "token"

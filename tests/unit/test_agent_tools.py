@@ -89,14 +89,16 @@ class TestRegistryShape:
         }
         assert api_tools.issubset(names)
 
-    def test_phase1_all_readonly(self, tools_mod):
-        for t in tools_mod.list_tools("admin"):
-            assert t.readonly is True, f"{t.name} not readonly"
+    def test_readonly_tools_are_readonly(self, tools_mod):
+        for t in tools_mod.list_tools("reader"):
+            assert t.readonly is True, f"{t.name} reader-visible but not readonly"
 
-    def test_reader_and_admin_see_same_phase1_list(self, tools_mod):
-        reader = [t.name for t in tools_mod.list_tools("reader")]
-        admin = [t.name for t in tools_mod.list_tools("admin")]
-        assert reader == admin  # Phase 1: identical
+    def test_reader_subset_of_admin(self, tools_mod):
+        reader = {t.name for t in tools_mod.list_tools("reader")}
+        admin = {t.name for t in tools_mod.list_tools("admin")}
+        # Phase 2: admin sees strictly more (mutating tools added).
+        assert reader.issubset(admin)
+        assert "restart_pod" in admin and "restart_pod" not in reader
 
 
 # ---------------------------------------------------------------------------

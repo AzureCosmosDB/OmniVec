@@ -190,9 +190,10 @@ def tm7_generator(monkeypatch):
 
 _AGENT_MODULES = [
     "agent", "agent.api", "agent.agent_loop", "agent.audit", "agent.auth",
-    "agent.llm", "agent.session_store",
+    "agent.approvals", "agent.llm", "agent.session_store",
     "agent.tools", "agent.tools.omnivec_api", "agent.tools.k8s",
     "agent.tools.cosmos", "agent.tools.servicebus", "agent.tools.metrics",
+    "agent.tools.mutations",
 ]
 
 
@@ -210,8 +211,10 @@ def agent_app(monkeypatch):
     mod = importlib.import_module("agent.api")
     from agent.session_store import reset_session_store_for_tests
     from agent.audit import reset_audit_writer_for_tests
+    from agent.approvals import reset_approvals_store_for_tests
     reset_session_store_for_tests()
     reset_audit_writer_for_tests()
+    reset_approvals_store_for_tests()
     yield mod.app
 
 

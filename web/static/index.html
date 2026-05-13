@@ -1363,30 +1363,29 @@
             <!-- Playground Section -->
             <section id="section-agent" class="section" style="display: none;">
                 <header class="header">
-                    <h2 class="header-title">Agent (read-only diagnostics)</h2>
+                    <h2 class="header-title">Agent</h2>
+                    <p class="header-subtitle">AI ops assistant — diagnose pipelines, query state, tail logs. Read-only.</p>
                 </header>
-                <div class="content">
-                    <div class="card" style="margin-bottom:16px;"><div class="card-body" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;">
-                        <div class="form-group" style="flex:1;min-width:240px;margin-bottom:0;">
+                <div class="content" style="display:flex;flex-direction:column;gap:12px;height:calc(100vh - 140px);">
+                    <div class="card" style="flex:0 0 auto;"><div class="card-body" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;">
+                        <div class="form-group" style="flex:1;min-width:260px;margin-bottom:0;">
                             <label class="form-label">Session</label>
-                            <select id="agent-session-select" class="form-input" onchange="agentSelectSession(this.value)">
-                                <option value="">— new session —</option>
-                            </select>
+                            <select id="agent-session-select" class="form-input" onchange="agentSelectSession(this.value)"></select>
                         </div>
-                        <div class="form-group" style="margin-bottom:0;">
+                        <div class="form-group" style="min-width:240px;margin-bottom:0;">
                             <label class="form-label">Model</label>
-                            <input id="agent-model" class="form-input" placeholder="(default)" style="width:200px;">
+                            <select id="agent-model" class="form-input"></select>
                         </div>
-                        <button class="btn btn-secondary" onclick="agentRefreshSessions()">Refresh</button>
-                        <button class="btn btn-secondary" onclick="agentDeleteSession()">Delete session</button>
+                        <button class="btn btn-primary" onclick="agentNewSession()">+ New chat</button>
+                        <button class="btn btn-secondary" onclick="agentRefreshSessions()" title="Refresh session list">↻</button>
+                        <button class="btn btn-secondary" onclick="agentDeleteSession()" title="Delete current session">🗑</button>
                     </div></div>
-                    <div class="card"><div class="card-body">
-                        <div id="agent-transcript" style="min-height:280px;max-height:520px;overflow-y:auto;padding:12px;background:var(--bg-secondary);border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;"></div>
+                    <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0;"><div class="card-body" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+                        <div id="agent-transcript" style="flex:1;overflow-y:auto;padding:16px;background:var(--bg-secondary);border-radius:8px;min-height:0;"></div>
                         <div style="display:flex;gap:8px;margin-top:12px;">
                             <input id="agent-input" class="form-input" placeholder="Ask the agent (e.g. 'list pipelines', 'why is pipeline X failing?')" onkeydown="if(event.key==='Enter')agentSend()" style="flex:1;">
                             <button class="btn btn-primary" onclick="agentSend()">Send</button>
                         </div>
-                        <div id="agent-tools-hint" style="margin-top:12px;font-size:12px;color:var(--text-secondary);"></div>
                     </div></div>
                 </div>
             </section>
@@ -2910,17 +2909,31 @@
 
         // ============================== Agent UI ==============================
         let _agentSessionId = '';
+        let _agentModels = [];
         async function agentInit() {
+            await agentRefreshModels();
+            await agentRefreshSessions();
+            agentNewSession();
+        }
+        async function agentRefreshModels() {
+            const sel = document.getElementById('agent-model');
+            sel.innerHTML = '<option value="">(default)</option>';
             try {
-                const r = await fetch('/api/agent/tools', { headers: authHeaders() });
-                if (r.ok) {
-                    const data = await r.json();
-                    const tools = (data.tools || []).map(t => t.name).join(', ');
-                    document.getElementById('agent-tools-hint').textContent =
-                        `${(data.tools || []).length} tools available: ${tools}`;
-                }
+                const r = await fetch('/api/models', { headers: authHeaders() });
+                if (!r.ok) return;
+                const data = await r.json();
+                const models = (data.models || data || []).filter(m =>
+                    (m.type === 'azure-openai' || m.type === 'openai' || m.kind === 'external')
+                );
+                _agentModels = models;
+                models.forEach(m => {
+                    const o = document.createElement('option');
+                    o.value = m.id;
+                    const chatHint = (m.embedding_dim === 0 || m.embedding_dim === undefined) ? ' • chat' : ' • embed';
+                    o.textContent = (m.name || m.id) + chatHint;
+                    sel.appendChild(o);
+                });
             } catch (e) { /* ignore */ }
-            agentRefreshSessions();
         }
         async function agentRefreshSessions() {
             try {
@@ -2928,62 +2941,106 @@
                 if (!r.ok) return;
                 const data = await r.json();
                 const sel = document.getElementById('agent-session-select');
-                sel.innerHTML = '<option value="">— new session —</option>';
+                const current = _agentSessionId;
+                sel.innerHTML = '';
+                const optNew = document.createElement('option');
+                optNew.value = '';
+                optNew.textContent = '+ New chat';
+                sel.appendChild(optNew);
                 (data.sessions || []).forEach(s => {
                     const o = document.createElement('option');
                     o.value = s.id;
-                    o.textContent = `${s.id.slice(0, 8)} — ${(s.title || '').slice(0, 40)}`;
+                    const title = (s.title || '(empty)').slice(0, 60);
+                    o.textContent = title;
                     sel.appendChild(o);
+                });
+                sel.value = current || '';
+            } catch (e) { /* ignore */ }
+        }
+        function agentNewSession() {
+            _agentSessionId = '';
+            document.getElementById('agent-session-select').value = '';
+            const t = document.getElementById('agent-transcript');
+            t.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:24px;text-align:center;">Start a new conversation. Ask the agent about pipelines, pods, queues, recent errors, etc.</div>';
+            document.getElementById('agent-input').focus();
+        }
+        function _agentRenderMsg(role, text) {
+            const t = document.getElementById('agent-transcript');
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'display:flex;margin:8px 0;' + (role === 'user' ? 'justify-content:flex-end;' : '');
+            const bubble = document.createElement('div');
+            bubble.style.cssText = 'max-width:80%;padding:10px 14px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word;font-size:14px;line-height:1.5;' +
+                (role === 'user'
+                    ? 'background:var(--accent,#2563eb);color:white;'
+                    : 'background:var(--bg-primary,#fff);border:1px solid var(--border,#e5e7eb);color:var(--text-primary);');
+            bubble.textContent = text;
+            wrap.appendChild(bubble);
+            t.appendChild(wrap);
+            t.scrollTop = t.scrollHeight;
+            return bubble;
+        }
+        function _agentRenderTool(name, args) {
+            const t = document.getElementById('agent-transcript');
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin:4px 0 4px 8px;font-family:ui-monospace,monospace;font-size:12px;color:var(--text-secondary);';
+            wrap.textContent = `🔧 ${name}(${JSON.stringify(args || {})})`;
+            t.appendChild(wrap);
+            t.scrollTop = t.scrollHeight;
+        }
+        async function agentSelectSession(id) {
+            _agentSessionId = id || '';
+            const t = document.getElementById('agent-transcript');
+            t.innerHTML = '';
+            if (!id) { agentNewSession(); return; }
+            try {
+                const r = await fetch('/api/agent/sessions/' + encodeURIComponent(id), { headers: authHeaders() });
+                if (!r.ok) return;
+                const d = await r.json();
+                (d.messages || []).forEach(m => {
+                    if (m.role === 'user' || m.role === 'assistant') _agentRenderMsg(m.role, m.content || '');
                 });
             } catch (e) { /* ignore */ }
         }
-        function agentSelectSession(id) {
-            _agentSessionId = id || '';
-            document.getElementById('agent-transcript').textContent = '';
-            if (id) {
-                fetch('/api/agent/sessions/' + encodeURIComponent(id), { headers: authHeaders() })
-                    .then(r => r.ok ? r.json() : null)
-                    .then(d => {
-                        if (!d) return;
-                        const t = document.getElementById('agent-transcript');
-                        (d.messages || []).forEach(m => {
-                            t.textContent += `\n[${m.role}] ${m.content}\n`;
-                        });
-                    });
-            }
-        }
         async function agentDeleteSession() {
-            if (!_agentSessionId) return;
+            if (!_agentSessionId) { agentNewSession(); return; }
+            if (!confirm('Delete this chat?')) return;
             await fetch('/api/agent/sessions/' + encodeURIComponent(_agentSessionId),
                 { method: 'DELETE', headers: authHeaders() });
             _agentSessionId = '';
-            document.getElementById('agent-transcript').textContent = '';
-            agentRefreshSessions();
+            await agentRefreshSessions();
+            agentNewSession();
         }
-        async function agentSend() {
-            const input = document.getElementById('agent-input');
-            const message = input.value.trim();
-            if (!message) return;
-            input.value = '';
+        function _agentRenderApproval(callId, tool, args, danger, summary) {
             const t = document.getElementById('agent-transcript');
-            t.textContent += `\n[user] ${message}\n[assistant] `;
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin:8px 0; padding:12px; border-radius:10px; border:1px solid #f59e0b; background:#fffbeb; font-size:13px;';
+            wrap.setAttribute('data-call-id', callId);
+            const dangerColor = danger === 'high' ? '#dc2626' : danger === 'medium' ? '#d97706' : '#65a30d';
+            const argsStr = JSON.stringify(args || {}, null, 2);
+            wrap.innerHTML =
+                `<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">`
+                + `<span style="font-size:16px;">⚠️</span>`
+                + `<strong>Approval required</strong>`
+                + `<span style="padding:2px 8px; border-radius:10px; background:${dangerColor}; color:#fff; font-size:11px; text-transform:uppercase;">${danger || 'medium'}</span>`
+                + `</div>`
+                + `<div style="margin-bottom:6px;"><strong>${tool}</strong> — ${summary || ''}</div>`
+                + `<pre style="margin:6px 0; padding:8px; background:#fff; border:1px solid #fde68a; border-radius:6px; overflow:auto; font-size:11px;">${argsStr.replace(/</g, '&lt;')}</pre>`
+                + `<textarea id="approve-comment-${callId}" placeholder="Optional comment (sent to the LLM on deny)" style="width:100%; min-height:40px; margin-top:6px; padding:6px; border:1px solid #fde68a; border-radius:6px; font-family:inherit; font-size:12px; resize:vertical;"></textarea>`
+                + `<div style="display:flex; gap:8px; margin-top:8px; justify-content:flex-end;">`
+                + `<button class="btn-danger" onclick="agentDecide('${callId}', '${tool.replace(/'/g, "\\'")}', 'deny')" style="padding:6px 12px;">Deny</button>`
+                + `<button class="btn-primary" onclick="agentDecide('${callId}', '${tool.replace(/'/g, "\\'")}', 'approve')" style="padding:6px 12px; background:#16a34a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Approve &amp; run</button>`
+                + `</div>`;
+            t.appendChild(wrap);
             t.scrollTop = t.scrollHeight;
-            const body = { message };
-            if (_agentSessionId) body.session_id = _agentSessionId;
-            const model = document.getElementById('agent-model').value.trim();
-            if (model) body.model = model;
-            const resp = await fetch('/api/agent/chat', {
-                method: 'POST',
-                headers: { ...authHeaders(), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-                body: JSON.stringify(body),
-            });
-            if (!resp.ok || !resp.body) {
-                t.textContent += `\n[error] HTTP ${resp.status}\n`;
-                return;
-            }
+            return wrap;
+        }
+        async function _agentConsumeStream(resp, asstBubble) {
+            // Drains an SSE stream from /api/agent/chat or /api/agent/chat/approve
+            // into the chat transcript. Returns when the server emits `done`.
             const reader = resp.body.getReader();
             const dec = new TextDecoder();
-            let buf = '', evt = '';
+            let buf = '', evt = '', acc = '';
+            const t = document.getElementById('agent-transcript');
             while (true) {
                 const { value, done } = await reader.read();
                 if (done) break;
@@ -2997,19 +3054,38 @@
                         const data = line.slice(5).trim();
                         try {
                             const obj = JSON.parse(data);
-                            if (evt === 'session' && obj.session_id) {
+                            const kind = evt || obj.type || '';
+                            if (kind === 'session' && obj.session_id) {
                                 _agentSessionId = obj.session_id;
-                            } else if (evt === 'token') {
-                                t.textContent += obj.text || '';
-                            } else if (evt === 'tool_call') {
-                                t.textContent += `\n  → ${obj.tool}(${JSON.stringify(obj.args || {})})\n`;
-                            } else if (evt === 'tool_result') {
-                                t.textContent += `  ← ok\n`;
-                            } else if (evt === 'error') {
-                                t.textContent += `\n[error] ${obj.message || data}\n`;
-                            } else if (evt === 'done') {
-                                t.textContent += `\n`;
-                                agentRefreshSessions();
+                            } else if (kind === 'token') {
+                                acc += obj.text || '';
+                                asstBubble.textContent = acc;
+                            } else if (kind === 'tool_call') {
+                                _agentRenderTool(obj.tool || obj.name, obj.args || obj.arguments);
+                            } else if (kind === 'tool_result') {
+                                // shown inline as part of the tool_call line
+                            } else if (kind === 'approval_required') {
+                                _agentRenderApproval(obj.call_id, obj.tool, obj.args, obj.danger_level, obj.summary);
+                            } else if (kind === 'approval_decision') {
+                                // intercept the disabled card if still present
+                                const card = t.querySelector(`div[data-call-id="${obj.call_id}"]`);
+                                if (card) {
+                                    card.style.opacity = '0.6';
+                                    card.querySelectorAll('button').forEach(b => b.disabled = true);
+                                    const tag = document.createElement('div');
+                                    tag.style.cssText = 'margin-top:6px; font-size:11px; color:#666;';
+                                    tag.textContent = `→ ${obj.decision}`;
+                                    card.appendChild(tag);
+                                }
+                            } else if (kind === 'final') {
+                                if (obj.text) { acc = obj.text; asstBubble.textContent = acc; }
+                            } else if (kind === 'error') {
+                                asstBubble.textContent = `[error] ${obj.detail || obj.message || data}`;
+                            } else if (kind === 'done') {
+                                await agentRefreshSessions();
+                                if (_agentSessionId) {
+                                    document.getElementById('agent-session-select').value = _agentSessionId;
+                                }
                                 return;
                             }
                         } catch (e) { /* skip malformed */ }
@@ -3017,6 +3093,59 @@
                     }
                 }
             }
+        }
+        async function agentDecide(callId, tool, decision) {
+            if (!_agentSessionId) return;
+            const ta = document.getElementById(`approve-comment-${callId}`);
+            const comment = (ta && ta.value || '').trim();
+            const body = { session_id: _agentSessionId, call_id: callId, decision, comment };
+            const asstBubble = _agentRenderMsg('assistant', '');
+            let resp;
+            try {
+                resp = await fetch('/api/agent/chat/approve', {
+                    method: 'POST',
+                    headers: { ...authHeaders(), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                    body: JSON.stringify(body),
+                });
+            } catch (e) {
+                asstBubble.textContent = `[network error] ${e.message}`;
+                return;
+            }
+            if (!resp.ok || !resp.body) {
+                asstBubble.textContent = `[error] HTTP ${resp.status}`;
+                return;
+            }
+            await _agentConsumeStream(resp, asstBubble);
+        }
+        async function agentSend() {
+            const input = document.getElementById('agent-input');
+            const message = input.value.trim();
+            if (!message) return;
+            input.value = '';
+            const t = document.getElementById('agent-transcript');
+            if (t.querySelector('div[style*="text-align:center"]')) t.innerHTML = '';
+            _agentRenderMsg('user', message);
+            const asstBubble = _agentRenderMsg('assistant', '');
+            const body = { messages: [{ role: 'user', content: message }] };
+            if (_agentSessionId) body.session_id = _agentSessionId;
+            const model = document.getElementById('agent-model').value.trim();
+            if (model) body.model_id = model;
+            let resp;
+            try {
+                resp = await fetch('/api/agent/chat', {
+                    method: 'POST',
+                    headers: { ...authHeaders(), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                    body: JSON.stringify(body),
+                });
+            } catch (e) {
+                asstBubble.textContent = `[network error] ${e.message}`;
+                return;
+            }
+            if (!resp.ok || !resp.body) {
+                asstBubble.textContent = `[error] HTTP ${resp.status}`;
+                return;
+            }
+            await _agentConsumeStream(resp, asstBubble);
         }
         function authHeaders() {
             const h = {};

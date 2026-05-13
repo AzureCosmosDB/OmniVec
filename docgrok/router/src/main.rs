@@ -297,6 +297,10 @@ async fn main() {
                 "/admin/models/registry/{model_id}",
                 get(get_registry_model).delete(delete_registry_model),
             )
+            .route(
+                "/admin/models/registry/{model_id}/chat",
+                post(chat_via_model),
+            )
             // Admin — K8s models
             .route("/admin/models", get(list_k8s_models))
             .route("/admin/models/{name}/scale", post(scale_model))
@@ -1394,6 +1398,114 @@ async fn delete_registry_model(
 
     info!("Deleted model: {model_id}");
     Ok(Json(json!({"deleted": model_id})))
+}
+
+// Proxy an OpenAI-compatible chat-completion call through a registered
+// external model. Body: {messages, tools?, tool_choice?, temperature?, max_tokens?}.
+// Returns: {model_id, content, tool_calls, role, finish_reason, usage}.
+async fn chat_via_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<impl IntoResponse, AppError> {
+    let cfg = state
+        .registry
+        .get(&model_id)
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Model '{model_id}' not found")))?
+        .value()
+        .clone();
+
+    let model_type = cfg["type"].as_str().unwrap_or("");
+    if model_type != "azure-openai" {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!("Chat unsupported for model type '{model_type}'"),
+        ));
+    }
+    let endpoint = cfg["endpoint"].as_str().unwrap_or("").trim_end_matches('/');
+    let deployment = cfg["deployment"]
+        .as_str()
+        .or_else(|| cfg["name"].as_str())
+        .unwrap_or("");
+    let api_version = cfg["api_version"]
+        .as_str()
+        .unwrap_or("2024-08-01-preview");
+    let api_key = cfg["api_key"].as_str().unwrap_or("");
+
+    let messages = body.get("messages").cloned().ok_or_else(|| {
+        AppError(StatusCode::BAD_REQUEST, "'messages' is required".into())
+    })?;
+    let mut payload = json!({
+        "messages": messages,
+        "temperature": body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.1),
+    });
+    if let Some(tools) = body.get("tools").cloned() {
+        if !tools.is_null() {
+            payload["tools"] = tools;
+            payload["tool_choice"] = body
+                .get("tool_choice")
+                .cloned()
+                .unwrap_or_else(|| json!("auto"));
+        }
+    }
+    if let Some(mt) = body.get("max_tokens").and_then(|v| v.as_u64()) {
+        payload["max_tokens"] = json!(mt);
+    }
+
+    let url = format!(
+        "{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+    );
+    let mut headers = reqwest::header::HeaderMap::new();
+    if !api_key.is_empty() {
+        headers.insert("api-key", api_key.parse().unwrap());
+    } else {
+        let token = get_aoai_token(&state.http).await.map_err(|e| {
+            AppError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get AOAI token: {e}"),
+            )
+        })?;
+        headers.insert(
+            "Authorization",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let resp = state
+        .http
+        .post(&url)
+        .headers(headers)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(AppError(
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            format!("Upstream {status}: {text}"),
+        ));
+    }
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Decode error: {e}")))?;
+
+    let choice = data
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let msg = choice.get("message").cloned().unwrap_or_else(|| json!({}));
+    Ok(Json(json!({
+        "model_id": model_id,
+        "content": msg.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+        "tool_calls": msg.get("tool_calls").cloned().unwrap_or_else(|| json!([])),
+        "role": msg.get("role").and_then(|v| v.as_str()).unwrap_or("assistant"),
+        "finish_reason": choice.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("stop"),
+        "usage": data.get("usage").cloned().unwrap_or_else(|| json!({})),
+    })))
 }
 
 // ============================================================================
