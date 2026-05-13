@@ -99,12 +99,25 @@ async def get_pipeline(p: _PipelineId, **_ctx) -> Any:
 
 @tool("get_pipeline_status", "Return the current status of a pipeline.", _PipelineId)
 async def get_pipeline_status(p: _PipelineId, **_ctx) -> Any:
-    return await _get(f"/api/pipelines/{p.pipeline_id}/status")
+    # The control-plane has no /status sub-route; the parent pipeline document
+    # already carries status + processing_mode + generation, so project those.
+    pipe = await _get(f"/api/pipelines/{p.pipeline_id}")
+    return {
+        "id": pipe.get("id"),
+        "name": pipe.get("name"),
+        "status": pipe.get("status"),
+        "processing_mode": pipe.get("processing_mode"),
+        "generation": pipe.get("generation"),
+        "updated_at": pipe.get("updated_at"),
+        "reset_at": pipe.get("reset_at"),
+    }
 
 
 @tool("get_pipeline_metrics", "Return aggregate metrics for a pipeline.", _PipelineId)
 async def get_pipeline_metrics(p: _PipelineId, **_ctx) -> Any:
-    return await _get(f"/api/pipelines/{p.pipeline_id}/metrics")
+    # No /metrics sub-route either — the parent doc embeds `stats`.
+    pipe = await _get(f"/api/pipelines/{p.pipeline_id}")
+    return {"id": pipe.get("id"), "name": pipe.get("name"), "stats": pipe.get("stats", {})}
 
 
 @tool("list_models", "List registered embedding models.", _Empty)
