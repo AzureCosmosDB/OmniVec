@@ -74,6 +74,17 @@ DOCGROK_REQUIRED_ROUTES = [
 ]
 
 
+AGENT_REQUIRED_ROUTES = [
+    ("get", "/v1/health"),
+    ("get", "/v1/ready"),
+    ("get", "/v1/tools"),
+    ("post", "/v1/chat"),
+    ("get", "/v1/sessions/{user}"),
+    ("get", "/v1/sessions/{user}/{session_id}"),
+    ("delete", "/v1/sessions/{user}/{session_id}"),
+]
+
+
 # ===========================================================================
 # api/api.py
 # ===========================================================================
@@ -124,3 +135,19 @@ class TestDocgrokOpenAPI:
     def test_required_route_exists(self, docgrok_app, method, path):
         present = {(r[0], r[1]) for r in _route_summary(docgrok_app)}
         assert (method, path) in present
+
+
+# ===========================================================================
+# agent/api.py
+# ===========================================================================
+class TestAgentOpenAPI:
+    def test_route_list_snapshot(self, agent_app, snapshot):
+        assert _route_summary(agent_app) == snapshot
+
+    def test_full_schema_snapshot(self, agent_app, snapshot):
+        assert _sanitize_schema(agent_app.openapi()) == snapshot
+
+    @pytest.mark.parametrize("method,path", AGENT_REQUIRED_ROUTES)
+    def test_required_route_exists(self, agent_app, method, path):
+        present = {(r[0], r[1]) for r in _route_summary(agent_app)}
+        assert (method, path) in present, f"required route missing: {method.upper()} {path}"

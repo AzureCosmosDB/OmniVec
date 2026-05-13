@@ -34,13 +34,13 @@ DOCS_SECURITY = REPO_ROOT / "docs" / "security"
 # ---------------------------------------------------------------------------
 class TestDiagramOverall:
     def test_element_count(self, tm7_generator):
-        assert len(tm7_generator.DIAG_OVERALL["elements"]) == 7
+        assert len(tm7_generator.DIAG_OVERALL["elements"]) == 9
 
     def test_tb_count(self, tm7_generator):
         assert len(tm7_generator.DIAG_OVERALL["tbs"]) == 6
 
     def test_flow_count(self, tm7_generator):
-        assert len(tm7_generator.DIAG_OVERALL["flows"]) == 8
+        assert len(tm7_generator.DIAG_OVERALL["flows"]) == 10
 
     def test_callers_is_external(self, tm7_generator):
         callers = tm7_generator.DIAG_OVERALL["elements"][0]
@@ -69,15 +69,15 @@ class TestDiagramOverall:
     def test_flow_tuples_exact(self, tm7_generator):
         # Locking the (src, dst) pairs catches direction regressions.
         actual = [(s, d) for s, d, _ in tm7_generator.DIAG_OVERALL["flows"]]
-        assert actual == [(0, 2), (0, 1), (2, 1), (2, 3), (2, 4), (2, 4), (2, 5), (2, 6)]
+        assert actual == [(0, 2), (0, 1), (2, 1), (2, 3), (2, 4), (2, 4), (2, 5), (2, 6), (2, 7), (7, 8)]
 
 
 class TestDiagramControl:
     def test_counts(self, tm7_generator):
         d = tm7_generator.DIAG_CONTROL
-        assert len(d["elements"]) == 6
+        assert len(d["elements"]) == 7
         assert len(d["tbs"]) == 4
-        assert len(d["flows"]) == 6
+        assert len(d["flows"]) == 7
 
     def test_aad_oos(self, tm7_generator):
         aad = tm7_generator.DIAG_CONTROL["elements"][1]
@@ -89,7 +89,7 @@ class TestDiagramControl:
 
     def test_flow_tuples_exact(self, tm7_generator):
         actual = [(s, d) for s, d, _ in tm7_generator.DIAG_CONTROL["flows"]]
-        assert actual == [(0, 2), (0, 1), (0, 3), (3, 1), (3, 4), (3, 5)]
+        assert actual == [(0, 2), (0, 1), (0, 3), (3, 1), (3, 4), (3, 5), (3, 6)]
 
 
 class TestDiagramSearch:

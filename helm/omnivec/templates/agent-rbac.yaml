@@ -1,0 +1,39 @@
+{{- if .Values.agent.enabled -}}
+# Dedicated ServiceAccount for the agent so we can scope pod-read RBAC
+# narrowly via a namespaced Role.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: omnivec-agent
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    azure.workload.identity/client-id: {{ .Values.azure.workloadIdentity.clientId | quote }}
+  labels:
+    app: omnivec-agent
+    azure.workload.identity/use: "true"
+---
+# Phase 1: read-only pod inspection in the release namespace ONLY.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: omnivec-agent-pod-reader
+  namespace: {{ .Values.global.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: omnivec-agent-pod-reader
+  namespace: {{ .Values.global.namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: omnivec-agent
+    namespace: {{ .Values.global.namespace }}
+roleRef:
+  kind: Role
+  name: omnivec-agent-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -41,6 +41,7 @@ func main() {
 		newSettingsCmd(),
 		newConfigCmd(),
 		newAdminCmd(),
+		newAgentCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

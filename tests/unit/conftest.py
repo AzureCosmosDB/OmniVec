@@ -31,6 +31,7 @@ API_DIR = REPO_ROOT / "api"
 SEARCH_DIR = REPO_ROOT / "search"
 DOCGROK_DIR = REPO_ROOT / "docgrok"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
+AGENT_PARENT = REPO_ROOT  # agent is a package, imported as ``agent.*``
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +186,33 @@ def tm7_generator(monkeypatch):
     _purge_modules(["gen_threat_model_tm7"])
     mod = importlib.import_module("gen_threat_model_tm7")
     return mod
+
+
+_AGENT_MODULES = [
+    "agent", "agent.api", "agent.agent_loop", "agent.audit", "agent.auth",
+    "agent.llm", "agent.session_store",
+    "agent.tools", "agent.tools.omnivec_api", "agent.tools.k8s",
+    "agent.tools.cosmos", "agent.tools.servicebus", "agent.tools.metrics",
+]
+
+
+@pytest.fixture
+def agent_app(monkeypatch):
+    """Import ``agent.api`` and return the FastAPI app with deterministic env."""
+    _set_defaults(monkeypatch)
+    _stub_azure_clients(monkeypatch)
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "test-internal-token")
+    monkeypatch.setenv("OMNIVEC_NAMESPACE", "omnivec")
+    monkeypatch.setenv("AOAI_ENDPOINT", "")
+    monkeypatch.syspath_prepend(str(AGENT_PARENT))
+    for m in _AGENT_MODULES:
+        sys.modules.pop(m, None)
+    mod = importlib.import_module("agent.api")
+    from agent.session_store import reset_session_store_for_tests
+    from agent.audit import reset_audit_writer_for_tests
+    reset_session_store_for_tests()
+    reset_audit_writer_for_tests()
+    yield mod.app
 
 
 @pytest.fixture

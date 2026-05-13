@@ -1,0 +1,103 @@
+{{- if .Values.agent.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-agent
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-agent
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.agent.replicas }}
+  selector:
+    matchLabels:
+      app: omnivec-agent
+  template:
+    metadata:
+      labels:
+        app: omnivec-agent
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: omnivec-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: agent
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy | default "Always" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          env:
+            - name: COSMOS_ENDPOINT
+              value: {{ .Values.azure.cosmos.endpoint | quote }}
+            - name: COSMOS_METADATA_DB
+              value: {{ .Values.azure.cosmos.database | default "omnivec" | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            - name: AGENT_DEFAULT_MODEL_ID
+              value: {{ .Values.agent.defaultModelId | default "" | quote }}
+            - name: AOAI_ENDPOINT
+              value: {{ .Values.agent.aoai.endpoint | default "" | quote }}
+            - name: AOAI_DEPLOYMENT
+              value: {{ .Values.agent.aoai.deployment | default "gpt-4o-mini" | quote }}
+            - name: AOAI_API_VERSION
+              value: {{ .Values.agent.aoai.apiVersion | default "2024-08-01-preview" | quote }}
+            - name: DOCGROK_URL
+              value: {{ .Values.agent.docgrokUrl | default "http://omnivec-docgrok-router" | quote }}
+            - name: OMNIVEC_API_URL
+              value: {{ .Values.agent.omnivecApiUrl | default "http://omnivec-api" | quote }}
+            - name: OMNIVEC_NAMESPACE
+              value: {{ .Values.global.namespace | quote }}
+            - name: SERVICEBUS_FQNS
+              value: {{ .Values.agent.servicebusFqns | default "" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.agent.logLevel | default "INFO" | quote }}
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agent.internalTokenSecret.name | default "omnivec-agent-internal" }}
+                  key: {{ .Values.agent.internalTokenSecret.key | default "token" }}
+            {{- if .Values.azure.appInsights.connectionString }}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: {{ .Values.azure.appInsights.connectionString | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /v1/ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnivec-agent
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  selector:
+    app: omnivec-agent
+{{- end }}
