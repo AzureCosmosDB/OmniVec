@@ -1,0 +1,50 @@
+name: python-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit / regression-trap suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tests/unit/requirements.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/unit/requirements.txt
+
+      - name: Install service requirements (best-effort)
+        run: |
+          for f in api/requirements.txt search/requirements.txt docgrok/requirements.txt; do
+            if [ -f "$f" ]; then
+              echo "::group::pip install -r $f"
+              pip install -r "$f" || echo "::warning::optional install failed for $f"
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Run pytest
+        run: |
+          pytest tests/unit -v --tb=short --junitxml=junit-unit.xml
+
+      - name: Upload junit XML on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-unit
+          path: junit-unit.xml
+          if-no-files-found: ignore
