@@ -65,6 +65,8 @@ DIAG_OVERALL = {
         {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1300, "y": 540},
         {"k": "store",    "name": "OmniVec CosmosDB metadata\n(pipelines · sources · tokens · models)",   "x": 1300,  "y": 880},
         {"k": "store",    "name": "Application Insights\n(traces · metrics · logs)",                     "x": 700,   "y": 880},
+        {"k": "process",  "name": "OmniVec Agent\n(read-only diagnostic AI-ops · in-cluster)",          "x": 700,   "y": 720},
+        {"k": "store",    "name": "agent_sessions / agent_audit\n(omnivec.metadata containers · TTL)", "x": 1080,  "y": 880},
     ],
     "tbs": [
         {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
@@ -83,6 +85,8 @@ DIAG_OVERALL = {
         (2, 4, "Write embeddings/vectors\nHTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"),
         (2, 5, "Read/write metadata + token hashes\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC"),
         (2, 6, "Telemetry export (traces · metrics · logs)\nHTTPS · Managed Identity (UAMI) · Application Insights ingestion"),
+        (2, 7, "Internal proxy /api/agent/* → agent /v1/*\nHTTP · in-cluster · INTERNAL_API_TOKEN bearer + X-Caller-Id"),
+        (7, 8, "Read/write agent_sessions, append agent_audit\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC · TTL 30d/365d"),
     ],
 }
 
@@ -99,6 +103,7 @@ DIAG_CONTROL = {
         {"k": "process",  "name": "API\n(admin CRUD · token mint)",             "x": 480,  "y": 700},
         {"k": "store",    "name": "CosmosDB metadata\nomnivec.metadata + tokens", "x": 1100, "y": 540},
         {"k": "store",    "name": "Key Vault",                                  "x": 1100, "y": 880},
+        {"k": "process",  "name": "Agent\n(read-only diag · in-cluster)",       "x": 480,  "y": 880},
     ],
     "tbs": [
         {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
@@ -113,6 +118,7 @@ DIAG_CONTROL = {
         (3, 1, "U4 · JWKS validation\nHTTPS to login.microsoftonline.com · cached 1h"),
         (3, 4, "U5 · {read,write} omnivec.metadata + tokens\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC · tokens hashed (SHA-256)"),
         (3, 5, "U6 · GET /secrets/{name}\nHTTPS · Managed Identity (UAMI) · Key Vault Secret Reader"),
+        (3, 6, "U7 · POST /api/agent/chat (SSE) · GET /api/agent/tools · sessions\nHTTP in-cluster · INTERNAL_API_TOKEN bearer + X-Caller-Id"),
     ],
 }
 

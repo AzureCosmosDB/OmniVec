@@ -827,6 +827,12 @@
                         Health
                         <span class="nav-badge" id="health-badge" style="display:none"></span>
                     </a>
+                    <a class="nav-item" onclick="showSection('agent')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>
+                        </svg>
+                        Agent
+                    </a>
                 </div>
 
                 <div class="nav-section">
@@ -1355,6 +1361,36 @@
 
 
             <!-- Playground Section -->
+            <section id="section-agent" class="section" style="display: none;">
+                <header class="header">
+                    <h2 class="header-title">Agent (read-only diagnostics)</h2>
+                </header>
+                <div class="content">
+                    <div class="card" style="margin-bottom:16px;"><div class="card-body" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;">
+                        <div class="form-group" style="flex:1;min-width:240px;margin-bottom:0;">
+                            <label class="form-label">Session</label>
+                            <select id="agent-session-select" class="form-input" onchange="agentSelectSession(this.value)">
+                                <option value="">— new session —</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label class="form-label">Model</label>
+                            <input id="agent-model" class="form-input" placeholder="(default)" style="width:200px;">
+                        </div>
+                        <button class="btn btn-secondary" onclick="agentRefreshSessions()">Refresh</button>
+                        <button class="btn btn-secondary" onclick="agentDeleteSession()">Delete session</button>
+                    </div></div>
+                    <div class="card"><div class="card-body">
+                        <div id="agent-transcript" style="min-height:280px;max-height:520px;overflow-y:auto;padding:12px;background:var(--bg-secondary);border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;"></div>
+                        <div style="display:flex;gap:8px;margin-top:12px;">
+                            <input id="agent-input" class="form-input" placeholder="Ask the agent (e.g. 'list pipelines', 'why is pipeline X failing?')" onkeydown="if(event.key==='Enter')agentSend()" style="flex:1;">
+                            <button class="btn btn-primary" onclick="agentSend()">Send</button>
+                        </div>
+                        <div id="agent-tools-hint" style="margin-top:12px;font-size:12px;color:var(--text-secondary);"></div>
+                    </div></div>
+                </div>
+            </section>
+
             <section id="section-playground" class="section" style="display: none;">
                 <header class="header">
                     <h2 class="header-title">Vector Search Playground</h2>
@@ -2867,6 +2903,126 @@
             if (section === 'metrics') {
                 loadMetricsSection();
             }
+            if (section === 'agent') {
+                agentInit();
+            }
+        }
+
+        // ============================== Agent UI ==============================
+        let _agentSessionId = '';
+        async function agentInit() {
+            try {
+                const r = await fetch('/api/agent/tools', { headers: authHeaders() });
+                if (r.ok) {
+                    const data = await r.json();
+                    const tools = (data.tools || []).map(t => t.name).join(', ');
+                    document.getElementById('agent-tools-hint').textContent =
+                        `${(data.tools || []).length} tools available: ${tools}`;
+                }
+            } catch (e) { /* ignore */ }
+            agentRefreshSessions();
+        }
+        async function agentRefreshSessions() {
+            try {
+                const r = await fetch('/api/agent/sessions', { headers: authHeaders() });
+                if (!r.ok) return;
+                const data = await r.json();
+                const sel = document.getElementById('agent-session-select');
+                sel.innerHTML = '<option value="">— new session —</option>';
+                (data.sessions || []).forEach(s => {
+                    const o = document.createElement('option');
+                    o.value = s.id;
+                    o.textContent = `${s.id.slice(0, 8)} — ${(s.title || '').slice(0, 40)}`;
+                    sel.appendChild(o);
+                });
+            } catch (e) { /* ignore */ }
+        }
+        function agentSelectSession(id) {
+            _agentSessionId = id || '';
+            document.getElementById('agent-transcript').textContent = '';
+            if (id) {
+                fetch('/api/agent/sessions/' + encodeURIComponent(id), { headers: authHeaders() })
+                    .then(r => r.ok ? r.json() : null)
+                    .then(d => {
+                        if (!d) return;
+                        const t = document.getElementById('agent-transcript');
+                        (d.messages || []).forEach(m => {
+                            t.textContent += `\n[${m.role}] ${m.content}\n`;
+                        });
+                    });
+            }
+        }
+        async function agentDeleteSession() {
+            if (!_agentSessionId) return;
+            await fetch('/api/agent/sessions/' + encodeURIComponent(_agentSessionId),
+                { method: 'DELETE', headers: authHeaders() });
+            _agentSessionId = '';
+            document.getElementById('agent-transcript').textContent = '';
+            agentRefreshSessions();
+        }
+        async function agentSend() {
+            const input = document.getElementById('agent-input');
+            const message = input.value.trim();
+            if (!message) return;
+            input.value = '';
+            const t = document.getElementById('agent-transcript');
+            t.textContent += `\n[user] ${message}\n[assistant] `;
+            t.scrollTop = t.scrollHeight;
+            const body = { message };
+            if (_agentSessionId) body.session_id = _agentSessionId;
+            const model = document.getElementById('agent-model').value.trim();
+            if (model) body.model = model;
+            const resp = await fetch('/api/agent/chat', {
+                method: 'POST',
+                headers: { ...authHeaders(), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                body: JSON.stringify(body),
+            });
+            if (!resp.ok || !resp.body) {
+                t.textContent += `\n[error] HTTP ${resp.status}\n`;
+                return;
+            }
+            const reader = resp.body.getReader();
+            const dec = new TextDecoder();
+            let buf = '', evt = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                let idx;
+                while ((idx = buf.indexOf('\n')) >= 0) {
+                    const line = buf.slice(0, idx).replace(/\r$/, '');
+                    buf = buf.slice(idx + 1);
+                    if (line.startsWith('event:')) evt = line.slice(6).trim();
+                    else if (line.startsWith('data:')) {
+                        const data = line.slice(5).trim();
+                        try {
+                            const obj = JSON.parse(data);
+                            if (evt === 'session' && obj.session_id) {
+                                _agentSessionId = obj.session_id;
+                            } else if (evt === 'token') {
+                                t.textContent += obj.text || '';
+                            } else if (evt === 'tool_call') {
+                                t.textContent += `\n  → ${obj.tool}(${JSON.stringify(obj.args || {})})\n`;
+                            } else if (evt === 'tool_result') {
+                                t.textContent += `  ← ok\n`;
+                            } else if (evt === 'error') {
+                                t.textContent += `\n[error] ${obj.message || data}\n`;
+                            } else if (evt === 'done') {
+                                t.textContent += `\n`;
+                                agentRefreshSessions();
+                                return;
+                            }
+                        } catch (e) { /* skip malformed */ }
+                        t.scrollTop = t.scrollHeight;
+                    }
+                }
+            }
+        }
+        function authHeaders() {
+            const h = {};
+            const tok = (typeof getAuthToken === 'function') ? getAuthToken() : '';
+            if (tok) h['Authorization'] = 'Bearer ' + tok;
+            return h;
         }
 
         // Modal functions

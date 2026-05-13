@@ -1,4 +1,868 @@
 # serializer version: 1
+# name: TestAgentOpenAPI.test_full_schema_snapshot
+  dict({
+    'components': dict({
+      'schemas': dict({
+        'ChatMessage': dict({
+          'properties': dict({
+            'content': dict({
+              'default': '',
+              'title': 'Content',
+              'type': 'string',
+            }),
+            'role': dict({
+              'description': "'user' | 'assistant' | 'tool' | 'system'",
+              'title': 'Role',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'role',
+          ]),
+          'title': 'ChatMessage',
+          'type': 'object',
+        }),
+        'ChatRequest': dict({
+          'properties': dict({
+            'messages': dict({
+              'items': dict({
+                '$ref': '#/components/schemas/ChatMessage',
+              }),
+              'minItems': 1,
+              'title': 'Messages',
+              'type': 'array',
+            }),
+            'model_id': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Model Id',
+            }),
+            'session_id': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Session Id',
+            }),
+          }),
+          'required': list([
+            'messages',
+          ]),
+          'title': 'ChatRequest',
+          'type': 'object',
+        }),
+        'HTTPValidationError': dict({
+          'properties': dict({
+            'detail': dict({
+              'items': dict({
+                '$ref': '#/components/schemas/ValidationError',
+              }),
+              'title': 'Detail',
+              'type': 'array',
+            }),
+          }),
+          'title': 'HTTPValidationError',
+          'type': 'object',
+        }),
+        'SessionSummary': dict({
+          'properties': dict({
+            'created_at': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Created At',
+            }),
+            'id': dict({
+              'title': 'Id',
+              'type': 'string',
+            }),
+            'message_count': dict({
+              'default': 0,
+              'title': 'Message Count',
+              'type': 'integer',
+            }),
+            'title': dict({
+              'default': '',
+              'title': 'Title',
+              'type': 'string',
+            }),
+            'updated_at': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Updated At',
+            }),
+            'user_id': dict({
+              'title': 'User Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'id',
+            'user_id',
+          ]),
+          'title': 'SessionSummary',
+          'type': 'object',
+        }),
+        'SessionTranscript': dict({
+          'properties': dict({
+            'created_at': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Created At',
+            }),
+            'id': dict({
+              'title': 'Id',
+              'type': 'string',
+            }),
+            'messages': dict({
+              'items': dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              'title': 'Messages',
+              'type': 'array',
+            }),
+            'title': dict({
+              'default': '',
+              'title': 'Title',
+              'type': 'string',
+            }),
+            'updated_at': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Updated At',
+            }),
+            'user_id': dict({
+              'title': 'User Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'id',
+            'user_id',
+          ]),
+          'title': 'SessionTranscript',
+          'type': 'object',
+        }),
+        'ToolDescriptor': dict({
+          'properties': dict({
+            'description': dict({
+              'title': 'Description',
+              'type': 'string',
+            }),
+            'name': dict({
+              'title': 'Name',
+              'type': 'string',
+            }),
+            'parameters': dict({
+              'additionalProperties': True,
+              'title': 'Parameters',
+              'type': 'object',
+            }),
+            'readonly': dict({
+              'title': 'Readonly',
+              'type': 'boolean',
+            }),
+            'role': dict({
+              'title': 'Role',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'name',
+            'description',
+            'role',
+            'readonly',
+            'parameters',
+          ]),
+          'title': 'ToolDescriptor',
+          'type': 'object',
+        }),
+        'ToolListResponse': dict({
+          'properties': dict({
+            'role': dict({
+              'title': 'Role',
+              'type': 'string',
+            }),
+            'tools': dict({
+              'items': dict({
+                '$ref': '#/components/schemas/ToolDescriptor',
+              }),
+              'title': 'Tools',
+              'type': 'array',
+            }),
+          }),
+          'required': list([
+            'role',
+            'tools',
+          ]),
+          'title': 'ToolListResponse',
+          'type': 'object',
+        }),
+        'ValidationError': dict({
+          'properties': dict({
+            'ctx': dict({
+              'title': 'Context',
+              'type': 'object',
+            }),
+            'input': dict({
+              'title': 'Input',
+            }),
+            'loc': dict({
+              'items': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'integer',
+                  }),
+                ]),
+              }),
+              'title': 'Location',
+              'type': 'array',
+            }),
+            'msg': dict({
+              'title': 'Message',
+              'type': 'string',
+            }),
+            'type': dict({
+              'title': 'Error Type',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'loc',
+            'msg',
+            'type',
+          ]),
+          'title': 'ValidationError',
+          'type': 'object',
+        }),
+      }),
+    }),
+    'info': dict({
+      'description': 'In-cluster AI ops agent — Phase 1 (read-only diagnostics).',
+      'title': 'OmniVec Agent',
+    }),
+    'openapi': '3.1.0',
+    'paths': dict({
+      '/v1/chat': dict({
+        'post': dict({
+          'operationId': 'chat_v1_chat_post',
+          'parameters': list([
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/ChatRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Chat',
+        }),
+      }),
+      '/v1/health': dict({
+        'get': dict({
+          'operationId': 'health_v1_health_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'additionalProperties': True,
+                    'title': 'Response Health V1 Health Get',
+                    'type': 'object',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Health',
+        }),
+      }),
+      '/v1/ready': dict({
+        'get': dict({
+          'operationId': 'ready_v1_ready_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'additionalProperties': True,
+                    'title': 'Response Ready V1 Ready Get',
+                    'type': 'object',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Ready',
+        }),
+      }),
+      '/v1/sessions/{user}': dict({
+        'get': dict({
+          'operationId': 'list_sessions_v1_sessions__user__get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'user',
+              'required': True,
+              'schema': dict({
+                'title': 'User',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'items': dict({
+                      '$ref': '#/components/schemas/SessionSummary',
+                    }),
+                    'title': 'Response List Sessions V1 Sessions  User  Get',
+                    'type': 'array',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'List Sessions',
+        }),
+      }),
+      '/v1/sessions/{user}/{session_id}': dict({
+        'delete': dict({
+          'operationId': 'delete_session_v1_sessions__user___session_id__delete',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'user',
+              'required': True,
+              'schema': dict({
+                'title': 'User',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'path',
+              'name': 'session_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Session Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'additionalProperties': True,
+                    'title': 'Response Delete Session V1 Sessions  User   Session Id  Delete',
+                    'type': 'object',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Delete Session',
+        }),
+        'get': dict({
+          'operationId': 'get_session_v1_sessions__user___session_id__get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'user',
+              'required': True,
+              'schema': dict({
+                'title': 'User',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'path',
+              'name': 'session_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Session Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/SessionTranscript',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Get Session',
+        }),
+      }),
+      '/v1/tools': dict({
+        'get': dict({
+          'operationId': 'list_tools_endpoint_v1_tools_get',
+          'parameters': list([
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/ToolListResponse',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'List Tools Endpoint',
+        }),
+      }),
+    }),
+  })
+# ---
+# name: TestAgentOpenAPI.test_route_list_snapshot
+  list([
+    tuple(
+      'post',
+      '/v1/chat',
+      list([
+        'authorization',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/health',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/ready',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/sessions/{user}',
+      list([
+        'authorization',
+        'user',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'delete',
+      '/v1/sessions/{user}/{session_id}',
+      list([
+        'authorization',
+        'session_id',
+        'user',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/sessions/{user}/{session_id}',
+      list([
+        'authorization',
+        'session_id',
+        'user',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/tools',
+      list([
+        'authorization',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+  ])
+# ---
 # name: TestApiOpenAPI.test_full_schema_snapshot
   dict({
     'components': dict({
@@ -845,6 +1709,132 @@
             }),
           }),
           'summary': 'Import Bundle',
+        }),
+      }),
+      '/api/agent/chat': dict({
+        'post': dict({
+          'description': 'Forward a chat request to omnivec-agent and stream the SSE response back.',
+          'operationId': 'agent_chat_proxy_api_agent_chat_post',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Agent Chat Proxy',
+        }),
+      }),
+      '/api/agent/sessions': dict({
+        'get': dict({
+          'operationId': 'agent_sessions_list_api_agent_sessions_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Agent Sessions List',
+        }),
+      }),
+      '/api/agent/sessions/{session_id}': dict({
+        'delete': dict({
+          'operationId': 'agent_session_delete_api_agent_sessions__session_id__delete',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'session_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Session Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Agent Session Delete',
+        }),
+        'get': dict({
+          'operationId': 'agent_session_get_api_agent_sessions__session_id__get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'session_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Session Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Agent Session Get',
+        }),
+      }),
+      '/api/agent/tools': dict({
+        'get': dict({
+          'operationId': 'agent_tools_proxy_api_agent_tools_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Agent Tools Proxy',
         }),
       }),
       '/api/assistants': dict({
@@ -4729,6 +5719,55 @@
       list([
         '200',
         '422',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/api/agent/chat',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/agent/sessions',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'delete',
+      '/api/agent/sessions/{session_id}',
+      list([
+        'session_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/agent/sessions/{session_id}',
+      list([
+        'session_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/agent/tools',
+      list([
+      ]),
+      list([
+        '200',
       ]),
     ),
     tuple(

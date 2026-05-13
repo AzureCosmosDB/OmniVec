@@ -1055,6 +1055,7 @@ async def get_capabilities():
     return {
         "blob_source_enabled": _BLOB_SOURCE_ENABLED,
         "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
+        "agent_enabled": bool(os.getenv("AGENT_URL", "").strip()),
         "allowed_source_types": (
             ["azure-blob", "cosmosdb", "postgres", "mssql"]
             if _BLOB_SOURCE_ENABLED else
@@ -1064,6 +1065,99 @@ async def get_capabilities():
             ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
         ),
     }
+
+
+# =============================================================================
+# OMNIVEC AGENT PROXY â€” forwards to the in-cluster omnivec-agent service.
+# =============================================================================
+# This proxy validates the caller via the existing AuthMiddleware, then
+# forwards to the agent service with X-Caller-Id / X-Caller-Role headers and
+# the shared INTERNAL_API_TOKEN as the bearer. The agent service refuses any
+# request without the internal token (agent/auth.py).
+_AGENT_URL = os.getenv("AGENT_URL", "http://omnivec-agent:8000").rstrip("/")
+_INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+
+
+def _agent_headers(request: Request) -> dict:
+    auth = getattr(request.state, "auth", None) or {}
+    return {
+        "Authorization": f"Bearer {_INTERNAL_API_TOKEN}",
+        "X-Caller-Id": str(auth.get("name") or auth.get("id") or "anonymous"),
+        "X-Caller-Role": str(auth.get("role") or "reader"),
+    }
+
+
+@app.post("/api/agent/chat")
+async def agent_chat_proxy(request: Request):
+    """Forward a chat request to omnivec-agent and stream the SSE response back."""
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    body = await request.body()
+    headers = _agent_headers(request)
+    headers["Content-Type"] = "application/json"
+
+    async def _stream():
+        timeout = httpx.Timeout(300.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", f"{_AGENT_URL}/v1/chat", content=body, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    yield (
+                        b"data: " + json.dumps({"type": "error", "stage": "proxy",
+                                                 "status": resp.status_code,
+                                                 "detail": detail.decode("utf-8", "replace")[:500]}).encode("utf-8") + b"\n\n"
+                    )
+                    return
+                async for chunk in resp.aiter_raw():
+                    if chunk:
+                        yield chunk
+
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/agent/tools")
+async def agent_tools_proxy(request: Request):
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        r = await client.get(f"{_AGENT_URL}/v1/tools", headers=_agent_headers(request))
+        return JSONResponse(status_code=r.status_code, content=r.json() if r.headers.get("content-type", "").startswith("application/json") else {"detail": r.text})
+
+
+def _caller_id(request: Request) -> str:
+    auth = getattr(request.state, "auth", None) or {}
+    return str(auth.get("name") or auth.get("id") or "anonymous")
+
+
+@app.get("/api/agent/sessions")
+async def agent_sessions_list(request: Request):
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    user = _caller_id(request)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        r = await client.get(f"{_AGENT_URL}/v1/sessions/{user}", headers=_agent_headers(request))
+        return JSONResponse(status_code=r.status_code, content=r.json())
+
+
+@app.get("/api/agent/sessions/{session_id}")
+async def agent_session_get(session_id: str, request: Request):
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    user = _caller_id(request)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        r = await client.get(f"{_AGENT_URL}/v1/sessions/{user}/{session_id}", headers=_agent_headers(request))
+        return JSONResponse(status_code=r.status_code, content=r.json())
+
+
+@app.delete("/api/agent/sessions/{session_id}")
+async def agent_session_delete(session_id: str, request: Request):
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
+    user = _caller_id(request)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        r = await client.delete(f"{_AGENT_URL}/v1/sessions/{user}/{session_id}", headers=_agent_headers(request))
+        return JSONResponse(status_code=r.status_code, content=r.json())
+
 
 
 

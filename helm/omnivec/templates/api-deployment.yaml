@@ -34,6 +34,16 @@ spec:
             - containerPort: 8080
               protocol: TCP
           env:
+            - name: AGENT_URL
+              value: {{ .Values.agent.serviceUrl | default "http://omnivec-agent:8000" | quote }}
+            {{- if .Values.agent.enabled }}
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agent.internalTokenSecret.name | default "omnivec-agent-internal" }}
+                  key: {{ .Values.agent.internalTokenSecret.key | default "token" }}
+                  optional: true
+            {{- end }}
             - name: DOCGROK_URL
               value: {{ .Values.api.env.DOCGROK_URL | quote }}
             - name: COSMOS_ENDPOINT

@@ -126,7 +126,36 @@ def init_store() -> MetadataStore:
         raise RuntimeError("COSMOS_ENDPOINT environment variable is required")
     key = os.environ.get("COSMOS_KEY", "")
     _store = MetadataStore(endpoint, key=key if key else None)
+    # Best-effort: ensure the agent's containers exist. Idempotent (Cosmos
+    # returns the existing container on conflict). Wrapped in try/except so a
+    # missing RBAC permission doesn't fail startup of the api service.
+    try:
+        _ensure_agent_containers(_store)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("agent container init skipped: %s", e)
     return _store
+
+
+def _ensure_agent_containers(store: "MetadataStore") -> None:
+    """Create ``agent_sessions`` (PK /user_id, TTL 30d) and ``agent_audit``
+    (PK /session_id, TTL 365d) in the ``omnivec`` database if missing.
+
+    The agent stores live in the SAME ``omnivec.metadata`` *database* (the
+    one named ``DATABASE_NAME`` above), but as their own containers so they
+    don't pollute the existing single-container metadata schema.
+    """
+    db = store._database  # already opened on the right database
+    # 30 days * 86_400 s
+    db.create_container_if_not_exists(
+        id="agent_sessions",
+        partition_key=PartitionKey(path="/user_id"),
+        default_ttl=30 * 86400,
+    )
+    db.create_container_if_not_exists(
+        id="agent_audit",
+        partition_key=PartitionKey(path="/session_id"),
+        default_ttl=365 * 86400,
+    )
 
 
 def get_store() -> MetadataStore:

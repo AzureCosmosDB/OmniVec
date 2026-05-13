@@ -548,6 +548,7 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `connectors/ingestion/dotnet/` | .NET Change Feed Processor connector |
 | `connectors/worker/dotnet/` | .NET embedding worker |
 | `docgrok/` | Document intelligence engine (in-repo) |
+| `agent/` | OmniVec Agent — in-cluster read-only AI-ops agent (see [docs/agent.md](docs/agent.md)) |
 | `cli/` | Go CLI for managing pipelines, sources, and jobs |
 | `infra/` | Azure Bicep infrastructure-as-code |
 | `helm/` | Kubernetes Helm charts |
