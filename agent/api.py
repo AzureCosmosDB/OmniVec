@@ -13,7 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .agent_loop import run_agent, stream_events
+from .agent_loop import run_agent, resume_after_approval, stream_events
+from .approvals import get_approvals_store
 from .audit import get_audit_writer
 from .auth import CallerIdentity, require_internal_caller
 from .session_store import get_session_store
@@ -69,6 +70,24 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(..., min_length=1)
     model_id: Optional[str] = None
     session_id: Optional[str] = None
+
+
+class ApproveRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    call_id: str = Field(..., min_length=1)
+    decision: str = Field(..., description="'approve' or 'deny'")
+    comment: str = ""
+
+
+class PendingApprovalSummary(BaseModel):
+    session_id: str
+    call_id: str
+    user_id: str
+    tool_name: str
+    args: dict
+    danger_level: str
+    summary: str
+    created_at: float
 
 
 class ToolDescriptor(BaseModel):
@@ -187,6 +206,78 @@ async def chat(req: ChatRequest, caller: CallerIdentity = Depends(require_intern
         yield _sse({"type": "done"})
 
     return StreamingResponse(emit(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/v1/chat/approve")
+async def chat_approve(req: ApproveRequest, caller: CallerIdentity = Depends(require_internal_caller)) -> StreamingResponse:
+    """Approve or deny a parked mutating tool call and resume the loop.
+
+    Admin role required. The pending record is looked up by
+    ``(session_id, call_id)``; if not found we 404. After resuming we stream
+    the continuation as standard SSE events so the UI can append to the same
+    chat bubble.
+    """
+    if not caller.is_admin:
+        raise HTTPException(status_code=403, detail="admin role required to approve mutating actions")
+
+    approvals = get_approvals_store()
+    pending = await approvals.pop(req.session_id, req.call_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="no pending approval for that call_id")
+
+    if pending.user_id != caller.caller_id and not caller.is_admin:
+        # Should be unreachable given the is_admin guard above, but defence-in-depth.
+        raise HTTPException(status_code=403, detail="cannot approve another user's request")
+
+    sessions = get_session_store()
+    audit = get_audit_writer()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def driver():
+        await resume_after_approval(
+            queue=queue, pending=pending,
+            decision=req.decision, comment=req.comment,
+            caller_id=caller.caller_id, role=caller.role,
+            audit=audit,
+        )
+
+    task = asyncio.create_task(driver())
+
+    async def emit():
+        yield _sse({
+            "type": "approval_decision",
+            "call_id": req.call_id, "decision": req.decision,
+            "tool": pending.tool_name,
+        })
+        try:
+            async for evt in stream_events(queue):
+                if evt.get("type") == "final":
+                    await sessions.append_message(
+                        pending.user_id, pending.session_id,
+                        {"role": "assistant", "content": evt.get("text", "")},
+                    )
+                yield _sse(evt)
+        finally:
+            await task
+        yield _sse({"type": "done"})
+
+    return StreamingResponse(emit(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/v1/sessions/{user}/{session_id}/approvals", response_model=list[PendingApprovalSummary])
+async def list_pending_approvals(user: str, session_id: str, caller: CallerIdentity = Depends(require_internal_caller)) -> list[PendingApprovalSummary]:
+    """List approvals still pending for a session — used to rehydrate the UI on reload."""
+    if caller.caller_id != user and not caller.is_admin:
+        raise HTTPException(status_code=403, detail="cannot read other users' approvals")
+    items = await get_approvals_store().list_for_session(session_id)
+    return [
+        PendingApprovalSummary(
+            session_id=p.session_id, call_id=p.call_id, user_id=p.user_id,
+            tool_name=p.tool_name, args=p.args, danger_level=p.danger_level,
+            summary=p.summary, created_at=p.created_at,
+        )
+        for p in items
+    ]
 
 
 @app.get("/v1/sessions/{user}", response_model=list[SessionSummary])

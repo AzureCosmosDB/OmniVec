@@ -3,6 +3,37 @@
   dict({
     'components': dict({
       'schemas': dict({
+        'ApproveRequest': dict({
+          'properties': dict({
+            'call_id': dict({
+              'minLength': 1,
+              'title': 'Call Id',
+              'type': 'string',
+            }),
+            'comment': dict({
+              'default': '',
+              'title': 'Comment',
+              'type': 'string',
+            }),
+            'decision': dict({
+              'description': "'approve' or 'deny'",
+              'title': 'Decision',
+              'type': 'string',
+            }),
+            'session_id': dict({
+              'minLength': 1,
+              'title': 'Session Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'session_id',
+            'call_id',
+            'decision',
+          ]),
+          'title': 'ApproveRequest',
+          'type': 'object',
+        }),
         'ChatMessage': dict({
           'properties': dict({
             'content': dict({
@@ -72,6 +103,55 @@
             }),
           }),
           'title': 'HTTPValidationError',
+          'type': 'object',
+        }),
+        'PendingApprovalSummary': dict({
+          'properties': dict({
+            'args': dict({
+              'additionalProperties': True,
+              'title': 'Args',
+              'type': 'object',
+            }),
+            'call_id': dict({
+              'title': 'Call Id',
+              'type': 'string',
+            }),
+            'created_at': dict({
+              'title': 'Created At',
+              'type': 'number',
+            }),
+            'danger_level': dict({
+              'title': 'Danger Level',
+              'type': 'string',
+            }),
+            'session_id': dict({
+              'title': 'Session Id',
+              'type': 'string',
+            }),
+            'summary': dict({
+              'title': 'Summary',
+              'type': 'string',
+            }),
+            'tool_name': dict({
+              'title': 'Tool Name',
+              'type': 'string',
+            }),
+            'user_id': dict({
+              'title': 'User Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'session_id',
+            'call_id',
+            'user_id',
+            'tool_name',
+            'args',
+            'danger_level',
+            'summary',
+            'created_at',
+          ]),
+          'title': 'PendingApprovalSummary',
           'type': 'object',
         }),
         'SessionSummary': dict({
@@ -365,6 +445,101 @@
             }),
           }),
           'summary': 'Chat',
+        }),
+      }),
+      '/v1/chat/approve': dict({
+        'post': dict({
+          'description': '''
+            Approve or deny a parked mutating tool call and resume the loop.
+            
+            Admin role required. The pending record is looked up by
+            ``(session_id, call_id)``; if not found we 404. After resuming we stream
+            the continuation as standard SSE events so the UI can append to the same
+            chat bubble.
+          ''',
+          'operationId': 'chat_approve_v1_chat_approve_post',
+          'parameters': list([
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/ApproveRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Chat Approve',
         }),
       }),
       '/v1/health': dict({
@@ -690,6 +865,107 @@
           'summary': 'Get Session',
         }),
       }),
+      '/v1/sessions/{user}/{session_id}/approvals': dict({
+        'get': dict({
+          'description': 'List approvals still pending for a session — used to rehydrate the UI on reload.',
+          'operationId': 'list_pending_approvals_v1_sessions__user___session_id__approvals_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'user',
+              'required': True,
+              'schema': dict({
+                'title': 'User',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'path',
+              'name': 'session_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Session Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'items': dict({
+                      '$ref': '#/components/schemas/PendingApprovalSummary',
+                    }),
+                    'title': 'Response List Pending Approvals V1 Sessions  User   Session Id  Approvals Get',
+                    'type': 'array',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'List Pending Approvals',
+        }),
+      }),
       '/v1/tools': dict({
         'get': dict({
           'operationId': 'list_tools_endpoint_v1_tools_get',
@@ -787,6 +1063,19 @@
       ]),
     ),
     tuple(
+      'post',
+      '/v1/chat/approve',
+      list([
+        'authorization',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'get',
       '/v1/health',
       list([
@@ -836,6 +1125,21 @@
     tuple(
       'get',
       '/v1/sessions/{user}/{session_id}',
+      list([
+        'authorization',
+        'session_id',
+        'user',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/sessions/{user}/{session_id}/approvals',
       list([
         'authorization',
         'session_id',
@@ -1729,6 +2033,24 @@
           'summary': 'Agent Chat Proxy',
         }),
       }),
+      '/api/agent/chat/approve': dict({
+        'post': dict({
+          'description': 'Forward an approve/deny decision to omnivec-agent and stream the resumed SSE back.',
+          'operationId': 'agent_chat_approve_proxy_api_agent_chat_approve_post',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Agent Chat Approve Proxy',
+        }),
+      }),
       '/api/agent/sessions': dict({
         'get': dict({
           'operationId': 'agent_sessions_list_api_agent_sessions_get',
@@ -1818,6 +2140,44 @@
             }),
           }),
           'summary': 'Agent Session Get',
+        }),
+      }),
+      '/api/agent/sessions/{session_id}/approvals': dict({
+        'get': dict({
+          'operationId': 'agent_session_approvals_api_agent_sessions__session_id__approvals_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'session_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Session Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Agent Session Approvals',
         }),
       }),
       '/api/agent/tools': dict({
@@ -5731,6 +6091,15 @@
       ]),
     ),
     tuple(
+      'post',
+      '/api/agent/chat/approve',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
       'get',
       '/api/agent/sessions',
       list([
@@ -5753,6 +6122,17 @@
     tuple(
       'get',
       '/api/agent/sessions/{session_id}',
+      list([
+        'session_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/agent/sessions/{session_id}/approvals',
       list([
         'session_id',
       ]),

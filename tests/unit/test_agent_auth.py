@@ -50,11 +50,14 @@ class TestAuth:
         assert r.status_code == 200
         assert r.json()["role"] == "admin"
 
-    def test_phase1_reader_admin_same_list(self, client):
+    def test_admin_sees_more_than_reader(self, client):
         rdr = client.get("/v1/tools", headers=_hdrs("reader")).json()["tools"]
         adm = client.get("/v1/tools", headers=_hdrs("admin")).json()["tools"]
-        # Phase 1: every tool is reader-visible.
-        assert sorted(t["name"] for t in rdr) == sorted(t["name"] for t in adm)
+        rdr_names = {t["name"] for t in rdr}
+        adm_names = {t["name"] for t in adm}
+        # Phase 2: admin sees mutating tools that reader does not.
+        assert rdr_names.issubset(adm_names)
+        assert "restart_pod" in adm_names and "restart_pod" not in rdr_names
 
     def test_missing_internal_token_env_returns_503(self, agent_app, monkeypatch):
         import os

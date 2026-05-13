@@ -18,6 +18,16 @@ class _SBClient:
     async def list_topics(self, fqns: str) -> list[str]:  # pragma: no cover
         return []
 
+    # --- Phase 2 mutating shims --------------------------------------------
+    async def retry_dlq(self, fqns: str, queue: str, max_messages: int) -> dict:  # pragma: no cover
+        # Real implementation: read from {queue}/$DeadLetterQueue and re-publish
+        # to {queue}. Kept as a stub so tests can override; production code in
+        # the worker handles the actual replay.
+        return {"queue": queue, "replayed": 0, "requested": max_messages, "stub": True}
+
+    async def purge_dlq(self, fqns: str, queue: str) -> dict:  # pragma: no cover
+        return {"queue": queue, "purged": 0, "stub": True}
+
 
 _SB: _SBClient = _SBClient()
 

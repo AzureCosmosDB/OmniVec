@@ -44,12 +44,6 @@ spec:
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: AGENT_DEFAULT_MODEL_ID
               value: {{ .Values.agent.defaultModelId | default "" | quote }}
-            - name: AOAI_ENDPOINT
-              value: {{ .Values.agent.aoai.endpoint | default "" | quote }}
-            - name: AOAI_DEPLOYMENT
-              value: {{ .Values.agent.aoai.deployment | default "gpt-4o-mini" | quote }}
-            - name: AOAI_API_VERSION
-              value: {{ .Values.agent.aoai.apiVersion | default "2024-08-01-preview" | quote }}
             - name: DOCGROK_URL
               value: {{ .Values.agent.docgrokUrl | default "http://omnivec-docgrok-router" | quote }}
             - name: OMNIVEC_API_URL
