@@ -63,11 +63,14 @@ DIAG_OVERALL = {
         {"k": "process",  "name": "OmniVec\n(API, Search, DocGrok, Ingestion)\nsingle-tenant in customer AKS", "x": 700, "y": 540},
         {"k": "process",  "name": "Azure OpenAI / Foundry\n(in customer subscription)",    "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
         {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1300, "y": 540},
+        {"k": "store",    "name": "OmniVec CosmosDB metadata\n(pipelines · sources · tokens · models)",   "x": 1300,  "y": 880},
+        {"k": "store",    "name": "Application Insights\n(traces · metrics · logs)",                     "x": 700,   "y": 880},
     ],
     "tbs": [
         {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
         {"name": "TB-1a Microsoft-operated identity (out of scope)",        "x": 30,   "y": 140, "w": 280,  "h": 200},
         {"name": "TB-2 OmniVec / AKS (single tenant)",                      "x": 600,  "y": 440, "w": 460,  "h": 340},
+        {"name": "TB-3 Azure managed services (Cosmos metadata · App Insights — in scope, OmniVec-owned, UAMI)",  "x": 600,  "y": 820, "w": 1020, "h": 200},
         {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1240, "y": 140, "w": 380, "h": 220},
         {"name": "TB-4 Customer data plane",                                "x": 1240, "y": 480, "w": 380,  "h": 240},
     ],
@@ -78,6 +81,8 @@ DIAG_OVERALL = {
         (2, 3, "Embed call (consume only)\nHTTPS · Managed Identity (UAMI) or API key"),
         (2, 4, "Read source documents/attachments · change-feed\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
         (2, 4, "Write embeddings/vectors\nHTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"),
+        (2, 5, "Read/write metadata + token hashes\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC"),
+        (2, 6, "Telemetry export (traces · metrics · logs)\nHTTPS · Managed Identity (UAMI) · Application Insights ingestion"),
     ],
 }
 
