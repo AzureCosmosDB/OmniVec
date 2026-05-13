@@ -16,6 +16,8 @@ venv/
 .venv/
 ENV/
 env/
+.pytest_cache/
+.hypothesis/
 
 # IDE
 .idea/
