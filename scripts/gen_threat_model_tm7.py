@@ -59,9 +59,9 @@ DIAG_OVERALL = {
     "out": "threat-model.tm7",
     "elements": [
         {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)",            "x": 80,   "y": 540},
-        {"k": "external", "name": "Azure AD (login.microsoftonline.com)",                  "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        {"k": "process",  "name": "Azure AD (login.microsoftonline.com)",                  "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
         {"k": "process",  "name": "OmniVec\n(API, Search, DocGrok, Ingestion)\nsingle-tenant in customer AKS", "x": 700, "y": 540},
-        {"k": "external", "name": "Azure OpenAI / Foundry\n(in customer subscription)",    "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        {"k": "process",  "name": "Azure OpenAI / Foundry\n(in customer subscription)",    "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
         {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1300, "y": 540},
     ],
     "tbs": [
@@ -89,7 +89,7 @@ DIAG_CONTROL = {
     "out": "threat-model-control.tm7",
     "elements": [
         {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)", "x": 80,   "y": 540},
-        {"k": "external", "name": "Azure AD",                                   "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        {"k": "process",  "name": "Azure AD",                                   "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
         {"k": "process",  "name": "Web\n(UI static assets)",                    "x": 480,  "y": 380},
         {"k": "process",  "name": "API\n(admin CRUD · token mint)",             "x": 480,  "y": 700},
         {"k": "store",    "name": "CosmosDB metadata\nomnivec.metadata + tokens", "x": 1100, "y": 540},
@@ -119,11 +119,11 @@ DIAG_SEARCH = {
     "out": "threat-model-search.tm7",
     "elements": [
         {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)", "x": 80,   "y": 540},
-        {"k": "external", "name": "Azure AD",                                   "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        {"k": "process",  "name": "Azure AD",                                   "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
         {"k": "process",  "name": "API\n(query proxy)",                         "x": 480,  "y": 380},
         {"k": "process",  "name": "Search\n(direct via searchIngress)",         "x": 480,  "y": 700},
         {"k": "process",  "name": "DocGrok\n(router + embedder)",               "x": 880,  "y": 540},
-        {"k": "external", "name": "Azure OpenAI / Foundry\n(customer subscription)", "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        {"k": "process",  "name": "Azure OpenAI / Foundry\n(customer subscription)", "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
         {"k": "store",    "name": "CosmosDB metadata\ntokens partition (SHA-256)", "x": 1300, "y": 540},
         {"k": "store",    "name": "Customer vectors",                           "x": 1300, "y": 880},
     ],
@@ -159,7 +159,7 @@ DIAG_INGEST = {
         {"k": "store",    "name": "Service Bus",                                "x": 880,  "y": 200},
         {"k": "process",  "name": "dotnet-worker\n(queue consumer)",            "x": 880,  "y": 540},
         {"k": "process",  "name": "DocGrok\n(router + parser sandbox + embedder)", "x": 880,  "y": 880},
-        {"k": "external", "name": "Azure OpenAI / Foundry\n(customer subscription)", "x": 1300, "y": 880, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        {"k": "process",  "name": "Azure OpenAI / Foundry\n(customer subscription)", "x": 1300, "y": 880, "oos": True, "oos_reason": _FOUNDRY_OOS},
         {"k": "store",    "name": "Customer vectors destination\ne2eblob.vectors / pgvector", "x": 1300, "y": 540},
     ],
     "tbs": [
