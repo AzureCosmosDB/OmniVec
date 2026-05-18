@@ -741,6 +741,111 @@
             animation: spin 1s linear infinite;
         }
 
+        /* --- Live tab animations --- */
+        @keyframes livePulse {
+            0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.7); }
+            70%  { box-shadow: 0 0 0 10px rgba(239,68,68,0); }
+            100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+        }
+        @keyframes liveShimmer {
+            0%   { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        @keyframes liveRowSlide {
+            from { opacity: 0; transform: translateX(-12px); }
+            to   { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes liveRingGlow {
+            0%, 100% { filter: drop-shadow(0 0 8px rgba(99,102,241,.55)); }
+            50%      { filter: drop-shadow(0 0 24px rgba(236,72,153,1)); }
+        }
+        @keyframes liveOrbit {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
+        }
+        @keyframes liveOrbitReverse {
+            from { transform: rotate(360deg); }
+            to   { transform: rotate(0deg); }
+        }
+        @keyframes liveMeshDrift {
+            0%   { transform: translate(0%, 0%) scale(1); }
+            50%  { transform: translate(3%, -2%) scale(1.05); }
+            100% { transform: translate(0%, 0%) scale(1); }
+        }
+        @keyframes liveDigitFlip {
+            from { transform: translateY(-100%); opacity: 0; }
+            to   { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes liveFlash {
+            0%   { background: rgba(99,102,241,.25); }
+            100% { background: var(--bg-tertiary); }
+        }
+        .live-ring-progress {
+            transition: stroke-dashoffset .9s cubic-bezier(.22,.61,.36,1);
+            animation: liveRingGlow 3s ease-in-out infinite;
+        }
+        .live-bar-fill {
+            background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+            background-size: 200% 100%;
+            animation: liveShimmer 2.4s linear infinite;
+            transition: width .9s cubic-bezier(.22,.61,.36,1);
+            box-shadow: 0 0 24px rgba(139,92,246,.65);
+        }
+        .live-stat-card {
+            background: linear-gradient(135deg, rgba(99,102,241,.10), rgba(139,92,246,.04) 60%, rgba(236,72,153,.06));
+            border: 1px solid rgba(139,92,246,.22);
+            border-radius: 14px;
+            padding: 18px 20px;
+            position: relative;
+            overflow: hidden;
+        }
+        .live-stat-card::before {
+            content: '';
+            position: absolute; inset: 0;
+            background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,.04) 50%, transparent 70%);
+            background-size: 200% 100%;
+            animation: liveShimmer 6s linear infinite;
+            pointer-events: none;
+        }
+        .live-recent-row {
+            animation: liveRowSlide .35s ease-out, liveFlash 1.2s ease-out;
+        }
+        .live-mesh {
+            position: absolute; inset: -20%;
+            background:
+              radial-gradient(circle at 20% 30%, rgba(99,102,241,.18), transparent 40%),
+              radial-gradient(circle at 80% 20%, rgba(236,72,153,.14), transparent 45%),
+              radial-gradient(circle at 60% 80%, rgba(139,92,246,.16), transparent 45%),
+              radial-gradient(circle at 15% 85%, rgba(56,189,248,.10), transparent 40%);
+            filter: blur(40px);
+            animation: liveMeshDrift 18s ease-in-out infinite;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .live-orbit-1 { animation: liveOrbit 22s linear infinite; transform-origin: 100px 100px; }
+        .live-orbit-2 { animation: liveOrbitReverse 16s linear infinite; transform-origin: 100px 100px; }
+        .live-digit {
+            display: inline-block;
+            min-width: .65em;
+            font-variant-numeric: tabular-nums;
+            animation: liveDigitFlip .35s cubic-bezier(.22,.61,.36,1);
+        }
+        .live-now-card {
+            background: linear-gradient(135deg, rgba(16,185,129,.12), rgba(99,102,241,.08));
+            border: 1px solid rgba(16,185,129,.25);
+            border-radius: 12px;
+            padding: 14px 18px;
+            position: relative;
+            overflow: hidden;
+        }
+        .live-now-card::after {
+            content: '';
+            position: absolute; left: 0; top: 0; bottom: 0;
+            width: 3px;
+            background: linear-gradient(180deg, #10b981, #6366f1);
+            box-shadow: 0 0 12px rgba(16,185,129,.8);
+        }
+
         /* Responsive */
         @media (max-width: 1200px) {
             .stats-grid {
@@ -784,21 +889,251 @@
 </head>
 <body>
     <!-- Login Screen -->
-    <div id="login-screen" style="display: none; min-height: 100vh; align-items: center; justify-content: center; background: var(--bg-primary);">
-        <div style="width: 400px; padding: 48px; background: var(--bg-secondary); border-radius: var(--radius-lg); border: 1px solid var(--border-subtle); box-shadow: var(--shadow-lg);">
-            <div style="text-align: center; margin-bottom: 32px;">
-                <div style="font-size: 28px; font-weight: 700; background: var(--gradient-accent); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px;">OmniVec</div>
-                <div style="color: var(--text-tertiary); font-size: 14px;">Enter your access token to continue</div>
+    <div id="login-screen" style="display: none; min-height: 100vh; background: #0a0a0b; color: #fafafa;">
+        <style>
+            #login-screen .login-wrap { display: flex; min-height: 100vh; }
+            #login-screen .login-wrap { display: flex; min-height: 100vh; width: 100%; }
+            #login-screen .login-left {
+                flex: 1 1 50%; width: 50%; max-width: 50%; min-width: 0;
+                position: relative; overflow: hidden;
+                display: flex; flex-direction: column;
+                padding: 56px 64px; box-sizing: border-box;
+                background:
+                    radial-gradient(ellipse 80% 60% at 20% 30%, rgba(99,102,241,0.28), transparent 60%),
+                    radial-gradient(ellipse 70% 50% at 80% 80%, rgba(168,85,247,0.22), transparent 60%),
+                    radial-gradient(ellipse 60% 60% at 60% 20%, rgba(139,92,246,0.18), transparent 60%),
+                    linear-gradient(135deg, #0b0b14 0%, #14101f 50%, #0a0a0b 100%);
+            }
+            #login-screen .login-left::before {
+                content: ""; position: absolute; inset: 0; pointer-events: none;
+                background-image:
+                    linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+                background-size: 48px 48px;
+                mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+                -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+            }
+            #login-screen .login-left::after {
+                content: ""; position: absolute; width: 520px; height: 520px;
+                border-radius: 50%; filter: blur(120px);
+                background: radial-gradient(circle, rgba(99,102,241,0.45), transparent 65%);
+                top: -100px; right: -120px; pointer-events: none;
+            }
+            #login-screen .ll-content { position: relative; z-index: 1; }
+            #login-screen .brand-mark {
+                display: inline-flex; align-items: center; gap: 14px;
+                padding: 10px 16px; border-radius: 999px;
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                backdrop-filter: blur(10px);
+                font-size: 12px; font-weight: 600; letter-spacing: 1.5px;
+                color: #c7c7d1; text-transform: uppercase;
+            }
+            #login-screen .brand-dot {
+                width: 8px; height: 8px; border-radius: 50%;
+                background: linear-gradient(135deg, #6366f1, #a855f7);
+                box-shadow: 0 0 16px rgba(139,92,246,0.8);
+            }
+            #login-screen .hero-logo {
+                font-size: 88px; font-weight: 800; letter-spacing: -3px;
+                line-height: 1; margin-top: 40px;
+                background: linear-gradient(135deg, #ffffff 0%, #c7d2fe 40%, #a855f7 100%);
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                background-clip: text; color: transparent;
+            }
+            #login-screen .hero-tagline {
+                margin-top: 28px; font-size: 22px; font-weight: 500;
+                color: #d4d4d8; max-width: 560px; line-height: 1.5;
+            }
+            #login-screen .any-hero {
+                display: inline-flex; align-items: center; gap: 28px;
+                margin-top: 180px; align-self: center;
+            }
+            #login-screen .any-big {
+                font-size: 140px; font-weight: 800; letter-spacing: 8px;
+                line-height: 1; color: #ffffff;
+                text-transform: uppercase;
+                background: linear-gradient(135deg, #ffffff 0%, #c7d2fe 100%);
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                background-clip: text;
+                text-shadow: 0 0 80px rgba(199,210,254,0.5);
+                padding-right: 8px;
+            }
+            #login-screen .any-list {
+                display: flex; flex-direction: column; justify-content: center;
+                height: 140px; gap: 0; text-align: center;
+            }
+            #login-screen .any-word {
+                font-size: 30px; font-weight: 700; line-height: 1.15;
+                letter-spacing: -0.5px;
+                background: linear-gradient(135deg, #818cf8 0%, #a855f7 50%, #ec4899 100%);
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                background-clip: text;
+                filter: drop-shadow(0 0 18px rgba(168,85,247,0.30));
+            }
+            #login-screen .ll-bottom {
+                margin-top: auto; text-align: center;
+            }
+            #login-screen .hero-sub {
+                margin: 20px auto 0; font-size: 14px; color: #a1a1aa; max-width: 500px;
+                text-align: center;
+            }
+            #login-screen .feat-row {
+                display: flex; gap: 28px; margin-top: 44px; flex-wrap: wrap;
+                justify-content: center;
+            }
+            #login-screen .feat {
+                display: flex; align-items: center; gap: 10px;
+                font-size: 13px; color: #c7c7d1;
+            }
+            #login-screen .feat svg { color: #a855f7; }
+            #login-screen .ll-footer {
+                position: relative; z-index: 1;
+                font-size: 12px; color: #71717a; display: flex; gap: 16px;
+            }
+            #login-screen .ll-footer a { color: #a1a1aa; text-decoration: none; }
+            #login-screen .ll-footer a:hover { color: #ffffff; }
+
+            #login-screen .login-right {
+                flex: 1 1 50%; width: 50%; max-width: 50%; min-width: 0;
+                display: flex; align-items: center; justify-content: center;
+                padding: 48px; box-sizing: border-box;
+                background: #0a0a0b;
+                border-left: 1px solid rgba(255,255,255,0.06);
+            }
+            #login-screen .login-card {
+                width: 100%; max-width: 420px;
+            }
+            #login-screen .login-card h2 {
+                font-size: 28px; font-weight: 700; margin: 0 0 8px 0; color: #fafafa;
+                letter-spacing: -0.5px;
+            }
+            #login-screen .login-card .sub {
+                font-size: 14px; color: #a1a1aa; margin-bottom: 32px;
+            }
+            #login-screen .login-card label {
+                display: block; font-size: 13px; font-weight: 500;
+                color: #d4d4d8; margin-bottom: 8px;
+            }
+            #login-screen .login-card input {
+                width: 100%; padding: 14px 16px;
+                background: #141416; color: #fafafa;
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 10px; font-size: 14px;
+                font-family: 'JetBrains Mono', ui-monospace, monospace;
+                transition: all 0.2s ease; outline: none;
+                box-sizing: border-box;
+            }
+            #login-screen .login-card input::placeholder { color: #52525b; }
+            #login-screen .login-card input:focus {
+                border-color: #6366f1;
+                box-shadow: 0 0 0 4px rgba(99,102,241,0.15);
+                background: #18181b;
+            }
+            #login-screen .login-card .btn-signin {
+                width: 100%; padding: 14px; margin-top: 24px;
+                border: none; border-radius: 10px; cursor: pointer;
+                font-size: 15px; font-weight: 600; color: #ffffff;
+                background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
+                box-shadow: 0 8px 24px rgba(99,102,241,0.35), inset 0 1px 0 rgba(255,255,255,0.15);
+                transition: transform 0.15s ease, box-shadow 0.2s ease;
+            }
+            #login-screen .login-card .btn-signin:hover {
+                transform: translateY(-1px);
+                box-shadow: 0 12px 28px rgba(139,92,246,0.45), inset 0 1px 0 rgba(255,255,255,0.18);
+            }
+            #login-screen .login-card .btn-signin:active { transform: translateY(0); }
+            #login-screen .login-card .err {
+                display: none; color: #fca5a5; font-size: 13px; margin-top: 14px;
+                padding: 10px 12px; background: rgba(239,68,68,0.1);
+                border: 1px solid rgba(239,68,68,0.25); border-radius: 8px;
+            }
+            #login-screen .login-card .hint {
+                margin-top: 28px; padding-top: 24px;
+                border-top: 1px solid rgba(255,255,255,0.06);
+                font-size: 12px; color: #71717a; text-align: center;
+            }
+            #login-screen .login-card .hint code {
+                background: #18181b; color: #c4b5fd; padding: 3px 8px;
+                border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
+                border: 1px solid rgba(255,255,255,0.05);
+            }
+            @media (max-width: 900px) {
+                #login-screen .login-wrap { flex-direction: column; }
+                #login-screen .login-left,
+                #login-screen .login-right { width: 100%; flex: 1 1 auto; }
+                #login-screen .login-left { padding: 40px 32px; }
+                #login-screen .hero-logo { font-size: 56px; }
+                #login-screen .any-hero { gap: 16px; margin-top: 36px; }
+                #login-screen .any-big { font-size: 80px; letter-spacing: -3px; }
+                #login-screen .any-list { height: 80px; }
+                #login-screen .any-word { font-size: 18px; }
+                #login-screen .login-right { padding: 32px; border-left: none; border-top: 1px solid rgba(255,255,255,0.06); }
+            }
+        </style>
+
+        <div class="login-wrap">
+            <!-- LEFT: brand -->
+            <div class="login-left">
+                <div class="ll-top">
+                    <div class="brand-mark">
+                        <span class="brand-dot"></span>
+                        Vector Ingestion Platform
+                    </div>
+                </div>
+                <div class="ll-content">
+                    <div class="hero-logo">OmniVec</div>
+                    <div class="any-hero">
+                        <span class="any-big">Any</span>
+                        <span class="any-list">
+                            <span class="any-word">source.</span>
+                            <span class="any-word">format.</span>
+                            <span class="any-word">model.</span>
+                            <span class="any-word">destination.</span>
+                        </span>
+                    </div>
+                    <div class="hero-sub">
+                        Ingest, embed, and search across everything — one platform, zero glue code.
+                    </div>
+                    <div class="feat-row">
+                        <div class="feat">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                            Real-time pipelines
+                        </div>
+                        <div class="feat">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/></svg>
+                            Any vector store
+                        </div>
+                        <div class="feat">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/></svg>
+                            AI-powered agents
+                        </div>
+                    </div>
+                </div>
+                <div class="ll-bottom">
+                <div class="ll-footer">
+                    <span>© OmniVec</span>
+                    <a href="https://github.com/AzureCosmosDB/OmniVec" target="_blank">Docs</a>
+                    <a href="https://github.com/AzureCosmosDB/OmniVec" target="_blank">GitHub</a>
+                </div>
+                </div>
             </div>
-            <div class="form-group">
-                <label class="form-label" style="font-size: 13px;">Access Token</label>
-                <input type="password" id="login-token" class="form-input" placeholder="Paste your token here" style="font-family: 'JetBrains Mono', monospace; font-size: 13px;"
-                    onkeydown="if(event.key==='Enter') doLogin()">
-            </div>
-            <div id="login-error" style="display: none; color: var(--error); font-size: 13px; margin-bottom: 16px; padding: 10px; background: var(--error-muted); border-radius: var(--radius-sm);"></div>
-            <button class="btn btn-primary" onclick="doLogin()" style="width: 100%; padding: 12px; font-size: 14px; margin-top: 8px;" id="login-btn">Sign In</button>
-            <div style="text-align: center; margin-top: 20px; color: var(--text-tertiary); font-size: 12px;">
-                Generate tokens via CLI: <code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;">curl -X POST /api/auth/tokens</code>
+
+            <!-- RIGHT: login form -->
+            <div class="login-right">
+                <div class="login-card">
+                    <h2>Welcome back</h2>
+                    <div class="sub">Sign in with your access token to continue.</div>
+                    <label for="login-token">Access Token</label>
+                    <input type="password" id="login-token" placeholder="Paste your token here"
+                        onkeydown="if(event.key==='Enter') doLogin()" autofocus>
+                    <div id="login-error" class="err"></div>
+                    <button class="btn-signin" onclick="doLogin()" id="login-btn">Sign In</button>
+                    <div class="hint">
+                        Generate a token via CLI:<br>
+                        <code style="margin-top:6px; display:inline-block;">curl -X POST /api/auth/tokens</code>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -3755,6 +4090,10 @@
                         Health
                         ${(() => { const sh = getHealthFor('sources', source.id); return sh && sh.status !== 'healthy' ? '<span style="margin-left:auto;width:8px;height:8px;border-radius:50%;background:' + healthStatusColor(sh.status) + ';display:inline-block;"></span>' : ''; })()}
                     </button>
+                    <button class="detail-tab" data-tab="samples" onclick="switchDetailTab('samples')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                        Samples
+                    </button>
                 </nav>
 
                 <div id="source-detail-test-result" style="margin-top: 24px;"></div>
@@ -3981,7 +4320,72 @@
                         </div>
                     `;
                 }
+            } else if (currentDetailTab === 'samples') {
+                renderSamplesTab(configPanel, 'sources', source.id);
             }
+        }
+
+        async function renderSamplesTab(panel, kind, id) {
+            const label = kind === 'sources' ? 'Source' : 'Destination';
+            panel.innerHTML = `
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                    <h4 style="margin:0;font-size:16px;">Sample Items</h4>
+                    <button class="btn btn-secondary" id="samples-refresh-btn" onclick="renderSamplesTab(document.getElementById('${kind === 'sources' ? 'source-detail-config' : 'destination-detail-config'}'),'${kind}','${id}')">↻ Refresh</button>
+                </div>
+                <div style="color:var(--text-tertiary);font-size:13px;margin-bottom:12px;">Random preview of items currently in this ${label.toLowerCase()}. Refresh to draw a new sample.</div>
+                <div id="samples-list" style="display:flex;flex-direction:column;gap:10px;">
+                    <div style="text-align:center;padding:32px;color:var(--text-tertiary);">Loading samples…</div>
+                </div>`;
+            try {
+                const res = await apiFetch(`/api/${kind}/${id}/sample?limit=5`);
+                const list = document.getElementById('samples-list');
+                if (!res.ok) {
+                    const err = await res.json().catch(()=>({detail:res.statusText}));
+                    list.innerHTML = `<div style="padding:14px;background:rgba(248,113,113,.10);border:1px solid rgba(248,113,113,.4);border-radius:8px;color:#fecaca;font-size:13px;">${escapeHtml(err.detail || 'Failed to load samples')}</div>`;
+                    return;
+                }
+                const data = await res.json();
+                if (data.warning) {
+                    list.innerHTML = `<div style="padding:14px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:8px;color:#fde68a;font-size:13px;">${escapeHtml(data.warning)}</div>`;
+                    return;
+                }
+                const items = data.items || [];
+                if (!items.length) {
+                    list.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-tertiary);font-size:13px;">${escapeHtml(data.message || 'No items found')}</div>`;
+                    return;
+                }
+                list.innerHTML = items.map((it, i) => {
+                    const meta = [];
+                    if (it.size != null) meta.push(formatBytes(it.size));
+                    if (it.content_type) meta.push(escapeHtml(it.content_type));
+                    if (it.modified) meta.push(new Date(it.modified).toLocaleString());
+                    if (it.vector_dim) meta.push(`vec ${it.vector_dim}-d`);
+                    if (it.pipeline_id) meta.push(`pipeline: ${escapeHtml(it.pipeline_id)}`);
+                    const previewBlock = it.preview ? `<pre style="margin:8px 0 0;padding:10px 12px;background:var(--bg-secondary);border-radius:6px;font-size:12px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:140px;overflow:auto;color:var(--text-secondary);">${escapeHtml(it.preview)}</pre>` : '';
+                    const vecBlock = it.vector_preview ? `<div style="margin-top:6px;font-family:ui-monospace,monospace;font-size:11px;color:var(--text-tertiary);">${escapeHtml(it.vector_preview)}</div>` : '';
+                    const imgPreview = (it.kind === 'image' && kind === 'sources') ? `<div style="margin-top:8px;text-align:center;"><span style="font-size:11px;color:var(--text-tertiary);">🖼 image · open the source to preview</span></div>` : '';
+                    return `
+                        <div style="padding:12px 14px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;">
+                            <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+                                <div style="font-weight:600;font-size:13px;word-break:break-all;flex:1;">${i+1}. ${escapeHtml(it.name || it.id || '(unnamed)')}</div>
+                                <span class="badge badge-neutral" style="font-size:10px;">${escapeHtml(it.kind || 'item')}</span>
+                            </div>
+                            ${meta.length ? `<div style="margin-top:4px;font-size:11px;color:var(--text-tertiary);">${meta.join(' · ')}</div>` : ''}
+                            ${previewBlock}${vecBlock}${imgPreview}
+                        </div>`;
+                }).join('');
+            } catch (e) {
+                const list = document.getElementById('samples-list');
+                if (list) list.innerHTML = `<div style="padding:14px;background:rgba(248,113,113,.10);border:1px solid rgba(248,113,113,.4);border-radius:8px;color:#fecaca;font-size:13px;">${escapeHtml(e.message || String(e))}</div>`;
+            }
+        }
+
+        function formatBytes(n) {
+            if (n == null) return '';
+            if (n < 1024) return n + ' B';
+            if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+            if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+            return (n/1024/1024/1024).toFixed(2) + ' GB';
         }
 
         async function deleteSourceFromDetail() {
@@ -4313,6 +4717,10 @@
                         Health
                         ${(() => { const dh = getHealthFor('destinations', dest.id); return dh && dh.status !== 'healthy' ? '<span style="margin-left:auto;width:8px;height:8px;border-radius:50%;background:' + healthStatusColor(dh.status) + ';display:inline-block;"></span>' : ''; })()}
                     </button>
+                    <button class="dest-detail-tab" data-tab="samples" onclick="switchDestDetailTab('samples')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                        Samples
+                    </button>
                 </nav>
 
             `;
@@ -4564,6 +4972,8 @@
                         </div>
                     `;
                 }
+            } else if (currentDestDetailTab === 'samples') {
+                renderSamplesTab(configPanel, 'destinations', dest.id);
             }
         }
 
@@ -4925,6 +5335,234 @@
         let currentPipelineTab = 'general';
         let editedPipelineData = {};
         let pipelineDetailDirty = false;
+        // --- Live tab state ---
+        let livePipelinePollTimer = null;
+        let liveSpark = [];               // throughput samples (docs/sec)
+        let liveLastEmbedded = null;      // for instantaneous throughput diff
+        let liveLastSampleTs = null;
+        let liveStartEmbedded = null;     // baseline when Live tab was opened
+        let liveStartTs = null;
+        let liveAnimatedEmbedded = 0;     // tween counter (visual)
+        let liveTargetEmbedded = 0;       // latest real value
+        let liveRafHandle = null;
+        let liveRecentTitles = [];        // recent doc titles streamed in
+        let liveParticlesRaf = null;
+        let liveParticlesCanvas = null;
+        let liveParticles = [];
+        let liveParticleSpawnRate = 1;     // particles per frame (scales with throughput)
+        let liveSmoothThru = 0;            // EMA-smoothed throughput
+        let liveLastActiveTs = 0;          // ms timestamp of last seen increment
+        let liveCurrentTickFn = null;      // currently active poll tick (for manual refresh)
+
+        async function liveDashboardManualRefresh() {
+            const icon = document.getElementById('live-refresh-icon');
+            if (icon) {
+                icon.style.transform = 'rotate(360deg)';
+                setTimeout(() => { icon.style.transition = 'none'; icon.style.transform = 'rotate(0deg)'; requestAnimationFrame(() => { icon.style.transition = 'transform .6s ease'; }); }, 600);
+            }
+            if (typeof liveCurrentTickFn === 'function') {
+                try { await liveCurrentTickFn(); } catch (e) {}
+            }
+        }
+
+        function stopLivePipelinePoll() {
+            if (livePipelinePollTimer) { clearInterval(livePipelinePollTimer); livePipelinePollTimer = null; }
+            if (liveRafHandle) { cancelAnimationFrame(liveRafHandle); liveRafHandle = null; }
+            if (liveParticlesRaf) { cancelAnimationFrame(liveParticlesRaf); liveParticlesRaf = null; }
+            liveSpark = []; liveLastEmbedded = null; liveLastSampleTs = null;
+            liveStartEmbedded = null; liveStartTs = null;
+            liveAnimatedEmbedded = 0; liveTargetEmbedded = 0;
+            liveRecentTitles = [];
+            liveParticles = []; liveParticlesCanvas = null; liveParticleSpawnRate = 1;
+            liveSmoothThru = 0; liveLastActiveTs = 0;
+            liveCurrentTickFn = null;
+        }
+
+        function startLiveParticles() {
+            const canvas = document.getElementById('live-particles');
+            if (!canvas) return;
+            liveParticlesCanvas = canvas;
+            const ctx = canvas.getContext('2d');
+            const resize = () => {
+                const dpr = window.devicePixelRatio || 1;
+                const rect = canvas.getBoundingClientRect();
+                canvas.width = rect.width * dpr;
+                canvas.height = rect.height * dpr;
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            };
+            resize();
+            const ro = new ResizeObserver(resize);
+            ro.observe(canvas);
+
+            // Compute anchor points from the actual DOM nodes (positioned relative to canvas)
+            function getRoutes() {
+                const cr = canvas.getBoundingClientRect();
+                const get = (id) => {
+                    const el = document.getElementById(id);
+                    if (!el) return null;
+                    const r = el.getBoundingClientRect();
+                    return { x: r.left + r.width / 2 - cr.left, y: r.top + r.height / 2 - cr.top, w: r.width, h: r.height };
+                };
+                const src = get('live-source-pulse');
+                const dst = get('live-dest-pulse');
+                const mdl = get('live-model-pulse');
+                // OmniVec ring — use the progress circle's parent svg center via ring
+                const ring = document.getElementById('live-ring-progress');
+                let omni = null;
+                if (ring) {
+                    const r = ring.getBoundingClientRect();
+                    omni = { x: r.left + r.width/2 - cr.left, y: r.top + r.height/2 - cr.top };
+                }
+                if (!src || !dst || !omni) return [];
+                // Offset edges so crates appear to "exit" the boxes
+                const routes = [
+                    { id: 'src2omni', from: { x: src.x + 50, y: src.y }, to: { x: omni.x - 105, y: omni.y }, color: '#38bdf8', accent: '#7dd3fc' },
+                    { id: 'omni2dst', from: { x: omni.x + 105, y: omni.y }, to: { x: dst.x - 50, y: dst.y }, color: '#10b981', accent: '#6ee7b7' },
+                ];
+                if (mdl) {
+                    routes.push({ id: 'omni2model', from: { x: omni.x, y: omni.y - 105 }, to: { x: mdl.x, y: mdl.y + 40 }, color: '#fbbf24', accent: '#fcd34d' });
+                    routes.push({ id: 'model2omni', from: { x: mdl.x, y: mdl.y + 40 }, to: { x: omni.x, y: omni.y - 105 }, color: '#a78bfa', accent: '#c4b5fd' });
+                }
+                return routes;
+            }
+
+            let routesCache = getRoutes();
+            let lastRouteRefresh = performance.now();
+
+            const drawCrate = (x, y, angle, size, color, accent) => {
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.rotate(angle);
+                const w = size, h = size * 0.78;
+                // shadow
+                ctx.fillStyle = 'rgba(0,0,0,.45)';
+                ctx.fillRect(-w/2 + 1, -h/2 + 2, w, h);
+                // body
+                const grad = ctx.createLinearGradient(-w/2, -h/2, w/2, h/2);
+                grad.addColorStop(0, accent);
+                grad.addColorStop(1, color);
+                ctx.fillStyle = grad;
+                ctx.fillRect(-w/2, -h/2, w, h);
+                // top highlight
+                ctx.fillStyle = 'rgba(255,255,255,.18)';
+                ctx.fillRect(-w/2, -h/2, w, h * 0.22);
+                // X-strap (crate planks)
+                ctx.strokeStyle = 'rgba(255,255,255,.55)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(-w/2, -h/2); ctx.lineTo(w/2, h/2);
+                ctx.moveTo(w/2, -h/2);  ctx.lineTo(-w/2, h/2);
+                ctx.stroke();
+                // border
+                ctx.strokeStyle = 'rgba(0,0,0,.55)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(-w/2, -h/2, w, h);
+                ctx.restore();
+            };
+
+            const spawn = (idle) => {
+                if (!routesCache.length) return;
+                const r = routesCache[Math.floor(Math.random() * routesCache.length)];
+                if (idle) {
+                    liveParticles.push({
+                        route: r,
+                        progress: 0,
+                        speed: 0.0035 + Math.random() * 0.0025,
+                        size: 2 + Math.random() * 1.2,
+                        kind: 'idle',
+                    });
+                } else {
+                    liveParticles.push({
+                        route: r,
+                        progress: 0,
+                        speed: 0.012 + Math.random() * 0.010,
+                        size: 13 + Math.random() * 4,
+                        wobble: Math.random() * Math.PI * 2,
+                        kind: 'crate',
+                    });
+                }
+            };
+
+            const render = () => {
+                if (!liveParticlesCanvas || currentPipelineTab !== 'live') {
+                    liveParticlesRaf = null;
+                    return;
+                }
+                const now = performance.now();
+                if (now - lastRouteRefresh > 800) {
+                    routesCache = getRoutes();
+                    lastRouteRefresh = now;
+                }
+                const rect = canvas.getBoundingClientRect();
+                ctx.clearRect(0, 0, rect.width, rect.height);
+
+                const isIdle = liveParticleSpawnRate <= 0.001;
+
+                if (isIdle) {
+                    // Drop any in-flight crates so we go fully quiet
+                    liveParticles = liveParticles.filter(p => p.kind !== 'crate');
+                } else {
+                    const toSpawn = Math.max(0, Math.min(4, liveParticleSpawnRate));
+                    if (Math.random() < toSpawn) spawn(false);
+                    if (toSpawn >= 1) {
+                        for (let i = 0; i < Math.floor(toSpawn); i++) spawn(false);
+                    }
+                }
+
+                // Draw guide lines: dim when idle, slightly brighter when active
+                routesCache.forEach(r => {
+                    ctx.strokeStyle = isIdle ? 'rgba(148,163,184,.10)' : r.color + '22';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(r.from.x, r.from.y);
+                    ctx.lineTo(r.to.x, r.to.y);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                });
+
+                // Idle: emit a soft "ping" along each route on a slow heartbeat
+                if (isIdle) {
+                    const period = 2800; // ms per ping cycle
+                    routesCache.forEach((r, idx) => {
+                        const offset = idx * 700;
+                        const phase = ((now + offset) % period) / period; // 0..1
+                        if (phase > 1) return;
+                        const x = r.from.x + (r.to.x - r.from.x) * phase;
+                        const y = r.from.y + (r.to.y - r.from.y) * phase;
+                        const fade = Math.sin(phase * Math.PI);
+                        // soft outer halo
+                        const grd = ctx.createRadialGradient(x, y, 0, x, y, 14);
+                        grd.addColorStop(0, `rgba(148,163,184,${0.35 * fade})`);
+                        grd.addColorStop(1, 'rgba(148,163,184,0)');
+                        ctx.fillStyle = grd;
+                        ctx.beginPath();
+                        ctx.arc(x, y, 14, 0, Math.PI * 2);
+                        ctx.fill();
+                        // inner dot
+                        ctx.fillStyle = `rgba(203,213,225,${0.7 * fade})`;
+                        ctx.beginPath();
+                        ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                }
+
+                // Move + draw active crate particles
+                for (let i = liveParticles.length - 1; i >= 0; i--) {
+                    const p = liveParticles[i];
+                    p.progress += p.speed;
+                    if (p.progress >= 1) { liveParticles.splice(i, 1); continue; }
+                    const t = p.progress;
+                    const x = p.route.from.x + (p.route.to.x - p.route.from.x) * t;
+                    const y = p.route.from.y + (p.route.to.y - p.route.from.y) * t;
+                    const angle = Math.sin(now * 0.005 + (p.wobble || 0)) * 0.12;
+                    drawCrate(x, y, angle, p.size, p.route.color, p.route.accent);
+                }
+
+                liveParticlesRaf = requestAnimationFrame(render);
+            };
+            liveParticlesRaf = requestAnimationFrame(render);
+        }
 
         function markPipelineDetailDirty() {
             pipelineDetailDirty = true;
@@ -4938,6 +5576,7 @@
             }
             pipelineDetailDirty = false;
             editedPipelineData = {};
+            stopLivePipelinePoll();
             closeModal('pipeline-detail-modal');
         }
 
@@ -5021,6 +5660,11 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
                         Stats
                     </button>
+                    <button class="pip-detail-tab" data-tab="live" onclick="switchPipelineDetailTab('live')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="11" opacity="0.4"/></svg>
+                        Live
+                        <span style="margin-left:auto; width:8px; height:8px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,.7); animation: livePulse 1.4s infinite;"></span>
+                    </button>
                 </nav>
             `;
 
@@ -5030,6 +5674,7 @@
 
         function switchPipelineDetailTab(tab) {
             capturePipelineTabData();
+            if (currentPipelineTab === 'live' && tab !== 'live') stopLivePipelinePoll();
             currentPipelineTab = tab;
             document.querySelectorAll('.pip-detail-tab').forEach(t => {
                 if (t.dataset.tab === tab) {
@@ -5407,7 +6052,489 @@
                     </div>
                 `;
                 loadPipelineRecentErrors(pipeline.id);
+            } else if (currentPipelineTab === 'live') {
+                configPanel.innerHTML = `
+                    <div style="position:relative; overflow:hidden; border-radius:14px; padding:18px; background:radial-gradient(ellipse at top, #1a1d3a 0%, #0a0b1e 60%, #050613 100%); border:1px solid rgba(139,92,246,.25); color:#e2e8f0;">
+                        <div class="live-mesh"></div>
+                        <canvas id="live-particles" style="position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:1;"></canvas>
+
+                        <div style="position:relative; z-index:2;">
+                            <!-- Header -->
+                            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+                                <div style="display:flex; align-items:center; gap:12px;">
+                                    <div style="position:relative; width:32px; height:32px;">
+                                        <div style="position:absolute; inset:0; border-radius:50%; background:radial-gradient(circle, #ef4444, transparent 70%); animation: livePulse 1.4s infinite;"></div>
+                                        <div style="position:absolute; inset:10px; border-radius:50%; background:#ef4444; box-shadow:0 0 12px #ef4444;"></div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:2px; color:#94a3b8;">Live · Real-time</div>
+                                        <div style="font-size:17px; font-weight:700; background:linear-gradient(135deg,#a5b4fc,#f0abfc); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">Pipeline Activity Monitor</div>
+                                    </div>
+                                </div>
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                    <button id="live-refresh-btn" title="Refresh now" onclick="liveDashboardManualRefresh()" style="border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.05); color:#cbd5e1; width:32px; height:32px; border-radius:50%; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: all .2s;" onmouseover="this.style.background='rgba(255,255,255,.12)'; this.style.color='#a5b4fc';" onmouseout="this.style.background='rgba(255,255,255,.05)'; this.style.color='#cbd5e1';">
+                                        <svg id="live-refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition: transform .6s ease;">
+                                            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                                            <path d="M21 3v5h-5"/>
+                                            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                                            <path d="M3 21v-5h5"/>
+                                        </svg>
+                                    </button>
+                                    <div id="live-status-pill" style="font-size:11px; font-weight:600; padding:6px 12px; border-radius:18px; background:rgba(255,255,255,.05); color:#cbd5e1; display:flex; align-items:center; gap:6px;">
+                                        <span style="width:6px; height:6px; border-radius:50%; background:#94a3b8;"></span>
+                                        Connecting…
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Main hero: stats | flow | stats -->
+                            <div style="display:grid; grid-template-columns: 1fr 2fr 1fr; gap:18px; align-items:stretch; margin-bottom:18px;">
+                                <!-- Left stats -->
+                                <div style="display:flex; flex-direction:column; gap:12px;">
+                                    <div class="live-stat-card" style="padding:14px 16px;">
+                                        <div style="font-size:10px; text-transform:uppercase; color:#94a3b8; letter-spacing:1.5px;">Throughput</div>
+                                        <div style="display:flex; align-items:baseline; gap:6px; margin-top:6px;">
+                                            <span id="live-throughput" style="font-size:26px; font-weight:800; color:#a5b4fc; font-variant-numeric: tabular-nums; line-height:1;">—</span>
+                                            <span style="font-size:11px; color:#94a3b8;">d/s</span>
+                                        </div>
+                                    </div>
+                                    <div class="live-stat-card" style="padding:14px 16px;">
+                                        <div style="font-size:10px; text-transform:uppercase; color:#94a3b8; letter-spacing:1.5px;">Embedded</div>
+                                        <div id="live-embedded" style="font-size:26px; font-weight:800; margin-top:6px; font-variant-numeric: tabular-nums; line-height:1; color:#f0abfc;">0</div>
+                                    </div>
+                                </div>
+
+                                <!-- Center flow column -->
+                                <div style="position:relative; display:flex; flex-direction:column; align-items:center; padding:8px 0;">
+                                    <!-- Model node (top) -->
+                                    <div style="text-align:center;">
+                                        <div style="font-size:9px; text-transform:uppercase; letter-spacing:1px; color:#94a3b8; margin-bottom:2px;">Embedding Model</div>
+                                        <div id="live-model-name" style="font-size:12px; font-weight:600; color:#fcd34d; margin-bottom:6px; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${pipeline.docgrok_pipeline || '—'}</div>
+                                        <div style="display:inline-flex; align-items:center; justify-content:center; width:62px; height:62px; border-radius:16px; background:linear-gradient(135deg, rgba(251,191,36,.25), rgba(251,191,36,.05)); border:1px solid rgba(251,191,36,.45); position:relative;">
+                                            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="1.5">
+                                                <circle cx="12" cy="12" r="3"/>
+                                                <path d="M12 1v6m0 10v6M4.22 4.22l4.24 4.24m7.08 7.08l4.24 4.24M1 12h6m10 0h6M4.22 19.78l4.24-4.24m7.08-7.08l4.24-4.24"/>
+                                            </svg>
+                                            <div id="live-model-pulse" style="position:absolute; inset:-4px; border-radius:18px; border:2px solid rgba(251,191,36,.5); opacity:0;"></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Vertical traffic corridor (Model ↕ OmniVec) -->
+                                    <div style="height:120px; width:100%; position:relative;"></div>
+
+                                    <!-- Source ─ OmniVec ─ Destination row -->
+                                    <div style="display:grid; grid-template-columns: 80px 1fr 80px; gap:6px; align-items:center; width:100%;">
+                                        <!-- Source -->
+                                        <div style="text-align:center;">
+                                            <div style="display:inline-flex; align-items:center; justify-content:center; width:60px; height:60px; border-radius:16px; background:linear-gradient(135deg, rgba(56,189,248,.25), rgba(56,189,248,.05)); border:1px solid rgba(56,189,248,.4); position:relative;">
+                                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.5">
+                                                    <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
+                                                </svg>
+                                                <div id="live-source-pulse" style="position:absolute; inset:-4px; border-radius:18px; border:2px solid rgba(56,189,248,.4); opacity:0;"></div>
+                                            </div>
+                                            <div style="font-size:9px; text-transform:uppercase; letter-spacing:1px; color:#94a3b8; margin-top:6px;">Source</div>
+                                            <div id="live-source-name" style="font-size:11px; font-weight:600; color:#7dd3fc; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">—</div>
+                                        </div>
+
+                                        <!-- OmniVec ring -->
+                                        <div style="position:relative; display:flex; align-items:center; justify-content:center;">
+                                            <svg viewBox="0 0 200 200" width="180" height="180">
+                                                <defs>
+                                                    <linearGradient id="liveRingGrad" x1="0" y1="0" x2="1" y2="1">
+                                                        <stop offset="0%" stop-color="#6366f1"/>
+                                                        <stop offset="50%" stop-color="#8b5cf6"/>
+                                                        <stop offset="100%" stop-color="#ec4899"/>
+                                                    </linearGradient>
+                                                    <radialGradient id="liveRingCore" cx="50%" cy="50%" r="50%">
+                                                        <stop offset="0%" stop-color="rgba(139,92,246,.35)"/>
+                                                        <stop offset="60%" stop-color="rgba(139,92,246,.08)"/>
+                                                        <stop offset="100%" stop-color="transparent"/>
+                                                    </radialGradient>
+                                                </defs>
+                                                <circle cx="100" cy="100" r="92" fill="url(#liveRingCore)"/>
+                                                <g class="live-orbit-1">
+                                                    <circle cx="100" cy="14" r="3" fill="#a5b4fc" opacity="0.7"/>
+                                                    <circle cx="100" cy="186" r="2" fill="#f0abfc" opacity="0.5"/>
+                                                </g>
+                                                <g class="live-orbit-2">
+                                                    <circle cx="14" cy="100" r="2.5" fill="#ec4899" opacity="0.6"/>
+                                                    <circle cx="186" cy="100" r="2" fill="#8b5cf6" opacity="0.5"/>
+                                                </g>
+                                                <g transform="rotate(-90 100 100)">
+                                                    <circle cx="100" cy="100" r="80" stroke="rgba(139,92,246,.15)" stroke-width="1" fill="none"/>
+                                                    <circle cx="100" cy="100" r="88" stroke="rgba(255,255,255,.05)" stroke-width="12" fill="none"/>
+                                                    <circle id="live-ring-progress" class="live-ring-progress" cx="100" cy="100" r="88"
+                                                        stroke="url(#liveRingGrad)" stroke-width="12" fill="none" stroke-linecap="round"
+                                                        stroke-dasharray="${2*Math.PI*88}" stroke-dashoffset="${2*Math.PI*88}"/>
+                                                </g>
+                                            </svg>
+                                            <div style="position:absolute; text-align:center;">
+                                                <div style="font-size:9px; text-transform:uppercase; letter-spacing:2px; color:#a5b4fc; font-weight:600;">OmniVec</div>
+                                                <div id="live-pct" style="font-size:34px; font-weight:800; line-height:1; background:linear-gradient(135deg,#a5b4fc,#ec4899); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; text-shadow: 0 0 40px rgba(139,92,246,.4); margin-top:2px;">0%</div>
+                                                <div id="live-counter" style="font-size:11px; color:#cbd5e1; margin-top:4px; font-variant-numeric: tabular-nums;">— / —</div>
+                                                <div id="live-eta" style="font-size:9px; color:#94a3b8; margin-top:4px; text-transform:uppercase; letter-spacing:1.5px;">ETA: —</div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Destination -->
+                                        <div style="text-align:center;">
+                                            <div style="display:inline-flex; align-items:center; justify-content:center; width:60px; height:60px; border-radius:16px; background:linear-gradient(135deg, rgba(16,185,129,.25), rgba(16,185,129,.05)); border:1px solid rgba(16,185,129,.4); position:relative;">
+                                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="1.5">
+                                                    <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+                                                </svg>
+                                                <div id="live-dest-pulse" style="position:absolute; inset:-4px; border-radius:18px; border:2px solid rgba(16,185,129,.4); opacity:0;"></div>
+                                            </div>
+                                            <div style="font-size:9px; text-transform:uppercase; letter-spacing:1px; color:#94a3b8; margin-top:6px;">Vector Store</div>
+                                            <div id="live-dest-name" style="font-size:11px; font-weight:600; color:#6ee7b7; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">—</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Right stats -->
+                                <div style="display:flex; flex-direction:column; gap:12px;">
+                                    <div class="live-stat-card" style="padding:14px 16px;">
+                                        <div style="font-size:10px; text-transform:uppercase; color:#94a3b8; letter-spacing:1.5px;">This Session</div>
+                                        <div style="display:flex; align-items:baseline; gap:4px; margin-top:6px;">
+                                            <span style="color:#10b981; font-size:18px;">↑</span>
+                                            <span id="live-session" style="font-size:26px; font-weight:800; color:#6ee7b7; font-variant-numeric: tabular-nums; line-height:1;">0</span>
+                                        </div>
+                                    </div>
+                                    <div class="live-stat-card" style="padding:14px 16px;">
+                                        <div style="font-size:10px; text-transform:uppercase; color:#94a3b8; letter-spacing:1.5px;">Peak / Failed</div>
+                                        <div style="display:flex; align-items:baseline; gap:8px; margin-top:6px;">
+                                            <span id="live-peak" style="font-size:20px; font-weight:700; color:#fbbf24; font-variant-numeric: tabular-nums; line-height:1;">—</span>
+                                            <span style="color:#94a3b8; font-size:12px;">/</span>
+                                            <span id="live-failed" style="font-size:18px; font-weight:600; color:#cbd5e1; font-variant-numeric: tabular-nums; line-height:1;">0</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Legend (compact) -->
+                            <div style="display:flex; justify-content:center; gap:18px; margin-bottom:18px; font-size:10px; color:#94a3b8;">
+                                <span style="display:inline-flex; align-items:center; gap:5px;"><span style="display:inline-block; width:12px; height:9px; background:linear-gradient(135deg,#7dd3fc,#38bdf8); border:1px solid rgba(0,0,0,.5);"></span>doc batch</span>
+                                <span style="display:inline-flex; align-items:center; gap:5px;"><span style="display:inline-block; width:12px; height:9px; background:linear-gradient(135deg,#fcd34d,#fbbf24); border:1px solid rgba(0,0,0,.5);"></span>embed call</span>
+                                <span style="display:inline-flex; align-items:center; gap:5px;"><span style="display:inline-block; width:12px; height:9px; background:linear-gradient(135deg,#6ee7b7,#10b981); border:1px solid rgba(0,0,0,.5);"></span>vector batch</span>
+                            </div>
+
+                            <!-- Throughput sparkline (compact) -->
+                            <div class="live-stat-card" style="margin-bottom:14px; padding:12px 16px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                    <div style="font-size:10px; text-transform:uppercase; color:#94a3b8; letter-spacing:1.5px;">Throughput · last 60s</div>
+                                    <div style="display:flex; gap:14px; font-size:10px; color:#94a3b8;">
+                                        <span>Elapsed: <span id="live-elapsed" style="color:#e2e8f0; font-weight:600;">0s</span></span>
+                                        <span>Status: <span id="live-pipeline-status" style="font-weight:600; color:#e2e8f0;">${pipeline.status}</span></span>
+                                    </div>
+                                </div>
+                                <svg id="live-spark" viewBox="0 0 600 50" preserveAspectRatio="none" style="width:100%; height:50px; display:block;">
+                                    <defs>
+                                        <linearGradient id="liveSparkArea" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.4"/>
+                                            <stop offset="100%" stop-color="#ec4899" stop-opacity="0"/>
+                                        </linearGradient>
+                                    </defs>
+                                    <path id="live-spark-area" d="" fill="url(#liveSparkArea)"/>
+                                    <path id="live-spark-path" d="" fill="none" stroke="url(#liveRingGrad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <circle id="live-spark-head" r="3.5" fill="#ec4899" style="filter: drop-shadow(0 0 8px #ec4899); display:none;"/>
+                                </svg>
+                            </div>
+
+                            <!-- Progress bar -->
+                            <div style="margin-bottom:14px;">
+                                <div style="height:8px; background:rgba(139,92,246,.08); border-radius:5px; overflow:hidden; position:relative; border:1px solid rgba(139,92,246,.2);">
+                                    <div id="live-bar" class="live-bar-fill" style="height:100%; width:0%;"></div>
+                                </div>
+                                <div style="display:flex; justify-content:space-between; font-size:10px; color:#94a3b8; margin-top:4px;">
+                                    <span>0</span>
+                                    <span id="live-bar-label" style="color:#e2e8f0; font-weight:600;">— / —</span>
+                                    <span id="live-bar-total">—</span>
+                                </div>
+                            </div>
+
+                            <!-- Recent items -->
+                            <div>
+                                <div style="font-size:10px; text-transform:uppercase; color:#94a3b8; letter-spacing:1.5px; margin-bottom:8px; display:flex; align-items:center; gap:8px;">
+                                    <span style="width:6px; height:6px; border-radius:50%; background:#10b981; box-shadow:0 0 8px #10b981; animation: livePulse 1.4s infinite;"></span>
+                                    Recently embedded
+                                </div>
+                                <div id="live-recent" style="display:flex; flex-direction:column; gap:4px; max-height:200px; overflow:hidden;">
+                                    <div style="padding:10px; color:#94a3b8; text-align:center; background:rgba(255,255,255,.03); border-radius:6px; font-size:12px;">Waiting for activity…</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                // Populate source/dest names
+                try {
+                    const srcEl = document.getElementById('live-source-name');
+                    const dstEl = document.getElementById('live-dest-name');
+                    if (srcEl) {
+                        const names = (pipeline.sources || []).map(ps => {
+                            const s = sources.find(x => x.id === ps.source_id);
+                            return s ? s.name : ps.source_id;
+                        });
+                        srcEl.textContent = names.join(', ') || '—';
+                    }
+                    if (dstEl) {
+                        const d = destinations.find(x => x.id === pipeline.destination_id);
+                        dstEl.textContent = d ? d.name : (pipeline.destination_id || '—');
+                    }
+                } catch (e) {}
+                startLivePipelinePoll(pipeline.id);
+                startLiveParticles();
             }
+        }
+
+        async function fetchLivePipelineSnapshot(pipelineId) {
+            try {
+                const res = await apiFetch(`/api/pipelines/${pipelineId}`);
+                if (!res.ok) return null;
+                return await res.json();
+            } catch (e) { return null; }
+        }
+
+        async function fetchLiveRecentCompleted(pipelineId) {
+            try {
+                const res = await apiFetch(`/api/jobs?pipeline_id=${pipelineId}&status=completed&limit=8`);
+                if (!res.ok) return [];
+                const data = await res.json();
+                return data.jobs || [];
+            } catch (e) { return []; }
+        }
+
+        function startLivePipelinePoll(pipelineId) {
+            stopLivePipelinePoll();
+            liveStartTs = Date.now();
+            liveStartEmbedded = null;
+            liveTargetEmbedded = 0;
+            liveAnimatedEmbedded = 0;
+            // Linear-ramp tween state: when each poll arrives we compute the
+            // velocity needed to reach the new target by the time the *next*
+            // poll lands, so the counter visibly ticks up at ~real rate.
+            let liveTweenVelocity = 0;      // docs/ms
+            let liveLastTweenTs = performance.now();
+            const POLL_INTERVAL_MS = 3000; // poll backend every 3s — API is cached/cheap
+            const peakRef = { value: 0 };
+            let seenJobIds = new Set();
+
+            const tween = () => {
+                const diff = liveTargetEmbedded - liveAnimatedEmbedded;
+                if (Math.abs(diff) < 0.5) {
+                    liveAnimatedEmbedded = liveTargetEmbedded;
+                } else {
+                    // Exponential ease: 12% of remaining gap per frame ⇒ ~95% in ~24 frames (~0.4s @60fps).
+                    // Always converges, never stalls, never overshoots.
+                    liveAnimatedEmbedded += diff * 0.12;
+                }
+                const shown = Math.floor(liveAnimatedEmbedded);
+                const totalTw = liveTotalEmbedded || null;
+                const pctTw = totalTw && totalTw > 0
+                    ? Math.min(100, (liveAnimatedEmbedded / totalTw) * 100)
+                    : 0;
+
+                const elEmbed = document.getElementById('live-embedded');
+                if (elEmbed) elEmbed.textContent = shown.toLocaleString();
+                const elCounterTw = document.getElementById('live-counter');
+                const elBarLabelTw = document.getElementById('live-bar-label');
+                if (elCounterTw) elCounterTw.textContent = totalTw ? `${shown.toLocaleString()} / ${totalTw.toLocaleString()}` : shown.toLocaleString();
+                if (elBarLabelTw) elBarLabelTw.textContent = totalTw ? `${shown.toLocaleString()} / ${totalTw.toLocaleString()}` : shown.toLocaleString();
+
+                const elPctTw = document.getElementById('live-pct');
+                const elBarTw = document.getElementById('live-bar');
+                const elRingTw = document.getElementById('live-ring-progress');
+                if (elPctTw) elPctTw.textContent = totalTw ? pctTw.toFixed(1) + '%' : '—';
+                if (elBarTw) elBarTw.style.width = (totalTw ? pctTw : 0) + '%';
+                if (elRingTw && totalTw) {
+                    const C = 2 * Math.PI * 88;
+                    elRingTw.setAttribute('stroke-dashoffset', String(C - C * (pctTw / 100)));
+                }
+                liveRafHandle = requestAnimationFrame(tween);
+            };
+            liveRafHandle = requestAnimationFrame(tween);
+
+            const tick = async () => {
+                if (currentPipelineTab !== 'live' || currentPipelineId !== pipelineId) return;
+                const p = await fetchLivePipelineSnapshot(pipelineId);
+                if (!p) return;
+                const stats = p.stats || {};
+                const embedded = stats.embedded_count ?? stats.documents_processed ?? 0;
+                const total = stats.source_doc_count ?? null;
+                const failed = (stats.jobs && stats.jobs.failed) || 0;
+                const status = p.status || '—';
+
+                if (liveStartEmbedded === null) {
+                    liveStartEmbedded = embedded;
+                    liveAnimatedEmbedded = embedded;  // snap on first sample
+                }
+                liveTargetEmbedded = embedded;
+                liveTotalEmbedded = total;
+
+                // Instantaneous throughput
+                const now = Date.now();
+                let instThru = 0;
+                if (liveLastEmbedded !== null && liveLastSampleTs !== null) {
+                    const dt = (now - liveLastSampleTs) / 1000;
+                    if (dt > 0) instThru = Math.max(0, (embedded - liveLastEmbedded) / dt);
+                }
+                liveLastEmbedded = embedded;
+                liveLastSampleTs = now;
+                liveSpark.push(instThru);
+                if (liveSpark.length > 60) liveSpark.shift();
+                if (instThru > peakRef.value) peakRef.value = instThru;
+
+                // Compute sticky-active EARLY (used by both status pill and spawn rate)
+                if (instThru > 0) liveLastActiveTs = now;
+                const alpha = 0.35;
+                liveSmoothThru = liveSmoothThru * (1 - alpha) + instThru * alpha;
+                const stickyActive = (status === 'active') && !(total && embedded >= total) && (liveLastActiveTs > 0) && ((now - liveLastActiveTs) < 30000);
+                const animThru = stickyActive ? Math.max(liveSmoothThru, 20) : 0;
+
+                // Update DOM
+                const elPct = document.getElementById('live-pct');
+                const elCounter = document.getElementById('live-counter');
+                const elEta = document.getElementById('live-eta');
+                const elThru = document.getElementById('live-throughput');
+                const elSession = document.getElementById('live-session');
+                const elFailed = document.getElementById('live-failed');
+                const elStatus = document.getElementById('live-pipeline-status');
+                const elElapsed = document.getElementById('live-elapsed');
+                const elPeak = document.getElementById('live-peak');
+                const elBar = document.getElementById('live-bar');
+                const elBarLabel = document.getElementById('live-bar-label');
+                const elBarTotal = document.getElementById('live-bar-total');
+                const elRing = document.getElementById('live-ring-progress');
+                const elStatusPill = document.getElementById('live-status-pill');
+
+                const pct = total && total > 0 ? Math.min(100, (embedded / total) * 100) : 0;
+                // elPct, elBar, elRing, elCounter, elBarLabel are all tweened
+                // continuously in the rAF loop — do not overwrite them here.
+                if (elBarTotal) elBarTotal.textContent = total ? total.toLocaleString() : '—';
+                if (elRing && total) {
+                    // (Ring is tweened in the rAF loop; nothing to do here.)
+                }
+                // Rolling 15s average for the headline number (hides 1s 0-delta dips)
+                const sparkWindow = liveSpark.slice(-15);
+                const rollingAvg = sparkWindow.length ? sparkWindow.reduce((a,b)=>a+b,0) / sparkWindow.length : 0;
+                const displayThru = stickyActive ? Math.max(rollingAvg, liveSmoothThru) : 0;
+                if (elThru) elThru.textContent = displayThru > 0 ? displayThru.toFixed(1) : '0';
+                if (elSession) elSession.textContent = Math.max(0, embedded - liveStartEmbedded).toLocaleString();
+                if (elFailed) elFailed.textContent = failed.toLocaleString();
+                if (elStatus) {
+                    elStatus.textContent = status;
+                    elStatus.style.color = status === 'active' ? 'var(--success)' : 'var(--warning)';
+                }
+                const elapsedSec = Math.floor((now - liveStartTs) / 1000);
+                if (elElapsed) elElapsed.textContent = elapsedSec >= 60 ? Math.floor(elapsedSec/60) + 'm ' + (elapsedSec%60) + 's' : elapsedSec + 's';
+                if (elPeak) elPeak.textContent = peakRef.value > 0 ? peakRef.value.toFixed(1) + ' /s' : '—';
+
+                // ETA
+                if (elEta) {
+                    if (total && instThru > 0.5 && embedded < total) {
+                        const remaining = total - embedded;
+                        const etaSec = Math.round(remaining / instThru);
+                        elEta.textContent = 'ETA: ' + (etaSec >= 60 ? Math.floor(etaSec/60) + 'm ' + (etaSec%60) + 's' : etaSec + 's');
+                    } else if (total && embedded >= total) {
+                        elEta.textContent = '✓ Complete';
+                    } else {
+                        elEta.textContent = 'ETA: —';
+                    }
+                }
+
+                // Status pill (use sticky-active so bursty pipelines don't flicker)
+                if (elStatusPill) {
+                    if (status !== 'active') {
+                        elStatusPill.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#f59e0b;"></span>Paused';
+                        elStatusPill.style.background = 'rgba(245,158,11,.15)';
+                        elStatusPill.style.color = '#f59e0b';
+                    } else if (stickyActive) {
+                        elStatusPill.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#10b981;box-shadow:0 0 8px #10b981;animation:livePulse 1.4s infinite;"></span>Embedding';
+                        elStatusPill.style.background = 'rgba(16,185,129,.15)';
+                        elStatusPill.style.color = '#10b981';
+                    } else {
+                        elStatusPill.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#94a3b8;"></span>Idle';
+                        elStatusPill.style.background = 'rgba(255,255,255,.05)';
+                        elStatusPill.style.color = '#cbd5e1';
+                    }
+                }
+
+                // Smooth bursty throughput already computed above; just derive spawn rate
+                const batchesPerSec = animThru / 32;
+                liveParticleSpawnRate = stickyActive ? Math.min(2.5, Math.max(0.15, batchesPerSec / 40 + 0.15)) : 0;
+
+                // Pulse the source/dest/model icons during sticky-active window
+                if (stickyActive) {
+                    const sp = document.getElementById('live-source-pulse');
+                    const dp = document.getElementById('live-dest-pulse');
+                    const mp = document.getElementById('live-model-pulse');
+                    [sp, dp, mp].forEach(el => {
+                        if (!el) return;
+                        el.style.transition = 'none';
+                        el.style.opacity = '1';
+                        el.style.transform = 'scale(1)';
+                        requestAnimationFrame(() => {
+                            el.style.transition = 'opacity .9s ease-out, transform .9s ease-out';
+                            el.style.opacity = '0';
+                            el.style.transform = 'scale(1.4)';
+                        });
+                    });
+                }
+
+                // Sparkline path
+                const sparkPath = document.getElementById('live-spark-path');
+                const sparkArea = document.getElementById('live-spark-area');
+                const sparkHead = document.getElementById('live-spark-head');
+                if (sparkPath && liveSpark.length > 1) {
+                    const maxV = Math.max(1, ...liveSpark);
+                    const w = 600, h = 50;
+                    const step = w / Math.max(1, liveSpark.length - 1);
+                    let d = '';
+                    let lastX = 0, lastY = h;
+                    liveSpark.forEach((v, i) => {
+                        const x = i * step;
+                        const y = h - (v / maxV) * (h - 6) - 3;
+                        d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
+                        lastX = x; lastY = y;
+                    });
+                    sparkPath.setAttribute('d', d);
+                    if (sparkArea) sparkArea.setAttribute('d', d + ` L${w} ${h} L0 ${h} Z`);
+                    if (sparkHead) {
+                        sparkHead.setAttribute('cx', lastX);
+                        sparkHead.setAttribute('cy', lastY);
+                        sparkHead.style.display = '';
+                    }
+                }
+
+                // Recent items
+                const recent = await fetchLiveRecentCompleted(pipelineId);
+                const newRows = [];
+                for (const j of recent) {
+                    if (seenJobIds.has(j.id)) continue;
+                    seenJobIds.add(j.id);
+                    newRows.push(j);
+                }
+                if (newRows.length > 0) {
+                    for (const j of newRows.reverse()) {
+                        liveRecentTitles.unshift({
+                            label: j.source_ref || j.id,
+                            ts: j.completed_at || j.updated_at || j.created_at
+                        });
+                    }
+                    if (liveRecentTitles.length > 8) liveRecentTitles = liveRecentTitles.slice(0, 8);
+                    const recentEl = document.getElementById('live-recent');
+                    if (recentEl) {
+                        recentEl.innerHTML = liveRecentTitles.map((r, idx) => `
+                            <div class="live-recent-row" style="padding:10px 14px; background:linear-gradient(90deg, rgba(16,185,129,.08), var(--bg-tertiary) 30%); border-radius:8px; display:flex; align-items:center; gap:12px; border-left:2px solid ${idx === 0 ? '#10b981' : 'rgba(16,185,129,.3)'}; opacity:${Math.max(0.4, 1 - idx*0.09)};">
+                                <span style="color:#10b981; font-size:14px;">✓</span>
+                                <span style="font-size:13px; color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; font-variant-numeric: tabular-nums;">${r.label}</span>
+                                <span style="font-size:11px; color:var(--text-tertiary); font-variant-numeric: tabular-nums;">${r.ts ? new Date(r.ts).toLocaleTimeString() : ''}</span>
+                            </div>
+                        `).join('');
+                    }
+                }
+            };
+            tick();
+            liveCurrentTickFn = tick;
+            livePipelinePollTimer = setInterval(tick, 3000);
         }
 
         async function runPipelineHealthChecks(pipeline) {
@@ -5746,12 +6873,16 @@
             if (!pipeline) return;
             const isActive = pipeline.status === 'active';
             const action = isActive ? 'pause' : 'run';
+            const preserveTab = currentPipelineTab;
             try {
                 await apiFetch(`/api/pipelines/${currentPipelineId}/${action}`, { method: 'POST' });
                 await refreshData();
                 const updated = pipelines.find(p => p.id === currentPipelineId);
                 if (updated) {
                     showPipelineDetail(currentPipelineId);
+                    if (preserveTab && preserveTab !== 'general') {
+                        switchPipelineDetailTab(preserveTab);
+                    }
                 }
             } catch (err) {
                 alert('Error: ' + err.message);
@@ -10599,6 +11730,26 @@
             document.getElementById('playground-image-status').textContent = '';
         }
 
+        function hydrateBlobPreviews(container) {
+            if (!container) return;
+            const tok = (typeof getAuthToken === 'function') ? getAuthToken() : '';
+            const headers = tok ? { 'Authorization': 'Bearer ' + tok } : {};
+            const els = container.querySelectorAll('[data-blob-url]');
+            els.forEach(el => {
+                const url = el.getAttribute('data-blob-url');
+                if (!url) return;
+                el.removeAttribute('data-blob-url');
+                fetch(url, { headers, credentials: 'same-origin' })
+                    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+                    .then(b => { el.src = URL.createObjectURL(b); })
+                    .catch(() => {
+                        el.style.display = 'none';
+                        const fallback = el.nextSibling;
+                        if (fallback && fallback.style) fallback.style.display = 'block';
+                    });
+            });
+        }
+
         async function performVectorSearch() {
             const query = document.getElementById('playground-query').value.trim();
             const destIds = getSelectedDestIds();
@@ -10702,9 +11853,9 @@
                         const blobName = String(rawName).split('#')[0];
                         const url = `/api/blob-content/${encodeURIComponent(pid)}/${encodeURIComponent(blobName)}`;
                         if (r.entity_type === 'image') {
-                            previewHtml = `<div style="margin-top:12px;text-align:center;"><img src="${url}" alt="${escapeHtml(blobName)}" style="max-width:100%;max-height:280px;border-radius:var(--radius-md);background:var(--bg-tertiary);" onerror="this.style.display='none';this.nextSibling && (this.nextSibling.style.display='block');"><div style="display:none;color:var(--text-tertiary);font-size:12px;padding:8px;">Preview unavailable</div></div>`;
+                            previewHtml = `<div style="margin-top:12px;text-align:center;"><img data-blob-url="${url}" alt="${escapeHtml(blobName)}" style="max-width:100%;max-height:280px;border-radius:var(--radius-md);background:var(--bg-tertiary);"><div style="display:none;color:var(--text-tertiary);font-size:12px;padding:8px;">Preview unavailable</div></div>`;
                         } else {
-                            previewHtml = `<div style="margin-top:12px;text-align:center;"><video src="${url}" controls preload="metadata" style="max-width:100%;max-height:320px;border-radius:var(--radius-md);background:#000;"></video></div>`;
+                            previewHtml = `<div style="margin-top:12px;text-align:center;"><video data-blob-url="${url}" controls preload="metadata" style="max-width:100%;max-height:320px;border-radius:var(--radius-md);background:#000;"></video></div>`;
                         }
                     }
                     return `
@@ -10746,6 +11897,7 @@
                         </div>
                     </div>`;
                 }).join('');
+                hydrateBlobPreviews(resultsEl);
 
             } catch (err) {
                 statusEl.innerHTML = `<span style="color: var(--error);">Error: ${err.message}</span>`;

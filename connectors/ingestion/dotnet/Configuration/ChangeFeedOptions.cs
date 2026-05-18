@@ -25,7 +25,7 @@ public class ChangeFeedOptions
     public string LeaseCosmosDatabase { get; set; } = "";
 
     /// <summary>How often to poll the API for source/pipeline changes</summary>
-    public int SourcePollIntervalSeconds { get; set; } = 30;
+    public int SourcePollIntervalSeconds { get; set; } = 5;
 
     /// <summary>Instance name for lease ownership (defaults to hostname)</summary>
     public string InstanceName { get; set; } = Environment.MachineName;
