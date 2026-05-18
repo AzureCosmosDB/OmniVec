@@ -178,16 +178,31 @@ async def call_model(model_id: str, text, request_id: str = "") -> dict:
                 r = resp.json()
                 return {"embeddings": r.get("embeddings", []), "model_id": model_id}
             except (httpx.HTTPStatusError, httpx.ConnectError):
-                # Fallback: call one at a time for models without /embed/batch
-                results = []
-                for t in text:
-                    payload = {"text": t, "requestId": request_id}
-                    resp = await http_client.post(f"{url}/embed", json=payload, timeout=300)
+                # Fallback: use OpenAI-compatible /v1/embeddings which accepts a
+                # list and performs a single batched GPU forward pass (BGE, etc.)
+                try:
+                    payload = {"input": text, "model": model_id}
+                    resp = await http_client.post(f"{url}/v1/embeddings", json=payload, timeout=300)
                     resp.raise_for_status()
                     r = resp.json()
-                    embedding = r.get("pages", r.get("embeddings", [[]]))[0] if isinstance(r.get("pages", r.get("embeddings")), list) else []
-                    results.append(embedding)
-                return {"embeddings": results, "model_id": model_id}
+                    data = r.get("data", [])
+                    results = [None] * len(text)
+                    for item in data:
+                        idx = int(item.get("index", 0))
+                        if 0 <= idx < len(results):
+                            results[idx] = item.get("embedding", [])
+                    return {"embeddings": results, "model_id": model_id}
+                except (httpx.HTTPStatusError, httpx.ConnectError):
+                    # Last-resort fallback: per-text /embed (slow, kept for compat)
+                    results = []
+                    for t in text:
+                        payload = {"text": t, "requestId": request_id}
+                        resp = await http_client.post(f"{url}/embed", json=payload, timeout=300)
+                        resp.raise_for_status()
+                        r = resp.json()
+                        embedding = r.get("pages", r.get("embeddings", [[]]))[0] if isinstance(r.get("pages", r.get("embeddings")), list) else []
+                        results.append(embedding)
+                    return {"embeddings": results, "model_id": model_id}
         else:
             payload = {"text": text, "requestId": request_id}
             resp = await http_client.post(f"{url}/embed", json=payload, timeout=300)

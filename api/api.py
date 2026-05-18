@@ -2083,6 +2083,220 @@ async def test_source(source_id: str):
 
 
 # =============================================================================
+# SOURCE / DESTINATION SAMPLE — small random preview of underlying items
+# =============================================================================
+
+def _truncate(s: Any, n: int = 280) -> str:
+    try:
+        if not isinstance(s, str):
+            s = json.dumps(s, default=str, ensure_ascii=False)
+    except Exception:
+        s = str(s)
+    s = s.strip()
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _is_text_content_type(ct: Optional[str], name: str) -> bool:
+    if ct:
+        ct = ct.lower()
+        if ct.startswith("text/") or ct in ("application/json", "application/xml", "application/yaml"):
+            return True
+    n = (name or "").lower()
+    return any(n.endswith(ext) for ext in (".txt", ".json", ".md", ".csv", ".yaml", ".yml", ".xml", ".html", ".log"))
+
+
+@app.get("/api/sources/{source_id}/sample")
+async def sample_source(source_id: str, limit: int = 5):
+    """Return a small random sample of items currently in the source."""
+    import random
+    store = get_store()
+    doc = await asyncio.to_thread(store.get, source_id, "source")
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+    stype = doc.get("type")
+    cfg = doc.get("config", {}) or {}
+    limit = max(1, min(int(limit or 5), 25))
+
+    def _run():
+        if stype == "azure-blob":
+            from azure.storage.blob import BlobServiceClient
+            from azure.identity import DefaultAzureCredential
+            acct = (cfg.get("account_url") or "").strip()
+            container = (cfg.get("container") or "").strip()
+            prefix = cfg.get("prefix") or None
+            if not acct or not container:
+                return {"items": [], "warning": "Source missing account_url/container"}
+            client = BlobServiceClient(acct, credential=DefaultAzureCredential())
+            cont = client.get_container_client(container)
+            blobs = []
+            for b in cont.list_blobs(name_starts_with=prefix):
+                blobs.append(b)
+                if len(blobs) >= 500:
+                    break
+            if not blobs:
+                return {"items": [], "message": "Container is empty"}
+            picks = random.sample(blobs, k=min(limit, len(blobs)))
+            items = []
+            for b in picks:
+                name = b.name
+                ct = getattr(b.content_settings, "content_type", None) if getattr(b, "content_settings", None) else None
+                size = getattr(b, "size", None)
+                modified = getattr(b, "last_modified", None)
+                preview = None
+                if _is_text_content_type(ct, name) and (size or 0) <= 200_000:
+                    try:
+                        bc = cont.get_blob_client(name)
+                        data = bc.download_blob(offset=0, length=min(2048, size or 2048)).readall()
+                        try:
+                            preview = _truncate(data.decode("utf-8", errors="replace"))
+                        except Exception:
+                            preview = None
+                    except Exception:
+                        preview = None
+                items.append({
+                    "id": name,
+                    "name": name,
+                    "size": size,
+                    "content_type": ct,
+                    "modified": modified.isoformat() if modified else None,
+                    "preview": preview,
+                    "kind": "image" if any(name.lower().endswith(x) for x in (".jpg",".jpeg",".png",".webp",".gif",".bmp")) else ("text" if preview else "binary"),
+                })
+            return {"items": items, "total_scanned": len(blobs)}
+
+        elif stype == "cosmosdb":
+            from azure.cosmos import CosmosClient
+            from azure.identity import DefaultAzureCredential
+            endpoint = cfg.get("endpoint"); db = cfg.get("database"); cont = cfg.get("container")
+            if not endpoint or not db or not cont:
+                return {"items": [], "warning": "Cosmos source missing endpoint/database/container"}
+            client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+            container = client.get_database_client(db).get_container_client(cont)
+            n = min(limit * 4, 50)
+            q = f"SELECT TOP {n} c.id, c[\"content\"] AS content, c._ts FROM c"
+            rows = list(container.query_items(query=q, enable_cross_partition_query=True))
+            if not rows:
+                return {"items": [], "message": "Container is empty"}
+            picks = random.sample(rows, k=min(limit, len(rows)))
+            items = []
+            for r in picks:
+                items.append({
+                    "id": r.get("id"),
+                    "preview": _truncate(r.get("content") or {k:v for k,v in r.items() if not k.startswith("_")}),
+                    "modified": None,
+                    "kind": "text",
+                })
+            return {"items": items, "total_scanned": len(rows)}
+
+        elif stype == "postgresql":
+            return {"items": [], "warning": "Sampling not yet implemented for PostgreSQL sources"}
+        return {"items": [], "warning": f"Sampling not supported for source type '{stype}'"}
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.exception("source sample failed")
+        raise HTTPException(status_code=502, detail=f"sample failed: {e}")
+
+
+@app.get("/api/destinations/{dest_id}/sample")
+async def sample_destination(dest_id: str, limit: int = 5):
+    """Return a small random sample of vectors stored in this destination."""
+    import random
+    store = get_store()
+    doc = await asyncio.to_thread(store.get, dest_id, "destination")
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Destination '{dest_id}' not found")
+    dtype = doc.get("type")
+    cfg = doc.get("config", {}) or {}
+    limit = max(1, min(int(limit or 5), 25))
+
+    def _run():
+        if dtype == "cosmosdb-vector":
+            from azure.cosmos import CosmosClient
+            from azure.identity import DefaultAzureCredential
+            endpoint = cfg.get("endpoint"); db = cfg.get("database"); cont = cfg.get("container")
+            if not endpoint or not db or not cont:
+                return {"items": [], "warning": "Destination missing endpoint/database/container"}
+            client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+            container = client.get_database_client(db).get_container_client(cont)
+            vec_field = (cfg.get("vector_field")
+                         or (cfg.get("vector_indexes") or [{}])[0].get("path", "/embedding").lstrip("/"))
+            n = min(limit * 4, 50)
+            q = f"SELECT TOP {n} * FROM c"
+            rows = list(container.query_items(query=q, enable_cross_partition_query=True))
+            if not rows:
+                return {"items": [], "message": "Index is empty"}
+            picks = random.sample(rows, k=min(limit, len(rows)))
+            items = []
+            for r in picks:
+                vec = r.get(vec_field) or r.get("embedding") or r.get("vector")
+                vec_prev = None
+                vec_dim = None
+                if isinstance(vec, list):
+                    vec_dim = len(vec)
+                    head = [round(float(x), 4) for x in vec[:5]]
+                    vec_prev = "[" + ", ".join(f"{x:+.4f}" for x in head) + (", …" if vec_dim > 5 else "") + "]"
+                content = r.get("content") or r.get("text") or r.get("source_ref") or ""
+                items.append({
+                    "id": r.get("id"),
+                    "source_ref": r.get("source_ref") or r.get("source") or None,
+                    "pipeline_id": r.get("pipeline_id"),
+                    "preview": _truncate(content),
+                    "vector_dim": vec_dim,
+                    "vector_preview": vec_prev,
+                    "kind": "image" if str(r.get("source_ref") or r.get("id") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif",".bmp")) else "text",
+                })
+            return {"items": items, "total_scanned": len(rows), "vector_field": vec_field}
+
+        elif dtype == "pgvector":
+            try:
+                import psycopg2  # type: ignore
+            except Exception:
+                return {"items": [], "warning": "psycopg2 not installed"}
+            host = cfg.get("host"); port = int(cfg.get("port") or 5432)
+            user = cfg.get("user"); pw = cfg.get("password")
+            dbn = cfg.get("database"); table = cfg.get("table")
+            id_col = cfg.get("id_column", "id"); content_col = cfg.get("content_column", "content")
+            vec_col = cfg.get("vector_column", "embedding")
+            ssl = cfg.get("ssl_mode", "require")
+            if not all([host, dbn, table]):
+                return {"items": [], "warning": "Destination missing host/database/table"}
+            conn = psycopg2.connect(host=host, port=port, user=user, password=pw, dbname=dbn, sslmode=ssl, connect_timeout=8)
+            try:
+                cur = conn.cursor()
+                cur.execute(f"SELECT {id_col}, {content_col}, {vec_col} FROM {table} ORDER BY random() LIMIT %s", (limit,))
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+            items = []
+            for rid, content, vec in rows:
+                vec_dim = None; vec_prev = None
+                if vec is not None:
+                    try:
+                        # pgvector returns a string like "[0.1,0.2,...]" by default
+                        if isinstance(vec, str):
+                            parts = vec.strip("[]").split(",")
+                            arr = [float(x) for x in parts[:5]]
+                            vec_dim = len(parts)
+                        else:
+                            arr = list(vec)[:5]; vec_dim = len(vec)
+                        vec_prev = "[" + ", ".join(f"{x:+.4f}" for x in arr) + (", …" if (vec_dim or 0) > 5 else "") + "]"
+                    except Exception:
+                        pass
+                items.append({"id": rid, "preview": _truncate(content or ""), "vector_dim": vec_dim, "vector_preview": vec_prev, "kind": "text"})
+            return {"items": items}
+
+        return {"items": [], "warning": f"Sampling not supported for destination type '{dtype}'"}
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.exception("destination sample failed")
+        raise HTTPException(status_code=502, detail=f"sample failed: {e}")
+
+
+# =============================================================================
 # SOURCE CONNECTION TEST (for UI before saving)
 # =============================================================================
 
@@ -2707,18 +2921,25 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
 # =============================================================================
 
 @app.get("/api/pipelines")
-def list_pipelines():
-    """List all pipelines."""
+def list_pipelines(include_stats: bool = True):
+    """List all pipelines.
+
+    include_stats=false skips per-pipeline Cosmos count aggregation, which is
+    expensive and only useful for the UI. Internal consumers (CFP, agents) that
+    only need pipeline config should pass include_stats=false for a fast path.
+    """
     store = get_store()
     result = []
     for d in store.list("pipeline"):
         p = _pipeline_from_doc(d)
-        stats = get_pipeline_stats(p.id)
-        result.append({
+        entry = {
             **p.model_dump(),
             "cfp_generation": _cfp_generation(p.reset_at),
-            "stats": stats.model_dump()
-        })
+        }
+        if include_stats:
+            stats = get_pipeline_stats(p.id)
+            entry["stats"] = stats.model_dump()
+        result.append(entry)
     return {"pipelines": result}
 
 
@@ -4991,7 +5212,9 @@ async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str,
         if not dest_doc:
             warnings.append(f"destination {dest_id} not found")
             continue
-        matched_pip = next((pd for pd in pipeline_docs if pd.get("destination_id") == dest_id), None)
+        dest_pipes = [pd for pd in pipeline_docs if pd.get("destination_id") == dest_id]
+        matched_pip = next((pd for pd in dest_pipes if (pd.get("status") or "").lower() == "active"), None) \
+            or (dest_pipes[0] if dest_pipes else None)
         if not matched_pip:
             warnings.append(f"destination {dest_id} has no pipeline (cannot embed query)")
             continue
@@ -5063,6 +5286,7 @@ async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str,
                 "vector": {"field": vf, "dims": dims, "metric": "cosine"},
                 "embedding": embedding,
                 "content_fields": cf,
+                "pipeline_id": matched_pip.get("id"),
             })
         elif dtype == "pgvector":
             indexes.append({
@@ -5082,6 +5306,7 @@ async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str,
                 "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
                 "embedding": embedding,
                 "content_fields": cf,
+                "pipeline_id": matched_pip.get("id"),
             })
         else:
             warnings.append(f"destination {dest_id} has unsupported type '{dtype}' for search")
@@ -5985,7 +6210,28 @@ def _get_mssql_stats_cached(source, pipeline, store):
         return None
 
 
+_pipeline_stats_cache: dict = {}
+_PIPELINE_STATS_CACHE_TTL = 2.0  # seconds
+
+
 def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
+    """Get statistics for a specific pipeline using aggregate queries.
+
+    Results are cached in-process for a short TTL because the UI polls this
+    endpoint every ~1s and each call fires multiple cross-partition COUNT(1)
+    queries against the source Cosmos container — left uncached this starves
+    the change-feed processor's RU budget and causes visible embedding stalls.
+    """
+    now_ts = time.time()
+    cached = _pipeline_stats_cache.get(pipeline_id)
+    if cached and (now_ts - cached[1] < _PIPELINE_STATS_CACHE_TTL):
+        return cached[0]
+    stats = _compute_pipeline_stats(pipeline_id)
+    _pipeline_stats_cache[pipeline_id] = (stats, now_ts)
+    return stats
+
+
+def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
     """Get statistics for a specific pipeline using aggregate queries."""
     store = get_store()
     doc = store.get(pipeline_id, "pipeline")
@@ -6108,17 +6354,56 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                     if hasattr(reset_at, 'isoformat'):
                         reset_at = reset_at.isoformat()
                     reset_at = str(reset_at)
-                    count_query = (
-                        "SELECT VALUE COUNT(1) FROM c "
-                        "WHERE c.pipeline_id = @pid AND c.embedded_at >= @reset_at"
-                    )
-                    count_params = [
-                        {"name": "@pid", "value": pipeline_id},
-                        {"name": "@reset_at", "value": reset_at},
-                    ]
-                    result = list(embed_container.query_items(count_query, parameters=count_params, enable_cross_partition_query=True))
-                    if result:
-                        embedded_count = result[0]
+
+                    # PREFER live CFP-reported inline metrics over a Cosmos
+                    # cross-partition COUNT(1). The COUNT scan can hit hundreds
+                    # of RU on a hot source container that the inline writer is
+                    # actively patching, which throttles the writer itself.
+                    # CFP now streams `inline_processed` per ~250-doc sub-batch
+                    # (~3s cadence) so this is always within a few seconds of
+                    # reality during an active run.
+                    inline_processed = 0
+                    metrics_fresh = False
+                    try:
+                        m_doc = store.get("global", "metrics")
+                        if m_doc:
+                            pip_m = (m_doc.get("pipelines") or {}).get(pipeline_id) or {}
+                            inline_processed = int(pip_m.get("processed", 0))
+                            # Treat metrics as fresh if updated within the last 90s.
+                            from datetime import datetime, timezone
+                            updated_at = pip_m.get("updated_at")
+                            if updated_at:
+                                try:
+                                    upd = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+                                    age_s = (datetime.now(timezone.utc) - upd).total_seconds()
+                                    metrics_fresh = age_s < 90
+                                except Exception:
+                                    metrics_fresh = inline_processed > 0
+                            else:
+                                metrics_fresh = inline_processed > 0
+                    except Exception:  # lgtm[py/empty-except]
+                        pass
+
+                    if metrics_fresh and pipeline.processing_mode == "inline":
+                        # Fast path: trust the live metric, skip the COUNT scan.
+                        embedded_count = inline_processed
+                    else:
+                        # Cold path (idle / non-inline / no metrics doc): run the
+                        # cross-partition COUNT once and take the larger of the
+                        # two values so we never under-report.
+                        count_query = (
+                            "SELECT VALUE COUNT(1) FROM c "
+                            "WHERE c.pipeline_id = @pid AND c.embedded_at >= @reset_at"
+                        )
+                        count_params = [
+                            {"name": "@pid", "value": pipeline_id},
+                            {"name": "@reset_at", "value": reset_at},
+                        ]
+                        result = list(embed_container.query_items(count_query, parameters=count_params, enable_cross_partition_query=True))
+                        if result:
+                            embedded_count = result[0]
+                        if inline_processed > embedded_count:
+                            embedded_count = inline_processed
 
                     docs_processed = embedded_count
                     if source_doc_count and source_doc_count > 0:
@@ -6143,26 +6428,12 @@ def get_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                             completion_pct = round(embedded_count / source_doc_count * 100, 1)
 
                 elif source.type == SourceType.AZURE_BLOB:
-                    # Count blobs in source container
-                    from azure.storage.blob import BlobServiceClient
-                    conn_str = source.config.get("connection_string", "")
-                    acct_url = source.config.get("account_url", "")
-                    container_name = source.config.get("container", "")
-                    prefix = source.config.get("prefix", "")
-                    file_type = source.config.get("file_type", "pdf")
-
-                    if container_name and (conn_str or acct_url):
-                        if conn_str:
-                            blob_client = BlobServiceClient.from_connection_string(conn_str)
-                        else:
-                            blob_client = BlobServiceClient(acct_url, credential=DefaultAzureCredential())
-                        container_client = blob_client.get_container_client(container_name)
-                        blob_count = 0
-                        for blob in container_client.list_blobs(name_starts_with=prefix or None):
-                            if file_type and not blob.name.lower().endswith(f".{file_type}"):
-                                continue
-                            blob_count += 1
-                        source_doc_count = blob_count
+                    # NOTE: Azure Blob has no count API; enumerating containers
+                    # scales O(N) and stalls the /api/pipelines endpoint at TB
+                    # scale. We intentionally skip the source-side count here
+                    # and rely on the destination's embedded count (computed
+                    # below via a fast COUNT(1) on Cosmos/pgvector/MSSQL).
+                    source_doc_count = None
 
                     # Count embedded docs in the pipeline's destination store.
                     # Dispatch by destination type: cosmosdb | pgvector | mssql.

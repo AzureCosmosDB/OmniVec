@@ -241,6 +241,48 @@ public class SourceWatcher : ISourceWatcher
                         continue;
                     }
 
+                    // Idempotency guard: if this doc was already embedded for
+                    // THIS pipeline at or after the current reset_at, skip it.
+                    // This runs even when SkipContentHash=true (post-reset) so
+                    // we don't infinite-loop on the PATCH-feedback change feed.
+                    {
+                        var existingEmbeddedAt = doc["embedded_at"];
+                        var existingPipelineId = doc["pipeline_id"]?.Value<string>();
+                        if (existingEmbeddedAt is not null && existingEmbeddedAt.Type != JTokenType.Null
+                            && (string.IsNullOrEmpty(existingPipelineId) || existingPipelineId == pipeline.Id))
+                        {
+                            DateTime embeddedDt;
+                            bool parsedEmbedded = false;
+                            if (existingEmbeddedAt.Type == JTokenType.Date)
+                            {
+                                embeddedDt = existingEmbeddedAt.Value<DateTime>();
+                                parsedEmbedded = true;
+                            }
+                            else
+                            {
+                                parsedEmbedded = DateTime.TryParse(existingEmbeddedAt.Value<string>(),
+                                    null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                                    out embeddedDt);
+                            }
+                            if (parsedEmbedded)
+                            {
+                                bool afterReset = true;
+                                if (!string.IsNullOrEmpty(pipeline.ResetAt) &&
+                                    DateTime.TryParse(pipeline.ResetAt,
+                                        null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                                        out var resetDt))
+                                {
+                                    afterReset = embeddedDt >= resetDt;
+                                }
+                                if (afterReset)
+                                {
+                                    skippedUnchanged++;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     // Content hash dedup (respects reset_at)
                     if (!SkipContentHash)
                     {
@@ -463,84 +505,114 @@ public class SourceWatcher : ISourceWatcher
             // Use smaller batches for external models to avoid rate limits
             // Native models (bge-small supports 256 per batch) can use larger batches
             int embedSubBatchSize = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 50 : 250;
+            // Run multiple sub-batches concurrently so embed RTT + GPU work
+            // overlaps across BGE replicas. With 3 BGE replicas this multiplies
+            // per-partition throughput ~3-4x (was strictly serial before).
+            int embedConcurrency = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 2 : 4;
 
             try
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                // Phase 1: Embed all docs in sub-batches, collect results
-                var embedded = new List<(string docId, string pkValue, JsonElement embedding, string contentHash)>();
+                // Phase 1: Embed all docs in sub-batches, collect results.
+                // Use a SemaphoreSlim to cap concurrency, fire Tasks per sub-batch.
+                var embeddedSlots = new (string docId, string pkValue, JsonElement embedding, string contentHash)?[docs.Count];
+                var gate = new SemaphoreSlim(embedConcurrency, embedConcurrency);
+                var subBatchTasks = new List<Task>();
 
                 for (int offset = 0; offset < docs.Count; offset += embedSubBatchSize)
                 {
-                    var chunk = docs.Skip(offset).Take(embedSubBatchSize).ToList();
+                    int subOffset = offset;
+                    var chunk = docs.Skip(subOffset).Take(embedSubBatchSize).ToList();
                     var chunkTexts = chunk.Select(d => d.content).ToList();
 
-                    // Send model_id for model references, pipeline for transform pipelines
-                    object embedReq;
-                    if (pipeline.DocgrokPipeline.StartsWith("mdl-"))
-                    {
-                        embedReq = new { model_id = pipeline.DocgrokPipeline, texts = chunkTexts };
-                    }
-                    else
-                    {
-                        embedReq = new { pipeline = pipeline.DocgrokPipeline, texts = chunkTexts };
-                    }
-                    // Embed with retry on transient errors (capped at 20 attempts)
-                    const int MaxEmbedRetries = 20;
-                    HttpResponseMessage resp = null!;
-                    for (int embedAttempt = 1; embedAttempt <= MaxEmbedRetries; embedAttempt++)
+                    await gate.WaitAsync(ct);
+                    subBatchTasks.Add(Task.Run(async () =>
                     {
                         try
                         {
-                            resp = await _docGrokClient.PostAsJsonAsync("/embed/batch", embedReq, ct);
-                            if ((int)resp.StatusCode == 429)
+                            var chunkSw = System.Diagnostics.Stopwatch.StartNew();
+                            object embedReq;
+                            if (pipeline.DocgrokPipeline.StartsWith("mdl-"))
                             {
-                                var retryAfter = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                _logger.LogWarning("Embed 429, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", embedAttempt, MaxEmbedRetries, retryAfter.TotalSeconds);
-                                await Task.Delay(retryAfter, ct);
-                                continue;
+                                embedReq = new { model_id = pipeline.DocgrokPipeline, texts = chunkTexts };
                             }
-                            if ((int)resp.StatusCode >= 500)
+                            else
                             {
-                                var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                _logger.LogWarning("Embed {Status}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", resp.StatusCode, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
-                                await Task.Delay(delay, ct);
-                                continue;
+                                embedReq = new { pipeline = pipeline.DocgrokPipeline, texts = chunkTexts };
                             }
-                            // Non-retryable status (400, 401, 404) — fail immediately
-                            break;
+
+                            const int MaxEmbedRetries = 20;
+                            HttpResponseMessage resp = null!;
+                            for (int embedAttempt = 1; embedAttempt <= MaxEmbedRetries; embedAttempt++)
+                            {
+                                try
+                                {
+                                    resp = await _docGrokClient.PostAsJsonAsync("/embed/batch", embedReq, ct);
+                                    if ((int)resp.StatusCode == 429)
+                                    {
+                                        var retryAfter = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
+                                        _logger.LogWarning("Embed 429, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", embedAttempt, MaxEmbedRetries, retryAfter.TotalSeconds);
+                                        await Task.Delay(retryAfter, ct);
+                                        continue;
+                                    }
+                                    if ((int)resp.StatusCode >= 500)
+                                    {
+                                        var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
+                                        _logger.LogWarning("Embed {Status}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", resp.StatusCode, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
+                                        await Task.Delay(delay, ct);
+                                        continue;
+                                    }
+                                    break;
+                                }
+                                catch (Exception ex) when (ex is not OperationCanceledException)
+                                {
+                                    if (embedAttempt >= MaxEmbedRetries)
+                                    {
+                                        _logger.LogError(ex, "CRITICAL: Embed failed after {MaxRetries} attempts — documents will NOT be embedded", MaxEmbedRetries);
+                                        throw;
+                                    }
+                                    var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
+                                    _logger.LogWarning("Embed call failed: {Error}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", ex.Message, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
+                                    await Task.Delay(delay, ct);
+                                }
+                            }
+                            resp.EnsureSuccessStatusCode();
+
+                            var resultJson = await resp.Content.ReadAsStringAsync(ct);
+                            using var resultDoc = JsonDocument.Parse(resultJson);
+                            var outputs = resultDoc.RootElement.GetProperty("outputs");
+
+                            if (outputs.GetArrayLength() != chunk.Count)
+                            {
+                                _logger.LogError("CRITICAL: Inline embed mismatch: sent {Sent}, got {Got} — aborting batch to prevent data loss",
+                                    chunk.Count, outputs.GetArrayLength());
+                                throw new InvalidOperationException(
+                                    $"Embed returned {outputs.GetArrayLength()} results for {chunk.Count} inputs — batch will retry");
+                            }
+
+                            for (int i = 0; i < chunk.Count; i++)
+                            {
+                                embeddedSlots[subOffset + i] = (chunk[i].docId, chunk[i].pkValue, outputs[i].Clone(), chunk[i].contentHash);
+                            }
+
+                            // Streaming progress: report each embedded sub-batch immediately so the
+                            // UI counter advances every ~3s instead of waiting for the full batch.
+                            var subKey = $"{partition}:{docs[0].docId}:{docs.Count}:emb:{subOffset}";
+                            _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, chunk.Count, 0, chunkSw.ElapsedMilliseconds, subKey, CancellationToken.None);
                         }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        finally
                         {
-                            if (embedAttempt >= MaxEmbedRetries)
-                            {
-                                _logger.LogError(ex, "CRITICAL: Embed failed after {MaxRetries} attempts — documents will NOT be embedded", MaxEmbedRetries);
-                                throw;
-                            }
-                            var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                            _logger.LogWarning("Embed call failed: {Error}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", ex.Message, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
-                            await Task.Delay(delay, ct);
+                            gate.Release();
                         }
-                    }
-                    resp.EnsureSuccessStatusCode();
+                    }, ct));
+                }
 
-                    var resultJson = await resp.Content.ReadAsStringAsync(ct);
-                    using var resultDoc = JsonDocument.Parse(resultJson);
-                    var outputs = resultDoc.RootElement.GetProperty("outputs");
-
-                    if (outputs.GetArrayLength() != chunk.Count)
-                    {
-                        _logger.LogError("CRITICAL: Inline embed mismatch: sent {Sent}, got {Got} — aborting batch to prevent data loss",
-                            chunk.Count, outputs.GetArrayLength());
-                        throw new InvalidOperationException(
-                            $"Embed returned {outputs.GetArrayLength()} results for {chunk.Count} inputs — batch will retry");
-                    }
-
-                    for (int i = 0; i < chunk.Count; i++)
-                    {
-                        // Clone so it survives JsonDocument disposal
-                        embedded.Add((chunk[i].docId, chunk[i].pkValue, outputs[i].Clone(), chunk[i].contentHash));
-                    }
+                await Task.WhenAll(subBatchTasks);
+                // Compact slots into a flat list (preserving order) for patching.
+                var embedded = new List<(string docId, string pkValue, JsonElement embedding, string contentHash)>(docs.Count);
+                for (int i = 0; i < embeddedSlots.Length; i++)
+                {
+                    if (embeddedSlots[i].HasValue) embedded.Add(embeddedSlots[i]!.Value);
                 }
 
                 // Phase 2: Group by partition key, patch via TransactionalBatch
@@ -558,10 +630,13 @@ public class SourceWatcher : ISourceWatcher
                         $"Patch failed for {failed}/{docs.Count} documents in pipeline {pipeline.Name} — aborting to prevent data loss");
                 }
 
-                // Report metrics with dedup key: partition + first doc ID + count
-                // If lease rebalancing causes a replay, the API ignores the duplicate report
-                var batchKey = $"{partition}:{docs[0].docId}:{docs.Count}";
-                _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, patched, failed, sw.ElapsedMilliseconds, batchKey, CancellationToken.None);
+                // Report only failures at batch end. Successes were already streamed
+                // per sub-batch above so the UI counter advances in near-real time.
+                if (failed > 0)
+                {
+                    var batchKey = $"{partition}:{docs[0].docId}:{docs.Count}:fail";
+                    _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, 0, failed, sw.ElapsedMilliseconds, batchKey, CancellationToken.None);
+                }
             }
             catch (Exception ex)
             {

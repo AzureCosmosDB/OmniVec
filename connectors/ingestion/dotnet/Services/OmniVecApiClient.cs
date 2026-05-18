@@ -12,10 +12,59 @@ public class OmniVecApiClient
     private readonly HttpClient _http;
     private readonly ILogger<OmniVecApiClient> _logger;
 
+    // Lightweight in-process cache for config-shaped listing endpoints.
+    // Sources/destinations rarely change → 60s cache. Pipelines carry `reset_at`
+    // which the operator can flip via /reset, so cache them only briefly so the
+    // CFP reconcile loop notices a reset within a few seconds, not a minute.
+    private static readonly TimeSpan SourcesCacheTtl = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan PipelinesCacheTtl = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DestinationsCacheTtl = TimeSpan.FromSeconds(60);
+    private List<Source>? _cachedSources;
+    private DateTime _cachedSourcesAt = DateTime.MinValue;
+    private List<Pipeline>? _cachedPipelines;
+    private DateTime _cachedPipelinesAt = DateTime.MinValue;
+    private List<Destination>? _cachedDestinations;
+    private DateTime _cachedDestinationsAt = DateTime.MinValue;
+    private readonly SemaphoreSlim _sourcesLock = new(1, 1);
+    private readonly SemaphoreSlim _pipelinesLock = new(1, 1);
+    private readonly SemaphoreSlim _destinationsLock = new(1, 1);
+
     public OmniVecApiClient(HttpClient http, ILogger<OmniVecApiClient> logger)
     {
         _http = http;
         _logger = logger;
+    }
+
+    /// <summary>Force the next list call to skip the cache. Use after operator-triggered changes.</summary>
+    public void InvalidateListCaches()
+    {
+        _cachedSourcesAt = DateTime.MinValue;
+        _cachedPipelinesAt = DateTime.MinValue;
+        _cachedDestinationsAt = DateTime.MinValue;
+    }
+
+    private async Task<List<Source>> FetchSourcesAsync(CancellationToken ct)
+    {
+        var resp = await _http.GetAsync("/api/sources", ct);
+        resp.EnsureSuccessStatusCode();
+        var body = await resp.Content.ReadFromJsonAsync<SourcesResponse>(cancellationToken: ct);
+        return body?.Sources ?? new List<Source>();
+    }
+
+    private async Task<List<Source>> GetSourcesCachedAsync(CancellationToken ct)
+    {
+        if (_cachedSources != null && DateTime.UtcNow - _cachedSourcesAt < SourcesCacheTtl)
+            return _cachedSources;
+        await _sourcesLock.WaitAsync(ct);
+        try
+        {
+            if (_cachedSources != null && DateTime.UtcNow - _cachedSourcesAt < SourcesCacheTtl)
+                return _cachedSources;
+            _cachedSources = await FetchSourcesAsync(ct);
+            _cachedSourcesAt = DateTime.UtcNow;
+            return _cachedSources;
+        }
+        finally { _sourcesLock.Release(); }
     }
 
     /// <summary>Get all enabled CosmosDB sources.</summary>
@@ -25,35 +74,36 @@ public class OmniVecApiClient
     /// <summary>Get all enabled sources of a given type.</summary>
     public async Task<List<Source>> GetSourcesByTypeAsync(string type, CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync("/api/sources", ct);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<SourcesResponse>(cancellationToken: ct);
-        return body?.Sources?
-            .Where(s => s.Type == type && s.Enabled)
-            .ToList() ?? new List<Source>();
+        var all = await GetSourcesCachedAsync(ct);
+        return all.Where(s => s.Type == type && s.Enabled).ToList();
     }
 
     /// <summary>Get all enabled sources of the given types.</summary>
     public async Task<List<Source>> GetSourcesByTypesAsync(IEnumerable<string> types, CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync("/api/sources", ct);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<SourcesResponse>(cancellationToken: ct);
+        var all = await GetSourcesCachedAsync(ct);
         var typeSet = types.ToHashSet();
-        return body?.Sources?
-            .Where(s => typeSet.Contains(s.Type) && s.Enabled)
-            .ToList() ?? new List<Source>();
+        return all.Where(s => typeSet.Contains(s.Type) && s.Enabled).ToList();
     }
 
     /// <summary>Get all active pipelines.</summary>
     public async Task<List<Pipeline>> GetActivePipelinesAsync(CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync("/api/pipelines", ct);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<PipelinesResponse>(cancellationToken: ct);
-        return body?.Pipelines?
-            .Where(p => p.Status == "active")
-            .ToList() ?? new List<Pipeline>();
+        if (_cachedPipelines != null && DateTime.UtcNow - _cachedPipelinesAt < PipelinesCacheTtl)
+            return _cachedPipelines;
+        await _pipelinesLock.WaitAsync(ct);
+        try
+        {
+            if (_cachedPipelines != null && DateTime.UtcNow - _cachedPipelinesAt < PipelinesCacheTtl)
+                return _cachedPipelines;
+            var resp = await _http.GetAsync("/api/pipelines?include_stats=false", ct);
+            resp.EnsureSuccessStatusCode();
+            var body = await resp.Content.ReadFromJsonAsync<PipelinesResponse>(cancellationToken: ct);
+            _cachedPipelines = body?.Pipelines?.Where(p => p.Status == "active").ToList() ?? new List<Pipeline>();
+            _cachedPipelinesAt = DateTime.UtcNow;
+            return _cachedPipelines;
+        }
+        finally { _pipelinesLock.Release(); }
     }
 
     /// <summary>Create jobs in bulk. Returns (created, skipped).</summary>
@@ -87,10 +137,21 @@ public class OmniVecApiClient
     /// <summary>Get all destinations.</summary>
     public async Task<List<Destination>> GetDestinationsAsync(CancellationToken ct = default)
     {
-        var resp = await _http.GetAsync("/api/destinations", ct);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync<DestinationsResponse>(cancellationToken: ct);
-        return body?.Destinations?.Where(d => d.Enabled).ToList() ?? new List<Destination>();
+        if (_cachedDestinations != null && DateTime.UtcNow - _cachedDestinationsAt < DestinationsCacheTtl)
+            return _cachedDestinations;
+        await _destinationsLock.WaitAsync(ct);
+        try
+        {
+            if (_cachedDestinations != null && DateTime.UtcNow - _cachedDestinationsAt < DestinationsCacheTtl)
+                return _cachedDestinations;
+            var resp = await _http.GetAsync("/api/destinations", ct);
+            resp.EnsureSuccessStatusCode();
+            var body = await resp.Content.ReadFromJsonAsync<DestinationsResponse>(cancellationToken: ct);
+            _cachedDestinations = body?.Destinations?.Where(d => d.Enabled).ToList() ?? new List<Destination>();
+            _cachedDestinationsAt = DateTime.UtcNow;
+            return _cachedDestinations;
+        }
+        finally { _destinationsLock.Release(); }
     }
 
     /// <summary>Report changefeed batch metrics including skip counts.</summary>
