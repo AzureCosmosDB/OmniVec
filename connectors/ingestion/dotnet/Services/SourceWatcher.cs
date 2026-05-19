@@ -502,13 +502,14 @@ public class SourceWatcher : ISourceWatcher
     {
         foreach (var pipeline in inlinePipelines)
         {
-            // Use smaller batches for external models to avoid rate limits
-            // Native models (bge-small supports 256 per batch) can use larger batches
-            int embedSubBatchSize = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 50 : 250;
-            // Run multiple sub-batches concurrently so embed RTT + GPU work
-            // overlaps across BGE replicas. With 3 BGE replicas this multiplies
-            // per-partition throughput ~3-4x (was strictly serial before).
-            int embedConcurrency = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 2 : 4;
+            // Use smaller batches for external models to avoid rate limits.
+            // For native BGE we deliberately pick a small sub-batch size so
+            // each CFP change-feed page (~200 docs) splits into 4-5 sub-batches
+            // that we fire in parallel — this is the only way to amortize
+            // embed RTT across BGE replicas. Single 200-doc call benchmarked
+            // at ~250 d/s; 4× concurrent 50-doc calls benchmarks at ~850 d/s.
+            int embedSubBatchSize = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 50 : 50;
+            int embedConcurrency = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 2 : 8;
 
             try
             {
@@ -594,11 +595,9 @@ public class SourceWatcher : ISourceWatcher
                             {
                                 embeddedSlots[subOffset + i] = (chunk[i].docId, chunk[i].pkValue, outputs[i].Clone(), chunk[i].contentHash);
                             }
-
-                            // Streaming progress: report each embedded sub-batch immediately so the
-                            // UI counter advances every ~3s instead of waiting for the full batch.
-                            var subKey = $"{partition}:{docs[0].docId}:{docs.Count}:emb:{subOffset}";
-                            _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, chunk.Count, 0, chunkSw.ElapsedMilliseconds, subKey, CancellationToken.None);
+                            // (Streaming progress is reported AFTER PATCH succeeds — see below.
+                            // Reporting pre-PATCH led to overcounts when lease takeover caused
+                            // the same docs to be re-embedded by a new owner.)
                         }
                         finally
                         {
@@ -630,8 +629,14 @@ public class SourceWatcher : ISourceWatcher
                         $"Patch failed for {failed}/{docs.Count} documents in pipeline {pipeline.Name} — aborting to prevent data loss");
                 }
 
-                // Report only failures at batch end. Successes were already streamed
-                // per sub-batch above so the UI counter advances in near-real time.
+                // Report actual patched count AFTER PATCH succeeds. Using
+                // (firstDocId,count) as the batch_key dedups duplicate reports
+                // if a lease retake causes the same chunk to be replayed.
+                if (patched > 0)
+                {
+                    var okKey = $"{partition}:{docs[0].docId}:{docs.Count}:ok";
+                    _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, patched, 0, sw.ElapsedMilliseconds, okKey, CancellationToken.None);
+                }
                 if (failed > 0)
                 {
                     var batchKey = $"{partition}:{docs[0].docId}:{docs.Count}:fail";
