@@ -354,6 +354,50 @@ async def embed(request: Request):
         model_id = body.get("model_id")
         if model_id:
             text = body.get("text", "")
+            blob_name = body.get("blob_name")
+            blob_url_in = body.get("blobUrl") or body.get("blob_url")
+
+            # Image (blob) routing for native image models like CLIP. The
+            # ingestion worker posts {model_id, blob_name, blob_container,
+            # blob_account_url}; we construct a blobUrl and forward to the
+            # backend's /embed, then re-shape the response into the
+            # {chunks:[{text, embedding}]} format the worker expects.
+            if (blob_name or blob_url_in) and not text:
+                if not model_id.startswith("mdl-native-"):
+                    raise HTTPException(status_code=400, detail="Blob embedding only supported for native models")
+                name = model_id[len("mdl-native-"):]
+                url = NATIVE_URLS.get(name)
+                if not url:
+                    raise HTTPException(status_code=400, detail=f"Unknown native model: '{name}'")
+
+                if blob_url_in:
+                    blob_url = blob_url_in
+                else:
+                    account = (body.get("blob_account_url") or "").rstrip("/")
+                    container = body.get("blob_container") or ""
+                    if not account or not container:
+                        raise HTTPException(status_code=400, detail="blob_account_url and blob_container required when using blob_name")
+                    blob_url = f"{account}/{container}/{blob_name}"
+
+                payload = {
+                    "requestId": request_id,
+                    "blobUrl": blob_url,
+                    "contentTypeHint": body.get("contentTypeHint", "image/jpeg"),
+                    "expectedEtag": body.get("expectedEtag", ""),
+                }
+                resp = await http_client.post(f"{url}/embed", json=payload, timeout=300)
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=resp.status_code, detail=f"Backend error: {resp.text}")
+                r = resp.json()
+                embeddings = r.get("embeddings") or r.get("pages") or []
+                vec = embeddings[0] if embeddings else []
+                return JSONResponse(content={
+                    "requestId": request_id,
+                    "model_id": model_id,
+                    "chunks": [{"text": "", "embedding": vec}],
+                    "_routed_to": model_id,
+                })
+
             if not text:
                 raise HTTPException(status_code=400, detail="'text' field is required for model_id routing")
             result = await call_model(model_id, text, request_id)
