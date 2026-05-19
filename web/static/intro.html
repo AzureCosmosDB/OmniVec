@@ -1,0 +1,1199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OmniVec — Any source × Any model × Any destination</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{
+    --bg:#0b1020; --bg2:#111935; --ink:#e6ecff; --muted:#8a96c4;
+    --src:#22d3ee; --mdl:#a78bfa; --dst:#34d399;
+    --bad:#f87171; --good:#34d399; --gold:#fbbf24;
+    --line:#475569;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:radial-gradient(1200px 700px at 50% 30%, #1a2350 0%, var(--bg) 60%, #05080f 100%);color:var(--ink);font-family:Inter,system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
+  .stage{position:relative;width:100vw;height:100vh;overflow:hidden}
+
+  /* Top title */
+  .title{position:absolute;top:24px;left:50%;transform:translateX(-50%);text-align:center;z-index:10;opacity:0;animation:fadeIn .8s ease forwards}
+  .title h1{margin:0;font-size:30px;letter-spacing:.5px;font-weight:700}
+  .title p{margin:6px 0 0;color:var(--muted);font-size:14px;letter-spacing:1px;text-transform:uppercase}
+
+  /* Scenes */
+  .scene{position:absolute;inset:0;opacity:0;pointer-events:none}
+  .scene.on{opacity:1;pointer-events:auto}
+
+  /* Columns layout */
+  .cols{position:absolute;inset:120px 60px 100px 60px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:60px}
+  .col{display:flex;flex-direction:column;align-items:center;gap:12px}
+  .col-head{font-size:12px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:8px}
+  .chip{padding:8px 14px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);font-size:13px;display:flex;align-items:center;gap:8px;backdrop-filter:blur(6px);transition:all .3s}
+  .chip .dot{width:8px;height:8px;border-radius:50%}
+  .src .chip{border-color:rgba(34,211,238,.35)}  .src .dot{background:var(--src)}
+  .mdl .chip{border-color:rgba(167,139,250,.35)} .mdl .dot{background:var(--mdl)}
+  .dst .chip{border-color:rgba(52,211,153,.35)}  .dst .dot{background:var(--dst)}
+
+  /* Wires (SVG) */
+  svg.wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .wires path{fill:none;stroke:var(--line);stroke-width:1.2;opacity:.35}
+  .wires path.bad{stroke:var(--bad);stroke-width:1.6;opacity:.9;stroke-dasharray:6 4;animation:dash 1.2s linear infinite}
+  .wires path.good{stroke:url(#goldGrad);stroke-width:2.4;opacity:1;filter:drop-shadow(0 0 6px rgba(251,191,36,.55))}
+  @keyframes dash{to{stroke-dashoffset:-40}}
+
+  /* Person */
+  .person{position:absolute;bottom:60px;left:50%;transform:translateX(-50%) translateY(0);font-size:72px;filter:drop-shadow(0 8px 16px rgba(0,0,0,.5));transition:transform .4s}
+  .person.shake{animation:shake .25s ease-in-out 8}
+  @keyframes shake{0%,100%{transform:translateX(-50%) rotate(0)}25%{transform:translateX(-54%) rotate(-3deg)}75%{transform:translateX(-46%) rotate(3deg)}}
+
+  /* Floating chaos toasts */
+  .toast{position:absolute;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.55);color:#fecaca;padding:6px 10px;border-radius:8px;font-size:12px;font-weight:600;letter-spacing:.5px;backdrop-filter:blur(4px);box-shadow:0 6px 24px rgba(0,0,0,.3);opacity:0;animation:toastPop .8s ease forwards}
+  @keyframes toastPop{0%{opacity:0;transform:translateY(10px) scale(.9)}30%{opacity:1;transform:translateY(0) scale(1)}80%{opacity:1}100%{opacity:.85;transform:translateY(-6px) scale(1)}}
+
+  /* OmniVec hero scene */
+  .hero{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:24px;text-align:center}
+  .logo{font-size:64px;font-weight:800;letter-spacing:1px;background:linear-gradient(90deg,#22d3ee,#a78bfa,#34d399);-webkit-background-clip:text;background-clip:text;color:transparent;transform:scale(.6);opacity:0;animation:zoomIn .8s cubic-bezier(.2,.9,.3,1.2) forwards}
+  .tagline{font-size:18px;color:var(--muted);opacity:0;animation:fadeIn .8s .3s forwards}
+  .knife{font-size:120px;opacity:0;transform:rotate(-30deg) scale(.4);animation:knifeIn .9s cubic-bezier(.2,.8,.3,1.4) .1s forwards;filter:drop-shadow(0 12px 28px rgba(251,191,36,.45))}
+  @keyframes zoomIn{to{transform:scale(1);opacity:1}}
+  @keyframes knifeIn{to{transform:rotate(0) scale(1);opacity:1}}
+
+  /* Builder pipeline preview */
+  .builder{display:flex;align-items:center;gap:14px;padding:14px 22px;border-radius:18px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);opacity:0;animation:fadeIn .6s .9s forwards}
+  .pill{padding:8px 14px;border-radius:999px;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .pill.src{background:rgba(34,211,238,.12);color:#a5f3fc;border:1px solid rgba(34,211,238,.4)}
+  .pill.mdl{background:rgba(167,139,250,.12);color:#ddd6fe;border:1px solid rgba(167,139,250,.4)}
+  .pill.dst{background:rgba(52,211,153,.12);color:#a7f3d0;border:1px solid rgba(52,211,153,.4)}
+  .arrow{color:var(--gold);font-size:22px;font-weight:800}
+  .timer{margin-top:10px;font-size:14px;color:var(--muted);opacity:0;animation:fadeIn .5s 1.2s forwards}
+  .timer b{color:var(--gold);font-size:20px}
+
+  /* Hub scene */
+  .hub-wrap{position:absolute;top:120px;bottom:120px;left:5%;right:5%;display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:0;align-items:center;z-index:5}
+  .hub-col{display:flex;flex-direction:column;gap:14px;align-items:stretch}
+  .hub-head{font-size:12px;letter-spacing:3px;color:var(--muted);font-weight:700;margin-bottom:6px;text-align:center}
+  .hub-src .hub-head{color:#67e8f9}
+  .hub-dst .hub-head{color:#86efac}
+  .hub-node{padding:11px 16px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10);font-size:14px;font-weight:500;backdrop-filter:blur(6px);transition:all .35s;text-align:left}
+  .hub-src .hub-node{border-color:rgba(34,211,238,.30)}
+  .hub-dst .hub-node{border-color:rgba(52,211,153,.30);text-align:right}
+  .hub-node.hot{background:rgba(251,191,36,.14);border-color:rgba(251,191,36,.7);color:#fef3c7;box-shadow:0 0 24px rgba(251,191,36,.35);transform:scale(1.03)}
+  .hub-center{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:34px;position:relative}
+  .hub-models-row{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;align-items:center;max-width:340px}
+  .hub-models-row .hub-head{width:100%;margin-bottom:2px}
+  .hub-core{position:relative;padding:26px 30px;border-radius:20px;background:radial-gradient(circle at 50% 40%, rgba(167,139,250,.25), rgba(34,211,238,.10) 60%, transparent 75%);border:1.5px solid rgba(167,139,250,.5);text-align:center;min-width:260px;box-shadow:0 0 40px rgba(167,139,250,.25), inset 0 0 30px rgba(34,211,238,.08)}
+  .hub-core::before{content:"";position:absolute;inset:-8px;border-radius:24px;border:1px solid rgba(167,139,250,.18);animation:halo 3s ease-in-out infinite}
+  .hub-models-row .hub-head{color:#ddd6fe}
+  @keyframes halo{0%,100%{transform:scale(1);opacity:.5}50%{transform:scale(1.04);opacity:.9}}
+  .hub-core-title{font-size:32px;font-weight:800;background:linear-gradient(90deg,#22d3ee,#a78bfa,#34d399);-webkit-background-clip:text;background-clip:text;color:transparent;letter-spacing:.5px}
+  .hub-core-sub{font-size:11px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-top:4px}
+  .hub-models{display:none}
+  .hub-model{padding:5px 12px;border-radius:999px;background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.4);font-size:12px;color:#ddd6fe;font-weight:600;letter-spacing:.3px}
+  .hub-model.active{background:rgba(251,191,36,.22);border-color:rgba(251,191,36,.7);color:#fef3c7;box-shadow:0 0 12px rgba(251,191,36,.4)}
+  svg.hub-wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+  .hub-wires path{fill:none;stroke:rgba(148,163,184,.18);stroke-width:1.4}
+  .hub-wires path.active{stroke:url(#goldGrad);stroke-width:2.8;filter:drop-shadow(0 0 8px rgba(251,191,36,.6));stroke-dasharray:6 4;animation:flow 1s linear infinite}
+  @keyframes flow{to{stroke-dashoffset:-30}}
+  .hub-example{position:absolute;bottom:50px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:14px;background:rgba(0,0,0,.4);border:1px solid rgba(251,191,36,.4);font-size:14px;letter-spacing:.3px;color:#fde68a;backdrop-filter:blur(8px);min-width:520px;text-align:center;opacity:0;transition:opacity .3s}
+  .hub-example.on{opacity:1}
+  .hub-example b{color:#fef3c7;font-weight:700}
+
+  /* Scene 5: federated search */
+  .qs-wrap{position:absolute;top:120px;bottom:120px;left:6%;right:6%;display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:0;align-items:center;z-index:5}
+  .qs-col{display:flex;flex-direction:column;align-items:stretch;gap:10px}
+  .qs-user{align-items:center;justify-content:center;display:flex;flex-direction:column;gap:18px}
+  .qs-avatar{width:108px;height:108px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#67e8f9,#0e7490);display:flex;align-items:center;justify-content:center;font-size:54px;box-shadow:0 0 30px rgba(34,211,238,.4);border:2px solid rgba(34,211,238,.5)}
+  .qs-query{padding:10px 16px;border-radius:14px;background:rgba(34,211,238,.10);border:1px solid rgba(34,211,238,.4);color:#a5f3fc;font-size:13px;font-weight:600;text-align:center;max-width:240px;min-height:42px;display:flex;align-items:center;justify-content:center}
+  .qs-answer{padding:10px 14px;border-radius:14px;background:rgba(52,211,153,.10);border:1px solid rgba(52,211,153,.4);color:#a7f3d0;font-size:12px;font-weight:500;text-align:left;max-width:260px;line-height:1.45;opacity:0;transition:opacity .4s}
+  .qs-answer.on{opacity:1}
+  .qs-center{display:flex;align-items:center;justify-content:center}
+  .qs-pod{position:relative;padding:24px 28px;border-radius:18px;background:radial-gradient(circle at 50% 40%,rgba(167,139,250,.28),rgba(34,211,238,.12) 60%,transparent 75%);border:1.5px solid rgba(167,139,250,.55);text-align:center;min-width:220px;box-shadow:0 0 36px rgba(167,139,250,.30),inset 0 0 28px rgba(34,211,238,.08)}
+  .qs-pod::before{content:"";position:absolute;inset:-8px;border-radius:22px;border:1px solid rgba(167,139,250,.18);animation:halo 3s ease-in-out infinite}
+  .qs-pod-title{font-size:24px;font-weight:800;background:linear-gradient(90deg,#22d3ee,#a78bfa,#34d399);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .qs-pod-sub{font-size:10px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-top:4px}
+  .qs-pod-stage{margin-top:10px;font-size:11px;color:#fef3c7;font-weight:600;min-height:14px;letter-spacing:.5px;opacity:0;transition:opacity .3s}
+  .qs-pod-stage.on{opacity:1}
+  .qs-stores{align-items:stretch}
+  .qs-store-head{font-size:11px;letter-spacing:3px;color:#86efac;font-weight:700;text-align:center;margin-bottom:4px}
+  .qs-store{padding:10px 14px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(52,211,153,.30);font-size:13px;font-weight:500;display:flex;justify-content:space-between;align-items:center;transition:all .35s;text-align:left}
+  .qs-store .qs-count{font-size:11px;color:var(--muted);font-weight:600;font-variant-numeric:tabular-nums}
+  .qs-store.hot{background:rgba(251,191,36,.14);border-color:rgba(251,191,36,.7);color:#fef3c7;box-shadow:0 0 20px rgba(251,191,36,.30);transform:scale(1.03)}
+  .qs-store.hot .qs-count{color:#fde68a}
+  .qs-store.returned{border-color:rgba(52,211,153,.7);background:rgba(52,211,153,.10)}
+  svg.qs-wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+  .qs-wires path{fill:none;stroke:rgba(148,163,184,.30);stroke-width:1.4}
+  .qs-wires path.fanout{stroke:url(#qsGoldGrad);stroke-width:2.6;filter:drop-shadow(0 0 8px rgba(251,191,36,.55));stroke-dasharray:6 4;animation:flow 1s linear infinite}
+  .qs-wires path.collect{stroke:#34d399;stroke-width:2.6;filter:drop-shadow(0 0 8px rgba(52,211,153,.55));stroke-dasharray:6 4;animation:flowRev 1s linear infinite}
+  .qs-wires path.user-q{stroke:url(#qsGoldGrad);stroke-width:2.8;filter:drop-shadow(0 0 8px rgba(251,191,36,.55));stroke-dasharray:6 4;animation:flow 1s linear infinite}
+  .qs-wires path.user-a{stroke:#34d399;stroke-width:2.8;filter:drop-shadow(0 0 8px rgba(52,211,153,.55));stroke-dasharray:6 4;animation:flowRev 1s linear infinite}
+  @keyframes flowRev{to{stroke-dashoffset:30}}
+
+  /* Scene 6: agents on top */
+  .ag-wrap{position:absolute;top:120px;bottom:100px;left:5%;right:5%;display:grid;grid-template-columns:1.1fr 1.2fr 1.1fr;gap:0;align-items:center;z-index:5}
+  .ag-col{display:flex;flex-direction:column;align-items:stretch;gap:14px}
+  .ag-user{align-items:center;justify-content:flex-start;gap:14px;padding-top:6px}
+  .ag-chat{display:flex;flex-direction:column;gap:8px;width:100%;max-width:300px}
+  .ag-msg{padding:8px 12px;border-radius:12px;font-size:12px;line-height:1.4;opacity:0;transform:translateY(6px);animation:agIn .35s ease forwards}
+  @keyframes agIn{to{opacity:1;transform:none}}
+  .ag-msg.user{background:rgba(34,211,238,.10);border:1px solid rgba(34,211,238,.4);color:#a5f3fc;align-self:flex-start;max-width:90%}
+  .ag-msg.agent{background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.4);color:#ddd6fe;align-self:flex-end;max-width:90%}
+  .ag-msg.final{background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.5);color:#a7f3d0;align-self:flex-end;max-width:95%;font-weight:500}
+  .ag-agent{align-items:center;justify-content:center;gap:18px}
+  .ag-agent-box{position:relative;padding:22px 26px;border-radius:18px;background:radial-gradient(circle at 50% 40%,rgba(167,139,250,.28),rgba(251,191,36,.10) 60%,transparent 75%);border:1.5px solid rgba(167,139,250,.55);text-align:center;min-width:240px;box-shadow:0 0 36px rgba(167,139,250,.28),inset 0 0 28px rgba(251,191,36,.08)}
+  .ag-agent-box::before{content:"";position:absolute;inset:-8px;border-radius:22px;border:1px solid rgba(167,139,250,.18);animation:halo 3s ease-in-out infinite}
+  .ag-agent-title{font-size:22px;font-weight:800;color:#ddd6fe}
+  .ag-agent-sub{font-size:10px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-top:4px}
+  .ag-thought{margin-top:12px;font-size:11px;color:#fef3c7;font-weight:600;min-height:30px;line-height:1.4;font-style:italic;opacity:.95}
+  .ag-loop-badge{padding:6px 14px;border-radius:999px;background:rgba(251,191,36,.14);border:1px solid rgba(251,191,36,.45);color:#fde68a;font-size:12px;font-weight:700;letter-spacing:.5px}
+  .ag-search{align-items:stretch;gap:18px}
+  .ag-stores{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+  .ag-store{padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(52,211,153,.30);font-size:12px;font-weight:500;transition:all .35s}
+  .ag-store.hot{background:rgba(251,191,36,.14);border-color:rgba(251,191,36,.7);color:#fef3c7;box-shadow:0 0 18px rgba(251,191,36,.30)}
+
+  .footer{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;opacity:.7}
+
+  /* Pipelines scene */
+  .pipelines{position:absolute;top:120px;bottom:60px;left:8%;right:8%;display:flex;flex-direction:column;justify-content:center;gap:18px}
+  .pipe-row{display:grid;grid-template-columns:170px 40px 1fr 40px 1fr 40px 1fr 40px 90px;align-items:center;gap:10px;padding:14px 18px;border-radius:14px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);opacity:0;transform:translateY(14px)}
+  .pipe-row.in{animation:rowIn .6s ease forwards}
+  @keyframes rowIn{to{opacity:1;transform:none}}
+  .pipe-label{font-size:13px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;font-weight:600}
+  .pipe-pill{padding:9px 14px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;border:1px solid;display:flex;align-items:center;justify-content:center;gap:6px;opacity:0;transform:scale(.85);animation:pillIn .35s ease forwards}
+  .pipe-row.in .pipe-pill:nth-of-type(1){animation-delay:.15s}
+  .pipe-row.in .pipe-pill:nth-of-type(2){animation-delay:.5s}
+  .pipe-row.in .pipe-pill:nth-of-type(3){animation-delay:.85s}
+  @keyframes pillIn{to{opacity:1;transform:scale(1)}}
+  .pp-src{background:rgba(34,211,238,.10);color:#a5f3fc;border-color:rgba(34,211,238,.45)}
+  .pp-mdl{background:rgba(167,139,250,.10);color:#ddd6fe;border-color:rgba(167,139,250,.45)}
+  .pp-dst{background:rgba(52,211,153,.10);color:#a7f3d0;border-color:rgba(52,211,153,.45)}
+  .pipe-arrow{color:var(--gold);font-weight:800;font-size:18px;text-align:center;opacity:0;animation:arrowIn .3s ease forwards}
+  .pipe-row.in .pipe-arrow:nth-of-type(1){animation-delay:.35s}
+  .pipe-row.in .pipe-arrow:nth-of-type(2){animation-delay:.7s}
+  .pipe-row.in .pipe-arrow:nth-of-type(3){animation-delay:1.05s}
+  @keyframes arrowIn{to{opacity:1}}
+  .pipe-ok{font-size:13px;font-weight:700;color:var(--good);text-align:right;opacity:0;animation:fadeIn .4s 1.15s forwards;letter-spacing:.5px}
+
+  .replay{position:absolute;top:18px;right:22px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:var(--ink);padding:8px 14px;border-radius:10px;cursor:pointer;font-size:12px;letter-spacing:.5px;z-index:50}
+  .replay:hover{background:rgba(255,255,255,.12)}
+
+  /* Slide nav: prev/next + dot markers */
+  .navbar{position:absolute;bottom:48px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;z-index:50;padding:8px 14px;border-radius:999px;background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(8px)}
+  .nav-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);color:var(--ink);width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:all .2s;font-weight:700}
+  .nav-btn:hover{background:rgba(255,255,255,.16);transform:scale(1.05)}
+  .nav-btn:disabled{opacity:.3;cursor:not-allowed;transform:none}
+  .nav-dots{display:flex;gap:8px;align-items:center}
+  .nav-dot{width:10px;height:10px;border-radius:50%;background:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.18);cursor:pointer;transition:all .25s;padding:0}
+  .nav-dot:hover{background:rgba(255,255,255,.45);transform:scale(1.2)}
+  .nav-dot.active{background:linear-gradient(135deg,#22d3ee,#a78bfa);border-color:rgba(167,139,250,.7);width:24px;border-radius:6px;box-shadow:0 0 12px rgba(167,139,250,.5)}
+  .nav-label{font-size:11px;color:var(--muted);letter-spacing:.6px;text-transform:uppercase;font-weight:600;min-width:72px;text-align:center}
+  .nav-mode{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);color:var(--ink);padding:5px 12px;border-radius:999px;cursor:pointer;font-size:11px;letter-spacing:.5px;font-weight:600}
+  .nav-mode:hover{background:rgba(255,255,255,.14)}
+  .nav-mode.auto{background:rgba(52,211,153,.16);border-color:rgba(52,211,153,.5);color:#a7f3d0}
+
+  /* Scene 0: progressive build-up */
+  .build-badge{position:absolute;top:90px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:999px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.45);color:#fde68a;font-size:13px;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:flex;align-items:center;gap:14px;z-index:10}
+  .build-badge .num{font-size:28px;font-weight:800;color:#fbbf24;font-variant-numeric:tabular-nums;letter-spacing:0;text-transform:none;line-height:1;transition:transform .3s}
+  .build-badge.bump .num{transform:scale(1.25)}
+  .build-step{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:14px;background:rgba(0,0,0,.45);border:1px solid rgba(167,139,250,.45);color:#ddd6fe;font-size:14px;font-weight:600;backdrop-filter:blur(8px);min-width:280px;text-align:center;letter-spacing:.4px;z-index:10;opacity:0;transition:opacity .3s}
+  .build-step.on{opacity:1}
+  .build-step .added{color:#fbbf24;font-weight:800}
+  .chip.hidden{opacity:0;transform:translateY(8px) scale(.9)}
+  .chip.shown{opacity:1;transform:none;transition:all .4s cubic-bezier(.2,.8,.3,1.2)}
+  .chip.just-added{box-shadow:0 0 0 2px rgba(251,191,36,.5), 0 0 22px rgba(251,191,36,.35)}
+
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @keyframes fadeOut{to{opacity:0}}
+  .fade-out{animation:fadeOut .5s forwards}
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <button class="replay" onclick="play()">↻ Replay</button>
+  <div class="navbar" id="navbar">
+    <button class="nav-btn" id="navPrev" onclick="goPrev()" title="Previous (←)">‹</button>
+    <div class="nav-dots" id="navDots"></div>
+    <button class="nav-btn" id="navNext" onclick="goNext()" title="Next (→)">›</button>
+    <div class="nav-label" id="navLabel">1 / 7</div>
+    <button class="nav-mode" id="navMode" onclick="toggleAuto()" title="Toggle auto-advance">▶ AUTO</button>
+  </div>
+
+  <!-- SCENE 0: progressive build-up — 1 pipeline → combinatorial mess -->
+  <div class="scene" id="scene0">
+    <div class="title">
+      <h1>Start with one pipeline…</h1>
+      <p>Then add a source. Then a model. Then a destination.</p>
+    </div>
+
+    <div class="build-badge"><span>Pipelines to maintain</span> <span class="num" id="buildNum">1</span></div>
+
+    <svg class="wires" id="wires0"></svg>
+
+    <div class="cols">
+      <div class="col src" id="col0src">
+        <div class="col-head">Sources</div>
+        <div class="chip hidden"><span class="dot"></span>Cosmos DB</div>
+        <div class="chip hidden"><span class="dot"></span>Azure Blob</div>
+        <div class="chip hidden"><span class="dot"></span>SQL Server</div>
+        <div class="chip hidden"><span class="dot"></span>SharePoint</div>
+        <div class="chip hidden"><span class="dot"></span>S3</div>
+        <div class="chip hidden"><span class="dot"></span>PDFs / Images</div>
+      </div>
+      <div class="col mdl" id="col0mdl">
+        <div class="col-head">Models</div>
+        <div class="chip hidden"><span class="dot"></span>OpenAI ada</div>
+        <div class="chip hidden"><span class="dot"></span>BGE-large</div>
+        <div class="chip hidden"><span class="dot"></span>CLIP</div>
+        <div class="chip hidden"><span class="dot"></span>Cohere</div>
+        <div class="chip hidden"><span class="dot"></span>Custom HF</div>
+        <div class="chip hidden"><span class="dot"></span>Multimodal</div>
+      </div>
+      <div class="col dst" id="col0dst">
+        <div class="col-head">Destinations</div>
+        <div class="chip hidden"><span class="dot"></span>Cosmos vector</div>
+        <div class="chip hidden"><span class="dot"></span>pgvector</div>
+        <div class="chip hidden"><span class="dot"></span>Pinecone</div>
+        <div class="chip hidden"><span class="dot"></span>Redis</div>
+        <div class="chip hidden"><span class="dot"></span>Elastic</div>
+        <div class="chip hidden"><span class="dot"></span>Milvus</div>
+      </div>
+    </div>
+
+    <div class="build-step" id="buildStep"></div>
+  </div>
+
+  <!-- SCENE 1: many sources × models × destinations + chaos wiring -->
+  <div class="scene" id="scene1">
+    <div class="title">
+      <h1>Every team has the same problem</h1>
+      <p>Sources × Models × Destinations</p>
+    </div>
+
+    <svg class="wires" id="wires"></svg>
+
+    <div class="cols">
+      <div class="col src">
+        <div class="col-head">Sources</div>
+        <div class="chip"><span class="dot"></span>Azure Blob</div>
+        <div class="chip"><span class="dot"></span>Cosmos DB</div>
+        <div class="chip"><span class="dot"></span>SQL Server</div>
+        <div class="chip"><span class="dot"></span>S3</div>
+        <div class="chip"><span class="dot"></span>SharePoint</div>
+        <div class="chip"><span class="dot"></span>PDFs / Images</div>
+      </div>
+      <div class="col mdl">
+        <div class="col-head">Models</div>
+        <div class="chip"><span class="dot"></span>OpenAI ada</div>
+        <div class="chip"><span class="dot"></span>BGE-large</div>
+        <div class="chip"><span class="dot"></span>CLIP</div>
+        <div class="chip"><span class="dot"></span>Cohere</div>
+        <div class="chip"><span class="dot"></span>Custom HF</div>
+        <div class="chip"><span class="dot"></span>Multimodal</div>
+      </div>
+      <div class="col dst">
+        <div class="col-head">Destinations</div>
+        <div class="chip"><span class="dot"></span>Cosmos vector</div>
+        <div class="chip"><span class="dot"></span>pgvector</div>
+        <div class="chip"><span class="dot"></span>Pinecone</div>
+        <div class="chip"><span class="dot"></span>Redis</div>
+        <div class="chip"><span class="dot"></span>Elastic</div>
+        <div class="chip"><span class="dot"></span>Milvus</div>
+      </div>
+    </div>
+
+    <div class="person" id="person">🧑‍💻</div>
+  </div>
+
+  <!-- SCENE 2: chaos – red wires, toasts, frustrated dev -->
+  <div class="scene" id="scene2">
+    <div class="title">
+      <h1>So they wire it themselves…</h1>
+      <p>And nothing stays running for long</p>
+    </div>
+
+    <svg class="wires" id="wires2"></svg>
+
+    <div class="cols">
+      <div class="col src">
+        <div class="col-head">Sources</div>
+        <div class="chip"><span class="dot"></span>Azure Blob</div>
+        <div class="chip"><span class="dot"></span>Cosmos DB</div>
+        <div class="chip"><span class="dot"></span>SQL Server</div>
+        <div class="chip"><span class="dot"></span>S3</div>
+        <div class="chip"><span class="dot"></span>SharePoint</div>
+        <div class="chip"><span class="dot"></span>PDFs / Images</div>
+      </div>
+      <div class="col mdl">
+        <div class="col-head">Models</div>
+        <div class="chip"><span class="dot"></span>OpenAI ada</div>
+        <div class="chip"><span class="dot"></span>BGE-large</div>
+        <div class="chip"><span class="dot"></span>CLIP</div>
+        <div class="chip"><span class="dot"></span>Cohere</div>
+        <div class="chip"><span class="dot"></span>Custom HF</div>
+        <div class="chip"><span class="dot"></span>Multimodal</div>
+      </div>
+      <div class="col dst">
+        <div class="col-head">Destinations</div>
+        <div class="chip"><span class="dot"></span>Cosmos vector</div>
+        <div class="chip"><span class="dot"></span>pgvector</div>
+        <div class="chip"><span class="dot"></span>Pinecone</div>
+        <div class="chip"><span class="dot"></span>Redis</div>
+        <div class="chip"><span class="dot"></span>Elastic</div>
+        <div class="chip"><span class="dot"></span>Milvus</div>
+      </div>
+    </div>
+
+    <div id="toasts"></div>
+    <div class="person shake" id="person2">😤</div>
+  </div>
+
+  <!-- SCENE 3: OmniVec arrives -->
+  <div class="scene" id="scene3">
+    <div class="hero">
+      <div class="knife">🇨🇭🔪</div>
+      <div class="logo">OmniVec</div>
+      <div class="tagline">The Swiss Army knife for enterprise AI memory and agents</div>
+      <div class="builder">
+        <span class="pill src"><span style="width:8px;height:8px;border-radius:50%;background:var(--src)"></span>Any source</span>
+        <span class="arrow">→</span>
+        <span class="pill mdl"><span style="width:8px;height:8px;border-radius:50%;background:var(--mdl)"></span>Any model</span>
+        <span class="arrow">→</span>
+        <span class="pill dst"><span style="width:8px;height:8px;border-radius:50%;background:var(--dst)"></span>Any destination</span>
+        <span class="arrow">→</span>
+        <span class="pill" style="background:rgba(251,191,36,.15);color:#fde68a;border:1px solid rgba(251,191,36,.55)"><span style="width:8px;height:8px;border-radius:50%;background:var(--gold)"></span>Agents on top</span>
+      </div>
+      <div class="timer">Universal Embedding Layer + Agent Builder · <b>5 minutes</b>, not 5 weeks</div>
+    </div>
+  </div>
+
+  <!-- SCENE 4: OmniVec hub — sources left, destinations right, example pipelines light up -->
+  <div class="scene" id="scene4">
+    <div class="title">
+      <h1>OmniVec connects them all</h1>
+      <p>Any source · Any model · Any destination</p>
+    </div>
+    <div class="hub-wrap">
+      <div class="hub-col hub-src">
+        <div class="hub-head">SOURCES</div>
+        <div class="hub-node" data-id="blob">📁 Azure Blob</div>
+        <div class="hub-node" data-id="cosmos">🌐 Cosmos DB</div>
+        <div class="hub-node" data-id="sql">🗄️ SQL Server</div>
+        <div class="hub-node" data-id="s3">☁️ S3</div>
+        <div class="hub-node" data-id="sp">📚 SharePoint</div>
+        <div class="hub-node" data-id="pdf">📄 PDFs / Images</div>
+      </div>
+      <div class="hub-center">
+        <div class="hub-models-row">
+          <div class="hub-head">MODELS</div>
+          <span class="hub-model" data-model="BGE">BGE</span>
+          <span class="hub-model" data-model="CLIP">CLIP</span>
+          <span class="hub-model" data-model="ada">OpenAI ada</span>
+          <span class="hub-model" data-model="Cohere">Cohere</span>
+          <span class="hub-model" data-model="HF">Custom HF</span>
+        </div>
+        <div class="hub-core">
+          <div class="hub-core-title">OmniVec</div>
+          <div class="hub-core-sub">Embedding · Routing · Indexing</div>
+        </div>
+      </div>
+      <div class="hub-col hub-dst">
+        <div class="hub-head">DESTINATIONS</div>
+        <div class="hub-node" data-id="cosvec">🧠 Cosmos vector</div>
+        <div class="hub-node" data-id="pgv">🐘 pgvector</div>
+        <div class="hub-node" data-id="pine">🌲 Pinecone</div>
+        <div class="hub-node" data-id="redis">⚡ Redis</div>
+        <div class="hub-node" data-id="elastic">🔎 Elastic</div>
+        <div class="hub-node" data-id="milvus">🧬 Milvus</div>
+      </div>
+    </div>
+    <svg class="hub-wires" id="hubWires"></svg>
+    <div class="hub-example" id="hubExample"></div>
+  </div>
+
+  <!-- SCENE 5: federated search across multiple vector stores -->
+  <div class="scene" id="scene5">
+    <div class="header">
+      <h1>One query · every vector store</h1>
+      <p class="sub">Search pod fans out to every collection · collates · returns the best matches</p>
+    </div>
+    <div class="qs-wrap">
+      <div class="qs-col qs-user">
+        <div class="qs-avatar">👤</div>
+        <div class="qs-query" id="qsQuery">"warranty terms for outdoor furniture"</div>
+        <div class="qs-answer" id="qsAnswer"></div>
+      </div>
+      <div class="qs-col qs-center">
+        <div class="qs-pod" id="qsPod">
+          <div class="qs-pod-title">Search Pod</div>
+          <div class="qs-pod-sub">Embed · Fan-out · Re-rank</div>
+          <div class="qs-pod-stage" id="qsStage">embedding query…</div>
+        </div>
+      </div>
+      <div class="qs-col qs-stores">
+        <div class="qs-store-head">VECTOR COLLECTIONS</div>
+        <div class="qs-store" data-id="cosvec">🧠 Cosmos vector <span class="qs-count">—</span></div>
+        <div class="qs-store" data-id="pgv">🐘 pgvector <span class="qs-count">—</span></div>
+        <div class="qs-store" data-id="pine">🌲 Pinecone <span class="qs-count">—</span></div>
+        <div class="qs-store" data-id="elastic">🔎 Elastic <span class="qs-count">—</span></div>
+        <div class="qs-store" data-id="milvus">🧬 Milvus <span class="qs-count">—</span></div>
+      </div>
+    </div>
+    <svg class="qs-wires" id="qsWires"></svg>
+  </div>
+
+  <!-- SCENE 6: agents on top of search -->
+  <div class="scene" id="scene6">
+    <div class="header">
+      <h1>Agents on top of the search layer</h1>
+      <p class="sub">Agent reasons, plans, queries — looping until the answer is found</p>
+    </div>
+    <div class="ag-wrap">
+      <div class="ag-col ag-user">
+        <div class="qs-avatar">👤</div>
+        <div class="ag-chat" id="agChat"></div>
+      </div>
+      <div class="ag-col ag-agent">
+        <div class="ag-agent-box">
+          <div class="ag-agent-title">🤖 Agent</div>
+          <div class="ag-agent-sub">Plan · Tool · Reflect</div>
+          <div class="ag-thought" id="agThought">—</div>
+        </div>
+        <div class="ag-loop-badge"><span id="agLoopN">0</span> tool calls</div>
+      </div>
+      <div class="ag-col ag-search">
+        <div class="qs-pod" id="agSearchPod">
+          <div class="qs-pod-title">Search Pod</div>
+          <div class="qs-pod-sub">Vector · Hybrid · Re-rank</div>
+          <div class="qs-pod-stage" id="agSearchStage">idle</div>
+        </div>
+        <div class="ag-stores">
+          <div class="ag-store" data-id="cosvec">🧠 Cosmos vector</div>
+          <div class="ag-store" data-id="pgv">🐘 pgvector</div>
+          <div class="ag-store" data-id="elastic">🔎 Elastic</div>
+        </div>
+      </div>
+    </div>
+    <svg class="qs-wires" id="agWires"></svg>
+  </div>
+
+  <div class="footer">OmniVec · Microsoft Azure Cosmos DB</div>
+</div>
+
+<script>
+const sceneIds = ['scene0','scene1','scene2','scene3','scene4','scene5','scene6'];
+let timers = [];
+
+function show(id){
+  sceneIds.forEach(s => document.getElementById(s).classList.toggle('on', s===id));
+}
+function clearAll(){
+  timers.forEach(t=>clearTimeout(t));
+  timers = [];
+  const t = document.getElementById('toasts'); if(t) t.innerHTML = '';
+  const w = document.getElementById('wires');  if(w) w.innerHTML  = '';
+  const w2 = document.getElementById('wires2'); if(w2) w2.innerHTML = '';
+  const w0 = document.getElementById('wires0'); if(w0) w0.innerHTML = '';
+  // reset scene0 chips
+  document.querySelectorAll('#scene0 .chip').forEach(c=>{
+    c.classList.remove('shown','just-added');
+    c.classList.add('hidden');
+  });
+  const bs = document.getElementById('buildStep'); if(bs){ bs.classList.remove('on'); bs.innerHTML=''; }
+  const bn = document.getElementById('buildNum'); if(bn) bn.textContent = '1';
+}
+
+function drawWires(svgId, n, klass){
+  const svg = document.getElementById(svgId);
+  // gradient for highlighted wires
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="goldGrad" x1="0" x2="1">
+        <stop offset="0" stop-color="#22d3ee"/>
+        <stop offset=".5" stop-color="#fbbf24"/>
+        <stop offset="1" stop-color="#34d399"/>
+      </linearGradient>
+    </defs>`;
+  const cols = document.querySelectorAll(`#${svgId.replace('wires','scene')}`.replace('scene','scene') + ' .col');
+  // find scene root via svg parent
+  const sceneRoot = svg.parentElement;
+  const sCol = sceneRoot.querySelector('.col.src');
+  const mCol = sceneRoot.querySelector('.col.mdl');
+  const dCol = sceneRoot.querySelector('.col.dst');
+  if(!sCol||!mCol||!dCol) return;
+  const sChips = sCol.querySelectorAll('.chip');
+  const mChips = mCol.querySelectorAll('.chip');
+  const dChips = dCol.querySelectorAll('.chip');
+  const rect = svg.getBoundingClientRect();
+  function center(el){
+    const r = el.getBoundingClientRect();
+    return { x: r.left - rect.left + r.width/2, y: r.top - rect.top + r.height/2 };
+  }
+  function curve(a,b){
+    const mx = (a.x+b.x)/2;
+    return `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`;
+  }
+  // sources → models
+  for(let i=0;i<sChips.length;i++){
+    for(let j=0;j<mChips.length;j++){
+      if(Math.random()>0.55) continue;
+      const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+      p.setAttribute('d', curve(center(sChips[i]), center(mChips[j])));
+      if(klass) p.setAttribute('class', klass);
+      svg.appendChild(p);
+    }
+  }
+  // models → destinations
+  for(let i=0;i<mChips.length;i++){
+    for(let j=0;j<dChips.length;j++){
+      if(Math.random()>0.55) continue;
+      const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+      p.setAttribute('d', curve(center(mChips[i]), center(dChips[j])));
+      if(klass) p.setAttribute('class', klass);
+      svg.appendChild(p);
+    }
+  }
+}
+
+const toastTexts = [
+  'BATCH FAILED','TOKEN LEAK','RATE-LIMITED','SCHEMA DRIFT','OOM CRASH',
+  'DEAD-LETTER','TIMEOUT','SDK MISMATCH','CHUNKER OOM','RETRY STORM',
+  'STALE INDEX','MODEL 503'
+];
+function spawnToasts(){
+  const wrap = document.getElementById('toasts');
+  const stageRect = document.getElementById('stage').getBoundingClientRect();
+  let i = 0;
+  const id = setInterval(()=>{
+    if(i++ > 10){ clearInterval(id); return; }
+    const t = document.createElement('div');
+    t.className = 'toast';
+    t.textContent = '⚠ ' + toastTexts[Math.floor(Math.random()*toastTexts.length)];
+    t.style.left = (15 + Math.random()*70) + '%';
+    t.style.top  = (20 + Math.random()*55) + '%';
+    wrap.appendChild(t);
+    setTimeout(()=>t.remove(), 3500);
+  }, 350);
+  timers.push(id);
+}
+
+function countdown(){
+  const el = document.getElementById('count');
+  if(!el) return;
+  let n = 5;
+  el.textContent = n;
+  const id = setInterval(()=>{
+    n--;
+    if(n<=0){ el.textContent='✓'; clearInterval(id); return; }
+    el.textContent = n;
+  }, 1000);
+  timers.push(id);
+}
+
+const HUB_EXAMPLES = [
+  { src:'pdf',    model:'BGE',    dst:'cosvec',  label:'PDFs · BGE · Cosmos vector — semantic doc search' },
+  { src:'blob',   model:'CLIP',   dst:'cosvec',  label:'Images · CLIP · Cosmos vector — visual search' },
+  { src:'sql',    model:'ada',    dst:'pgv',     label:'SQL Server · OpenAI ada · pgvector — structured RAG' },
+  { src:'sp',     model:'Cohere', dst:'pine',    label:'SharePoint · Cohere · Pinecone — enterprise knowledge' },
+  { src:'cosmos', model:'HF',     dst:'milvus',  label:'Cosmos · Custom HF · Milvus — domain-tuned RAG' },
+  { src:'s3',     model:'BGE',    dst:'elastic', label:'S3 · BGE · Elastic — hybrid keyword + vector' },
+];
+
+function drawHubWires(){
+  const svg = document.getElementById('hubWires');
+  if(!svg) return;
+  // defs: gradient + arrowheads (one for idle, one for active gold)
+  svg.innerHTML = `<defs>
+    <linearGradient id="goldGrad" x1="0" x2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset=".5" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <marker id="arrIdle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="rgba(148,163,184,.45)"/>
+    </marker>
+    <marker id="arrGold" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>`;
+  const scene = document.getElementById('scene4');
+  const rect = svg.getBoundingClientRect();
+  const core = scene.querySelector('.hub-core');
+  if(!core) return;
+  const cr = core.getBoundingClientRect();
+  const left   = { x: cr.left  - rect.left,                y: cr.top  - rect.top + cr.height/2 };
+  const right  = { x: cr.left  - rect.left + cr.width,     y: cr.top  - rect.top + cr.height/2 };
+  const top    = { x: cr.left  - rect.left + cr.width/2,   y: cr.top  - rect.top };
+  function center(el){
+    const r = el.getBoundingClientRect();
+    return { x: r.left - rect.left + r.width/2, y: r.top - rect.top + r.height/2 };
+  }
+  function curveH(a, b){
+    const mx = (a.x + b.x)/2;
+    return `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`;
+  }
+  function curveV(a, b){
+    const my = (a.y + b.y)/2;
+    return `M ${a.x} ${a.y} C ${a.x} ${my}, ${b.x} ${my}, ${b.x} ${b.y}`;
+  }
+  function addPath(d, opts){
+    const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d', d);
+    p.setAttribute('marker-end', 'url(#arrIdle)');
+    if(opts && opts.id) p.dataset.id = opts.id;
+    if(opts && opts.side) p.dataset.side = opts.side;
+    if(opts && opts.model) p.dataset.model = opts.model;
+    svg.appendChild(p);
+    return p;
+  }
+  // src → core (one-way, arrow into core left edge)
+  scene.querySelectorAll('.hub-src .hub-node').forEach(node=>{
+    const r = node.getBoundingClientRect();
+    const a = { x: r.right - rect.left, y: r.top - rect.top + r.height/2 };
+    // shrink endpoint slightly so arrowhead lands on core border
+    const b = { x: left.x - 4, y: left.y };
+    addPath(curveH(a, b), { id: node.dataset.id, side: 'src' });
+  });
+  // core → dst (one-way, arrow into dst left edge)
+  scene.querySelectorAll('.hub-dst .hub-node').forEach(node=>{
+    const r = node.getBoundingClientRect();
+    const b = { x: r.left - rect.left - 4, y: r.top - rect.top + r.height/2 };
+    const a = { x: right.x, y: right.y };
+    addPath(curveH(a, b), { id: node.dataset.id, side: 'dst' });
+  });
+  // core ↔ models (bidirectional: two paths, opposite directions)
+  scene.querySelectorAll('.hub-models-row .hub-model').forEach(node=>{
+    const r = node.getBoundingClientRect();
+    const m = { x: r.left - rect.left + r.width/2, y: r.bottom - rect.top + 2 };
+    const t = { x: top.x, y: top.y - 4 };
+    // core -> model
+    addPath(curveV(t, m), { model: node.dataset.model, side: 'model-up' });
+    // model -> core (slightly offset so they don't overlap)
+    const m2 = { x: m.x + 6, y: m.y };
+    const t2 = { x: t.x + 6, y: t.y };
+    addPath(curveV(m2, t2), { model: node.dataset.model, side: 'model-down' });
+  });
+}
+
+function highlightHub(example){
+  const scene = document.getElementById('scene4');
+  scene.querySelectorAll('.hub-node.hot').forEach(n=>n.classList.remove('hot'));
+  scene.querySelectorAll('.hub-model.active').forEach(n=>n.classList.remove('active'));
+  scene.querySelectorAll('#hubWires path').forEach(p=>{ p.classList.remove('active'); p.setAttribute('marker-end','url(#arrIdle)'); });
+  const srcNode = scene.querySelector(`.hub-src .hub-node[data-id="${example.src}"]`);
+  const dstNode = scene.querySelector(`.hub-dst .hub-node[data-id="${example.dst}"]`);
+  if(srcNode) srcNode.classList.add('hot');
+  if(dstNode) dstNode.classList.add('hot');
+  scene.querySelectorAll(`.hub-model[data-model="${example.model}"]`).forEach(m=>m.classList.add('active'));
+  scene.querySelectorAll(`#hubWires path[data-side="src"][data-id="${example.src}"]`).forEach(p=>{p.classList.add('active'); p.setAttribute('marker-end','url(#arrGold)');});
+  scene.querySelectorAll(`#hubWires path[data-side="dst"][data-id="${example.dst}"]`).forEach(p=>{p.classList.add('active'); p.setAttribute('marker-end','url(#arrGold)');});
+  scene.querySelectorAll(`#hubWires path[data-model="${example.model}"]`).forEach(p=>{p.classList.add('active'); p.setAttribute('marker-end','url(#arrGold)');});
+  const ex = document.getElementById('hubExample');
+  const parts = example.label.split('—');
+  ex.innerHTML = `<b>${parts[0].trim()}</b>${parts[1] ? ' — ' + parts[1].trim() : ''}`;
+  ex.classList.add('on');
+}
+
+function runHubExamples(){
+  // wait one frame so layout settles, then draw wires
+  requestAnimationFrame(()=>{
+    drawHubWires();
+    let i = 0;
+    highlightHub(HUB_EXAMPLES[0]);
+    const id = setInterval(()=>{
+      i = (i + 1) % HUB_EXAMPLES.length;
+      highlightHub(HUB_EXAMPLES[i]);
+    }, 2400);
+    timers.push(id);
+  });
+}
+
+// ============================================================
+// SCENE 5: federated search — fan out / collate
+// ============================================================
+// Holds geometry & helpers for federated search wiring.
+let qsCtx = null;
+function setupQsGeometry(){
+  const svg = document.getElementById('qsWires');
+  if(!svg) return null;
+  svg.innerHTML = `<defs>
+    <linearGradient id="qsGoldGrad" x1="0" x2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset=".5" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+  </defs>`;
+  const scene = document.getElementById('scene5');
+  const rect = svg.getBoundingClientRect();
+  const pod  = scene.querySelector('#qsPod');
+  const user = scene.querySelector('.qs-avatar');
+  if(!pod || !user) return null;
+  const pr = pod.getBoundingClientRect();
+  const ur = user.getBoundingClientRect();
+  const podLeft  = { x: pr.left  - rect.left,            y: pr.top - rect.top + pr.height/2 };
+  const podRight = { x: pr.left  - rect.left + pr.width, y: pr.top - rect.top + pr.height/2 };
+  const userR    = { x: ur.right - rect.left,            y: ur.top - rect.top + ur.height/2 };
+  return { svg, scene, rect, podLeft, podRight, userR };
+}
+function qsCurveH(a, b){
+  const mx = (a.x + b.x)/2;
+  return `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`;
+}
+// Draw an explicit arrowhead polygon at point (x,y) pointing in direction angle (radians).
+function drawArrowHead(svg, x, y, angle, color, size){
+  size = size || 9;
+  const polygon = document.createElementNS('http://www.w3.org/2000/svg','polygon');
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  // Triangle: tip at (0,0), base at (-size, ±size*0.55), then rotate by angle
+  const pts = [
+    [0,0],
+    [-size, -size*0.55],
+    [-size, +size*0.55]
+  ].map(([px,py]) => {
+    const rx = px*cos - py*sin + x;
+    const ry = px*sin + py*cos + y;
+    return `${rx.toFixed(1)},${ry.toFixed(1)}`;
+  }).join(' ');
+  polygon.setAttribute('points', pts);
+  polygon.setAttribute('fill', color);
+  polygon.setAttribute('filter', `drop-shadow(0 0 6px ${color})`);
+  svg.appendChild(polygon);
+  return polygon;
+}
+function qsAddWire(d, cls, arrowEnd, arrowColor, data){
+  if(!qsCtx) return null;
+  const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+  p.setAttribute('d', d);
+  if(cls) p.classList.add(cls);
+  if(data) Object.entries(data).forEach(([k,v])=>p.dataset[k]=v);
+  qsCtx.svg.appendChild(p);
+  // arrowEnd: { x, y, angle } in radians; angle 0 = pointing right
+  if(arrowEnd){
+    drawArrowHead(qsCtx.svg, arrowEnd.x, arrowEnd.y, arrowEnd.angle, arrowColor || '#fbbf24');
+  }
+  return p;
+}
+
+function runFederatedSearch(){
+  const scene = document.getElementById('scene5');
+  const stage = document.getElementById('qsStage');
+  const answer = document.getElementById('qsAnswer');
+  function reset(){
+    scene.querySelectorAll('.qs-store').forEach(s=>{ s.classList.remove('hot','returned'); s.querySelector('.qs-count').textContent='—'; });
+    answer.classList.remove('on');
+    answer.innerHTML='';
+  }
+  reset();
+  requestAnimationFrame(()=>{
+    qsCtx = setupQsGeometry();
+    if(!qsCtx) return;
+    const { scene, rect, podLeft, podRight, userR } = qsCtx;
+
+    // Step 1: user → pod (gold)
+    stage.textContent = '① user → search pod';
+    stage.classList.add('on');
+    qsAddWire(
+      qsCurveH(userR, {x:podLeft.x-6, y:podLeft.y}),
+      'user-q', { x: podLeft.x-6, y: podLeft.y, angle: 0 }, '#fbbf24', { role:'userq' }
+    );
+
+    timers.push(setTimeout(()=>{ stage.textContent = '② embedding query → 768d'; }, 1100));
+    timers.push(setTimeout(()=>{ stage.textContent = '③ fan-out to 5 vector stores'; }, 1900));
+
+    const stores = ['cosvec','pgv','pine','elastic','milvus'];
+    stores.forEach((id, idx)=>{
+      timers.push(setTimeout(()=>{
+        const node = scene.querySelector(`.qs-store[data-id="${id}"]`);
+        if(!node) return;
+        const r = node.getBoundingClientRect();
+        const s = { x: r.left - rect.left - 6, y: r.top - rect.top + r.height/2 };
+        qsAddWire(qsCurveH(podRight, s), 'fanout', { x:s.x, y:s.y, angle:0 }, '#fbbf24', { role:'fanout', id });
+        node.classList.add('hot');
+      }, 2200 + idx*280));
+    });
+
+    timers.push(setTimeout(()=>{ stage.textContent = '④ collecting results'; }, 3700));
+    const counts = { cosvec: 12, pgv: 7, pine: 9, elastic: 4, milvus: 6 };
+    Object.entries(counts).forEach(([id, n], idx)=>{
+      timers.push(setTimeout(()=>{
+        const node = scene.querySelector(`.qs-store[data-id="${id}"]`);
+        if(node){
+          node.classList.remove('hot');
+          node.classList.add('returned');
+          node.querySelector('.qs-count').textContent = `${n} hits`;
+          const r = node.getBoundingClientRect();
+          const s = { x: r.left - rect.left + 4, y: r.top - rect.top + r.height/2 + 10 };
+          const end = { x: podRight.x - 6, y: podRight.y + 10 };
+          qsAddWire(qsCurveH(s, end), 'collect', { x:end.x, y:end.y, angle: Math.PI }, '#34d399', { role:'collect', id });
+        }
+      }, 4100 + idx*340));
+    });
+
+    timers.push(setTimeout(()=>{ stage.textContent = '⑤ re-rank 38 hits → top 5'; }, 5900));
+
+    timers.push(setTimeout(()=>{
+      stage.textContent = '⑥ return combined answer ✓';
+      const end = { x: userR.x + 6, y: userR.y };
+      qsAddWire(qsCurveH(podLeft, end), 'user-a', { x:end.x, y:end.y, angle: Math.PI }, '#34d399', { role:'final' });
+      answer.innerHTML = '<b>Top match · 92%</b><br>"All outdoor patio furniture carries a 3-year limited warranty against frame defects…"';
+      answer.classList.add('on');
+    }, 6800));
+
+    timers.push(setTimeout(()=>{
+      qsCtx.svg.querySelectorAll('path, polygon').forEach(p=>p.remove());
+      runFederatedSearch();
+    }, 11500));
+  });
+}
+
+// ============================================================
+// SCENE 6: agents on top — multi-turn tool loop
+// ============================================================
+const AGENT_SCRIPT = [
+  { who:'user',  text:'Find me products under $50 with great reviews that ship to Texas.' },
+  { who:'agent', thought:'Plan: 1) find cheap products  2) filter by reviews  3) verify shipping.', tool:{ store:'cosvec', stage:'vector search · products under $50', hits:'18 candidates' } },
+  { who:'agent', thought:'Re-rank by review score in pgvector reviews collection.',                  tool:{ store:'pgv',    stage:'vector search · review embeddings', hits:'8 strong matches' } },
+  { who:'agent', thought:'Cross-check shipping policy for Texas in policy index.',                   tool:{ store:'elastic',stage:'hybrid · shipping policy · Texas', hits:'3 ship to TX' } },
+  { who:'final', text:'I found 3 products under $50, all with 4.5★+ reviews and free Texas shipping. Top pick: <b>Cedar Patio Lantern · $42 · 4.7★</b>.' },
+];
+
+function runAgentLoop(){
+  const scene  = document.getElementById('scene6');
+  const chat   = document.getElementById('agChat');
+  const thought= document.getElementById('agThought');
+  const stage  = document.getElementById('agSearchStage');
+  const loopN  = document.getElementById('agLoopN');
+  function reset(){
+    chat.innerHTML = '';
+    thought.textContent = 'waiting for question…';
+    stage.textContent = 'idle';
+    loopN.textContent = '0';
+    scene.querySelectorAll('.ag-store').forEach(s=>s.classList.remove('hot'));
+    scene.querySelectorAll('#agWires path').forEach(p=>p.remove());
+  }
+  function drawAgentWires(){
+    const svg = document.getElementById('agWires');
+    if(!svg) return;
+    svg.innerHTML = '';
+    const rect = svg.getBoundingClientRect();
+    const user  = scene.querySelector('.ag-user .qs-avatar');
+    const agentBox = scene.querySelector('.ag-agent-box');
+    const pod = scene.querySelector('#agSearchPod');
+    if(!user || !agentBox || !pod) return;
+    function box(el){
+      const r = el.getBoundingClientRect();
+      return {
+        left:  { x: r.left - rect.left,            y: r.top - rect.top + r.height/2 },
+        right: { x: r.left - rect.left + r.width,  y: r.top - rect.top + r.height/2 }
+      };
+    }
+    const u = box(user), a = box(agentBox), p = box(pod);
+    function curveH(p1, p2){
+      const mx = (p1.x + p2.x)/2;
+      return `M ${p1.x} ${p1.y} C ${mx} ${p1.y}, ${mx} ${p2.y}, ${p2.x} ${p2.y}`;
+    }
+    function add(d, role, arrowEnd){
+      const pth = document.createElementNS('http://www.w3.org/2000/svg','path');
+      pth.setAttribute('d', d);
+      pth.dataset.role = role;
+      svg.appendChild(pth);
+      // baseline idle arrowhead (gray)
+      if(arrowEnd){
+        const head = drawArrowHead(svg, arrowEnd.x, arrowEnd.y, arrowEnd.angle, 'rgba(148,163,184,.6)', 8);
+        head.dataset.role = role + '-head';
+        head.dataset.angle = arrowEnd.angle;
+        head.dataset.tipX = arrowEnd.x;
+        head.dataset.tipY = arrowEnd.y;
+      }
+    }
+    // Two directional paths each connection (offset slightly so both visible)
+    add(curveH({x:u.right.x, y:u.right.y-10}, {x:a.left.x-6, y:a.left.y-10}), 'user-to-agent', {x:a.left.x-6, y:a.left.y-10, angle:0});
+    add(curveH({x:a.left.x, y:a.left.y+10}, {x:u.right.x-6, y:u.right.y+10}), 'agent-to-user', {x:u.right.x-6, y:u.right.y+10, angle:Math.PI});
+    add(curveH({x:a.right.x, y:a.right.y-10}, {x:p.left.x-6, y:p.left.y-10}), 'agent-to-search', {x:p.left.x-6, y:p.left.y-10, angle:0});
+    add(curveH({x:p.left.x, y:p.left.y+10}, {x:a.right.x-6, y:a.right.y+10}), 'search-to-agent', {x:a.right.x-6, y:a.right.y+10, angle:Math.PI});
+  }
+  function pulseWire(role, color, ms){
+    const p = scene.querySelector(`#agWires path[data-role="${role}"]`);
+    const head = scene.querySelector(`#agWires polygon[data-role="${role}-head"]`);
+    if(!p) return;
+    const cls = color === 'green' ? 'user-a' : 'user-q';
+    p.classList.add(cls);
+    let newHead = null;
+    if(head){
+      const c = color === 'green' ? '#34d399' : '#fbbf24';
+      const angle = parseFloat(head.dataset.angle);
+      const x = parseFloat(head.dataset.tipX);
+      const y = parseFloat(head.dataset.tipY);
+      head.remove();
+      newHead = drawArrowHead(document.getElementById('agWires'), x, y, angle, c, 10);
+      newHead.dataset.role = role + '-head';
+      newHead.dataset.angle = angle; newHead.dataset.tipX = x; newHead.dataset.tipY = y;
+    }
+    timers.push(setTimeout(()=>{
+      p.classList.remove(cls);
+      if(newHead){
+        const angle = parseFloat(newHead.dataset.angle);
+        const x = parseFloat(newHead.dataset.tipX);
+        const y = parseFloat(newHead.dataset.tipY);
+        newHead.remove();
+        const idle = drawArrowHead(document.getElementById('agWires'), x, y, angle, 'rgba(148,163,184,.6)', 8);
+        idle.dataset.role = role + '-head';
+        idle.dataset.angle = angle; idle.dataset.tipX = x; idle.dataset.tipY = y;
+      }
+    }, ms||1400));
+  }
+  function addMsg(kind, html){
+    const div = document.createElement('div');
+    div.className = 'ag-msg ' + kind;
+    div.innerHTML = html;
+    chat.appendChild(div);
+  }
+  let calls = 0;
+  function step(i){
+    if(i >= AGENT_SCRIPT.length){
+      // pause then loop
+      timers.push(setTimeout(()=>{ reset(); requestAnimationFrame(()=>{ drawAgentWires(); step(0); }); }, 4000));
+      return;
+    }
+    const s = AGENT_SCRIPT[i];
+    if(s.who === 'user'){
+      addMsg('user', s.text);
+      pulseWire('user-to-agent', 'gold', 1300);
+      thought.textContent = 'reading question…';
+      timers.push(setTimeout(()=>step(i+1), 1500));
+    } else if(s.who === 'agent'){
+      thought.innerHTML = s.thought;
+      // call search
+      timers.push(setTimeout(()=>{
+        pulseWire('agent-to-search', 'gold', 1000);
+        stage.textContent = s.tool.stage;
+        const store = scene.querySelector(`.ag-store[data-id="${s.tool.store}"]`);
+        if(store){ store.classList.add('hot'); timers.push(setTimeout(()=>store.classList.remove('hot'), 1500)); }
+      }, 700));
+      // results
+      timers.push(setTimeout(()=>{
+        pulseWire('search-to-agent', 'green', 1000);
+        stage.textContent = `← ${s.tool.hits}`;
+        calls += 1;
+        loopN.textContent = calls;
+        addMsg('agent', `🔧 <b>${s.tool.store}</b> · ${s.tool.hits}`);
+      }, 1900));
+      timers.push(setTimeout(()=>step(i+1), 3000));
+    } else if(s.who === 'final'){
+      thought.textContent = 'answer ready ✓';
+      pulseWire('agent-to-user', 'green', 1600);
+      addMsg('final', s.text);
+      timers.push(setTimeout(()=>step(i+1), 2400));
+    }
+  }
+  reset();
+  requestAnimationFrame(()=>{ drawAgentWires(); step(0); });
+}
+
+// ============================================================
+// Slide navigation: prev/next + clickable dots, manual + auto
+// ============================================================
+const SCENES = [
+  { id:'scene0', title:'Build-up',         run: ()=>runProgressiveBuild(),                                   autoDur:10000 },
+  { id:'scene1', title:'Grid',             run: ()=>{ drawWires('wires', 30, null); },                       autoDur: 2000 },
+  { id:'scene2', title:'Chaos',            run: ()=>{ drawWires('wires2', 60, 'bad'); spawnToasts(); },      autoDur: 6000 },
+  { id:'scene3', title:'OmniVec',          run: ()=>{ countdown(); },                                        autoDur: 6000 },
+  { id:'scene4', title:'Hub',              run: ()=>{ runHubExamples(); },                                   autoDur:10000 },
+  { id:'scene5', title:'Federated Search', run: ()=>{ runFederatedSearch(); },                               autoDur:14000 },
+  { id:'scene6', title:'Agents',           run: ()=>{ runAgentLoop(); },                                     autoDur:12000 },
+];
+let currentScene = 0;
+let autoMode = true;
+let autoTimer = null;
+
+function renderNavDots(){
+  const wrap = document.getElementById('navDots');
+  if(!wrap || wrap.childElementCount) return;
+  SCENES.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'nav-dot';
+    b.title = `${i+1}. ${s.title}`;
+    b.onclick = () => goTo(i);
+    wrap.appendChild(b);
+  });
+}
+function updateNav(){
+  document.querySelectorAll('#navDots .nav-dot').forEach((d,i)=>d.classList.toggle('active', i===currentScene));
+  document.getElementById('navPrev').disabled = currentScene === 0;
+  document.getElementById('navNext').disabled = currentScene === SCENES.length - 1;
+  document.getElementById('navLabel').textContent = `${currentScene+1} / ${SCENES.length} · ${SCENES[currentScene].title}`;
+  const m = document.getElementById('navMode');
+  m.textContent = autoMode ? '❚❚ AUTO' : '▶ MANUAL';
+  m.classList.toggle('auto', autoMode);
+}
+function goTo(i){
+  if(i < 0 || i >= SCENES.length) return;
+  clearAll();
+  currentScene = i;
+  show(SCENES[i].id);
+  // run scene animation
+  requestAnimationFrame(()=>{ try { SCENES[i].run(); } catch(e){ console.error(e); } });
+  updateNav();
+  if(autoMode && i < SCENES.length - 1){
+    autoTimer = setTimeout(()=>goTo(i+1), SCENES[i].autoDur);
+    timers.push(autoTimer);
+  }
+}
+function goPrev(){ goTo(currentScene - 1); }
+function goNext(){ goTo(currentScene + 1); }
+function toggleAuto(){
+  autoMode = !autoMode;
+  if(autoMode){
+    // advance to next scene after current one's duration
+    if(currentScene < SCENES.length - 1){
+      autoTimer = setTimeout(()=>goTo(currentScene+1), 3000);
+      timers.push(autoTimer);
+    }
+  }
+  updateNav();
+}
+document.addEventListener('keydown', e=>{
+  if(e.key === 'ArrowRight'){ goNext(); }
+  else if(e.key === 'ArrowLeft'){ goPrev(); }
+  else if(e.key === ' '){ e.preventDefault(); toggleAuto(); }
+});
+
+function play(){
+  renderNavDots();
+  autoMode = true;
+  goTo(0);
+}
+
+// Progressive build-up: reveal chips one at a time, redraw wires between
+// every visible src→mdl→dst pair, animate the "pipelines" counter to the
+// combinatorial product. Demonstrates why a custom-pipeline approach
+// doesn't scale.
+const BUILD_STEPS = [
+  // [stepLabel, srcCount, mdlCount, dstCount]
+  ['1 source · 1 model · 1 destination',                  1, 1, 1],
+  ['+ <span class="added">a second source</span>',         2, 1, 1],
+  ['+ <span class="added">a second model</span>',          2, 2, 1],
+  ['+ <span class="added">a second destination</span>',    2, 2, 2],
+  ['+ <span class="added">more sources &amp; models</span>', 3, 3, 2],
+  ['+ <span class="added">more of everything</span>',      4, 4, 3],
+  ['Now multiply: <span class="added">S × M × D</span>',   6, 6, 6],
+];
+
+function showChips(colId, n){
+  const chips = document.querySelectorAll(`#${colId} .chip`);
+  chips.forEach((c, i) => {
+    const shouldShow = i < n;
+    if (shouldShow && !c.classList.contains('shown')) {
+      c.classList.remove('hidden');
+      c.classList.add('shown','just-added');
+      setTimeout(()=>c.classList.remove('just-added'), 900);
+    }
+  });
+}
+
+function drawProgressiveWires(s, m, d){
+  const svg = document.getElementById('wires0');
+  svg.innerHTML = `<defs><linearGradient id="goldGrad" x1="0" x2="1">
+    <stop offset="0" stop-color="#22d3ee"/><stop offset=".5" stop-color="#fbbf24"/><stop offset="1" stop-color="#34d399"/></linearGradient></defs>`;
+  const scene = document.getElementById('scene0');
+  const sChips = [...scene.querySelectorAll('.col.src .chip')].slice(0, s);
+  const mChips = [...scene.querySelectorAll('.col.mdl .chip')].slice(0, m);
+  const dChips = [...scene.querySelectorAll('.col.dst .chip')].slice(0, d);
+  const rect = svg.getBoundingClientRect();
+  const center = el => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left - rect.left + r.width/2, y: r.top - rect.top + r.height/2 };
+  };
+  const curve = (a, b) => {
+    const mx = (a.x + b.x) / 2;
+    return `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`;
+  };
+  // every src → every model
+  sChips.forEach(sc => mChips.forEach(mc => {
+    const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d', curve(center(sc), center(mc)));
+    svg.appendChild(p);
+  }));
+  // every model → every destination
+  mChips.forEach(mc => dChips.forEach(dc => {
+    const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d', curve(center(mc), center(dc)));
+    svg.appendChild(p);
+  }));
+}
+
+function animateNumber(el, from, to, ms){
+  const start = performance.now();
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / ms);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const v = Math.round(from + (to - from) * eased);
+    el.textContent = v.toLocaleString();
+    if (t < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function runProgressiveBuild(){
+  const stepEl = document.getElementById('buildStep');
+  const numEl  = document.getElementById('buildNum');
+  const badge  = document.querySelector('.build-badge');
+  let prevPipes = 0;
+  BUILD_STEPS.forEach((step, idx) => {
+    const [label, s, m, d] = step;
+    timers.push(setTimeout(() => {
+      stepEl.innerHTML = label;
+      stepEl.classList.add('on');
+      showChips('col0src', s);
+      showChips('col0mdl', m);
+      showChips('col0dst', d);
+      // Wires layout depends on chip positions — wait a tick.
+      setTimeout(()=>drawProgressiveWires(s, m, d), 380);
+      const pipes = s * m * d;
+      animateNumber(numEl, prevPipes, pipes, 600);
+      badge.classList.add('bump');
+      setTimeout(()=>badge.classList.remove('bump'), 350);
+      prevPipes = pipes;
+      // For the last step, color the badge red to emphasize unmanageability
+      if (idx === BUILD_STEPS.length - 1){
+        badge.style.background = 'rgba(248,113,113,.12)';
+        badge.style.borderColor = 'rgba(248,113,113,.55)';
+        badge.querySelector('.num').style.color = '#f87171';
+      }
+    }, idx * 1300));
+  });
+}
+
+window.addEventListener('load', play);
+window.addEventListener('resize', ()=>{
+  // redraw wires for whichever scene is on
+  if(document.getElementById('scene0').classList.contains('on')){
+    // re-draw with the currently revealed chip counts
+    const s = document.querySelectorAll('#col0src .chip.shown').length;
+    const m = document.querySelectorAll('#col0mdl .chip.shown').length;
+    const d = document.querySelectorAll('#col0dst .chip.shown').length;
+    if(s+m+d>0) drawProgressiveWires(s||1, m||1, d||1);
+  }
+  if(document.getElementById('scene1').classList.contains('on')) drawWires('wires', 30, null);
+  if(document.getElementById('scene2').classList.contains('on')) drawWires('wires2', 60, 'bad');
+  if(document.getElementById('scene4').classList.contains('on')) drawHubWires();
+  if(document.getElementById('scene5').classList.contains('on')) drawQsWires();
+  if(document.getElementById('scene6').classList.contains('on')) {
+    const svg = document.getElementById('agWires');
+    if(svg){ /* redraw via runAgentLoop's helper if visible */
+      const sc = document.getElementById('scene6');
+      const u = sc.querySelector('.ag-user .qs-avatar'), ab = sc.querySelector('.ag-agent-box'), pd = sc.querySelector('#agSearchPod');
+      if(u && ab && pd){
+        const rect = svg.getBoundingClientRect();
+        svg.innerHTML = svg.querySelector('defs')?.outerHTML || '';
+        function box(el){const r=el.getBoundingClientRect();return{left:{x:r.left-rect.left,y:r.top-rect.top+r.height/2},right:{x:r.left-rect.left+r.width,y:r.top-rect.top+r.height/2}}}
+        const U=box(u),A=box(ab),P=box(pd);
+        function curveH(p1,p2){const mx=(p1.x+p2.x)/2;return`M ${p1.x} ${p1.y} C ${mx} ${p1.y}, ${mx} ${p2.y}, ${p2.x} ${p2.y}`}
+        function add(d,role){const pth=document.createElementNS('http://www.w3.org/2000/svg','path');pth.setAttribute('d',d);pth.dataset.role=role;svg.appendChild(pth);}
+        add(curveH(U.right,A.left),'user-agent');
+        add(curveH(A.right,P.left),'agent-search');
+      }
+    }
+  }
+});
+</script>
+</body>
+</html>
