@@ -52,6 +52,52 @@ Documents assumptions that are not visible on the diagrams.
 | Customer's hardening of their CosmosDB / Blob | Customer responsibility (we assume *they* did it) |
 | Pod replicas, node-pool / AZ layout | Deployment concern; not a security-design risk in a single-tenant cluster |
 
+### 0.6 Operator (customer) responsibilities & assumptions
+
+OmniVec's threat model holds **only if** the customer operates the deployment along the lines below. These are the assumptions the security design depends on; they double as an onboarding checklist for any customer taking the platform into production.
+
+#### 0.6.1 Deployment assumptions
+
+- **Single-tenant cluster.** One customer deployment = one AKS cluster + one set of Azure data-plane resources (CosmosDB / Blob / Service Bus / Key Vault / AOAI). OmniVec is **not** designed to be shared across tenants; do not co-locate two customers in one cluster.
+- **Helm is the supported install path.** Customer deploys via the published `helm/omnivec` chart (or a thin overlay of it). Deviating from the chart (hand-rolled manifests, kustomize forks that drop securityContext / probes / RBAC bindings) is out-of-scope for this model.
+- **Linux node pools only in production.** The parser sandbox (`T-RTR-1`) relies on Linux `RLIMIT_*` and `spawn`; Windows nodes silently lose the sandbox guarantee. Dev/CI on macOS/Windows is fine — production must be Linux.
+- **Container image source.** Customer pulls signed images from the OmniVec ACR (or a mirror they control). Image signatures are verified at admission when `security.imageSigning.enabled=true` (cosign + sigstore policy-controller; see batch 8). Customers who disable signing are accepting `RES-3`.
+- **Cluster day-2 ownership.** Customer owns AKS upgrades, node patching, autoscaling, log retention, and AppInsights / SIEM wiring. OmniVec ships defaults but does not operate the cluster.
+
+#### 0.6.2 Networking assumptions
+
+- **HTTPS-terminating ingress.** Customer fronts `omnivec-web` / `omnivec-api` with an HTTPS-terminating ingress controller (NGINX, Traefik, or Application Gateway/AGIC — all three Helm variants ship). A plain `LoadBalancer` Service for the API or Search is not a supported topology.
+- **TLS certificate management.** Customer provisions and renews TLS certs (cert-manager + Let's Encrypt, or a corporate PKI). OmniVec does not issue certs.
+- **In-cluster network policy.** Customer enables `networkPolicy.enabled=true` for default-deny + per-component allow (see `T-NET-1`). Leaving it off is a documented residual.
+- **Egress reachability.** OmniVec pods must reach (a) `login.microsoftonline.com` (AAD JWKS), (b) the customer's CosmosDB / Blob / Service Bus / Key Vault / AOAI endpoints, and (c) the configured embedding endpoints (AOAI or in-cluster BGE/CLIP). If the cluster has a strict egress firewall, the customer is responsible for allow-listing these FQDNs.
+- **Private Endpoints are optional but recommended.** `terraform/private-endpoints.tf` (batch 6/7) provisions PEs for Cosmos / Blob / Service Bus / Key Vault / AOAI. Customers in regulated environments should enable them; OmniVec works either way (`RES-1`).
+- **Customer storage account hostnames are allow-listed.** Customer populates `attachment_blob_account_allowlist` with the storage-account hostnames OmniVec is permitted to fetch attachments from. An empty / wildcarded list re-opens `T-CON-2` (SSRF).
+
+#### 0.6.3 Identity & access assumptions
+
+- **AAD-first, breakglass-second.** Customer wires `OMNIVEC_AAD_TENANT_ID`, `_CLIENT_ID`, and the three group IDs (`*_ADMIN_GROUP_ID`, `*_OPERATOR_GROUP_ID`, `*_VIEWER_GROUP_ID`). End users authenticate via AAD; admin token is for breakglass only.
+- **Reject-unmapped-principals is enabled in production.** Customer sets `OMNIVEC_AAD_REQUIRE_GROUP=1` so AAD principals that don't match any configured group are rejected (closes `T-AAD-1`). Default `0` is for backwards compat only.
+- **Admin token rotated or disabled.** Customer either rotates `OMNIVEC_ADMIN_TOKEN` on a documented cadence (we recommend ≤ 90 days) **or** removes the env entirely in production once AAD is verified working. The audit log surfaces every admin-token use.
+- **Workload Identity Federation for Azure resources.** Customer attaches a User-Assigned Managed Identity to the AKS pods via federated credentials. No Azure access keys in pod env, no service-principal secrets in Helm values.
+- **Azure RBAC, not Cosmos master keys.** Customer grants the OmniVec UAMI Cosmos / Blob / AOAI data-plane RBAC roles. Cleartext API-key fallbacks exist in code for offline/dev only and should not be populated in production.
+
+#### 0.6.4 Data & content assumptions
+
+- **Customer owns and trusts their data stores.** OmniVec assumes the customer has hardened the source CosmosDB / Blob / SharePoint they point at us (firewall, RBAC, classification, encryption-at-rest with CMK if required). We don't audit or re-configure the source.
+- **Document content is hostile.** Even though the customer owns the source, the *content* may have been placed by a third party (end users, upstream systems, partners). OmniVec treats every parsed byte as untrusted; the customer should not relax sandbox / SSRF / size-cap defaults below shipped values without a security review.
+- **Customer-supplied embedding endpoints are trusted with content.** When a pipeline points at a customer-provided embedding endpoint (any model registered via `/api/models`), the endpoint sees plaintext document content. Customer is responsible for that endpoint's data-handling, retention, and residency posture.
+- **Right-to-erasure is per-source.** Customer uses `DELETE /api/sources/{id}/vectors?cascade=true` to purge a source's vectors. Cascade purge on legacy (pre-batch-4) pipelines is pipeline-wide — customers operating legacy pipelines should run the `backfill_source_id.py` job first (`T-VEC-2`).
+- **PII classification is the customer's call.** OmniVec does not classify or redact document content. If the source contains regulated data (PII, PHI, payment), the customer is responsible for source-side redaction + downstream access control.
+
+#### 0.6.5 Operational security assumptions
+
+- **Secrets live in Key Vault.** Customer stores AOAI keys, connector secrets, lease-account keys (if any) in Key Vault and references them via CSI driver or the AAD-RBAC pathway. Helm `values.yaml` should never contain a real secret.
+- **Audit-log retention is wired up.** Audit events on state-changing routes (`POST/PATCH/DELETE /api/*`) are emitted as structured logs. Customer ships them to AppInsights / Log Analytics / their SIEM with retention that meets their compliance bar.
+- **Rate-limits are accepted defaults or tightened.** Per-token sliding-window rate-limit on the API and `/search` ships with conservative defaults. Customer may raise via the `rate_limit_rpm` field on the token doc but should not disable globally.
+- **Ingress security headers are enabled.** Customer keeps the chart's ingress-template defaults (CSP, X-Frame-Options, Permissions-Policy, rate-limit annotations). Stripping them re-opens browser-side risks the in-process CSP only partially mitigates.
+- **Cluster autoscaling sized for embed concurrency.** `OMNIVEC_EMBED_CONCURRENCY` (default 4) caps in-flight AOAI calls per replica. Customer scaling the API horizontally multiplies effective concurrency; they should size the AOAI deployment's TPM accordingly to avoid `T-RL-1` (429 amplification).
+- **Patching cadence.** Customer applies OmniVec chart upgrades on the published cadence (monthly minor, immediate for security advisories). Running an N-2 chart in production is not a supported security posture.
+
 ---
 
 ## 1. Scope
