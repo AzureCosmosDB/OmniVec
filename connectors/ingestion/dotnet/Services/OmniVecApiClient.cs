@@ -118,19 +118,65 @@ public class OmniVecApiClient
 
     /// <summary>Report inline processing metrics for a pipeline.
     /// batch_key is used for deduplication — if the same batch_key is reported twice
-    /// (e.g. due to lease rebalancing), the API ignores the duplicate.</summary>
+    /// (e.g. due to lease rebalancing), the API ignores the duplicate.
+    /// Retries on transient failures so the dashboard counter doesn't drift when
+    /// the API replica is restarting / a network hiccup occurs. Docs are already
+    /// patched in Cosmos by the time we report — only the counter is at risk.</summary>
     public async Task ReportInlineMetricsAsync(
         string pipelineId, int processed, int failed, long processingTimeMs,
         string batchKey, CancellationToken ct = default)
     {
-        try
+        var payload = new { processed, failed, processing_time_ms = processingTimeMs, batch_key = batchKey };
+        const int MaxAttempts = 6;
+        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
         {
-            var payload = new { processed, failed, processing_time_ms = processingTimeMs, batch_key = batchKey };
-            await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to report inline metrics for pipeline {PipelineId}", pipelineId);
+            try
+            {
+                using var resp = await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
+                if (resp.IsSuccessStatusCode) return;
+
+                var status = (int)resp.StatusCode;
+                // 4xx (except 408/429) is not retryable — payload is wrong, stop trying.
+                if (status >= 400 && status < 500 && status != 408 && status != 429)
+                {
+                    _logger.LogWarning(
+                        "Inline metric report rejected for pipeline {PipelineId} status={Status} batch={BatchKey} processed={Processed} — counter will drift",
+                        pipelineId, resp.StatusCode, batchKey, processed);
+                    return;
+                }
+                // Retryable: 408/429/5xx
+                if (attempt == MaxAttempts)
+                {
+                    _logger.LogError(
+                        "Inline metric report FAILED after {MaxAttempts} attempts for pipeline {PipelineId} status={Status} batch={BatchKey} processed={Processed} — counter will drift",
+                        MaxAttempts, pipelineId, resp.StatusCode, batchKey, processed);
+                    return;
+                }
+                var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 15_000));
+                _logger.LogWarning(
+                    "Inline metric report status={Status} for pipeline {PipelineId} attempt {Attempt}/{Max}, retrying in {Delay}ms",
+                    resp.StatusCode, pipelineId, attempt, MaxAttempts, delay.TotalMilliseconds);
+                await Task.Delay(delay, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (attempt == MaxAttempts)
+                {
+                    _logger.LogError(ex,
+                        "Inline metric report THREW after {MaxAttempts} attempts for pipeline {PipelineId} batch={BatchKey} processed={Processed} — counter will drift",
+                        MaxAttempts, pipelineId, batchKey, processed);
+                    return;
+                }
+                var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 15_000));
+                _logger.LogWarning(ex,
+                    "Inline metric report transient error for pipeline {PipelineId} attempt {Attempt}/{Max}, retrying in {Delay}ms",
+                    pipelineId, attempt, MaxAttempts, delay.TotalMilliseconds);
+                await Task.Delay(delay, ct);
+            }
         }
     }
 
