@@ -53,7 +53,7 @@ models:
           periodSeconds: 10
 
     clip:
-      enabled: false
+      enabled: true
       description: "Image embeddings using CLIP ViT-Large/14"
       image:
         repository: docgrok-clip
@@ -85,7 +85,7 @@ models:
           periodSeconds: 10
 
     bge:
-      enabled: false
+      enabled: true
       description: "Text embeddings using BGE-Large-EN"
       image:
         repository: docgrok-bge
@@ -169,6 +169,28 @@ providers:
       # text-embedding-ada-002:
       #   deployment: "ada-002-deployment"
       #   embeddingDim: 1536
+
+  omnivec-local:
+    enabled: true
+    type: "openai"
+    endpoint: "http://bge-svc.omnivec.svc.cluster.local:8000/v1"
+    apiVersion: ""
+    apiKey: "not-required"
+    models:
+      bge-large:
+        deployment: "bge-large"
+        embeddingDim: 1024
+
+  omnivec-local-clip:
+    enabled: true
+    type: "openai"
+    endpoint: "http://clip-svc.omnivec.svc.cluster.local:8000/v1"
+    apiVersion: ""
+    apiKey: "not-required"
+    models:
+      clip-vit-l14:
+        deployment: "clip-vit-l14"
+        embeddingDim: 768
 
   # openai:
   #   enabled: false
