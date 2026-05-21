@@ -6483,6 +6483,16 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         import traceback
         logger.error(f"Error computing pipeline stats for {pipeline_id}: {e}\n{traceback.format_exc()}")  # lgtm[py/log-injection]
 
+    # Cap embedded/processed counts at source_doc_count so the dashboard never
+    # shows >100% (e.g. 10,634 / 10,000) when streaming metrics double-count
+    # due to lease takeovers. Single source of truth is the actual source size.
+    if source_doc_count and source_doc_count > 0:
+        if embedded_count > source_doc_count:
+            embedded_count = source_doc_count
+        if docs_processed > source_doc_count:
+            docs_processed = source_doc_count
+        completion_pct = round(embedded_count / source_doc_count * 100, 1)
+
     return PipelineRunStats(
         pipeline_id=pipeline_id,
         pipeline_name=pipeline.name,

@@ -6318,13 +6318,34 @@
             let seenJobIds = new Set();
 
             const tween = () => {
+                const nowTw = performance.now();
+                const dt = Math.max(0, nowTw - liveLastTweenTs);
+                liveLastTweenTs = nowTw;
                 const diff = liveTargetEmbedded - liveAnimatedEmbedded;
-                if (Math.abs(diff) < 0.5) {
+                // Stop extrapolating once we've reached the total or are within
+                // 1 doc of it — the run is essentially done.
+                const reachedTotal = (liveTotalEmbedded && liveAnimatedEmbedded >= liveTotalEmbedded - 0.5);
+                if (diff > 0) {
+                    // Catch-up linear ramp: cover the remaining gap over the
+                    // rest of the current poll interval so the counter ticks
+                    // continuously across the full 3s window.
+                    const msLeft = Math.max(200, POLL_INTERVAL_MS - (nowTw - liveLastTickTs));
+                    const velocity = Math.max(0.1 / 16.67, diff / msLeft); // docs per ms
+                    liveAnimatedEmbedded = Math.min(liveTargetEmbedded, liveAnimatedEmbedded + velocity * dt);
+                } else if (diff < -0.5) {
                     liveAnimatedEmbedded = liveTargetEmbedded;
-                } else {
-                    // Exponential ease: 12% of remaining gap per frame ⇒ ~95% in ~24 frames (~0.4s @60fps).
-                    // Always converges, never stalls, never overshoots.
-                    liveAnimatedEmbedded += diff * 0.12;
+                } else if (!reachedTotal && liveSmoothThru > 0 && liveLastActiveTs > 0 && (Date.now() - liveLastActiveTs) < 8000) {
+                    // EXTRAPOLATE: backend hasn't reported new docs yet, but
+                    // throughput is recently >0 → keep ticking at the EMA rate
+                    // so the counter NEVER pauses while embedding is active.
+                    // Cap extrapolation at liveTargetEmbedded + (rate * 4s) so
+                    // we don't drift more than one poll-window ahead of truth.
+                    const extraCap = liveTargetEmbedded + liveSmoothThru * 4;
+                    const physicalCap = liveTotalEmbedded ? Math.min(extraCap, liveTotalEmbedded) : extraCap;
+                    if (liveAnimatedEmbedded < physicalCap) {
+                        const extraVel = liveSmoothThru / 1000; // docs/ms
+                        liveAnimatedEmbedded = Math.min(physicalCap, liveAnimatedEmbedded + extraVel * dt);
+                    }
                 }
                 const shown = Math.floor(liveAnimatedEmbedded);
                 const totalTw = liveTotalEmbedded || null;
@@ -6350,6 +6371,7 @@
                 }
                 liveRafHandle = requestAnimationFrame(tween);
             };
+            let liveLastTickTs = performance.now();
             liveRafHandle = requestAnimationFrame(tween);
 
             const tick = async () => {
@@ -6368,6 +6390,12 @@
                 }
                 liveTargetEmbedded = embedded;
                 liveTotalEmbedded = total;
+                liveLastTickTs = performance.now();
+                // (No direct write of headline numbers — tween linearly ramps
+                // liveAnimatedEmbedded toward liveTargetEmbedded across the full
+                // poll interval, giving a continuous tick-up feel.)
+                const elBarTotalNow = document.getElementById('live-bar-total');
+                if (elBarTotalNow) elBarTotalNow.textContent = total ? total.toLocaleString() : '—';
 
                 // Instantaneous throughput
                 const now = Date.now();
