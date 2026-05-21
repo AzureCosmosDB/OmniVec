@@ -49,4 +49,24 @@ public class WorkerOptions
     /// estimated tokens) and embedded. If false, they are dead-lettered.
     /// </summary>
     public bool TruncateOversized { get; set; } = true;
+
+    /// <summary>
+    /// Max concurrent blob_ref (image/PDF) embed calls per worker replica.
+    /// Each call hits docgrok router → CLIP/pipeline-worker. Higher values
+    /// let CLIP's server-side dynamic batcher fill its window (CLIP_DYN_BATCH_MAX)
+    /// — required to push image throughput past the single-call latency floor.
+    /// Default 32 × 8 worker replicas ≈ 256 in-flight, comfortably saturating
+    /// a CLIP batch of 64.
+    /// </summary>
+    public int BlobConcurrency { get; set; } = 32;
+
+    /// <summary>
+    /// Number of blob_ref messages bundled into a single bulk /embed call.
+    /// Each batch becomes one HTTP request that the docgrok router forwards
+    /// to the backend's /v1/embeddings (parallel download + single batched
+    /// forward pass). 128 is a good fit for CLIP — large enough to amortize
+    /// HTTP + GPU launch overhead, small enough that one slow image doesn't
+    /// stall too many siblings.
+    /// </summary>
+    public int BlobBatchSize { get; set; } = 128;
 }

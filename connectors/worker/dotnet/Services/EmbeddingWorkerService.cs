@@ -129,10 +129,54 @@ public class EmbeddingWorkerService : BackgroundService
                 var blobItems = items.Where(i => i.msg.ContentType == "blob_ref").ToList();
                 var textItems = items.Where(i => i.msg.ContentType != "blob_ref").ToList();
 
-                // Process blob messages individually (each blob = multiple chunks)
-                foreach (var item in blobItems)
+                // Bulk image (blob_ref) path. Group by (pipeline, account, container),
+                // chunk into BlobBatchSize-sized batches, and post each batch as
+                // a single bulk call (downloads + GPU run all happen server-side
+                // in parallel). Falls back to the per-message ProcessBlobMessageAsync
+                // path for any item that has no blob_name (e.g. PDFs where the
+                // router needs to do OCR + chunking — those still go individually).
+                if (blobItems.Count > 0)
                 {
-                    await ProcessBlobMessageAsync(receiver, item, ct);
+                    var batchable = blobItems.Where(i =>
+                        !string.IsNullOrEmpty(i.msg.BlobName) &&
+                        !string.IsNullOrEmpty(i.msg.BlobContainer) &&
+                        !string.IsNullOrEmpty(i.msg.BlobAccountUrl) &&
+                        !string.IsNullOrEmpty(i.msg.DocgrokPipeline) &&
+                        i.msg.DocgrokPipeline.StartsWith("mdl-native-")).ToList();
+                    var individual = blobItems.Except(batchable).ToList();
+
+                    var groups = batchable.GroupBy(i => (
+                        i.msg.DocgrokPipeline,
+                        i.msg.BlobAccountUrl!,
+                        i.msg.BlobContainer!
+                    )).ToList();
+
+                    var batchTasks = new List<Task>();
+                    var gate = new SemaphoreSlim(_options.BlobConcurrency, _options.BlobConcurrency);
+                    foreach (var g in groups)
+                    {
+                        var list = g.ToList();
+                        for (int i = 0; i < list.Count; i += _options.BlobBatchSize)
+                        {
+                            var slice = list.Skip(i).Take(_options.BlobBatchSize).ToList();
+                            await gate.WaitAsync(ct);
+                            batchTasks.Add(Task.Run(async () =>
+                            {
+                                try { await ProcessBlobBatchAsync(receiver, slice, ct); }
+                                finally { gate.Release(); }
+                            }, ct));
+                        }
+                    }
+                    foreach (var item in individual)
+                    {
+                        await gate.WaitAsync(ct);
+                        batchTasks.Add(Task.Run(async () =>
+                        {
+                            try { await ProcessBlobMessageAsync(receiver, item, ct); }
+                            finally { gate.Release(); }
+                        }, ct));
+                    }
+                    await Task.WhenAll(batchTasks);
                 }
 
                 // Group text messages by model for batch embedding
@@ -241,6 +285,111 @@ public class EmbeddingWorkerService : BackgroundService
             try { await receiver.AbandonMessageAsync(item.sbMsg, cancellationToken: ct); }
             catch { /* ignore */ }
         }
+    }
+
+    /// <summary>
+    /// Bulk-embed a batch of blob_ref messages (e.g. CLIP images) in a single
+    /// HTTP call to the docgrok router. Vastly higher throughput than the
+    /// per-message path because images are downloaded in parallel server-side
+    /// and run through a single batched forward pass.
+    /// </summary>
+    private async Task ProcessBlobBatchAsync(
+        ServiceBusReceiver receiver,
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> batch,
+        CancellationToken ct)
+    {
+        if (batch.Count == 0) return;
+        var sw = Stopwatch.StartNew();
+        var head = batch[0].msg;
+        var blobNames = batch.Select(b => b.msg.BlobName ?? "").ToList();
+
+        List<float[]> embeddings;
+        try
+        {
+            embeddings = await _docGrok.EmbedBlobBatchAsync(
+                head.DocgrokPipeline,
+                head.BlobAccountUrl ?? "",
+                head.BlobContainer ?? "",
+                blobNames,
+                ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Bulk blob embed failed for {Count} blobs on pipeline {Pipeline}; abandoning batch",
+                batch.Count, head.PipelineName);
+            foreach (var it in batch)
+            {
+                try { await receiver.AbandonMessageAsync(it.sbMsg, cancellationToken: ct); }
+                catch { /* ignore */ }
+            }
+            return;
+        }
+
+        // Group results by destination so each unique destination gets one
+        // write call. In the common case all messages in a batch share a
+        // destination, so this is just a single WriteBatchAsync.
+        var resultsByDest = new Dictionary<string, (Dictionary<string, object> cfg, List<EmbeddingResult> docs)>();
+        for (int i = 0; i < batch.Count; i++)
+        {
+            var msg = batch[i].msg;
+            var emb = embeddings[i];
+            var res = new EmbeddingResult(
+                DocId: msg.SourceRef,
+                SourceRef: msg.SourceRef,
+                Embedding: emb,
+                ContentHash: msg.ContentHash,
+                PartitionKeyValue: msg.PartitionKeyValue,
+                PipelineId: msg.PipelineId,
+                PipelineName: msg.PipelineName,
+                PipelineGeneration: msg.PipelineGeneration,
+                Content: "",
+                SourceContentFields: new Dictionary<string, string>(),
+                SourceId: msg.SourceId);
+            var key = $"{msg.DestinationType}|{msg.DestinationId}";
+            if (!resultsByDest.TryGetValue(key, out var bucket))
+            {
+                bucket = (msg.DestinationConfig, new List<EmbeddingResult>());
+                resultsByDest[key] = bucket;
+            }
+            bucket.docs.Add(res);
+        }
+
+        foreach (var ((cfg, docs), kvp) in resultsByDest.Select(p => (p.Value, p)))
+        {
+            var destType = kvp.Key.Split('|', 2)[0];
+            if (!_writers.TryGetValue(destType, out var writer))
+            {
+                _logger.LogError("No writer for destination type {Type}", destType);
+                continue;
+            }
+            try { await writer.WriteBatchAsync(cfg, docs, ct); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Writer {Type} failed on bulk blob batch ({Count} docs)", destType, docs.Count);
+                throw;
+            }
+        }
+
+        // Complete messages
+        foreach (var it in batch)
+        {
+            try { await receiver.CompleteMessageAsync(it.sbMsg, ct); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Complete failed for {BlobName}", it.msg.BlobName);
+            }
+        }
+
+        sw.Stop();
+        _logger.LogInformation(
+            "Bulk blob batch: {Count} blobs for pipeline={Pipeline} in {Elapsed}ms ({Rate:F1} img/s)",
+            batch.Count, head.PipelineName, sw.ElapsedMilliseconds,
+            batch.Count * 1000.0 / Math.Max(sw.ElapsedMilliseconds, 1));
+
+        _ = _metrics.ReportInlineMetricsAsync(
+            head.PipelineId, batch.Count, 0, sw.ElapsedMilliseconds,
+            $"blobbatch:{head.PipelineId}:{Guid.NewGuid()}");
     }
 
     private async Task ProcessBatchAsync(
