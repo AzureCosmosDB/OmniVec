@@ -138,6 +138,7 @@ class IndexSpec(BaseModel):
     return_fields: List[str] = Field(default_factory=list)
     filter: Optional[IndexFilter] = None
     top_k: Optional[int] = Field(default=None, ge=1, le=500)
+    pipeline_id: Optional[str] = Field(default=None, description="Source pipeline id; surfaced into result metadata for blob preview")
 
 
 # -----------------------------------------------------------------------------
