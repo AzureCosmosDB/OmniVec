@@ -11,11 +11,36 @@ Set ``OMNIVEC_TM7_TEMPLATE`` to point at any working .tm7 you have on disk
 (default path is the Cmas BoA reference template under ``Downloads\\``).
 
 Source of truth for the architecture: ``docs/security/threat-model.md``.
+
+Layout preservation (added 2026-05-21):
+  Hand-tuned positions in TMT are easy to lose on regen. To keep them:
+
+    1) After arranging shapes in TMT (drag, resize, route arrows), save the
+       .tm7 and run:
+           python scripts/gen_threat_model_tm7.py --freeze-layout
+       That writes ``docs/security/threat-model.positions.json`` capturing the
+       current x/y/w/h of every shape + trust boundary, keyed by their
+       display *Name*.
+
+    2) Next time you regenerate (after adding shapes/flows in this script):
+           python scripts/gen_threat_model_tm7.py --force
+       Any element/TB whose Name matches an entry in positions.json gets
+       its coordinates from the sidecar; **new** elements use the defaults
+       you put in this file. Your hand layout is preserved, only the new
+       bits land at the defaults — which you can then nudge in TMT and
+       freeze again.
+
+  By default the generator now REFUSES to overwrite an existing .tm7 unless
+  ``--force`` is passed. This prevents accidental layout loss from a stray
+  ``python scripts/gen_threat_model_tm7.py`` call.
 """
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import re
+import sys
 import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -58,35 +83,78 @@ DIAG_OVERALL = {
     "name": "OmniVec — Overall (high-level)",
     "out": "threat-model.tm7",
     "elements": [
-        {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)",            "x": 80,   "y": 540},
-        {"k": "process",  "name": "Azure AD (login.microsoftonline.com)",                  "x": 80,   "y": 200, "oos": True, "oos_reason": _AAD_OOS},
-        {"k": "process",  "name": "OmniVec\n(API, Search, DocGrok, Ingestion)\nsingle-tenant in customer AKS", "x": 700, "y": 540},
-        {"k": "process",  "name": "Azure OpenAI / Foundry\n(in customer subscription)",    "x": 1300, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
-        {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1300, "y": 540},
-        {"k": "store",    "name": "OmniVec CosmosDB metadata\n(pipelines · sources · tokens · models)",   "x": 1300,  "y": 880},
-        {"k": "store",    "name": "Application Insights\n(traces · metrics · logs)",                     "x": 700,   "y": 880},
-        {"k": "process",  "name": "OmniVec Agent\n(read-only diagnostic AI-ops · in-cluster)",          "x": 700,   "y": 720},
-        {"k": "store",    "name": "agent_sessions / agent_audit\n(omnivec.metadata containers · TTL)", "x": 1080,  "y": 880},
+        # 0: Callers
+        {"k": "external", "name": "Callers\n(browser, CLI, embedded user app)",            "x": 100,  "y": 620},
+        # 1: Azure AD (OOS)
+        {"k": "process",  "name": "Azure AD (login.microsoftonline.com)",                  "x": 100,  "y": 200, "oos": True, "oos_reason": _AAD_OOS},
+        # 2: Web/API control plane
+        {"k": "process",  "name": "Web / API control plane\n(omnivec-web · omnivec-api · omnivec-search)\ncreds: AAD svc-principal + UAMI",
+                                                                                            "x": 620,  "y": 380},
+        # 3: Azure OpenAI / Foundry (OOS)
+        {"k": "process",  "name": "Azure OpenAI / Foundry\n(in customer subscription)",    "x": 1600, "y": 200, "oos": True, "oos_reason": _FOUNDRY_OOS},
+        # 4: Customer data plane
+        {"k": "external", "name": "Customer data plane\n(source CosmosDB/Blob, vectors destination)", "x": 1600, "y": 760},
+        # 5: CosmosDB metadata account (inside TB-3)
+        {"k": "store",    "name": "CosmosDB metadata account\nomnivec.metadata · tokens · pipelines · sources · models",
+                                                                                            "x": 320,  "y": 1140},
+        # 6: DocGrok
+        {"k": "process",  "name": "DocGrok\n(router · pipeline-worker · parser sandbox · embedder client)\ncreds: UAMI · AOAI scopes",
+                                                                                            "x": 1100, "y": 380},
+        # 7: Ingestion source/destination connector
+        {"k": "process",  "name": "Ingestion source/destination connector\n(omnivec-ingestor · omnivec-dotnet-worker)\ncreds: UAMI · Cosmos + Service Bus + Blob scopes",
+                                                                                            "x": 1100, "y": 760},
+        # 8: Local configuration — INSIDE TB-2
+        {"k": "store",    "name": "Local configuration\n(env vars · mounted Helm values · KV refs)\npod-local · read at process start",
+                                                                                            "x": 620,  "y": 760},
+        # 9: Key Vault (inside TB-3)
+        {"k": "store",    "name": "Key Vault\nsecret references",                          "x": 820,  "y": 1140},
+        # 10: Application Insights (inside TB-3)
+        {"k": "store",    "name": "Application Insights\ntraces · metrics · logs",         "x": 1240, "y": 1140},
     ],
     "tbs": [
-        {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
-        {"name": "TB-1a Microsoft-operated identity (out of scope)",        "x": 30,   "y": 140, "w": 280,  "h": 200},
-        {"name": "TB-2 OmniVec / AKS (single tenant)",                      "x": 600,  "y": 440, "w": 460,  "h": 340},
-        {"name": "TB-3 Azure managed services (Cosmos metadata · App Insights — in scope, OmniVec-owned, UAMI)",  "x": 600,  "y": 820, "w": 1020, "h": 200},
-        {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1240, "y": 140, "w": 380, "h": 220},
-        {"name": "TB-4 Customer data plane",                                "x": 1240, "y": 480, "w": 380,  "h": 240},
+        {"name": "TB-1 Internet (callers — public HTTPS surface · TLS ≥ 1.2 customer-configured)",          "x": 30,   "y": 560, "w": 300,  "h": 240},
+        {"name": "TB-1a Microsoft-operated identity (out of scope)",        "x": 30,   "y": 140, "w": 300,  "h": 240},
+        {"name": "TB-2 OmniVec / AKS — three components (Web/API · DocGrok · Ingestion connector) + pod-local config",
+                                                                            "x": 560,  "y": 320, "w": 800,  "h": 580},
+        {"name": "TB-3 OmniVec-owned Azure managed services — three distinct resources, one trust boundary (UAMI · same subscription · per-resource RBAC)",
+                                                                            "x": 260,  "y": 1080, "w": 1140, "h": 220},
+        {"name": "TB-3a Customer Azure subscription — Foundry (out of scope)", "x": 1540, "y": 140, "w": 400, "h": 240},
+        {"name": "TB-4 Customer data plane",                                "x": 1540, "y": 700, "w": 400,  "h": 240},
     ],
+    # NOTE on reviewer items (2026-05-21):
+    #   * Three OmniVec AKS components: Web/API (2), DocGrok (6), Ingestion connector (7).
+    #   * TB-3 groups three SEPARATE resource shapes (Cosmos metadata=5, Key Vault=9,
+    #     App Insights=10) under one trust boundary — per refined reviewer guidance,
+    #     they must be modelled distinctly (different RBAC, different data sensitivity).
+    #   * Removed flow Callers->AAD; external-interactor internals are black-boxed.
+    #   * Unified read+write to Customer data plane on the connector arrow.
     "flows": [
-        (0, 2, "Queries / admin / token-mint\nHTTPS · AAD bearer (browser/CLI) or scope=search bearer (embedded app)"),
-        (0, 1, "OIDC sign-in\nHTTPS · OIDC code flow"),
-        (2, 1, "JWT validation (JWKS fetch)\nHTTPS · public endpoint · cached 1h"),
-        (2, 3, "Embed call (consume only)\nHTTPS · Managed Identity (UAMI) or API key"),
-        (2, 4, "Read source documents/attachments · change-feed\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox"),
-        (2, 4, "Write embeddings/vectors\nHTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"),
-        (2, 5, "Read/write metadata + token hashes\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC"),
-        (2, 6, "Telemetry export (traces · metrics · logs)\nHTTPS · Managed Identity (UAMI) · Application Insights ingestion"),
-        (2, 7, "Internal proxy /api/agent/* → agent /v1/*\nHTTP · in-cluster · INTERNAL_API_TOKEN bearer + X-Caller-Id"),
-        (7, 8, "Read/write agent_sessions, append agent_audit\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC · TTL 30d/365d"),
+        (0, 2,  "Queries / admin / token-mint\nHTTPS · AAD bearer (browser/CLI) or scope=search bearer (embedded app) · TLS ≥ 1.2 customer-configured"),
+        (2, 1,  "JWT validation (JWKS fetch)\nHTTPS · public endpoint · cached 1h"),
+        (2, 6,  "In-cluster /v1/embed (search/RAG)\nHTTP · X-Admin-Token · NetworkPolicy: api -> docgrok"),
+        (7, 6,  "In-cluster /v1/embed/batch (ingest)\nHTTP · X-Admin-Token · NetworkPolicy: connector -> docgrok"),
+        (6, 3,  "Embed call (consume only)\nHTTPS · Managed Identity (UAMI) or API key"),
+        (7, 4,  "Customer data plane — read source/change-feed AND write embeddings (unified · OmniVec-initiated)\nHTTPS · Managed Identity (UAMI) or SAS · host allowlist · parser sandbox · Cosmos RBAC"),
+        # Web/API -> {Cosmos metadata, Key Vault, App Insights}  (3 separate flows)
+        (2, 5,  "Read/write config + token hashes\nHTTPS · UAMI · Cosmos data-plane RBAC"),
+        (2, 9,  "Resolve secret refs\nHTTPS · UAMI · Key Vault Secret Reader"),
+        (2, 10, "Export traces / metrics / logs\nHTTPS · UAMI · Monitoring Metrics Publisher"),
+        # DocGrok -> {Cosmos metadata, Key Vault, App Insights}
+        (6, 5,  "Read model records\nHTTPS · UAMI · Cosmos data-plane RBAC"),
+        (6, 9,  "Resolve AOAI secret refs\nHTTPS · UAMI · Key Vault Secret Reader"),
+        (6, 10, "Export traces / metrics / logs\nHTTPS · UAMI · Monitoring Metrics Publisher"),
+        # Ingestion connector -> {Cosmos metadata, Key Vault, App Insights}
+        (7, 5,  "Read pipeline / source records\nHTTPS · UAMI · Cosmos data-plane RBAC"),
+        (7, 9,  "Resolve connector secret refs\nHTTPS · UAMI · Key Vault Secret Reader"),
+        (7, 10, "Export traces / metrics / logs\nHTTPS · UAMI · Monitoring Metrics Publisher"),
+        # envcfg -> {Web/API, DocGrok, Connector} : pod-internal config reads.
+        # Same trust boundary (TB-2 · AKS pod), drawn explicitly per 2026-05-21
+        # reviewer ask that the configuration *path* be visible in the diagram.
+        # KV-ref resolution (the boundary-crossing part) is shown by the
+        # component -> Key Vault arrows above.
+        (2, 8,  "Read env vars / mounted config @ startup\nin-pod · no network"),
+        (6, 8,  "Read env vars / mounted config @ startup\nin-pod · no network"),
+        (7, 8,  "Read env vars / mounted config @ startup\nin-pod · no network"),
     ],
 }
 
@@ -104,21 +172,29 @@ DIAG_CONTROL = {
         {"k": "store",    "name": "CosmosDB metadata\nomnivec.metadata + tokens", "x": 1100, "y": 540},
         {"k": "store",    "name": "Key Vault",                                  "x": 1100, "y": 880},
         {"k": "process",  "name": "Agent\n(read-only diag · in-cluster)",       "x": 480,  "y": 880},
+        # 7: Local configuration node — NEW per 2026-05-21 review
+        {"k": "store",    "name": "Local configuration\n(env vars · Helm values · KV refs)\n[customer-owned · pod-local]",
+                                                                                "x": 80,   "y": 880},
     ],
     "tbs": [
-        {"name": "TB-1 Internet (callers — public HTTPS surface)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
+        {"name": "TB-1 Internet (callers — public HTTPS surface · TLS ≥ 1.2 customer-configured)",          "x": 30,   "y": 480, "w": 280,  "h": 240},
         {"name": "TB-1a Microsoft-operated identity (out of scope)",        "x": 30,   "y": 140, "w": 280,  "h": 200},
         {"name": "TB-2 OmniVec / AKS (single tenant)",                      "x": 420,  "y": 320, "w": 320,  "h": 600},
         {"name": "TB-3 Azure managed services (Cosmos · Key Vault)",        "x": 1040, "y": 480, "w": 320,  "h": 540},
+        {"name": "Local config (customer-owned · pod-local)",               "x": 30,   "y": 820, "w": 280,  "h": 200},
     ],
+    # NOTE: Per 2026-05-21 review, the callers->AAD OIDC sign-in flow is removed.
+    # External Interactors (Callers) are black boxes; we do not model their internal
+    # auth handshake. Only OmniVec-initiated flows to AAD (JWKS validation) remain.
     "flows": [
         (0, 2, "U1 · GET / (UI assets)\nHTTPS · static, no auth"),
-        (0, 1, "U2 · OIDC sign-in (browser)\nHTTPS · OIDC code flow + PKCE"),
-        (0, 3, "U3 · {GET,POST,PUT,DELETE} /api/* (admin CRUD · token mint)\nHTTPS · AAD JWT or scope=admin bearer · role: Admin/Reader"),
+        (0, 3, "U3 · {GET,POST,PUT,DELETE} /api/* (admin CRUD · token mint)\nHTTPS · AAD JWT or scope=admin bearer · role: Admin/Reader · TLS ≥ 1.2 customer-configured"),
         (3, 1, "U4 · JWKS validation\nHTTPS to login.microsoftonline.com · cached 1h"),
         (3, 4, "U5 · {read,write} omnivec.metadata + tokens\nHTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC · tokens hashed (SHA-256)"),
         (3, 5, "U6 · GET /secrets/{name}\nHTTPS · Managed Identity (UAMI) · Key Vault Secret Reader"),
         (3, 6, "U7 · POST /api/agent/chat (SSE) · GET /api/agent/tools · sessions\nHTTP in-cluster · INTERNAL_API_TOKEN bearer + X-Caller-Id"),
+        (7, 3, "U7 · Process-start config read (env vars · mounted Helm values · KV refs)\nin-pod · no network"),
+        (7, 2, "U7 · Process-start config read\nin-pod · no network"),
     ],
 }
 
@@ -409,6 +485,57 @@ def build_one(template_text: str, diagram: dict) -> str:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description="Regenerate OmniVec threat-model .tm7 files.")
+    ap.add_argument(
+        "--force", "-f", action="store_true",
+        help="Overwrite existing .tm7 files. Default: refuse if any output already exists "
+             "(prevents accidental loss of hand-tuned layout).",
+    )
+    ap.add_argument(
+        "--freeze-layout", action="store_true",
+        help="Read the existing .tm7 files, extract every shape/TB position into "
+             "docs/security/threat-model.positions.json, then exit without writing "
+             ".tm7. Use after arranging in TMT to preserve your layout.",
+    )
+    args = ap.parse_args()
+
+    out_dir = Path(__file__).resolve().parent.parent / "docs" / "security"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    positions_path = out_dir / "threat-model.positions.json"
+
+    if args.freeze_layout:
+        positions = _extract_positions_from_existing_tm7(out_dir)
+        positions_path.write_text(json.dumps(positions, indent=2), encoding="utf-8")
+        print(
+            f"froze layout for {sum(len(v) for v in positions.values())} entries "
+            f"across {len(positions)} diagrams -> {positions_path}"
+        )
+        return
+
+    # Refuse to overwrite by default — hand-tuned layouts are easy to clobber.
+    existing = [out_dir / d["out"] for d in DIAGRAMS if (out_dir / d["out"]).exists()]
+    if existing and not args.force:
+        msg = (
+            "Refusing to overwrite existing .tm7 file(s):\n  "
+            + "\n  ".join(str(p) for p in existing)
+            + "\nRe-run with --force to overwrite, or --freeze-layout first to capture "
+              "your current arrangement into a sidecar JSON that will be re-applied "
+              "automatically on the next --force regeneration."
+        )
+        print(msg, file=sys.stderr)
+        raise SystemExit(2)
+
+    # Load layout overrides (hand-tuned positions, captured via --freeze-layout).
+    overrides: dict[str, dict[str, dict[str, int]]] = {}
+    if positions_path.exists():
+        try:
+            overrides = json.loads(positions_path.read_text(encoding="utf-8"))
+            total = sum(len(v) for v in overrides.values())
+            print(f"applying layout overrides for {total} entries from {positions_path}")
+        except Exception as e:  # pragma: no cover — bad JSON is operator error
+            print(f"WARNING: could not load {positions_path}: {e}", file=sys.stderr)
+            overrides = {}
+
     template_path = Path(os.environ.get(
         "OMNIVEC_TM7_TEMPLATE",
         r"C:\Users\prsasatt\Downloads\CmasBoA-ThreatModel 2025-01-20 (2).tm7",
@@ -418,21 +545,110 @@ def main() -> None:
             f"Template tm7 not found: {template_path}\n"
             "Set OMNIVEC_TM7_TEMPLATE to a known-good .tm7 file."
         )
-    out_dir = Path(__file__).resolve().parent.parent / "docs" / "security"
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     template_text = template_path.read_text(encoding="utf-8")
 
     for diagram in DIAGRAMS:
+        diagram_overrides = overrides.get(diagram["out"], {})
+        _apply_overrides(diagram, diagram_overrides)
         rendered = build_one(template_text, diagram)
         out = out_dir / diagram["out"]
         out.write_text(rendered, encoding="utf-8")
+        n_overridden = sum(
+            1 for e in diagram["elements"] if e["name"] in diagram_overrides
+        ) + sum(
+            1 for t in diagram["tbs"] if t["name"] in diagram_overrides
+        )
         print(
             f"wrote {out} ({len(rendered):,} bytes) — "
             f"elements={len(diagram['elements'])} "
             f"trust-boundaries={len(diagram['tbs'])} "
             f"flows={len(diagram['flows'])}"
+            + (f" [layout-override: {n_overridden}]" if n_overridden else "")
         )
+
+
+def _apply_overrides(diagram: dict, overrides: dict[str, dict[str, int]]) -> None:
+    """Patch x/y/w/h on elements + tbs from the sidecar positions JSON.
+
+    Matching is by the shape/TB display ``name`` (exact, including newlines).
+    Entries with no override keep the in-code defaults — that's the contract
+    that lets newly added shapes land sanely without clobbering existing
+    hand-tuned positions.
+    """
+    for el in diagram["elements"]:
+        o = overrides.get(el["name"])
+        if not o:
+            continue
+        for k in ("x", "y", "w", "h"):
+            if k in o:
+                el[k] = int(o[k])
+    for tb in diagram["tbs"]:
+        o = overrides.get(tb["name"])
+        if not o:
+            continue
+        for k in ("x", "y", "w", "h"):
+            if k in o:
+                tb[k] = int(o[k])
+
+
+# Regex helpers for layout extraction. We deliberately scan only Borders
+# (shapes + trust boundaries); flow line coordinates are derived from their
+# endpoints and don't need to be frozen.
+_RE_KV_BLOCK = re.compile(
+    r"<a:KeyValueOfguidanyType>(?P<inner>.*?)</a:KeyValueOfguidanyType>",
+    re.DOTALL,
+)
+_RE_NAME = re.compile(
+    r'<a:anyType i:type="b:StringDisplayAttribute"[^>]*>'
+    r"<b:DisplayName>Name</b:DisplayName>"
+    r"<b:Name(?:/>|>[^<]*</b:Name>)"
+    r'<b:Value i:type="c:string"[^>]*>(?P<name>[^<]*)</b:Value>',
+    re.DOTALL,
+)
+_RE_GEOM = re.compile(
+    r'<Height xmlns="[^"]*">(?P<h>-?\d+)</Height>.*?'
+    r'<Left xmlns="[^"]*">(?P<x>-?\d+)</Left>.*?'
+    r'<Top xmlns="[^"]*">(?P<y>-?\d+)</Top>.*?'
+    r'<Width xmlns="[^"]*">(?P<w>-?\d+)</Width>',
+    re.DOTALL,
+)
+_RE_BORDERS_SECTION = re.compile(r"<Borders[^>]*>(?P<inner>.*?)</Borders>", re.DOTALL)
+
+
+def _extract_positions_from_existing_tm7(out_dir: Path) -> dict[str, dict[str, dict[str, int]]]:
+    """Return ``{diagram_filename: {shape/tb name: {x,y,w,h}}}``.
+
+    Skips data flows (lines): their geometry is a function of endpoints, so
+    we don't freeze it.
+    """
+    result: dict[str, dict[str, dict[str, int]]] = {}
+    for diagram in DIAGRAMS:
+        path = out_dir / diagram["out"]
+        if not path.exists():
+            print(f"skip {path} (does not exist)", file=sys.stderr)
+            continue
+        text = path.read_text(encoding="utf-8")
+        m = _RE_BORDERS_SECTION.search(text)
+        if not m:
+            print(f"skip {path}: no <Borders> section", file=sys.stderr)
+            continue
+        per_diagram: dict[str, dict[str, int]] = {}
+        for kv in _RE_KV_BLOCK.finditer(m.group("inner")):
+            block = kv.group("inner")
+            name_m = _RE_NAME.search(block)
+            geom_m = _RE_GEOM.search(block)
+            if not (name_m and geom_m):
+                continue
+            name = name_m.group("name")
+            per_diagram[name] = {
+                "x": int(geom_m.group("x")),
+                "y": int(geom_m.group("y")),
+                "w": int(geom_m.group("w")),
+                "h": int(geom_m.group("h")),
+            }
+        result[diagram["out"]] = per_diagram
+    return result
 
 
 if __name__ == "__main__":
