@@ -30,7 +30,8 @@ Documents assumptions that are not visible on the diagrams.
 ### 0.3 Networking assumptions
 
 - All public ingress goes through an **HTTPS-terminating ingress controller** (NGINX or AKS Application Gateway). Plain `LoadBalancer` Services are not used in production (search Service defaults to `ClusterIP`; see T-SRCH-1).
-- In-cluster traffic is **plain HTTP** today. The `networkPolicy.enabled=true` toggle activates default-deny + per-component allow rules (see T-NET-1). mTLS / service-mesh is roadmap.
+- **TLS protocol floor is a customer responsibility.** OmniVec does **not** enforce a minimum TLS version in application code — TLS termination, cipher suite selection, and protocol-version floor (e.g. TLS ≥ 1.2, disable 1.0/1.1) are configured at the ingress controller and the underlying OS / OpenSSL runtime. Diagrams continue to show `HTTPS` on public arrows because transport encryption is mandatory; **operators must independently configure the ingress controller (or AGIC / Application Gateway listener) to reject TLS < 1.2** as part of bring-up. See §0.6.2 and the operator checklist.
+- In-cluster traffic is **plain HTTP** today.The `networkPolicy.enabled=true` toggle activates default-deny + per-component allow rules (see T-NET-1). mTLS / service-mesh is roadmap.
 - Customer data-plane endpoints (CosmosDB, Blob) are reached over HTTPS via the public Azure backbone; Private Endpoints are supported but not required.
 
 ### 0.4 Customer assumptions
@@ -68,6 +69,7 @@ OmniVec's threat model holds **only if** the customer operates the deployment al
 
 - **HTTPS-terminating ingress.** Customer fronts `omnivec-web` / `omnivec-api` with an HTTPS-terminating ingress controller (NGINX, Traefik, or Application Gateway/AGIC — all three Helm variants ship). A plain `LoadBalancer` Service for the API or Search is not a supported topology.
 - **TLS certificate management.** Customer provisions and renews TLS certs (cert-manager + Let's Encrypt, or a corporate PKI). OmniVec does not issue certs.
+- **TLS minimum version is the customer's call.** OmniVec relies on the ingress / OS / runtime for protocol-version enforcement and does **not** pin a minimum TLS version in application code. Customers **must** configure the ingress controller to require **TLS ≥ 1.2** (and ideally TLS 1.3) and to disable SSLv3 / TLS 1.0 / TLS 1.1 — e.g. NGINX `ssl-protocols: "TLSv1.2 TLSv1.3"` annotation, AGIC `appgw-ssl-policy` set to `AppGwSslPolicy20220101S` or stricter, Traefik `tls.options.minVersion=VersionTLS12`. Operators running OmniVec without applying one of these is accepting the residual described in §5 row **T-TLS-1**. This assumption is restated in the Threat Model Information (§0.3) because the diagrams show only `HTTPS` and do not encode a version floor.
 - **In-cluster network policy.** Customer enables `networkPolicy.enabled=true` for default-deny + per-component allow (see `T-NET-1`). Leaving it off is a documented residual.
 - **Egress reachability.** OmniVec pods must reach (a) `login.microsoftonline.com` (AAD JWKS), (b) the customer's CosmosDB / Blob / Service Bus / Key Vault / AOAI endpoints, and (c) the configured embedding endpoints (AOAI or in-cluster BGE/CLIP). If the cluster has a strict egress firewall, the customer is responsible for allow-listing these FQDNs.
 - **Private Endpoints are optional but recommended.** `terraform/private-endpoints.tf` (batch 6/7) provisions PEs for Cosmos / Blob / Service Bus / Key Vault / AOAI. Customers in regulated environments should enable them; OmniVec works either way (`RES-1`).
@@ -118,38 +120,101 @@ OmniVec is a **single-tenant** retrieval-augmented vector platform that ingests 
 
 ```mermaid
 flowchart LR
-  callers(["Callers<br/>browser · CLI · embedded user app<br/>[ext]"])
+  callers(["Callers<br/>browser · CLI · embedded app<br/>[ext]"])
 
-  subgraph msft["Microsoft-operated — out of scope"]
-    aad(["Azure AD<br/>(identity provider)<br/>[ext, OOS]"])
+  subgraph msft["Microsoft-operated — OOS"]
+    aad(["Azure AD<br/>[ext, OOS]"])
   end
 
-  omnivec["**OmniVec**<br/>(API · Search · DocGrok · Ingestion)<br/>single-tenant in customer AKS"]
+  subgraph omnivecbox["OmniVec — single-tenant AKS (TB-2)"]
+    direction TB
+    api["Web / API control plane"]
+    docgrok["DocGrok"]
+    conn["Ingestion connector"]
+    envcfg[("Local configuration<br/>env vars · Helm values")]
+  end
 
-  subgraph custsub["Customer Azure subscription — out of scope"]
+  subgraph azuremgd["TB-3 · OmniVec-owned Azure managed services"]
+    direction LR
+    cmeta[("CosmosDB metadata account")]
+    kv[("Key Vault")]
+    appi[("Application Insights")]
+  end
+
+  subgraph custsub["Customer Azure subscription — OOS"]
     foundry(["Azure OpenAI / Foundry<br/>[ext, OOS]"])
   end
 
-  customer(["Customer data plane<br/>source CosmosDB / Blob · vectors destination<br/>[ext]"])
+  customer(["Customer data plane<br/>source / vectors destination<br/>[ext]"])
 
-  callers -->|"queries · admin · token-mint<br/>HTTPS · AAD bearer (browser/CLI) or scope=search bearer (embedded app)"| omnivec
-  callers -.->|OIDC sign-in<br/>HTTPS| aad
-  omnivec -.->|JWT validation (JWKS fetch)<br/>HTTPS · public| aad
-  omnivec -->|"embed call (consume only)<br/>HTTPS · Managed Identity (UAMI) or API key"| foundry
-  customer -->|"read source documents/attachments · change-feed<br/>HTTPS · Managed Identity (UAMI) or SAS · host allowlist"| omnivec
-  omnivec -->|"write embeddings/vectors<br/>HTTPS · Managed Identity (UAMI) · destination CosmosDB / pgvector"| customer
+  callers -- "O1" --> api
+  api -.-> |O2| aad
+  api -- "O3" --> docgrok
+  conn -- "O4" --> docgrok
+  docgrok -- "O5" --> foundry
+  conn <-- "O6 (read+write)" --> customer
+
+  api -- "O7" --> cmeta
+  api -- "O7" --> kv
+  api -. "O7" .-> appi
+  docgrok -- "O8" --> cmeta
+  docgrok -- "O8" --> kv
+  docgrok -. "O8" .-> appi
+  conn -- "O9" --> cmeta
+  conn -- "O9" --> kv
+  conn -. "O9" .-> appi
+
+  %% No arrows from `envcfg` — it is documented as the local-config source
+  %% per reviewer ask, but env-var / Helm-value reads are pod-internal
+  %% (no network, no trust-boundary crossing). Key Vault references resolved
+  %% at runtime are already covered by O7/O8/O9 (component -> Key Vault).
 
   style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
   style custsub fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
+  style omnivecbox fill:#f5faff,stroke:#369
+  style azuremgd fill:#f0fff4,stroke:#393,stroke-dasharray: 3 3
 ```
 
-> **What this view shows**: the only things OmniVec interacts with — Callers, AAD, customer's Azure OpenAI, and the customer data plane. Everything inside OmniVec (API, Search, DocGrok, Ingestion) is a black box at this level; per-component breakdowns live in §3 scenarios.
+**Flow details — Overall (§2)**
+
+Per reviewer guidance (2026-05-21): arrows on the diagram carry only flow-IDs to keep the picture readable; the table below carries the security details.
+
+| # | From → To | Purpose | Transport / auth | Mitigation refs (§5) |
+|---|---|---|---|---|
+| **O1** | Callers → Web/API | Queries · admin · token-mint | HTTPS · TLS ≥ 1.2 (customer-configured) · AAD bearer or `scope=search` bearer | T-API-1, T-TLS-1, T-SRCH-2 |
+| **O2** | Web/API → Azure AD | JWT validation (JWKS fetch) | HTTPS · public endpoint · cached 1 h | T-AAD-1/2 |
+| **O3** | Web/API → DocGrok | In-cluster embed for search/RAG | HTTP · `X-Admin-Token` · NetworkPolicy `api → docgrok` | T-NET-1 |
+| **O4** | Connector → DocGrok | In-cluster embed for ingest batches | HTTP · `X-Admin-Token` · NetworkPolicy `connector → docgrok` | T-NET-1 |
+| **O5** | DocGrok → Foundry | Embedding call (consume only) | HTTPS · Managed Identity (UAMI) or API key | T-MET-1, T-RL-1 |
+| **O6** | Connector ↔ Customer data plane | **Unified** read source + write vectors (OmniVec-initiated, both directions) | HTTPS · UAMI / SAS · host allowlist · parser sandbox · Cosmos RBAC | T-CON-1/2, T-PWK-1, T-VEC-1 |
+| **O7** | Web/API → TB-3 (Cosmos metadata · Key Vault · App Insights) | Config read/write + token hashes · resolve secret refs · export telemetry | HTTPS · UAMI · per-resource RBAC (Cosmos Data Contributor · KV Secret Reader · AppInsights Metrics Publisher) | T-MET-1 |
+| **O8** | DocGrok → TB-3 (same 3 resources) | Read model records · resolve AOAI secret refs · export telemetry | HTTPS · UAMI · per-resource RBAC | T-MET-1, T-FUZ-1 |
+| **O9** | Connector → TB-3 (same 3 resources) | Read pipeline/source records · resolve connector secret refs · export telemetry | HTTPS · UAMI · per-resource RBAC | T-MET-1 |
+
+> **Note on Local configuration:** the `envcfg` node is shown inside TB-2 to satisfy the reviewer's ask that the configuration source be represented in the diagram. It is **intentionally not connected by arrows** to the three OmniVec components — env vars and mounted Helm values are pod-internal state read at process start (no network, no trust-boundary crossing), and Key Vault references are resolved at runtime via UAMI which is already drawn as the per-component arrows to **Key Vault** in O7 / O8 / O9. Operator responsibility: never put plaintext secrets in `values.yaml`; use Key Vault references resolved by UAMI.
+
+> **What this view shows**: the OmniVec AKS deployment is drawn as **exactly three components** (per 2026-05-21 reviewer guidance, refined to the three roles the team actually operates):
+> 1. **Web / API control plane** — `omnivec-web` (static UI) + `omnivec-api` (admin CRUD, token mint, query proxy) + `omnivec-search` (kNN + RAG). Handles all caller traffic.
+> 2. **DocGrok** — `docgrok-router` + `docgrok-pipeline-worker` with the parser sandbox; the only component that talks to Azure OpenAI / Foundry for embeddings.
+> 3. **Ingestion source/destination connector** — `omnivec-ingestor` (change-feed watcher) + `omnivec-dotnet-worker` (Service Bus consumer); the only component that talks to the customer data plane.
+>
+> The three **OmniVec-owned Azure managed services** — **CosmosDB metadata**, **Key Vault**, and **Application Insights** — are intentionally grouped inside a **single trust boundary** (green dashed). They live in OmniVec's own Azure subscription, share the same authentication mechanism (UAMI), and share the same blast radius (compromise of one UAMI principal can reach any of them subject to per-resource RBAC). Telemetry export from each of the three OmniVec components flows into this same box (Application Insights). Per-resource RBAC scopes are documented in the §3.2 / §3.3 / §3.4 flow tables.
+>
+> The **OIDC sign-in flow from Callers → Azure AD** is intentionally **not drawn** — External Interactors are black boxes in this model and we do not represent their internal workings. JWT validation (OmniVec → AAD JWKS) **is** drawn because OmniVec initiates it.
+>
+> The customer-data-plane arrow is drawn **bidirectional** because OmniVec initiates both the read (change-feed / attachments) and the write (embedding vectors). Per reviewer guidance, same-actor read+write flows are unified rather than split into two directional artifacts.
+>
+> The `envcfg` node represents the **local configuration source** (environment variables and Helm values mounted into each pod). It is read once at process start; no network traffic. Key Vault references are resolved separately via UAMI (see §3.2 U6).
 
 **Components**
 
-| Component | Responsibility | Receives external content from |
-|---|---|---|
-| **OmniVec (black box)** | API + Search + DocGrok + Ingestion. Validates AAD JWTs (browser/CLI) and opaque `scope=search` bearer tokens (embedded apps). Calls Azure OpenAI to embed; reads/writes the customer data plane. | Callers (TB-1) and Customer documents (TB-4) |
+| Component | Responsibility | Credentials | Receives external content from |
+|---|---|---|---|
+| **Web / API control plane** | omnivec-web (static UI), omnivec-api (admin CRUD, token mint, query proxy), omnivec-search (kNN + RAG). Validates AAD JWTs and `scope=search` bearer tokens. | AAD svc-principal (JWT validation), UAMI (Cosmos / Key Vault data-plane RBAC) | Callers (TB-1) |
+| **DocGrok** | docgrok-router + docgrok-pipeline-worker with parser sandbox; only component that calls Azure OpenAI / Foundry for embeddings. | UAMI with AOAI Cognitive Services User; Cosmos read on `omnivec.metadata.docgrok_model` | Customer document content (TB-4, via the connector) |
+| **Ingestion source/destination connector** | omnivec-ingestor (change-feed watcher) + omnivec-dotnet-worker (Service Bus consumer); only component that touches the customer data plane (read source / write vectors). | UAMI with Service Bus Send/Receive, Cosmos RBAC read on source / write on vectors, Blob read on attachments | Customer documents (TB-4), customer attachment blobs (TB-4) |
+| **OmniVec-owned Azure managed services** (single TB-3 boundary, **three distinct resources**) | Three separate Azure resources sharing one trust boundary because they share the OmniVec subscription, the same UAMI, and the same blast radius — but each is its own shape on the diagram, with its own RBAC role and its own per-flow arrow: (a) **CosmosDB metadata account** — `omnivec.metadata` (pipelines / sources / tokens / models); (b) **Key Vault** — secret references resolved at runtime; (c) **Application Insights** — telemetry sink (traces / metrics / logs). | UAMI with per-resource data-plane RBAC: Cosmos `DocumentDB Data Contributor`, Key Vault `Secret Reader`, AppInsights `Monitoring Metrics Publisher` | n/a |
+| **Local configuration (env vars / Helm values)** | Source of truth at process start for AAD tenant/group IDs, Key Vault references, allowlists, rate-limit defaults, feature flags. Customer-owned. | n/a — file/env read only | n/a |
 
 **Trust boundaries**
 
@@ -194,12 +259,14 @@ flowchart LR
   cmeta(["CosmosDB metadata<br/>omnivec.metadata + tokens<br/>[ext, Azure-managed]"])
   kv(["Key Vault<br/>[ext, Azure-managed]"])
 
+  envcfg[("Local configuration<br/>env vars · Helm values<br/>[customer-owned]")]
+
   callers -->|"U1 · GET / (UI assets)<br/>HTTPS · static, no auth"| web
-  callers -.->|"U2 · OIDC sign-in (browser)<br/>HTTPS · OIDC code flow + PKCE"| aad
-  callers -->|"U3 · {GET,POST,PUT,DELETE} /api/* (admin CRUD · token mint)<br/>HTTPS · AAD JWT (browser) or scope=admin bearer (CLI/script) — role: Admin/Reader"| api
+  callers -->|"U3 · {GET,POST,PUT,DELETE} /api/* (admin CRUD · token mint)<br/>HTTPS (customer-configured TLS ≥ 1.2) · AAD JWT (browser) or scope=admin bearer (CLI/script) — role: Admin/Reader"| api
   api -->|"U4 · JWKS validation<br/>HTTPS to login.microsoftonline.com · cached 1h"| aad
   api -->|"U5 · {read,write} /dbs/omnivec/colls/metadata/docs<br/>HTTPS · Managed Identity (UAMI) · Cosmos data-plane RBAC"| cmeta
   api -->|"U6 · GET /secrets/{name}<br/>HTTPS · Managed Identity (UAMI) · Key Vault Secret Reader"| kv
+  envcfg -->|"U7 · process-start read<br/>pod env / mounted Helm values · no network"| api
 
   style msft fill:#fff5f5,stroke:#c00,stroke-dasharray: 5 5
 ```
@@ -209,8 +276,8 @@ flowchart LR
 | # | Purpose | Transport | AuthN | AuthZ | Data on the wire | Mitigations (refs §5) |
 |---|---|---|---|---|---|---|
 | **U1** | Browser fetches static UI assets | HTTPS (TLS 1.2+) terminated at NGINX | None (static) | n/a | HTML/JS/CSS | DefenseInDepth: CSP header set by web image |
-| **U2** | Browser-only OIDC sign-in against tenant AAD | HTTPS to `login.microsoftonline.com` | OIDC authorization-code flow + PKCE | Tenant admin defines conditional access, MFA, group membership | Auth code → JWT (Bearer) | AAD itself is OOS (§0.5) |
-| **U3** | Caller invokes admin CRUD / token mint endpoints | HTTPS (TLS 1.2+) terminated at NGINX ingress | AAD JWT (browser) or opaque `scope=admin` bearer (CLI/script); JWT validated against tenant JWKS — signature, `aud`, `iss`, `exp` | AAD group claim `Admin` or `Reader`; token-mint endpoints require `role=admin` | Config payloads (refs to secrets only); new-token plaintext (returned **once** at mint) | T-API-1 (AAD enforced; admin token = breakglass; audit log) |
+| **U3** | Caller invokes admin CRUD / token mint endpoints | HTTPS — **customer-configured TLS ≥ 1.2** at the ingress controller / OS (OmniVec does **not** pin a TLS floor; see §0.3) | AAD JWT (browser) or opaque `scope=admin` bearer (CLI/script); JWT validated against tenant JWKS — signature, `aud`, `iss`, `exp` | AAD group claim `Admin` or `Reader`; token-mint endpoints require `role=admin` | Config payloads (refs to secrets only); new-token plaintext (returned **once** at mint) | T-API-1 (AAD enforced; admin token = breakglass; audit log) |
+| **U7** | API / Web / Search read local configuration (env vars + mounted Helm values) at process start — AAD tenant/group IDs, allowlists, feature flags, KV references. **No network.** | Pod env / mounted file | n/a (read-only, in-pod) | Pod ServiceAccount (Kubernetes RBAC for the Secret/ConfigMap mounts) | Configuration values; **never raw secrets** — KV references only | Operator responsibility: never put plaintext secrets in `values.yaml`; use KV CSI driver |
 | **U4** | API verifies the user's JWT signature against Microsoft's signing keys | HTTPS to `login.microsoftonline.com` (egress) | JWKS endpoint (public); response cached 1 h with `Cache-Control` honored | n/a | JWKS keys (public) | DefenseInDepth: optional cert pin via env var |
 | **U5** | API persists/reads config records (pipelines, sources, model records, hashed tokens) | HTTPS to Azure Cosmos endpoint | Managed Identity (UAMI) | Cosmos data-plane RBAC; **read/write** on `omnivec.metadata`; tokens stored as SHA-256 hashes only | Config records (refs to secrets only), token records (hashed) | T-MET-1 (no key material in records; tokens hashed-at-rest) |
 | **U6** | API resolves secret references at runtime (never stores secret values) | HTTPS to Key Vault | Managed Identity (UAMI) | Key Vault RBAC; **get** scope on a named secret | Secret value (in-memory only) | T-MET-1 |
@@ -360,6 +427,8 @@ Selected manually at boundary crossings. Risk rating uses the SDL scale: **Criti
 | **T-SRCH-2** | TB-1 → Search (service-app path, Scenario D) | S/E/R | Search-scope bearer tokens are long-lived OmniVec-issued opaque tokens (not AAD); minted via `POST /api/auth/tokens` and stored hashed in Cosmos. No automatic rotation, no per-call audit beyond AppInsights, and the bootstrap `OMNIVEC_SEARCH_TOKEN` env value never expires. A leaked token grants read-only search until manually revoked. | **Important** | ⚠️ | Hashed-at-rest storage; admin-scope tokens rejected by default; rate limit on `searchIngress`; `searchIngress.enabled=false` by default so customers opt-in. Residual: rotation runbook + optional AAD-only mode (drop opaque tokens entirely) — see §6. |
 | **T-NET-1** | TB-2 (in-cluster) | S/T/I | No NetworkPolicy / mTLS — compromised pod can call any service unauth | **Moderate** | ✅ | Default-deny + per-component allow rules behind `networkPolicy.enabled`. Residual: mTLS / mesh roadmap. |
 | **T-SUP-1** | Pre-cluster (image source) | T | Compromised registry / MITM swaps an OmniVec image | **Moderate** | ⚠️ | Cosign keyless signing on every push. Residual: admission verification (Ratify/Kyverno) not enforced by default. |
+| **T-TLS-1** | TB-1 → API (transport) | I/T | TLS floor not enforced in application code; downgrade to TLS 1.0/1.1 possible if ingress / OS misconfigured | **Moderate** | ⚠️ | Diagrams continue to show `HTTPS`; **customer responsibility** to configure ingress (NGINX `ssl-protocols`, AGIC `appgw-ssl-policy`, Traefik `minVersion`) to require TLS ≥ 1.2. Restated in §0.3 + §0.6.2; tracked in §6 backlog. |
+| **T-FUZ-1** | TB-1 → API; TB-4 → DocGrok; ingestion parser sandbox | T/D/I | Service team **does not demonstrate the presence of systematic external or continuous Fuzz Testing across all exposed entry points** (Bug 123354 / TMP review booksql114276). API request handlers, DocGrok router/parser, and the document parser sandbox have not been fuzz-tested in CI. Latent input-handling defects (malformed JSON shapes, malformed PDFs / Office docs / images, oversized inputs) could escape unit tests and — in the worst case — enable RCE, DoS, or memory-disclosure attacks against customer-facing endpoints. SDL requires that issues identified by fuzz testing be fixed (per *Issues Identified by Fuzz Testing must be fixed — Liquid*). | **Moderate** | ❌ | Backlog: (1) contact the **Fuzz Testing v-team led by Sharath Unni** to scope the options available to the service; (2) evaluate **[OneFuzz](https://aka.ms/onefuzz)** as the primary continuous-fuzz platform, falling back to *General \| Fuzzing @ Microsoft* tooling if not viable; (3) stand up harnesses for the externally exposed entry points first (API route handlers in `api/api.py`, the `docgrok-router` parsing path, and the `worker.py::_pdf_subprocess_target` parser sandbox); (4) **integrate fuzz runs with the build pipeline** (PR-gating smoke + nightly long-runs) so coverage is continuous, not one-off; (5) wire findings into the existing SDL bug-tracking workflow. Tracked at Bug **123354** (TMP review **booksql114276**); SLA = next 6-month review. |
 
 > The CI/CD pipeline itself (the GitHub Actions runner that produces those signatures) has its own threat model in [`cicd-threat-model.md`](./cicd-threat-model.md).
 
@@ -374,6 +443,8 @@ Open items only — closed items are the ✅ rows above.
 | T-SUP-1 | Add Ratify or Kyverno admission-controller chart that requires cosign signature on every OmniVec image | OmniVec | follow-up |
 | T-API-1 (residual) | Document admin-token rotation runbook + deletion-after-AAD-cutover policy | OmniVec | follow-up |
 | T-NET-1 (residual) | mTLS or service-mesh between tiers (defence in depth on top of NetworkPolicy) | OmniVec | follow-up |
+| T-TLS-1 | Document explicit TLS-floor configuration snippets per ingress (NGINX / AGIC / Traefik) in the operator bring-up checklist; consider shipping default Helm values with TLS 1.2+ enforcement annotations preset | OmniVec | next-batch |
+| T-FUZ-1 (Bug 123354 · TMP review booksql114276) | Engage **Sharath Unni's Fuzz Testing v-team** to scope options; adopt **[OneFuzz](https://aka.ms/onefuzz)** (or alternative from *General \| Fuzzing @ Microsoft*); stand up harnesses for customer-exposed entry points first — `api/api.py` route handlers, `docgrok-router` parsing path, parser-sandbox PDF/Office/image corpus; **integrate continuous fuzz runs into the build pipeline** (PR-gating smoke + nightly long-runs); wire findings to SDL bug workflow; land before next 6-month review | OmniVec / DocGrok / Security | next 6-month review |
 
 ## 7. Did we do enough? (review log)
 
@@ -389,6 +460,7 @@ Open items only — closed items are the ✅ rows above.
 | 2026-05-12 | Reviewer follow-up (AAD scoping) | Marked **Azure AD** explicitly as `[ext, out of scope]` in all three scenario diagrams and the high-level view; added it to the §0.5 OOS table with reason ("Microsoft-operated identity provider; OmniVec only validates JWTs, does not run/secure/rotate AAD"); reworded TB-1 to state that AAD sits *outside* the boundary and only token validation is in scope; renamed TM7 trust boundary from "TB-1 Internet / AAD" to "TB-1 Internet (public HTTPS surface)" to remove the implication that AAD is enclosed | AAD now treated consistently with Foundry — shown because API calls it, OOS because Microsoft operates it |
 | 2026-05-12 | Reviewer follow-up (AAD layout) | Visually separated AAD into its own **TB-1a Microsoft-operated identity (out of scope)** boundary in both the mermaid diagrams (high-level + Scenario A + Scenario C) and the TM7 file; Foundry/AOAI shown enclosed in a matching **"Customer Azure subscription — out of scope"** rectangle in the scenario diagrams. AAD shape now sits outside the TB-1 rectangle in TMT instead of inside it | Reviewers can no longer mistake AAD for an in-scope component of TB-1 |
 | 2026-05-12 | Reviewer follow-up (terminology) | Replaced "WIF" with "Managed Identity (UAMI)" throughout the doc and TM7 to match how the team describes the mechanism. Same underlying setup (Azure AD Workload Identity binding a UAMI to the pod's ServiceAccount); the resource-level name is more discoverable for reviewers | No mechanism change |
+| 2026-05-21 | External reviewer (post-batch-8 TM review) | New risk + 6 diagram improvements accepted (must land before next 6-month review): (1) **removed** the `Callers → Azure AD` OIDC sign-in flow from the high-level view and §3.2 — External Interactors are black boxes and we do not represent their internal workings; (2) **unified** the OmniVec ↔ customer-data-plane read+write into one bidirectional OmniVec-initiated arrow (was previously two directional artifacts); (3) **added** the local configuration source node (`envcfg` — env vars + Helm values) so the config path is visible in both the high-level view and §3.2 (new flow **U7**); (4) **split** the OmniVec server box into three distinct process components — *Web/API control plane*, *Event listener / Embedding processor*, *Telemetry/Logging* — each with its own credentials column; (5) kept `HTTPS` on diagrams but added §0.3 + §0.6.2 + new threat **T-TLS-1** documenting that **TLS protocol-floor enforcement is customer responsibility** (OmniVec does not pin TLS ≥ 1.2 in app code — operators configure the ingress / OS); (6) expanded §0.6 *Operator responsibilities* to surface non-obvious assumptions (TLS floor, env-var ownership, allowlists). Also catalogued **T-FUZ-1 (Bug 123354)** — fuzz testing of API + DocGrok parser surfaces is not yet automated; backlog entry added with 6-month SLA. TM7 regenerated via `python scripts/gen_threat_model_tm7.py`. | Approved with the six items + Bug 123354 due by next review cycle |
 | 2026-05-12 | Reviewer follow-up (Scenario D — service-app search) | Added a missing flow: backend apps / scripts / partner systems can call Search **directly** via the `searchIngress` HTTPS endpoint, bypassing the API. Auth on that path is **not** AAD — it's an OmniVec-issued opaque bearer (scope=`search`) minted by `POST /api/auth/tokens` and stored SHA-256-hashed in `omnivec.metadata`. Added Scenario D diagram + flow-detail table (D0–D5), new threat **T-SRCH-2** (long-lived static search tokens; no automatic rotation; bootstrap token never expires), and a new external interactor "Service caller" in the TM7 with one flow into the API/Search surface | Programmatic / partner-app search path is now modeled distinctly from the browser path |
 
 **To request a Threat Model Review:** upload `threat-model.tm7` + this `.md` via the Threat Modeling Portal ([aka.ms/dpgtrack](https://aka.ms/dpgtrack)). Per DPSS guidance, the review meeting is a 2–3 hour call; this document is sized to fit.
