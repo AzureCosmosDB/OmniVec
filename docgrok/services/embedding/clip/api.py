@@ -331,18 +331,21 @@ async def embed(request: Request):
     if not blob_url:
         raise HTTPException(status_code=400, detail="blobUrl or text is required")
 
-    # Download image
+    # Download image (offload sync HTTP/blob fetch to thread pool so the event
+    # loop stays free for other concurrent /embed requests — without this,
+    # /embed serializes to ~1/download-latency throughput per replica).
     try:
         blob_url = _validate_blob_url(blob_url)
+        loop = asyncio.get_event_loop()
         if is_azure_blob_url(blob_url):
-            # Use managed identity for Azure Blob Storage
-            image_bytes = download_azure_blob(blob_url)
+            image_bytes = await loop.run_in_executor(_DOWNLOAD_POOL, download_azure_blob, blob_url)
         else:
-            # Use HTTP for other URLs
-            resp = http_requests.get(blob_url, timeout=DOWNLOAD_TIMEOUT_SECONDS, allow_redirects=False)
-            resp.raise_for_status()
-            image_bytes = resp.content
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            def _http_get(u: str) -> bytes:
+                r = http_requests.get(u, timeout=DOWNLOAD_TIMEOUT_SECONDS, allow_redirects=False)
+                r.raise_for_status()
+                return r.content
+            image_bytes = await loop.run_in_executor(_DOWNLOAD_POOL, _http_get, blob_url)
+        image = await loop.run_in_executor(_DOWNLOAD_POOL, lambda: Image.open(io.BytesIO(image_bytes)).convert("RGB"))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to download image: {str(e)}")
 
@@ -509,8 +512,16 @@ async def openai_embeddings(request: Request):
 
     if url_items:
         urls_only = [u for _, u in url_items]
+        # Run the parallel downloads in a worker thread so we don't block the
+        # asyncio event loop. Without this, 8 concurrent /v1/embeddings calls
+        # serialize because _DOWNLOAD_POOL.map() is synchronous from the loop's
+        # POV, which capped image throughput at ~3 img/s per call.
         try:
-            downloaded = list(_DOWNLOAD_POOL.map(_download_image_for_clip, urls_only))
+            loop = asyncio.get_event_loop()
+            downloaded = await loop.run_in_executor(
+                None,
+                lambda: list(_DOWNLOAD_POOL.map(_download_image_for_clip, urls_only)),
+            )
         except HTTPException:
             raise
         except Exception as e:

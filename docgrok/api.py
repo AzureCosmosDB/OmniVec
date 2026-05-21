@@ -356,6 +356,51 @@ async def embed(request: Request):
             text = body.get("text", "")
             blob_name = body.get("blob_name")
             blob_url_in = body.get("blobUrl") or body.get("blob_url")
+            blob_names_list = body.get("blob_names")  # bulk: list[str]
+            blob_urls_list = body.get("blob_urls") or body.get("blobUrls")  # bulk: list[str]
+            is_bulk = isinstance(blob_names_list, list) or isinstance(blob_urls_list, list)
+
+            # Bulk image (blob) routing — N images in a single call. The
+            # ingestion worker posts {model_id, blob_names: [...], blob_container,
+            # blob_account_url} (or blob_urls: [...]); we construct the URL list
+            # once and forward to the backend's /v1/embeddings (OpenAI-compat),
+            # which parallel-downloads all images in its _DOWNLOAD_POOL and
+            # runs a single batched forward pass. Response is reshaped into
+            # {chunks: [...]} (one chunk per input) so callers can keep their
+            # per-doc bookkeeping.
+            if is_bulk and not text:
+                if not model_id.startswith("mdl-native-"):
+                    raise HTTPException(status_code=400, detail="Bulk blob embedding only supported for native models")
+                name = model_id[len("mdl-native-"):]
+                url = NATIVE_URLS.get(name)
+                if not url:
+                    raise HTTPException(status_code=400, detail=f"Unknown native model: '{name}'")
+
+                if isinstance(blob_urls_list, list) and blob_urls_list:
+                    urls = blob_urls_list
+                else:
+                    account = (body.get("blob_account_url") or "").rstrip("/")
+                    container = body.get("blob_container") or ""
+                    if not account or not container:
+                        raise HTTPException(status_code=400, detail="blob_account_url and blob_container required when using blob_names")
+                    urls = [f"{account}/{container}/{n}" for n in (blob_names_list or [])]
+
+                if not urls:
+                    return JSONResponse(content={"requestId": request_id, "model_id": model_id, "chunks": [], "_routed_to": model_id})
+
+                payload = {"input": urls, "model": model_id}
+                resp = await http_client.post(f"{url}/v1/embeddings", json=payload, timeout=600)
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=resp.status_code, detail=f"Backend error: {resp.text}")
+                r = resp.json()
+                data = r.get("data") or []
+                chunks = [{"text": "", "embedding": (d.get("embedding") or [])} for d in data]
+                return JSONResponse(content={
+                    "requestId": request_id,
+                    "model_id": model_id,
+                    "chunks": chunks,
+                    "_routed_to": model_id,
+                })
 
             # Image (blob) routing for native image models like CLIP. The
             # ingestion worker posts {model_id, blob_name, blob_container,

@@ -220,4 +220,93 @@ public class DocGrokClient
 
         return results;
     }
+
+    /// <summary>
+    /// Bulk blob embedding. Posts a single request to docgrok router with a
+    /// list of blob names; the router forwards to the backend's bulk endpoint
+    /// (e.g. CLIP /v1/embeddings) which parallel-downloads and runs a single
+    /// batched forward. Returns one float[] per input blob, in input order.
+    /// Retries 429/5xx/transient errors.
+    /// </summary>
+    public async Task<List<float[]>> EmbedBlobBatchAsync(
+        string modelOrPipeline,
+        string blobAccountUrl,
+        string blobContainer,
+        List<string> blobNames,
+        CancellationToken ct)
+    {
+        if (blobNames.Count == 0) return new List<float[]>();
+
+        var request = new Dictionary<string, object?>
+        {
+            ["model_id"] = modelOrPipeline,
+            ["blob_names"] = blobNames,
+            ["blob_account_url"] = blobAccountUrl,
+            ["blob_container"] = blobContainer,
+        };
+
+        HttpResponseMessage resp = null!;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                resp = await _http.PostAsJsonAsync("/embed", request, ct);
+
+                if ((int)resp.StatusCode == 429)
+                {
+                    var retryAfter = resp.Headers.RetryAfter?.Delta
+                        ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
+                    _logger.LogWarning("EmbedBlobBatch 429, attempt {Attempt}, retry after {Delay}s",
+                        attempt, retryAfter.TotalSeconds);
+                    await Task.Delay(retryAfter, ct);
+                    continue;
+                }
+
+                if ((int)resp.StatusCode >= 500)
+                {
+                    var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
+                    _logger.LogWarning("EmbedBlobBatch {Status}, attempt {Attempt}, retry after {Delay}s",
+                        resp.StatusCode, attempt, delay.TotalSeconds);
+                    await Task.Delay(delay, ct);
+                    continue;
+                }
+                break;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
+                _logger.LogWarning("EmbedBlobBatch call failed: {Error}, attempt {Attempt}, retry after {Delay}s",
+                    ex.Message, attempt, delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+            }
+        }
+
+        resp.EnsureSuccessStatusCode();
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+
+        var results = new List<float[]>(blobNames.Count);
+        if (doc.RootElement.TryGetProperty("chunks", out var chunks))
+        {
+            foreach (var chunk in chunks.EnumerateArray())
+            {
+                var embArr = chunk.GetProperty("embedding");
+                var target = embArr;
+                if (target.ValueKind == JsonValueKind.Array && target.GetArrayLength() > 0 &&
+                    target[0].ValueKind == JsonValueKind.Array)
+                    target = target[0];
+                var floats = new float[target.GetArrayLength()];
+                int i = 0;
+                foreach (var val in target.EnumerateArray())
+                    floats[i++] = val.GetSingle();
+                results.Add(floats);
+            }
+        }
+        if (results.Count != blobNames.Count)
+            throw new EmbeddingClientException(
+                200,
+                null,
+                $"EmbedBlobBatch returned {results.Count} embeddings for {blobNames.Count} blobs");
+        return results;
+    }
 }
