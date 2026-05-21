@@ -585,9 +585,13 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
 
     # Build index_id -> input_modality map for entity_type tagging.
     idx_modality: Dict[str, str] = {}
+    idx_pipeline: Dict[str, str] = {}
     for ix in req.indexes:
         mod = getattr(ix.embedding, "input_modality", "text")
         idx_modality[ix.id] = mod
+        pid = getattr(ix, "pipeline_id", None)
+        if pid:
+            idx_pipeline[ix.id] = pid
 
     def _classify(hit: dict) -> str:
         ref = (hit.get("source_ref") or hit.get("id") or "").lower()
@@ -601,6 +605,10 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
 
     out_results: List[SearchResult] = []
     for h in merged:
+        md = dict(h.get("metadata", {}) or {})
+        pid = idx_pipeline.get(h.get("index_id"))
+        if pid and "pipeline_id" not in md:
+            md["pipeline_id"] = pid
         out_results.append(SearchResult(
             index_id=h["index_id"],
             id=h.get("id"),
@@ -609,7 +617,7 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
             rrf_score=h.get("rrf_score"),
             text=h.get("text", "") or "",
             text_parts=h.get("text_parts"),
-            metadata=h.get("metadata", {}) or {},
+            metadata=md,
             vector=(h.get("vector") if req.include.vectors else None),
             source=h.get("source"),
             source_ref=h.get("source_ref"),
