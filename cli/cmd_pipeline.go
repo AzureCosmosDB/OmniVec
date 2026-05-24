@@ -111,13 +111,33 @@ func newPipelineShowCmd() *cobra.Command {
 			if stats, ok := obj["stats"].(map[string]any); ok {
 				fmt.Println()
 				fmt.Println(bold("Stats"))
+				// Prefer embedded_count / lifetime_embedded_count (true "docs vectorized" measure)
+				// over jobs.completed, which is 0 for queue/changefeed pipelines that
+				// don't create one job document per source row.
+				embedded := toInt(stats["embedded_count"])
+				lifetime := toInt(stats["lifetime_embedded_count"])
+				sourceCount := toInt(stats["source_doc_count"])
+				if embedded > 0 || lifetime > 0 || sourceCount > 0 {
+					fmt.Printf("  %-22s %s\n", "Documents Embedded:", green(fmt.Sprintf("%d", embedded)))
+					if lifetime > embedded {
+						fmt.Printf("  %-22s %d\n", "Lifetime Embedded:", lifetime)
+					}
+					if sourceCount > 0 {
+						fmt.Printf("  %-22s %d\n", "Source Docs:", sourceCount)
+					}
+					if pct, ok := stats["completion_pct"].(float64); ok && pct > 0 {
+						fmt.Printf("  %-22s %.1f%%\n", "Completion:", pct)
+					}
+				}
 				if jobs, ok := stats["jobs"].(map[string]any); ok {
 					total := toInt(jobs["total"])
 					completed := toInt(jobs["completed"])
 					failed := toInt(jobs["failed"])
 					pending := toInt(jobs["pending"])
 					processing := toInt(jobs["processing"])
-					fmt.Printf("  %-22s %s\n", "Documents Processed:", green(fmt.Sprintf("%d", completed)))
+					if embedded == 0 && lifetime == 0 && sourceCount == 0 {
+						fmt.Printf("  %-22s %s\n", "Documents Processed:", green(fmt.Sprintf("%d", completed)))
+					}
 					if failed > 0 {
 						fmt.Printf("  %-22s %s\n", "Failed:", red(fmt.Sprintf("%d", failed)))
 					} else {

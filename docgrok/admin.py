@@ -72,15 +72,22 @@ async def list_registry_models():
     models = []
 
     # Native models from K8s deployments
+    # Only include deployments labelled as actual ML models (omnivec/role=model).
+    # Without this filter every infra deployment in the namespace (omnivec-api,
+    # omnivec-web, docgrok-controller, etc.) shows up as a "native model".
     if K8S_AVAILABLE:
         try:
             apps_v1 = client.AppsV1Api()
-            deployments = apps_v1.list_namespaced_deployment(namespace=NAMESPACE)
+            deployments = apps_v1.list_namespaced_deployment(
+                namespace=NAMESPACE,
+                label_selector="omnivec/role=model",
+            )
             for dep in deployments.items:
                 name = dep.metadata.name
                 if name == "docgrok":
                     continue
 
+                labels = dep.metadata.labels or {}
                 replicas = dep.spec.replicas or 0
                 ready_replicas = dep.status.ready_replicas or 0
                 container = dep.spec.template.spec.containers[0]
@@ -90,7 +97,10 @@ async def list_registry_models():
                 if resources.requests:
                     gpu_request = resources.requests.get("nvidia.com/gpu", "0")
 
-                model_type = "vision" if name in ("dse-qwen2", "clip") else "text"
+                # Prefer explicit type label (text/vision/chat) over name heuristic
+                model_type = labels.get("omnivec/model-type")
+                if not model_type:
+                    model_type = "vision" if name in ("dse-qwen2", "clip") else "text"
                 models.append({
                     "id": f"mdl-native-{name}",
                     "name": name,
@@ -185,9 +195,12 @@ async def get_registry_model(model_id: str):
             try:
                 apps_v1 = client.AppsV1Api()
                 dep = apps_v1.read_namespaced_deployment(name=name, namespace=NAMESPACE)
+                labels = (dep.metadata.labels or {})
+                if labels.get("omnivec/role") != "model":
+                    raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
                 replicas = dep.spec.replicas or 0
                 ready_replicas = dep.status.ready_replicas or 0
-                model_type = "vision" if name in ("dse-qwen2", "clip") else "text"
+                model_type = labels.get("omnivec/model-type") or ("vision" if name in ("dse-qwen2", "clip") else "text")
                 return {
                     "id": model_id,
                     "name": name,
@@ -197,6 +210,8 @@ async def get_registry_model(model_id: str):
                     "replicas": replicas,
                     "ready_replicas": ready_replicas,
                 }
+            except HTTPException:
+                raise
             except Exception:
                 pass
 
