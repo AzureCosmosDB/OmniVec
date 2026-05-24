@@ -13,6 +13,11 @@ public class DocGrokClient
     private readonly HttpClient _http;
     private readonly ILogger<DocGrokClient> _logger;
 
+    // Cap retries on persistent 5xx so a stopped/missing model doesn't cause
+    // the worker to spin forever. After this many 5xx attempts we surface an
+    // EmbeddingClientException so the worker can mark the job FAILED.
+    private const int MaxEmbedRetries = 20;
+
     public DocGrokClient(HttpClient http, ILogger<DocGrokClient> logger)
     {
         _http = http;
@@ -51,6 +56,17 @@ public class DocGrokClient
 
                 if ((int)resp.StatusCode >= 500)
                 {
+                    if (attempt >= MaxEmbedRetries)
+                    {
+                        var body5 = await resp.Content.ReadAsStringAsync(ct);
+                        _logger.LogError(
+                            "Embed giving up after {Attempt} 5xx attempts ({Status}): {Body}",
+                            attempt, resp.StatusCode, Truncate(body5, 300));
+                        throw new EmbeddingClientException(
+                            (int)resp.StatusCode,
+                            body5,
+                            $"Embed failed after {attempt} retries: {(int)resp.StatusCode} {resp.StatusCode}");
+                    }
                     var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
                     _logger.LogWarning("Embed {Status}, attempt {Attempt}, retry after {Delay}s",
                         resp.StatusCode, attempt, delay.TotalSeconds);
@@ -158,6 +174,17 @@ public class DocGrokClient
 
                 if ((int)resp.StatusCode >= 500)
                 {
+                    if (attempt >= MaxEmbedRetries)
+                    {
+                        var body5 = await resp.Content.ReadAsStringAsync(ct);
+                        _logger.LogError(
+                            "EmbedBlob giving up after {Attempt} 5xx attempts ({Status}): {Body}",
+                            attempt, resp.StatusCode, Truncate(body5, 300));
+                        throw new EmbeddingClientException(
+                            (int)resp.StatusCode,
+                            body5,
+                            $"EmbedBlob failed after {attempt} retries: {(int)resp.StatusCode} {resp.StatusCode}");
+                    }
                     var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
                     _logger.LogWarning("EmbedBlob {Status}, attempt {Attempt}, retry after {Delay}s",
                         resp.StatusCode, attempt, delay.TotalSeconds);
@@ -264,6 +291,22 @@ public class DocGrokClient
 
                 if ((int)resp.StatusCode >= 500)
                 {
+                    // Cap retries so a persistently-failing backend (e.g. the
+                    // model has been stopped, or DocGrok lost its registry entry)
+                    // doesn't spin forever. After MaxRetries 5xx attempts we
+                    // surface as EmbeddingClientException so the worker can
+                    // dead-letter the job instead of redelivering forever.
+                    if (attempt >= MaxEmbedRetries)
+                    {
+                        var body5 = await resp.Content.ReadAsStringAsync(ct);
+                        _logger.LogError(
+                            "EmbedBlobBatch giving up after {Attempt} 5xx attempts ({Status}): {Body}",
+                            attempt, resp.StatusCode, Truncate(body5, 300));
+                        throw new EmbeddingClientException(
+                            (int)resp.StatusCode,
+                            body5,
+                            $"EmbedBlobBatch failed after {attempt} retries: {(int)resp.StatusCode} {resp.StatusCode}");
+                    }
                     var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
                     _logger.LogWarning("EmbedBlobBatch {Status}, attempt {Attempt}, retry after {Delay}s",
                         resp.StatusCode, attempt, delay.TotalSeconds);

@@ -409,6 +409,17 @@ async def check_model(model_id: str, client: httpx.AsyncClient) -> dict:
                 # Test external model endpoint accessibility
                 endpoint = model_info.get("endpoint", "")
                 api_key = model_info.get("api_key", "")
+                # DocGrok masks api_key in its GET response. If we got nothing
+                # back (or the obvious "***" placeholder), fall back to the
+                # canonical KeyVault copy so the health probe can authenticate.
+                if not api_key or set(api_key) <= {"*"}:
+                    try:
+                        from keyvault_client import get_model_api_key
+                        kv_key = get_model_api_key(model_id)
+                        if kv_key:
+                            api_key = kv_key
+                    except Exception as kv_err:
+                        logger.debug("health: keyvault fallback failed for %s: %s", model_id, kv_err)
                 deployment = model_info.get("deployment", "")
                 api_version = model_info.get("api_version", "2024-06-01")
 

@@ -6315,6 +6315,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
     docs_processed = jobs.completed
     source_doc_count = None
     embedded_count = 0
+    lifetime_embedded_count = 0
     completion_pct = None
 
     try:
@@ -6405,6 +6406,25 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                         if inline_processed > embedded_count:
                             embedded_count = inline_processed
 
+                        # Also compute lifetime count (no reset_at filter) so
+                        # operators can see total work-ever-done, even after
+                        # a reset. This avoids the "stats show 0 after run"
+                        # confusion when reset_at moves forward but the
+                        # destination docs were embedded earlier.
+                        try:
+                            lifetime_q = (
+                                "SELECT VALUE COUNT(1) FROM c WHERE c.pipeline_id = @pid"
+                            )
+                            lifetime_res = list(embed_container.query_items(
+                                lifetime_q,
+                                parameters=[{"name": "@pid", "value": pipeline_id}],
+                                enable_cross_partition_query=True,
+                            ))
+                            if lifetime_res:
+                                lifetime_embedded_count = lifetime_res[0]
+                        except Exception:  # lgtm[py/empty-except]
+                            pass
+
                     docs_processed = embedded_count
                     if source_doc_count and source_doc_count > 0:
                         completion_pct = round(embedded_count / source_doc_count * 100, 1)
@@ -6493,6 +6513,11 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
             docs_processed = source_doc_count
         completion_pct = round(embedded_count / source_doc_count * 100, 1)
 
+    # lifetime should be at least embedded_count (covers non-cosmos paths
+    # where we didn't run the COUNT query above)
+    if lifetime_embedded_count < embedded_count:
+        lifetime_embedded_count = embedded_count
+
     return PipelineRunStats(
         pipeline_id=pipeline_id,
         pipeline_name=pipeline.name,
@@ -6500,6 +6525,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         documents_processed=docs_processed,
         source_doc_count=source_doc_count,
         embedded_count=embedded_count,
+        lifetime_embedded_count=lifetime_embedded_count,
         completion_pct=completion_pct,
         avg_processing_time_ms=avg_time,
         throughput_docs_per_sec=throughput,

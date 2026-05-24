@@ -342,6 +342,7 @@ class PipelineRunStats(BaseModel):
     documents_processed: int = 0
     source_doc_count: Optional[int] = None  # total docs in source container
     embedded_count: int = 0  # docs embedded with current generation/config
+    lifetime_embedded_count: int = 0  # total docs ever embedded for this pipeline (ignores reset_at)
     completion_pct: Optional[float] = None  # embedded_count / source_doc_count * 100
     avg_processing_time_ms: Optional[float] = None
     throughput_docs_per_sec: Optional[float] = None
