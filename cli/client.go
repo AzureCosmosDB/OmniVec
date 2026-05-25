@@ -70,6 +70,15 @@ func (c *Client) Delete(path string) (json.RawMessage, error) {
 	return c.do("DELETE", u, nil)
 }
 
+func (c *Client) Patch(path string, body any) (json.RawMessage, error) {
+	u := c.BaseURL + path
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	return c.do("PATCH", u, bytes.NewReader(data))
+}
+
 func (c *Client) do(method, url string, body io.Reader) (json.RawMessage, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
