@@ -28,6 +28,8 @@ func newDestinationCmd() *cobra.Command {
 		newDestUpdateCmd(),
 		newDestDeleteCmd(),
 		newDestTestCmd(),
+		newDestEnableCmd(),
+		newDestDisableCmd(),
 	)
 	return cmd
 }
@@ -99,6 +101,17 @@ func newDestCreateCmd() *cobra.Command {
 			resp := parseJSONObject(data)
 			if dst, ok := resp["destination"].(map[string]any); ok {
 				exitOK("Destination created: %s", dst["id"])
+				if enabled, hasEnabled := dst["enabled"].(bool); hasEnabled && !enabled {
+					fmt.Println("⚠  Destination is DISABLED — pipelines targeting it will skip docs until you enable it.")
+				}
+				if warns, ok := resp["warnings"].([]any); ok {
+					for _, w := range warns {
+						fmt.Printf("   ⚠ %v\n", w)
+					}
+				}
+				if enabled, hasEnabled := dst["enabled"].(bool); hasEnabled && !enabled {
+					fmt.Printf("   ↪ Run `omnivec destination enable %s` once the underlying resource is ready.\n", dst["id"])
+				}
 				if flagOutput != "table" {
 					outputResult(dst, destColumns)
 				}
@@ -113,6 +126,53 @@ func newDestCreateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&config, "config", "c", "", "JSON config string")
 	cmd.Flags().StringVarP(&configFile, "file", "f", "", "JSON config file path")
 	return cmd
+}
+
+func newDestEnableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "enable <destination-id>",
+		Short: "Enable a destination (re-probes connectivity; replays change-feed for active pipelines)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := ensurePrefix(args[0], "dst-")
+			c := getClient()
+			data, err := c.Patch(fmt.Sprintf("/api/destinations/%s", id), map[string]any{"enabled": true})
+			if err != nil {
+				exitErr("%v", err)
+			}
+			resp := parseJSONObject(data)
+			exitOK("Destination enabled: %s", id)
+			if replayed, ok := resp["replayed_pipelines"].([]any); ok && len(replayed) > 0 {
+				fmt.Printf("   ↻ Reset change-feed for %d pipeline(s): ", len(replayed))
+				for i, p := range replayed {
+					if i > 0 {
+						fmt.Print(", ")
+					}
+					fmt.Print(p)
+				}
+				fmt.Println()
+			}
+			return nil
+		},
+	}
+}
+
+func newDestDisableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disable <destination-id>",
+		Short: "Disable a destination (pipelines will skip docs targeting it)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := ensurePrefix(args[0], "dst-")
+			c := getClient()
+			_, err := c.Patch(fmt.Sprintf("/api/destinations/%s", id), map[string]any{"enabled": false})
+			if err != nil {
+				exitErr("%v", err)
+			}
+			exitOK("Destination disabled: %s", id)
+			return nil
+		},
+	}
 }
 
 func newDestUpdateCmd() *cobra.Command {

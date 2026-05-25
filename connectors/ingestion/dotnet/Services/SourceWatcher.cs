@@ -381,9 +381,18 @@ public class SourceWatcher : ISourceWatcher
                 foreach (var pipeline in queuePipelines)
                 {
                     if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
+                    var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
+                    if (dest is null)
+                    {
+                        _logger.LogWarning(
+                            "Skipping {Count} docs for pipeline {PipelineId}: destination {DestId} not found or disabled. " +
+                            "Enable the destination (e.g. `omnivec destination enable {DestId}`) and the change-feed will replay.",
+                            pipelineDocs.Count, pipeline.Id, pipeline.DestinationId);
+                        continue;
+                    }
+
                     foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att) in pipelineDocs)
                     {
-                        var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
                         var contentFields = new Dictionary<string, string>();
                         if (att is null)
                         {
@@ -398,7 +407,7 @@ public class SourceWatcher : ISourceWatcher
                         }
 
                         // Inject pipeline's vector_index_path into destination config
-                        var destConfig = dest?.Config ?? new();
+                        var destConfig = new Dictionary<string, object>(dest.Config);
                         destConfig["vector_field"] = pipeline.VectorIndexPath;
 
                         var msg = new EmbeddingMessage
@@ -409,7 +418,7 @@ public class SourceWatcher : ISourceWatcher
                             SourceId = _source.Id,
                             SourceRef = att is null ? docId : $"{docId}::{att.Name}",
                             DestinationId = pipeline.DestinationId,
-                            DestinationType = dest?.Type ?? "cosmosdb-vector",
+                            DestinationType = dest.Type,
                             DestinationConfig = destConfig,
                             Content = content,
                             ContentHash = contentHash,

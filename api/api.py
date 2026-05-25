@@ -2649,7 +2649,79 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
     return {"success": True, "destination": destination}
 
 
-@app.delete("/api/destinations/{dest_id}")
+class DestinationEnableRequest(BaseModel):
+    enabled: bool
+
+
+@app.patch("/api/destinations/{dest_id}")
+async def patch_destination(dest_id: str, req: DestinationEnableRequest):
+    """Toggle a destination's enabled flag.
+
+    On flip false->true we re-probe the destination so users get an
+    immediate, actionable error if the underlying container/table is
+    still not ready (e.g. no vector embedding policy). On success we
+    also reset every pipeline that targets this destination so the
+    change-feed replays any documents that were skipped while the
+    destination was disabled.
+    """
+    store = get_store()
+    doc = store.get(dest_id, "destination")
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Destination '{dest_id}' not found")
+    destination = _destination_from_doc(doc)
+    was_disabled = not destination.enabled
+
+    if req.enabled and was_disabled:
+        warnings: List[str] = []
+        try:
+            if destination.type == "cosmosdb-vector":
+                from connectors.cosmosdb_vector_connector import test_vector_connection
+                probe = await test_vector_connection(destination.config)
+                if not probe.get("has_vector_policy"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Cannot enable: cosmos container has no vector embedding policy. "
+                               "Configure a vector embedding policy on the container, then retry.",
+                    )
+                if probe.get("vector_indexes"):
+                    destination.config["vector_indexes"] = probe["vector_indexes"]
+            elif destination.type == "pgvector":
+                from connectors.postgres_connector import test_destination_connection as _test_pg
+                probe = await _test_pg(destination.config)
+                if not probe.get("has_vector_policy"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Cannot enable: pgvector table has no vector columns.",
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=409, detail=f"Cannot enable destination: {e}")
+
+    destination.enabled = req.enabled
+    destination.updated_at = datetime.utcnow()
+    store.upsert(_to_doc(destination, "destination"))
+
+    replayed_pipelines: List[str] = []
+    if req.enabled and was_disabled:
+        pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
+        for p in pipelines:
+            if p.destination_id == dest_id and p.status == PipelineStatus.ACTIVE:
+                p.reset_at = datetime.utcnow()
+                p.updated_at = datetime.utcnow()
+                store.upsert(_to_doc(p, "pipeline"))
+                replayed_pipelines.append(p.id)
+        if replayed_pipelines:
+            logger.info(
+                "Destination %s enabled — reset_at set on %d pipeline(s) to replay change-feed",  # lgtm[py/log-injection]
+                dest_id, len(replayed_pipelines),
+            )
+
+    return {
+        "success": True,
+        "destination": destination,
+        "replayed_pipelines": replayed_pipelines,
+    }
 def delete_destination(dest_id: str):
     """Delete a destination."""
     store = get_store()
@@ -3420,11 +3492,16 @@ def set_processing_mode(pipeline_id: str, mode: str):
 
 
 @app.post("/api/pipelines/{pipeline_id}/run")
-def run_pipeline(pipeline_id: str):
+async def run_pipeline(pipeline_id: str):
     """Activate a pipeline for continuous processing.
 
     Sets pipeline status to ACTIVE. The controller picks up active pipelines
     and starts creating PENDING jobs; workers process them.
+
+    If the target destination is currently disabled (e.g. because the cosmos
+    container had no vector policy at create time), we re-probe it here and
+    auto-enable on success. This saves the user from having to manually flip
+    the destination back on after fixing the underlying resource.
     """
     store = get_store()
     doc = store.get(pipeline_id, "pipeline")
@@ -3432,11 +3509,50 @@ def run_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+
+    dest_doc = store.get(pipeline.destination_id, "destination")
+    if dest_doc:
+        destination = _destination_from_doc(dest_doc)
+        if not destination.enabled:
+            try:
+                if destination.type == "cosmosdb-vector":
+                    from connectors.cosmosdb_vector_connector import test_vector_connection
+                    probe = await test_vector_connection(destination.config)
+                    if not probe.get("has_vector_policy"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Destination '{destination.id}' is disabled because the cosmos container "
+                                   "has no vector embedding policy. Configure one and retry "
+                                   f"(or `omnivec destination enable {destination.id}` after fixing).",
+                        )
+                    if probe.get("vector_indexes"):
+                        destination.config["vector_indexes"] = probe["vector_indexes"]
+                elif destination.type == "pgvector":
+                    from connectors.postgres_connector import test_destination_connection as _test_pg
+                    probe = await _test_pg(destination.config)
+                    if not probe.get("has_vector_policy"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Destination '{destination.id}' is disabled because the table has no vector columns.",
+                        )
+                destination.enabled = True
+                destination.updated_at = datetime.utcnow()
+                store.upsert(_to_doc(destination, "destination"))
+                logger.info("Destination %s auto-enabled by pipeline %s run", destination.id, pipeline_id)  # lgtm[py/log-injection]
+                pipeline.reset_at = datetime.utcnow()
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot activate pipeline: destination '{destination.id}' probe failed: {e}",
+                )
+
     pipeline.status = PipelineStatus.ACTIVE
     pipeline.updated_at = datetime.utcnow()
     store.upsert(_to_doc(pipeline, "pipeline"))
 
-    return {"success": True, "message": "Pipeline activated â€” controller will begin processing"}
+    return {"success": True, "message": "Pipeline activated — controller will begin processing"}
 
 
 @app.post("/api/pipelines/{pipeline_id}/reset")
