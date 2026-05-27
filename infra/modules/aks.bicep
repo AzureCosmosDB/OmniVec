@@ -29,7 +29,7 @@ var gpuPool = gpuNodeCount > 0 ? [
   }
 ] : []
 
-resource aks 'Microsoft.ContainerService/managedClusters@2024-02-01' = {
+resource aks 'Microsoft.ContainerService/managedClusters@2026-01-02-preview' = {
   name: clusterName
   location: location
   identity: {
