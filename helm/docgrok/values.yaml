@@ -14,6 +14,10 @@ azure:
     endpoint: "" # Set from Bicep output
     database: "omnivec"
     container: "metadata"
+  keyVault:
+    uri: "" # Set from Bicep output. When set, model api_keys are envelope-encrypted (AES-GCM/RSA-OAEP) at rest.
+    modelKekName: "docgrok-model-kek"
+    autoCreateKek: "true" # set false in prod once the KEK exists
 
 # =============================================================================
 # MODEL REGISTRY

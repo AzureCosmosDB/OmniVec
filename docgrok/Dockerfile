@@ -16,6 +16,7 @@ COPY api.py .
 COPY admin.py .
 COPY pipelines.py .
 COPY model_store.py .
+COPY envelope_crypto.py .
 COPY static/ ./static/
 
 EXPOSE 8080
