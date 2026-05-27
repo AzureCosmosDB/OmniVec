@@ -8,3 +8,5 @@ kubernetes>=28.1.0
 Pillow>=10.0.0
 azure-cosmos>=4.5.0
 azure-identity>=1.14.0
+azure-keyvault-keys>=4.8.0
+cryptography>=42.0.0

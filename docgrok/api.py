@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pipelines import PIPELINES, PipelineExecutor, StepType
-from admin import _MODEL_REGISTRY, _NATIVE_MODEL_URLS
+from admin import _MODEL_REGISTRY, _NATIVE_MODEL_URLS, resolve_model
 
 # Backend URLs for local models
 DSE_QWEN2_URL = os.getenv("DSE_QWEN2_URL", "http://dse-qwen2-svc:8000")
@@ -219,10 +219,10 @@ async def call_model(model_id: str, text, request_id: str = "") -> dict:
 
     # External model
     if model_id.startswith("mdl-ext-"):
-        if model_id not in _MODEL_REGISTRY:
+        cfg = resolve_model(model_id)
+        if cfg is None:
             raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found in registry")
 
-        cfg = _MODEL_REGISTRY[model_id]
         model_type = cfg.get("type", "")
         endpoint = cfg["endpoint"]
         api_key = cfg.get("api_key", "")

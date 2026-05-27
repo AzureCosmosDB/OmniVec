@@ -51,6 +51,14 @@ spec:
           value: {{ .Values.azure.cosmos.database | quote }}
         - name: COSMOS_CONTAINER
           value: {{ .Values.azure.cosmos.container | quote }}
+        {{- if .Values.azure.keyVault.uri }}
+        - name: KEY_VAULT_URI
+          value: {{ .Values.azure.keyVault.uri | quote }}
+        - name: MODEL_KEK_NAME
+          value: {{ .Values.azure.keyVault.modelKekName | default "docgrok-model-kek" | quote }}
+        - name: MODEL_KEK_AUTOCREATE
+          value: {{ .Values.azure.keyVault.autoCreateKek | default "true" | quote }}
+        {{- end }}
         - name: DOCGROK_CONTROLLER_URL
           value: "http://docgrok-controller:{{ .Values.controller.port }}"
         {{- range $name, $provider := .Values.providers }}
