@@ -4,9 +4,40 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// resolveModelID resolves a model provider name or id to the server-side id
+// (e.g. "mdl-ext-..."). The server's DELETE/GET /api/models/{id} endpoint
+// expects the id, not the human-readable provider name.
+func resolveModelID(c *Client, nameOrID string) string {
+	if strings.HasPrefix(nameOrID, "mdl-") {
+		return nameOrID
+	}
+	data, err := c.Get("/api/models", nil)
+	if err != nil {
+		return nameOrID
+	}
+	var wrapped map[string]any
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return nameOrID
+	}
+	items, _ := wrapped["models"].([]any)
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if n, _ := m["name"].(string); n == nameOrID {
+			if id, _ := m["id"].(string); id != "" {
+				return id
+			}
+		}
+	}
+	return nameOrID
+}
 
 var modelColumns = []Column{
 	{Header: "NAME", Key: "name"},
@@ -50,6 +81,15 @@ func newModelListCmd() *cobra.Command {
 			}
 
 			if flagOutput != "table" {
+				// Unwrap {"models":[...]} so JSON/YAML output is a bare array,
+				// matching `pipeline/source/destination list -o json`.
+				var wrapped map[string]any
+				if err := json.Unmarshal(data, &wrapped); err == nil {
+					if arr, ok := wrapped["models"]; ok {
+						outputResult(arr, nil)
+						return nil
+					}
+				}
 				var raw any
 				json.Unmarshal(data, &raw)
 				outputResult(raw, nil)
@@ -181,7 +221,7 @@ func newModelAddCmd() *cobra.Command {
 func newModelDeleteCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "delete <provider-name>",
+		Use:   "delete <provider-name-or-id>",
 		Short: "Delete an external model provider",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -190,7 +230,8 @@ func newModelDeleteCmd() *cobra.Command {
 				return nil
 			}
 			c := getClient()
-			_, err := c.Delete(fmt.Sprintf("/api/models/%s", name))
+			id := resolveModelID(c, name)
+			_, err := c.Delete(fmt.Sprintf("/api/models/%s", id))
 			if err != nil {
 				exitErr("%v", err)
 			}

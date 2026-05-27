@@ -21,9 +21,9 @@ func newSearchCmd() *cobra.Command {
 			query := args[0]
 			dstID := resolveDestination(index)
 			body := map[string]any{
-				"query":          query,
-				"destination_id": dstID,
-				"top_k":         topK,
+				"query":           query,
+				"destination_ids": []string{dstID},
+				"top_k":           topK,
 			}
 			c := getClient()
 			data, err := c.Post("/api/playground/search", body)
