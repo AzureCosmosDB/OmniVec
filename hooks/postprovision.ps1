@@ -130,6 +130,7 @@ $IMAGES = @(
     "omnivec-web",
     "omnivec-changefeed",
     "omnivec-dotnet-worker",
+    "omnivec-agent",
     "docgrok-pipeline-worker",
     "docgrok-router"
 )
@@ -221,6 +222,7 @@ function Build-AllImages {
     Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
     Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
     Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
+    Build-Image -Name "omnivec-agent" -Dockerfile "$RootDir/agent/Dockerfile" -Context "$RootDir/agent/" -Tag "latest"
 
     if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
         Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
@@ -240,6 +242,7 @@ function Build-MissingImages {
             "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
             "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
             "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
+            "omnivec-agent"           { Build-Image -Name $image -Dockerfile "$RootDir/agent/Dockerfile" -Context "$RootDir/agent/" -Tag "latest" }
             "docgrok-pipeline-worker" {
                 if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
                     Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
@@ -543,6 +546,7 @@ $helmArgs = @(
     "--set", "search.bootstrapToken=$SEARCH_BOOTSTRAP_TOKEN",
     "--set", "search.internalToken=$SEARCH_INTERNAL_TOKEN",
     "--set", "dotnetWorker.enabled=true",
+    "--set", "agent.image.tag=$IMAGE_TAG",
     "--set", "web.service.dnsLabel=$INSTANCE_ID"
 )
 

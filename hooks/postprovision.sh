@@ -170,7 +170,7 @@ OMNIVEC_BUILD=${OMNIVEC_BUILD:-false}
 FORCE_IMPORT=${OMNIVEC_FORCE_IMPORT:-false}
 
 # Images to import/build
-IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet-worker docgrok-pipeline-worker docgrok-router"
+IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet-worker omnivec-agent docgrok-pipeline-worker docgrok-router"
 
 # Release channel tag (stable / dev / sha-xxxxxxx / vX.Y.Z / latest).
 # Used for BOTH the acr import step AND the helm --set overrides so the
@@ -260,6 +260,7 @@ build_all_images() {
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
   build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
   build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
+  build_image "omnivec-agent" "${ROOT_DIR}/agent/Dockerfile" "${ROOT_DIR}/agent/" "latest"
   if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
     build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
   fi
@@ -276,6 +277,7 @@ build_missing_images() {
       omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
       omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
       omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
+      omnivec-agent)            build_image "$image" "${ROOT_DIR}/agent/Dockerfile" "${ROOT_DIR}/agent/" "latest" ;;
       docgrok-pipeline-worker)
         if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
           build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
@@ -682,6 +684,9 @@ changefeed:
     tag: "${IMAGE_TAG}"
 dotnetWorker:
   enabled: true
+agent:
+  image:
+    tag: "${IMAGE_TAG}"
 docgrok:
   global:
     imageRegistry: "${ACR_LOGIN_SERVER}"
