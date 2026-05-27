@@ -2722,8 +2722,8 @@ async def patch_destination(dest_id: str, req: DestinationEnableRequest):
         "destination": destination,
         "replayed_pipelines": replayed_pipelines,
     }
+@app.delete("/api/destinations/{dest_id}")
 def delete_destination(dest_id: str):
-    """Delete a destination."""
     store = get_store()
     doc = store.get(dest_id, "destination")
     if not doc:
@@ -4769,7 +4769,7 @@ async def create_model(payload: dict):
             "endpoint": payload.get("endpoint", "").strip(),
             "auth_type": auth_type,
             "api_key": payload.get("api_key", "").strip(),
-            "deployment": payload.get("deployment", payload.get("name", "")).strip(),
+            "deployment": payload.get("deployment", payload.get("model", payload.get("name", ""))).strip(),
             "embedding_dim": int(payload.get("embedding_dim", payload.get("dimensions", 1536))),
             "api_version": payload.get("api_version", "2024-06-01"),
         }
@@ -4815,27 +4815,25 @@ async def create_model(payload: dict):
             result = {"id": model_id, "name": model_name, "kind": "external",
                       "model_category": model_category, **persist_doc}
         else:
-            # Send full payload (including api_key) to DocGrok for in-memory use
+            # Send full payload (including api_key) to DocGrok for in-memory use.
+            # DocGrok handles CosmosDB persistence with envelope-encrypted api_key,
+            # so api.py must NOT overwrite that doc (would strip the envelope).
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
             result = resp.json()
 
-            # Persist to CosmosDB (without api_key) for durability
+            # DocGrok doesn't know about model_category — patch only that field
+            # onto the existing doc without disturbing api_key_envelope.
             model_id = result.get("id", "")
             if model_id.startswith("mdl-ext-"):
-                persist_doc = {k: v for k, v in reg_payload.items() if k != "api_key"}
-                if api_key_value and set_model_api_key(model_id, api_key_value):
-                    persist_doc["api_key_source"] = "keyvault"
-                else:
-                    persist_doc["api_key"] = api_key_value  # Fallback
-                store.upsert({
-                    "id": model_id,
-                    "doc_type": "docgrok_model",
-                    **persist_doc,
-                    "model_category": model_category,
-                    "stored_at": datetime.utcnow().isoformat(),
-                })
+                try:
+                    existing = store.get(model_id, "docgrok_model")
+                    if existing and existing.get("model_category") != model_category:
+                        existing["model_category"] = model_category
+                        store.upsert(existing)
+                except Exception:  # lgtm[py/empty-except]
+                    pass
             result["model_category"] = model_category
 
         return result
@@ -4876,8 +4874,11 @@ async def update_model(model_id: str, payload: dict):
     if not changed:
         raise HTTPException(status_code=400, detail="No updatable fields provided")
 
-    # Handle API key update — Key Vault if available, else CosmosDB
-    if new_api_key:
+    is_chat = doc.get("model_category") == "chat"
+
+    # For embedding models DocGrok owns the api_key (envelope-encrypted).
+    # For chat models DocGrok is bypassed, so api.py handles the key via Key Vault.
+    if new_api_key and is_chat:
         from keyvault_client import set_model_api_key
         if set_model_api_key(model_id, new_api_key):
             doc["api_key_source"] = "keyvault"
@@ -4887,10 +4888,10 @@ async def update_model(model_id: str, payload: dict):
             doc.pop("api_key_source", None)
 
     doc["updated_at"] = datetime.utcnow().isoformat()
-    store.upsert(doc)
 
-    # Re-register with DocGrok if it's an embedding model (so DocGrok picks up new key/endpoint)
-    if doc.get("model_category") != "chat":
+    # For embedding models, push everything (including the new key) to DocGrok and
+    # let DocGrok re-encrypt + persist. Don't double-write from api.py.
+    if not is_chat:
         try:
             reg_payload = {
                 "id": model_id,
@@ -4898,20 +4899,19 @@ async def update_model(model_id: str, payload: dict):
                 "type": doc.get("type", "azure-openai"),
                 "endpoint": doc.get("endpoint", ""),
                 "auth_type": doc.get("auth_type", "key"),
-                "api_key": new_api_key or doc.get("api_key", ""),
+                "api_key": new_api_key or "",  # empty → DocGrok preserves existing envelope
                 "deployment": doc.get("deployment", ""),
                 "embedding_dim": int(doc.get("embedding_dim", 1536)),
                 "api_version": doc.get("api_version", "2024-06-01"),
             }
-            # If key was in Key Vault, read it for DocGrok registration
-            if not reg_payload["api_key"] and doc.get("api_key_source") == "keyvault":
-                from keyvault_client import get_model_api_key
-                reg_payload["api_key"] = get_model_api_key(model_id) or ""
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
                 logger.warning(f"DocGrok re-register failed: {resp.text}")
         except Exception as e:
             logger.warning(f"DocGrok re-register error: {e}")
+    else:
+        # Chat-only path: api.py owns the persisted doc
+        store.upsert(doc)
 
     return {"status": "updated", "id": model_id, "fields_updated": changed}
 
@@ -4994,11 +4994,16 @@ async def delete_model(model_id: str):
 
 @app.post("/api/models/{model_id}/test")
 async def test_model_health(model_id: str):
-    """Test a model's connectivity and auth by making a small embed call."""
+    """Test a model's connectivity and auth by making a small embed call.
+
+    Accepts either the model id (mdl-ext-... / mdl-native-...) or the
+    user-visible model name. CLI passes the name; UI passes the id.
+    """
     from health_checker import run_health_checks
     result = await run_health_checks(section="models")
-    for m in result.get("models", []):
-        if m["id"] == model_id:
+    models = result.get("models", [])
+    for m in models:
+        if m.get("id") == model_id or m.get("name") == model_id:
             return m  # lgtm[py/stack-trace-exposure]
     return {"id": model_id, "status": "unknown", "checks": [], "detail": "Model not found in health results"}
 
