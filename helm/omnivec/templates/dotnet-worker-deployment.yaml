@@ -57,8 +57,7 @@ spec:
               containerPort: {{ .Values.dotnetWorker.healthPort | default 8080 }}
               protocol: TCP
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: {{ .Values.dotnetWorker.healthPort | default 8080 }}
             initialDelaySeconds: {{ .Values.dotnetWorker.probes.liveness.initialDelaySeconds | default 30 }}
             periodSeconds: {{ .Values.dotnetWorker.probes.liveness.periodSeconds | default 30 }}
@@ -73,8 +72,7 @@ spec:
             timeoutSeconds: {{ .Values.dotnetWorker.probes.readiness.timeoutSeconds | default 3 }}
             failureThreshold: {{ .Values.dotnetWorker.probes.readiness.failureThreshold | default 6 }}
           startupProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: {{ .Values.dotnetWorker.healthPort | default 8080 }}
             initialDelaySeconds: 5
             periodSeconds: 5
