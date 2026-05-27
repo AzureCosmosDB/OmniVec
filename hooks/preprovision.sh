@@ -39,6 +39,25 @@ case "$_env_name" in
     ;;
 esac
 
+# ── Block Azure-trademark reserved words. Azure rejects PublicIP DNS labels
+# containing these (DomainNameLabelReserved 400), which makes the web LB
+# unable to acquire an IP and causes helm --wait to time out. Fail fast
+# here so the user picks a clean name instead of debugging a stuck deploy.
+_lc_env=$(printf '%s' "$_env_name" | tr '[:upper:]' '[:lower:]')
+for _w in microsoft windows azure xbox login bing apple; do
+  case "$_lc_env" in
+    *"$_w"*)
+      printf "\n${RED}ERROR: AZURE_ENV_NAME='${_env_name}' contains the reserved word '${_w}'.${NC}\n" >&2
+      printf "  Azure rejects PublicIP DNS labels containing trademarks\n" >&2
+      printf "  (microsoft, windows, azure, xbox, login, bing, apple) with\n" >&2
+      printf "  DomainNameLabelReserved (400). Pick a name that doesn't contain any of these.\n" >&2
+      printf "  Fix with:  ${CYAN}azd env new <new-name>${NC}\n" >&2
+      exit 1
+      ;;
+  esac
+done
+unset _lc_env _w
+
 # ── Repair .env if prior run left embedded newlines / stray quotes ──────────
 # Symptom: `loading .env: unexpected character "\"" in variable name near "...\n"`
 # Cause: a previous azd env set wrote a multi-line value; subsequent runs can't parse it.
