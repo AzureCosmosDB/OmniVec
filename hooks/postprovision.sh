@@ -88,6 +88,25 @@ COSMOS_ENDPOINT=$(get_azd_value "AZURE_COSMOS_ENDPOINT")
 IDENTITY_CLIENT_ID=$(get_azd_value "AZURE_IDENTITY_CLIENT_ID")
 RESOURCE_GROUP=$(get_azd_value "AZURE_RESOURCE_GROUP")
 BUILD_MODE=$(get_azd_value "OMNIVEC_BUILD_MODE")
+
+# Azure rejects PublicIP DNS labels containing reserved trademarks
+# (windows, microsoft, azure, xbox, login, bing, apple) with
+# DomainNameLabelReserved (400). When the INSTANCE_ID happens to contain
+# one of these, fall back to an empty label so the Helm chart skips the
+# service.beta.kubernetes.io/azure-dns-label-name annotation and the LB
+# is reachable via its public IP instead of an azurewebsites FQDN.
+_lc_id=$(printf '%s' "$INSTANCE_ID" | tr '[:upper:]' '[:lower:]')
+WEB_DNS_LABEL="$INSTANCE_ID"
+for _w in microsoft windows azure xbox login bing apple; do
+  case "$_lc_id" in
+    *"$_w"*)
+      WEB_DNS_LABEL=""
+      DNS_LABEL_RESERVED="$_w"
+      break
+      ;;
+  esac
+done
+unset _lc_id _w
 if [ -z "$BUILD_MODE" ]; then
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     BUILD_MODE="docker"
@@ -133,6 +152,10 @@ if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
 fi
 echo "  Identity:        $IDENTITY_CLIENT_ID"
 echo "  Build mode:      $BUILD_MODE"
+if [ -n "${DNS_LABEL_RESERVED:-}" ]; then
+  printf "  ${YELLOW}Note: instance id contains reserved word '${DNS_LABEL_RESERVED}'${NC}\n"
+  printf "  ${YELLOW}      — Azure DNS label disabled; web LB will use IP only.${NC}\n"
+fi
 
 # -- Store config as RG tags (enables cross-machine config sync) --
 printf "\n${CYAN}Saving config to resource group tags...${NC}\n"
@@ -690,7 +713,7 @@ web:
   image:
     tag: "${IMAGE_TAG}"
   service:
-    dnsLabel: "${INSTANCE_ID}"
+    dnsLabel: "${WEB_DNS_LABEL}"
 changefeed:
   image:
     tag: "${IMAGE_TAG}"
