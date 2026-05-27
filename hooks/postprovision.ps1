@@ -65,6 +65,23 @@ $KEYVAULT_URI = Get-AzdValue "AZURE_KEYVAULT_URI"
 $APPINSIGHTS_CS = Get-AzdValue "AZURE_APPINSIGHTS_CONNECTION_STRING"
 $LOG_ANALYTICS_WS = Get-AzdValue "AZURE_LOG_ANALYTICS_WORKSPACE_ID"
 
+# Azure rejects PublicIP DNS labels containing reserved trademarks
+# (windows, microsoft, azure, xbox, login, bing, apple) with
+# DomainNameLabelReserved (400). When the INSTANCE_ID happens to contain
+# one of these, fall back to an empty label so the Helm chart skips the
+# service.beta.kubernetes.io/azure-dns-label-name annotation and the LB
+# is reachable via its public IP instead of an azurewebsites FQDN.
+$WEB_DNS_LABEL = $INSTANCE_ID
+$DNS_LABEL_RESERVED = ""
+$lcId = ([string]$INSTANCE_ID).ToLowerInvariant()
+foreach ($_w in @('microsoft','windows','azure','xbox','login','bing','apple')) {
+    if ($lcId -like "*$_w*") {
+        $WEB_DNS_LABEL = ""
+        $DNS_LABEL_RESERVED = $_w
+        break
+    }
+}
+
 # Validate required vars
 foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","COSMOS_ENDPOINT","IDENTITY_CLIENT_ID","RESOURCE_GROUP")) {
     if (-not (Get-Variable $var -ValueOnly)) {
@@ -90,6 +107,10 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
 }
 Write-Host "  Identity:        $IDENTITY_CLIENT_ID"
 Write-Host "  Build mode:      $BUILD_MODE"
+if ($DNS_LABEL_RESERVED) {
+    Write-Host "  `e[33mNote: instance id contains reserved word '$DNS_LABEL_RESERVED'`e[0m"
+    Write-Host "  `e[33m      — Azure DNS label disabled; web LB will use IP only.`e[0m"
+}
 
 # -- Store config as RG tags (enables cross-machine config sync) --
 Write-Host "`n`e[36mSaving config to resource group tags...`e[0m"
@@ -610,7 +631,7 @@ $helmArgs = @(
     "--set", "search.bootstrapToken=$SEARCH_BOOTSTRAP_TOKEN",
     "--set", "search.internalToken=$SEARCH_INTERNAL_TOKEN",
     "--set", "dotnetWorker.enabled=true",
-    "--set", "web.service.dnsLabel=$INSTANCE_ID"
+    "--set", "web.service.dnsLabel=$WEB_DNS_LABEL"
 )
 
 if ($KEYVAULT_URI) {
@@ -753,7 +774,7 @@ if ($skipHelm) {
         'RequestTimeout','OperationTimedOut','503','502','504',
         'Service Unavailable','Temporary failure','Connection reset',
         'TLS handshake','InternalServerError','i/o timeout',
-        'context deadline exceeded'
+        'context deadline exceeded','no such host','dial tcp'
     )
     $helmRc = 1
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
