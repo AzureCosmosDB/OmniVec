@@ -260,7 +260,7 @@ build_all_images() {
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
   build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
   build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
-  build_image "omnivec-agent" "${ROOT_DIR}/agent/Dockerfile" "${ROOT_DIR}/agent/" "latest"
+  build_image "omnivec-agent" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest"
   if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
     build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
   fi
@@ -277,7 +277,7 @@ build_missing_images() {
       omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
       omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
       omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
-      omnivec-agent)            build_image "$image" "${ROOT_DIR}/agent/Dockerfile" "${ROOT_DIR}/agent/" "latest" ;;
+      omnivec-agent)            build_image "$image" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest" ;;
       docgrok-pipeline-worker)
         if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
           build_image "$image" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
@@ -591,6 +591,18 @@ if [ "$ENABLE_BLOB_SOURCE" = "true" ]; then
     --dry-run=client -o yaml | kubectl_omnivec apply -f -
   printf "  ${GREEN}omnivec-storage secret created.${NC}\n"
 fi
+
+# Agent internal token secret (used for agent <-> API service-to-service auth)
+AGENT_INTERNAL_TOKEN=$(get_azd_value "OMNIVEC_AGENT_INTERNAL_TOKEN")
+if [ -z "$AGENT_INTERNAL_TOKEN" ]; then
+  AGENT_INTERNAL_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 44)
+  azd env set OMNIVEC_AGENT_INTERNAL_TOKEN "$AGENT_INTERNAL_TOKEN" </dev/null
+fi
+kubectl_omnivec create secret generic omnivec-agent-internal \
+  --namespace omnivec \
+  --from-literal=token="$AGENT_INTERNAL_TOKEN" \
+  --dry-run=client -o yaml | kubectl_omnivec apply -f -
+printf "  ${GREEN}omnivec-agent-internal secret created.${NC}\n"
 
 printf "${GREEN}Namespaces and secrets created.${NC}\n"
 
