@@ -406,62 +406,39 @@ async def check_model(model_id: str, client: httpx.AsyncClient) -> dict:
                 # External model — check it's configured
                 result["checks"].append({"check": "model_registered", "status": "pass", "detail": f"Model '{result['name']}' registered in DocGrok (type: {model_info.get('type', '?')})"})
 
-                # Test external model endpoint accessibility
                 endpoint = model_info.get("endpoint", "")
-                api_key = model_info.get("api_key", "")
-                # DocGrok masks api_key in its GET response. If we got nothing
-                # back (or the obvious "***" placeholder), fall back to the
-                # canonical KeyVault copy so the health probe can authenticate.
-                if not api_key or set(api_key) <= {"*"}:
-                    try:
-                        from keyvault_client import get_model_api_key
-                        kv_key = get_model_api_key(model_id)
-                        if kv_key:
-                            api_key = kv_key
-                    except Exception as kv_err:
-                        logger.debug("health: keyvault fallback failed for %s: %s", model_id, kv_err)
-                deployment = model_info.get("deployment", "")
-                api_version = model_info.get("api_version", "2024-06-01")
-
-                if endpoint:
-                    try:
-                        # Try to reach the endpoint (HEAD or GET to base URL)
-                        test_url = endpoint.rstrip("/")
-                        if deployment:
-                            test_url = f"{test_url}/openai/deployments/{deployment}/embeddings?api-version={api_version}"
-                        headers = {}
-                        if api_key:
-                            headers["api-key"] = api_key
-
-                        # Send a minimal request to verify the endpoint is reachable and auth works
-                        # Use POST with a tiny payload to get a real response (not just DNS check)
-                        test_resp = await client.post(
-                            test_url,
-                            headers=headers,
-                            json={"input": "health check", "model": deployment or result["name"]},
-                            timeout=CHECK_TIMEOUT,
-                        )
-                        if test_resp.status_code == 200:
-                            result["checks"].append({"check": "endpoint_accessible", "status": "pass", "detail": f"Endpoint reachable, auth valid ({endpoint})"})
-                        elif test_resp.status_code == 401 or test_resp.status_code == 403:
-                            result["status"] = "unhealthy"
-                            body = test_resp.text[:150]
-                            result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"Auth failed (HTTP {test_resp.status_code}): {body}"})
-                        elif test_resp.status_code == 404:
-                            result["status"] = "unhealthy"
-                            result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"Deployment '{deployment}' not found at {endpoint} (HTTP 404)"})
-                        elif test_resp.status_code == 429:
-                            result["checks"].append({"check": "endpoint_accessible", "status": "pass", "detail": f"Endpoint reachable (rate limited, HTTP 429) — auth is valid"})
-                        else:
-                            result["status"] = "warning"
-                            body = test_resp.text[:150]
-                            result["checks"].append({"check": "endpoint_accessible", "status": "warn", "detail": f"Endpoint returned HTTP {test_resp.status_code}: {body}"})
-                    except Exception as ep_err:
-                        result["status"] = "unhealthy"
-                        result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"Cannot reach endpoint {endpoint}: {str(ep_err)[:150]}"})
-                else:
+                if not endpoint:
                     result["status"] = "warning"
                     result["checks"].append({"check": "endpoint_accessible", "status": "warn", "detail": "No endpoint configured for external model"})
+                else:
+                    # Delegate the actual auth probe to DocGrok — it owns the
+                    # decrypted api_key (envelope) and never exposes it to api.py.
+                    try:
+                        hc = await client.post(
+                            f"{DOCGROK_URL}/admin/models/registry/{model_id}/healthcheck",
+                            timeout=CHECK_TIMEOUT,
+                        )
+                        if hc.status_code == 200:
+                            hcd = hc.json()
+                            ok = hcd.get("ok", False)
+                            detail = hcd.get("detail", "")
+                            status_code = hcd.get("status", 0)
+                            if ok:
+                                result["checks"].append({"check": "endpoint_accessible", "status": "pass", "detail": detail or f"HTTP {status_code}"})
+                            else:
+                                result["status"] = "unhealthy"
+                                if status_code in (401, 403):
+                                    result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"Auth failed (HTTP {status_code}): {detail}"})
+                                elif status_code == 404:
+                                    result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"Deployment not found at {endpoint} (HTTP 404)"})
+                                else:
+                                    result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"HTTP {status_code}: {detail}"})
+                        else:
+                            result["status"] = "unhealthy"
+                            result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"DocGrok healthcheck HTTP {hc.status_code}: {hc.text[:150]}"})
+                    except Exception as ep_err:
+                        result["status"] = "unhealthy"
+                        result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"healthcheck failed: {str(ep_err)[:150]}"})
 
         elif resp.status_code == 404:
             result["status"] = "unhealthy"

@@ -58,6 +58,58 @@ def _generate_ext_id() -> str:
     return f"mdl-ext-{uuid.uuid4().hex[:8]}"
 
 
+def resolve_model(model_id: str) -> Optional[dict]:
+    """Return model config, lazy-loading from the persistent store on cache miss.
+
+    Each pipeline-worker replica has its own in-memory _MODEL_REGISTRY. Writes
+    via POST /admin/models/registry only update the replica that received the
+    request; other replicas would otherwise see stale state until restart. By
+    falling back to the shared store on miss, every replica converges without
+    needing a broadcast or restart.
+    """
+    cfg = _MODEL_REGISTRY.get(model_id)
+    if cfg is not None:
+        return cfg
+    if _store is None or not model_id.startswith("mdl-ext-"):
+        return None
+    try:
+        cfg = _store.get_model(model_id)
+    except Exception:
+        cfg = None
+    if cfg:
+        _MODEL_REGISTRY[model_id] = cfg
+    return cfg
+
+
+def forget_model(model_id: str) -> None:
+    """Remove a model from the local in-memory cache (used after deletes)."""
+    _MODEL_REGISTRY.pop(model_id, None)
+
+
+def sync_cache_from_store() -> None:
+    """Reconcile the local in-memory cache against the persistent store.
+
+    Each pipeline-worker replica caches the registry independently. After a
+    write hits one replica, the others diverge until restart. Calling this on
+    the read path (LIST, name-based duplicate check) makes the cache eventually
+    consistent without requiring broadcast or sticky sessions.
+    """
+    if _store is None:
+        return
+    try:
+        persisted = _store.list_models()
+    except Exception:
+        return
+    # Add or refresh entries that exist in the store
+    for mid, cfg in persisted.items():
+        _MODEL_REGISTRY[mid] = cfg
+    # Drop entries that were deleted on another replica
+    stale = [mid for mid in _MODEL_REGISTRY
+             if mid.startswith("mdl-ext-") and mid not in persisted]
+    for mid in stale:
+        _MODEL_REGISTRY.pop(mid, None)
+
+
 class ScaleRequest(BaseModel):
     replicas: int
 
@@ -69,6 +121,7 @@ class ScaleRequest(BaseModel):
 @router.get("/models/registry")
 async def list_registry_models():
     """List all models — native (K8s) + registered external."""
+    sync_cache_from_store()
     models = []
 
     # Native models from K8s deployments
@@ -162,7 +215,9 @@ async def register_model(request: dict):
         if client_id:
             cfg_data["client_id"] = client_id
 
-    # Check for duplicate name — update existing
+    # Check for duplicate name — update existing.
+    # Refresh from store so we see models registered by other replicas.
+    sync_cache_from_store()
     for mid, cfg in _MODEL_REGISTRY.items():
         if cfg.get("name") == name:
             cfg_data["api_key"] = request.get("api_key", cfg.get("api_key", ""))
@@ -184,8 +239,8 @@ async def register_model(request: dict):
 async def get_registry_model(model_id: str):
     """Get a single model by ID."""
     # External model
-    if model_id in _MODEL_REGISTRY:
-        cfg = _MODEL_REGISTRY[model_id]
+    cfg = resolve_model(model_id)
+    if cfg is not None:
         return {"id": model_id, **{k: v for k, v in cfg.items() if k != "api_key"}}
 
     # Native model
@@ -221,13 +276,126 @@ async def get_registry_model(model_id: str):
 @router.delete("/models/registry/{model_id}")
 async def delete_registry_model(model_id: str):
     """Delete an external model from the registry."""
-    if model_id not in _MODEL_REGISTRY:
+    cfg = resolve_model(model_id)
+    if cfg is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
-    name = _MODEL_REGISTRY[model_id].get("name", "")
+    name = cfg.get("name", "")
     if _store:
         _store.delete_model(model_id)
-    del _MODEL_REGISTRY[model_id]
+    forget_model(model_id)
     return {"deleted": model_id, "name": name}
+
+
+@router.post("/models/registry/{model_id}/healthcheck")
+async def healthcheck_model(model_id: str):
+    """Verify an external model is reachable and the stored api_key is valid.
+
+    api.py callers used to fetch model config (with a redacted api_key) and
+    call the upstream themselves — that always 401'd. Doing the probe here
+    means the decrypted key never leaves docgrok and we still get an
+    authoritative reachability + auth signal.
+    """
+    cfg = resolve_model(model_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    endpoint = cfg.get("endpoint", "").rstrip("/")
+    deployment = cfg.get("deployment", cfg.get("name", ""))
+    api_version = cfg.get("api_version", "2024-06-01")
+    api_key = cfg.get("api_key", "")
+    auth_type = cfg.get("auth_type", "key")
+    model_type = cfg.get("type", "azure-openai")
+
+    if not endpoint or not deployment:
+        return {"ok": False, "status": 0, "detail": "endpoint or deployment not configured"}
+
+    if model_type != "azure-openai":
+        return {"ok": False, "status": 0, "detail": f"healthcheck only supports azure-openai (got {model_type})"}
+
+    url = f"{endpoint}/openai/deployments/{deployment}/embeddings?api-version={api_version}"
+    headers = {"Content-Type": "application/json"}
+    if auth_type == "managed-identity":
+        try:
+            from azure.identity import DefaultAzureCredential
+            client_id = cfg.get("client_id") or os.environ.get("AZURE_CLIENT_ID")
+            cred = DefaultAzureCredential(managed_identity_client_id=client_id) if client_id else DefaultAzureCredential()
+            token = cred.get_token("https://cognitiveservices.azure.com/.default").token
+            headers["Authorization"] = f"Bearer {token}"
+        except Exception as e:
+            return {"ok": False, "status": 0, "detail": f"failed to acquire MI token: {str(e)[:150]}"}
+    else:
+        if not api_key:
+            return {"ok": False, "status": 0, "detail": "no api_key configured"}
+        headers["api-key"] = api_key
+
+    import httpx as _httpx
+    async with _httpx.AsyncClient(timeout=15.0) as c:
+        try:
+            r = await c.post(url, headers=headers, json={"input": "health check", "model": deployment})
+        except Exception as e:
+            return {"ok": False, "status": 0, "detail": f"request failed: {str(e)[:150]}"}
+
+    body = r.text[:200]
+    if r.status_code == 200:
+        return {"ok": True, "status": 200, "detail": "endpoint reachable, auth valid"}
+    if r.status_code == 429:
+        return {"ok": True, "status": 429, "detail": "rate limited — auth is valid"}
+    return {"ok": False, "status": r.status_code, "detail": body}
+
+
+# ============================================================================
+# API KEY MANAGEMENT (rotate / revoke / status)
+# ============================================================================
+#
+# Plain rotation flow: PUT a new api_key in. model_store encrypts at rest using
+# envelope encryption (see docgrok/crypto.py); the hot embed path decrypts
+# locally against a cached DEK so we don't pay a Key Vault RTT per embed.
+
+@router.put("/models/registry/{model_id}/api-key")
+async def rotate_model_api_key(model_id: str, request: dict):
+    """Rotate (or set) the api_key for an external model.
+
+    Body: {"api_key": "<new-key>"}
+    The plaintext key is never logged and never persisted in cleartext.
+    """
+    cfg = resolve_model(model_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    new_key = (request.get("api_key") or "").strip()
+    if not new_key:
+        raise HTTPException(status_code=400, detail="'api_key' is required")
+    cfg["api_key"] = new_key
+    if _store:
+        _store.upsert_model(model_id, cfg)
+    return {"id": model_id, "rotated": True}
+
+
+@router.delete("/models/registry/{model_id}/api-key")
+async def revoke_model_api_key(model_id: str):
+    """Revoke the api_key for a model (crypto-shred its envelope)."""
+    cfg = resolve_model(model_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    cfg["api_key"] = ""
+    if _store:
+        shred = dict(cfg)
+        shred["api_key"] = ""
+        shred["_clear_api_key"] = True
+        _store.upsert_model(model_id, shred)
+    return {"id": model_id, "revoked": True}
+
+
+@router.get("/models/registry/{model_id}/api-key")
+async def get_model_api_key_status(model_id: str):
+    """Return metadata about whether an api_key is configured (never the key)."""
+    cfg = resolve_model(model_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    return {
+        "id": model_id,
+        "has_api_key": bool(cfg.get("api_key")),
+        "auth_type": cfg.get("auth_type", "key"),
+    }
 
 
 # ============================================================================

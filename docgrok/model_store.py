@@ -61,6 +61,8 @@ class CosmosDBStore(ModelStore):
         self._container = client.get_database_client(database).get_container_client(container)
 
     def list_models(self) -> dict[str, dict]:
+        from envelope_crypto import get_cipher, CipherError
+        cipher = get_cipher()
         docs = list(self._container.query_items(
             "SELECT * FROM c WHERE c.doc_type = 'docgrok_model'",
             partition_key="docgrok_model"
@@ -69,27 +71,66 @@ class CosmosDBStore(ModelStore):
         for doc in docs:
             model_id = doc["id"]
             cfg = {k: v for k, v in doc.items()
-                   if k not in ("doc_type", "stored_at") and not k.startswith("_")}
+                   if k not in ("doc_type", "stored_at", "api_key_envelope")
+                   and not k.startswith("_")}
             cfg.pop("id", None)
+            envelope = doc.get("api_key_envelope") or ""
+            if envelope:
+                try:
+                    cfg["api_key"] = cipher.decrypt(envelope)
+                except CipherError as e:
+                    print(f"WARNING: failed to decrypt api_key for {model_id}: {e}")
+                    cfg["api_key"] = ""
+            else:
+                cfg.setdefault("api_key", "")
             result[model_id] = cfg
         return result
 
     def get_model(self, model_id: str) -> dict | None:
+        from envelope_crypto import get_cipher, CipherError
         try:
             doc = self._container.read_item(model_id, partition_key="docgrok_model")
-            cfg = {k: v for k, v in doc.items()
-                   if k not in ("doc_type", "stored_at") and not k.startswith("_")}
-            cfg.pop("id", None)
-            return cfg
         except Exception:
             return None
+        cipher = get_cipher()
+        cfg = {k: v for k, v in doc.items()
+               if k not in ("doc_type", "stored_at", "api_key_envelope")
+               and not k.startswith("_")}
+        cfg.pop("id", None)
+        envelope = doc.get("api_key_envelope") or ""
+        if envelope:
+            try:
+                cfg["api_key"] = cipher.decrypt(envelope)
+            except CipherError as e:
+                print(f"WARNING: failed to decrypt api_key for {model_id}: {e}")
+                cfg["api_key"] = ""
+        else:
+            cfg.setdefault("api_key", "")
+        return cfg
 
     def upsert_model(self, model_id: str, config: dict) -> None:
         from datetime import datetime
+        from envelope_crypto import get_cipher
+        cipher = get_cipher()
+        api_key = config.get("api_key") or ""
+        envelope = ""
+        if api_key:
+            envelope = cipher.encrypt(api_key)
+        # Preserve existing envelope if caller updates without a new key,
+        # UNLESS _clear_api_key is set (explicit revoke).
+        clear = bool(config.get("_clear_api_key"))
+        if not api_key and not clear:
+            try:
+                existing = self._container.read_item(model_id, partition_key="docgrok_model")
+                envelope = existing.get("api_key_envelope", "")
+            except Exception:
+                envelope = ""
+
         doc = {
             "id": model_id,
             "doc_type": "docgrok_model",
-            **{k: v for k, v in config.items() if k != "api_key"},
+            **{k: v for k, v in config.items() if k not in ("api_key", "_clear_api_key")},
+            "api_key_envelope": envelope,
             "stored_at": datetime.utcnow().isoformat(),
         }
         self._container.upsert_item(doc)
