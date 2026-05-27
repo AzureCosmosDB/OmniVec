@@ -58,6 +58,12 @@ spec:
             - name: OMNIVEC_ADMIN_TOKEN
               value: {{ .Values.api.adminToken | quote }}
             {{- end }}
+            {{- if .Values.search.internalToken }}
+            - name: SEARCH_INTERNAL_TOKEN
+              value: {{ .Values.search.internalToken | quote }}
+            {{- end }}
+            - name: SEARCH_SERVICE_URL
+              value: {{ .Values.api.searchServiceUrl | default "http://omnivec-search" | quote }}
             {{- if .Values.azure.keyVault.uri }}
             - name: KEY_VAULT_URI
               value: {{ .Values.azure.keyVault.uri | quote }}
