@@ -408,7 +408,7 @@ public class SourceWatcher : ISourceWatcher
 
                         // Inject pipeline's vector_index_path into destination config
                         var destConfig = new Dictionary<string, object>(dest.Config);
-                        destConfig["vector_field"] = pipeline.VectorIndexPath;
+                        destConfig["vector_field"] = pipeline.VectorIndexPath.TrimStart('/');
 
                         var msg = new EmbeddingMessage
                         {
@@ -715,7 +715,7 @@ public class SourceWatcher : ISourceWatcher
                     var floats = EmbeddingToFloatList(embedding);
                     var ops = new List<PatchOperation>
                     {
-                        PatchOperation.Set($"/{pipeline.VectorIndexPath}", floats),                        PatchOperation.Set("/embedded_at", now),
+                        PatchOperation.Set($"/{pipeline.VectorIndexPath.TrimStart('/')}", floats),                        PatchOperation.Set("/embedded_at", now),
                         PatchOperation.Set("/embedding_dims", floats.Count),
                         PatchOperation.Set("/pipeline_id", pipeline.Id),
                         PatchOperation.Set("/pipeline_name", pipeline.Name),
@@ -806,7 +806,7 @@ public class SourceWatcher : ISourceWatcher
 
         var ops = new List<PatchOperation>
         {
-            PatchOperation.Set($"/{pipeline.VectorIndexPath}", floats),
+            PatchOperation.Set($"/{pipeline.VectorIndexPath.TrimStart('/')}", floats),
             PatchOperation.Set("/embedded_at", DateTime.UtcNow.ToString("O")),
             PatchOperation.Set("/embedding_dims", floats.Count),
             PatchOperation.Set("/pipeline_id", pipeline.Id),
