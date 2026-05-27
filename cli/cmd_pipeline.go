@@ -473,6 +473,7 @@ func toInt(v any) int {
 func newPipelineCreateCmd() *cobra.Command {
 	var name, description, source, destination, model, contentFields, vectorIndexPath string
 	var contentMode, contentStrategy, fileTypes, docIdPattern string
+	var processingMode, embeddingField string
 	var chunkSize, chunkOverlap int
 	var processExisting bool
 	cmd := &cobra.Command{
@@ -531,6 +532,12 @@ func newPipelineCreateCmd() *cobra.Command {
 			if description != "" {
 				body["description"] = description
 			}
+			if processingMode != "" {
+				body["processing_mode"] = processingMode
+			}
+			if embeddingField != "" {
+				body["embedding_field"] = embeddingField
+			}
 			if contentStrategy != "" {
 				body["content_strategy"] = contentStrategy
 			}
@@ -579,6 +586,8 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 0, "Chunk overlap in characters")
 	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern (e.g., {source}-chunk-{chunk})")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path from destination's vector policy (required)")
+	cmd.Flags().StringVar(&processingMode, "processing-mode", "", "Processing mode: inline or queue (default queue)")
+	cmd.Flags().StringVar(&embeddingField, "embedding-field", "", "Destination field to write embedding into (default: embedding)")
 	cmd.Flags().BoolVar(&processExisting, "process-existing", true, "Process existing documents on creation")
 	return cmd
 }

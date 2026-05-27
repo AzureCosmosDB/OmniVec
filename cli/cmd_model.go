@@ -44,7 +44,7 @@ func newModelListCmd() *cobra.Command {
 		Short: "List all models",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := getClient()
-			data, err := c.Get("/api/docgrok/models", nil)
+			data, err := c.Get("/api/models", nil)
 			if err != nil {
 				exitErr("%v", err)
 			}
@@ -56,10 +56,10 @@ func newModelListCmd() *cobra.Command {
 				return nil
 			}
 
-			// Models can be returned as a list or wrapped
+			// /api/models returns {"models": [...]} mixing internal (docgrok deployments)
+			// and external (registered via `model add`) entries.
 			var items []map[string]any
 			if err := json.Unmarshal(data, &items); err != nil {
-				// Try wrapped
 				items = parseJSONList(data, "models")
 			}
 			_, _, _, mdlH := fetchHealthMap(c)
