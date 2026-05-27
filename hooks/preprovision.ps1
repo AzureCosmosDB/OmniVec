@@ -26,6 +26,22 @@ if ($envName -notmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') {
     Write-Host "  Recommended: lowercase letters, digits, and dashes (no leading/trailing dash)."
 }
 
+# -- Block Azure-trademark reserved words. Azure rejects PublicIP DNS labels
+# containing these (DomainNameLabelReserved 400), which makes the web LB
+# unable to acquire an IP and causes helm --wait to time out. Fail fast
+# here so the user picks a clean name instead of debugging a stuck deploy.
+$lcEnv = $envName.ToLowerInvariant()
+foreach ($_w in @('microsoft','windows','azure','xbox','login','bing','apple')) {
+    if ($lcEnv -like "*$_w*") {
+        Write-Host "`n`e[31mERROR: AZURE_ENV_NAME='$envName' contains the reserved word '$_w'.`e[0m"
+        Write-Host "  Azure rejects PublicIP DNS labels containing trademarks"
+        Write-Host "  (microsoft, windows, azure, xbox, login, bing, apple) with"
+        Write-Host "  DomainNameLabelReserved (400). Pick a name that doesn't contain any of these."
+        Write-Host "  Fix with:  `e[36mazd env new <new-name>`e[0m"
+        exit 1
+    }
+}
+
 # -- Repair .env if prior run left embedded newlines / stray quotes --
 # Symptom: `loading .env: unexpected character "\"" in variable name near "...\n"`
 # Cause: a previous azd env set wrote a multi-line value; subsequent runs can't parse it.
