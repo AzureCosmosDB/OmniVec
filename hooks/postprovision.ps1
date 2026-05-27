@@ -63,6 +63,7 @@ $STORAGE_QUEUE_ENDPOINT = Get-AzdValue "AZURE_STORAGE_QUEUE_ENDPOINT"
 $SB_ENDPOINT = Get-AzdValue "AZURE_SERVICEBUS_ENDPOINT"
 $KEYVAULT_URI = Get-AzdValue "AZURE_KEYVAULT_URI"
 $APPINSIGHTS_CS = Get-AzdValue "AZURE_APPINSIGHTS_CONNECTION_STRING"
+$LOG_ANALYTICS_WS = Get-AzdValue "AZURE_LOG_ANALYTICS_WORKSPACE_ID"
 
 # Validate required vars
 foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","COSMOS_ENDPOINT","IDENTITY_CLIENT_ID","RESOURCE_GROUP")) {
@@ -222,7 +223,7 @@ function Build-AllImages {
     Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
     Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
     Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
-    Build-Image -Name "omnivec-agent" -Dockerfile "$RootDir/agent/Dockerfile" -Context "$RootDir/agent/" -Tag "latest"
+    Build-Image -Name "omnivec-agent" -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest"
 
     if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
         Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
@@ -242,7 +243,7 @@ function Build-MissingImages {
             "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
             "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
             "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
-            "omnivec-agent"           { Build-Image -Name $image -Dockerfile "$RootDir/agent/Dockerfile" -Context "$RootDir/agent/" -Tag "latest" }
+            "omnivec-agent"           { Build-Image -Name $image -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest" }
             "docgrok-pipeline-worker" {
                 if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
                     Build-Image -Name $image -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
@@ -261,28 +262,46 @@ function Build-MissingImages {
     }
 }
 
+# Honour OMNIVEC_SKIP_IMPORT — when set, do not overwrite images already
+# present in ACR (matches postprovision.sh policy).
+$SKIP_IMPORT = Get-AzdValue "OMNIVEC_SKIP_IMPORT"
+if (-not $SKIP_IMPORT) { $SKIP_IMPORT = $env:OMNIVEC_SKIP_IMPORT }
+
+$FIRST_IMAGE = $IMAGES[0]
+$anonOk = $false
+$tokenOk = $false
+$authImported = $false
+
 # -- If not explicitly set to build, try import --
-if (-not $DO_BUILD) {
+if (-not $DO_BUILD -and $SKIP_IMPORT -ne "true" -and $SKIP_IMPORT -ne "1") {
     Write-Host "`n`e[33mPhase 1: Importing pre-built images from shared registry...`e[0m"
     Write-Host "  `e[36mSource: $SHARED_REGISTRY`e[0m"
 
-    # Try anonymous pull first with a single test image
-    $anonOk = $false
-    $tokenOk = $false
+    # If the first image is already present and not forcing import, skip the
+    # auth-test re-import — importing unconditionally here used to clobber
+    # locally patched images.
+    $authTestCanSkip = (-not $FORCE_IMPORT) -and (Test-ImageExists -Name $FIRST_IMAGE -Tag "latest")
+
+    if ($authTestCanSkip) {
+        Write-Host "  `e[32m${FIRST_IMAGE}:latest already present locally, skipping auth test.`e[0m"
+        $anonOk = $true
+    } else {
     Write-Host "  `e[36mTesting anonymous pull...`e[0m" -NoNewline
-    $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --force 2>&1
+    $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --force 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host " `e[32m✓ anonymous pull works`e[0m"
         $anonOk = $true
+        $authImported = $true
     } else {
         Write-Host " `e[33m✗ requires auth`e[0m"
         # Try with stored token
         if ($SHARED_REGISTRY_TOKEN) {
             Write-Host "  `e[36mTrying stored token...`e[0m" -NoNewline
-            $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force 2>&1
+            $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Host " `e[32m✓ token works`e[0m"
                 $tokenOk = $true
+                $authImported = $true
             } else {
                 Write-Host " `e[31m✗ token invalid/expired`e[0m"
             }
@@ -294,18 +313,29 @@ if (-not $DO_BUILD) {
             # Strip ALL whitespace (paste can inject CR/LF/tabs/spaces). Valid tokens have none.
             $newToken = ("$newToken" -replace '\s', '')
             if ($newToken) {
-                $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/$($IMAGES[0]):$IMG_TAG" --image "$($IMAGES[0]):latest" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
+                $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
                 if ($LASTEXITCODE -eq 0) {
                     $SHARED_REGISTRY_TOKEN = $newToken
                     azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $newToken 2>$null
                     Write-Host "  `e[32mToken valid — saved for future use.`e[0m"
                     $tokenOk = $true
+                    $authImported = $true
                 } else {
                     Write-Host "  `e[31mToken invalid. Will build from source.`e[0m"
                 }
             }
         }
     }
+    }
+} elseif ($SKIP_IMPORT -eq "true" -or $SKIP_IMPORT -eq "1") {
+    Write-Host "`n`e[33mPhase 1: Skipping image import (OMNIVEC_SKIP_IMPORT=true).`e[0m"
+    Write-Host "  `e[36mUsing images already present in $ACR_NAME.`e[0m"
+    # Treat as imported so we do not fall through to build-from-source.
+    $anonOk = $true
+}
+
+if ($DO_BUILD -or (-not $anonOk -and -not $tokenOk -and $SKIP_IMPORT -ne "true" -and $SKIP_IMPORT -ne "1")) {
+    $DO_BUILD = $true
 }
 
 if ($DO_BUILD) {
@@ -328,12 +358,25 @@ if ($DO_BUILD) {
     $imagesToImport = @()
 
     foreach ($image in $IMAGES) {
-        if (-not $FORCE_IMPORT -and (Test-ImageUpToDate -Name $image -Tag "latest")) {
-            Write-Host "  `e[32m${image}:latest up to date (digest match), skipping.`e[0m"
+        # First image was handled by the auth test above
+        if ($image -eq $FIRST_IMAGE) {
+            if ($authImported) {
+                Write-Host "  `e[32m${image}:latest already imported (auth test).`e[0m"
+                $importCount++
+            } else {
+                Write-Host "  `e[32m${image}:latest already present locally, preserving (auth test).`e[0m"
+                $skipCount++
+            }
+            continue
+        }
+        if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
+            # Default policy: local image wins. Re-import only when the user
+            # explicitly sets OMNIVEC_FORCE_IMPORT=true. This prevents the
+            # shared-registry :latest (which may lag behind hotfixes) from
+            # clobbering locally built / patched images on every azd up.
+            Write-Host "  `e[32m${image}:latest already present locally, preserving (set OMNIVEC_FORCE_IMPORT=true to overwrite).`e[0m"
             $skipCount++
             continue
-        } elseif (-not $FORCE_IMPORT -and (Test-ImageExists -Name $image -Tag "latest")) {
-            Write-Host "  `e[36m${image}:latest exists but digest differs, re-importing...`e[0m"
         }
 
         Write-Host "  `e[36mImporting ${image}:$IMG_TAG as :latest...`e[0m"
@@ -458,6 +501,27 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
         --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
     Write-Host "  `e[32momnivec-storage secret created.`e[0m"
 }
+
+# Agent internal token secret (used for agent <-> API service-to-service auth)
+$AGENT_INTERNAL_TOKEN = Get-AzdValue "OMNIVEC_AGENT_INTERNAL_TOKEN"
+if ([string]::IsNullOrWhiteSpace($AGENT_INTERNAL_TOKEN)) {
+    # Use 48 bytes so the stripped-alnum base64 is reliably >= 44 chars.
+    $bytes = New-Object byte[] 48
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $tokenCandidate = ([Convert]::ToBase64String($bytes) -replace '[^A-Za-z0-9]','')
+    if ($tokenCandidate.Length -lt 44) {
+        # Extremely unlikely; pad with another draw to guarantee length.
+        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        $tokenCandidate += ([Convert]::ToBase64String($bytes) -replace '[^A-Za-z0-9]','')
+    }
+    $AGENT_INTERNAL_TOKEN = $tokenCandidate.Substring(0, [Math]::Min(44, $tokenCandidate.Length))
+    azd env set OMNIVEC_AGENT_INTERNAL_TOKEN $AGENT_INTERNAL_TOKEN | Out-Null
+}
+kubectl --context $KUBE_CONTEXT create secret generic omnivec-agent-internal `
+    --namespace omnivec `
+    --from-literal=token="$AGENT_INTERNAL_TOKEN" `
+    --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+Write-Host "  `e[32momnivec-agent-internal secret created.`e[0m"
 
 Write-Host "`e[32mNamespaces and secrets created.`e[0m"
 
@@ -587,7 +651,7 @@ if ($ENABLE_BLOB_SOURCE -eq "true") {
 # into the env-specific ACR tagged :latest (from OMNIVEC_IMAGE_TAG / branch),
 # so the default values.yaml (image.tag: latest) resolves for every service.
 
-$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
+$helmArgs += @("--kube-context", $KUBE_CONTEXT, "--kubeconfig", $OMNIVEC_KUBECONFIG, "--wait", "--timeout", "10m")
 # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which
 # strips the release metadata but can leave Deployments/Services behind (they
 # have finalizers or take time to delete). Next run sees "release not found"
@@ -595,14 +659,14 @@ $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--wait", "--timeout", "10m")
 # times out → uninstall again → infinite loop.
 
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
-$helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+$helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
 $helmState = if ($helmStatus -and $helmStatus.info) { $helmStatus.info.status } else { "" }
 if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pending-") {
     Write-Host "`e[33mDetected stuck Helm release (status: $($helmStatus.info.status)). Rolling back...`e[0m"
-    helm rollback omnivec -n omnivec --kube-context $KUBE_CONTEXT 2>$null
+    helm rollback omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "`e[33mRollback failed — uninstalling stuck release...`e[0m"
-        helm uninstall omnivec -n omnivec --kube-context $KUBE_CONTEXT 2>$null
+        helm uninstall omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG 2>$null
         $helmState = ""
     }
     Write-Host "`e[32mStuck release cleared. Proceeding with fresh deploy.`e[0m"
@@ -681,8 +745,38 @@ if ($skipHelm) {
     Write-Host "  `e[32mNo image/config changes detected and cluster is healthy — skipping helm upgrade.`e[0m"
     Write-Host "  `e[36m(Set `$env:OMNIVEC_FORCE_HELM='true' to force a redeploy.)`e[0m"
 } else {
-    & helm @helmArgs
-    if ($LASTEXITCODE -ne 0) {
+    # Retry helm on transient ARM / Kubernetes errors (mirrors retry_run in sh).
+    $maxAttempts = if ($env:OMNIVEC_RETRY_ATTEMPTS) { [int]$env:OMNIVEC_RETRY_ATTEMPTS } else { 4 }
+    $baseSec = if ($env:OMNIVEC_RETRY_BASE_SEC) { [int]$env:OMNIVEC_RETRY_BASE_SEC } else { 5 }
+    $transientPatterns = @(
+        '429','throttl','Too Many Requests','ServiceBusy','ServerBusy',
+        'RequestTimeout','OperationTimedOut','503','502','504',
+        'Service Unavailable','Temporary failure','Connection reset',
+        'TLS handshake','InternalServerError','i/o timeout',
+        'context deadline exceeded'
+    )
+    $helmRc = 1
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            $sleep = $baseSec * [Math]::Pow(2, $attempt - 2)
+            Write-Host "  `e[33m[helm-deploy] attempt $attempt/$maxAttempts after $([int]$sleep)s backoff...`e[0m"
+            Start-Sleep -Seconds ([int]$sleep)
+        }
+        $helmOutput = (& helm @helmArgs 2>&1 | Out-String)
+        $helmRc = $LASTEXITCODE
+        Write-Host $helmOutput
+        if ($helmRc -eq 0) { break }
+        $isTransient = $false
+        foreach ($pat in $transientPatterns) {
+            if ($helmOutput -match [regex]::Escape($pat)) { $isTransient = $true; break }
+        }
+        if (-not $isTransient) {
+            Write-Host "  `e[31m[helm-deploy] non-transient failure — not retrying.`e[0m"
+            break
+        }
+        Write-Host "  `e[33m[helm-deploy] transient failure detected — will retry.`e[0m"
+    }
+    if ($helmRc -ne 0) {
         Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
         kubectl --context $KUBE_CONTEXT get pods -n omnivec -o wide
 
