@@ -154,14 +154,14 @@ func newModelTestCmd() *cobra.Command {
 }
 
 func newModelAddCmd() *cobra.Command {
-	var provider, providerType, endpoint, apiKey, apiVersion, modelName, authType, clientID string
+	var name, providerType, endpoint, apiKey, apiVersion, modelName, authType, clientID string
 	var dimensions int
 	cmd := &cobra.Command{
 		Use:   "add",
 		Short: "Add an external embedding model",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if provider == "" {
-				exitErr("--provider is required")
+			if name == "" {
+				exitErr("--name is required")
 			}
 			if providerType == "" {
 				exitErr("--type is required (azure-openai, openai, cohere, custom)")
@@ -179,7 +179,7 @@ func newModelAddCmd() *cobra.Command {
 				exitErr("--api-key is required when --auth-type is key")
 			}
 			body := map[string]any{
-				"name":      provider,
+				"name":      name,
 				"type":      providerType,
 				"endpoint":  endpoint,
 				"model":     modelName,
@@ -202,11 +202,11 @@ func newModelAddCmd() *cobra.Command {
 			if err != nil {
 				exitErr("%v", err)
 			}
-			exitOK("External model added: %s (%s, auth: %s)", provider, modelName, authType)
+			exitOK("External model added: %s (%s, auth: %s)", name, modelName, authType)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider name (e.g., my-azure-openai)")
+	cmd.Flags().StringVar(&name, "name", "", "Model name (unique identifier, e.g., my-azure-openai)")
 	cmd.Flags().StringVarP(&providerType, "type", "t", "", "Provider type (azure-openai, openai, cohere, custom)")
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "Endpoint URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key (for key auth)")
@@ -221,7 +221,7 @@ func newModelAddCmd() *cobra.Command {
 func newModelDeleteCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "delete <provider-name-or-id>",
+		Use:   "delete <name-or-id>",
 		Short: "Delete an external model provider",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
