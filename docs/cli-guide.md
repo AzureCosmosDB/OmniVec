@@ -135,7 +135,7 @@ omnivec source delete <id> -y
 
 | Type | Required Fields | Optional Fields |
 |------|----------------|----------------|
-| `azure-blob` | `account_url`, `container` | `prefix` |
+| `azure-blob` | `account_url`, `container` | `prefix`, `file_type` (default `pdf`) |
 | `cosmosdb` | `endpoint`, `database`, `container` | `query`, `attachments_field`, `attachment_url_field`, `attachment_name_field`, `attachment_content_type_field`, `attachment_name_regex`, `attachment_file_types`, `attachment_content_types`, `attachment_blob_container`, `account_url`, `connection_string` |
 | `postgresql` | `host`, `database`, `table` | `port`, `user`, `password`, `ssl_mode` |
 | `mssql` | `host`, `database`, `table` | `port`, `user`, `password` |
