@@ -6,19 +6,53 @@ The OmniVec CLI (`omnivec`) is a standalone binary for managing the OmniVec plat
 
 ## Installation
 
+### Quick install (recommended)
+
+**macOS & Linux** (auto-detects OS + arch, strips macOS quarantine, installs to `~/.local/bin`):
+```bash
+curl -fsSL https://github.com/AzureCosmosDB/OmniVec/raw/main/scripts/install.sh | bash
+```
+
+**macOS via Homebrew:**
+```bash
+brew install --formula https://raw.githubusercontent.com/AzureCosmosDB/OmniVec/main/scripts/omnivec.rb
+```
+(A dedicated `AzureCosmosDB/homebrew-omnivec` tap is planned; once published, the command will simplify to `brew install AzureCosmosDB/omnivec/omnivec`.)
+
+**Windows** (installs to `%USERPROFILE%\.omnivec\bin` and updates user PATH):
+```powershell
+irm https://github.com/AzureCosmosDB/OmniVec/raw/main/scripts/install.ps1 | iex
+```
+
+### Manual download
+
+Grab the binary for your platform from the [latest release](https://github.com/AzureCosmosDB/OmniVec/releases/latest):
+
 | Platform | Binary |
 |----------|--------|
-| Linux (amd64) | `omnivec-linux-amd64` |
-| macOS (Apple Silicon) | `omnivec-darwin-arm64` |
-| macOS (Intel) | `omnivec-darwin-amd64` |
-| Windows (amd64) | `omnivec-windows-amd64.exe` |
+| Linux (amd64) | `omnivec-vX.Y.Z-linux-amd64` |
+| Linux (arm64) | `omnivec-vX.Y.Z-linux-arm64` |
+| macOS (Apple Silicon) | `omnivec-vX.Y.Z-darwin-arm64` |
+| macOS (Intel) | `omnivec-vX.Y.Z-darwin-amd64` |
+| Windows (amd64) | `omnivec-vX.Y.Z-windows-amd64.exe` |
+| Windows (arm64) | `omnivec-vX.Y.Z-windows-arm64.exe` |
 
 ```bash
-# Make executable (Linux/macOS)
-chmod +x omnivec
-sudo mv omnivec /usr/local/bin/
+# Linux / macOS
+chmod +x omnivec-*
+sudo mv omnivec-* /usr/local/bin/omnivec
+```
 
-# Or build from source (requires Go 1.24+)
+> **macOS Gatekeeper note:** if you see *"cannot be opened because the developer cannot be verified"*, strip the quarantine flag before running:
+> ```bash
+> xattr -dr com.apple.quarantine /usr/local/bin/omnivec
+> ```
+> The quick-install script and Homebrew formula handle this automatically.
+
+### Build from source
+
+Requires Go 1.24+.
+```bash
 cd cli && go build -o ../bin/omnivec . && cd ..
 ```
 

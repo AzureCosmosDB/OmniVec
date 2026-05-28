@@ -281,6 +281,7 @@ This removes the resource group, all Azure services, and local environment confi
 | Want to... | Go to |
 |-----------|-------|
 | Manage pipelines via CLI | [CLI Guide](docs/cli-guide.md) |
+| Install the CLI (one line) | [CLI Install](docs/cli-guide.md#installation) |
 | Understand the architecture | [Architecture](docs/architecture.md) |
 | Use the web UI in depth | [User Guide](docs/user-guide.md) |
 | Run the automated E2E test suite | [E2E Demo](#automated-e2e-demo) below |
