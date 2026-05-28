@@ -307,7 +307,7 @@ omnivec model test <name>
 
 # Add an Azure OpenAI model
 omnivec model add \
-  --provider my-azure-openai \
+  --name my-azure-openai \
   --type azure-openai \
   --endpoint https://myresource.openai.azure.com \
   --api-key sk-... \
@@ -334,7 +334,7 @@ omnivec model delete my-azure-openai -y
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--provider` | Yes | Unique name for this provider |
+| `--name` | Yes | Unique name for this model |
 | `--type` | Yes | `azure-openai`, `openai`, `cohere`, `custom` |
 | `--endpoint` | Yes | Endpoint URL |
 | `--model` | Yes | Model or deployment name |
@@ -426,7 +426,7 @@ omnivec pipeline list -o yaml
 omnivec status
 
 # 2. Add an external embedding model
-omnivec model add --provider azure-openai-prod --type azure-openai \
+omnivec model add --name azure-openai-prod --type azure-openai \
   --endpoint https://myresource.openai.azure.com --api-key YOUR_KEY \
   --api-version 2024-06-01 --model text-embedding-3-small --dimensions 1536
 
