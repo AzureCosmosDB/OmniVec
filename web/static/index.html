@@ -6711,6 +6711,10 @@
             })();
 
             const triggerCheck = (async () => {
+                const procMode = pipeline.processing_mode || 'queue';
+                if (procMode !== 'queue') {
+                    return { name: 'Triggers / Event Bus', ok: true, detail: `not applicable in ${procMode} mode`, type: 'trigger' };
+                }
                 try {
                     const res = await apiFetch('/api/triggers/status');
                     const data = await res.json();
