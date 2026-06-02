@@ -27,6 +27,20 @@ resource jobsQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' =
   }
 }
 
+// Blob events queue — Event Grid subscriptions on blob storage accounts deliver
+// BlobCreated/BlobDeleted/BlobRenamed events here. BlobEventConsumer in the
+// .NET ingestion service consumes and fans out to active pipelines.
+resource blobEventsQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' = {
+  parent: sbNamespace
+  name: 'blob-events'
+  properties: {
+    maxDeliveryCount: 10
+    lockDuration: 'PT5M'
+    deadLetteringOnMessageExpiration: true
+    defaultMessageTimeToLive: 'P1D'
+  }
+}
+
 // Embeddings topic — changefeed publishes, .NET worker subscribes
 resource embeddingsTopic 'Microsoft.ServiceBus/namespaces/topics@2022-10-01-preview' = {
   parent: sbNamespace
@@ -62,3 +76,5 @@ resource sbDataOwnerRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
 
 output namespaceName string = sbNamespace.name
 output endpoint string = '${sbNamespace.name}.servicebus.windows.net'
+output blobEventsQueueName string = blobEventsQueue.name
+output blobEventsQueueResourceId string = blobEventsQueue.id
