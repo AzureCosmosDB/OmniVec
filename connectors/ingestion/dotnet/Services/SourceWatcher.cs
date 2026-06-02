@@ -425,6 +425,8 @@ public class SourceWatcher : ISourceWatcher
                             PartitionKeyValue = pkValue,
                             PipelineGeneration = pipeline.Generation,
                             SourceContentFields = contentFields,
+                            StoreContent = pipeline.StoreContent,
+                            MetadataFields = pipeline.MetadataFields,
                         };
                         if (att is not null)
                         {

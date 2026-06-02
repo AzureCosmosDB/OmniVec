@@ -59,6 +59,14 @@ public class EmbeddingMessage
     [JsonPropertyName("enqueued_at")]
     public string EnqueuedAt { get; set; } = DateTime.UtcNow.ToString("O");
 
+    /// <summary>Pipeline-level flag: persist the (possibly-truncated) content on the destination document alongside the vector.</summary>
+    [JsonPropertyName("store_content")]
+    public bool? StoreContent { get; set; }
+
+    /// <summary>Pipeline-level: subset of optional metadata fields to write on destination docs (null = all, empty = none).</summary>
+    [JsonPropertyName("metadata_fields")]
+    public List<string>? MetadataFields { get; set; }
+
     /// <summary>"text" (default) or "blob_ref" — when blob_ref, worker sends blob location to DocGrok for download + processing.</summary>
     [JsonPropertyName("content_type")]
     public string ContentType { get; set; } = "text";

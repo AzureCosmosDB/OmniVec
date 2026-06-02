@@ -101,7 +101,8 @@ public class PostgresDestinationWriter : IDestinationWriter
                         cmd.Parameters.AddWithValue("id", result.DocId);
                     cmd.Parameters.AddWithValue("embedding", embeddingStr);
                     cmd.Parameters.AddWithValue("pipeline_id", result.PipelineId);
-                    cmd.Parameters.AddWithValue("pipeline_name", result.PipelineName);
+                    cmd.Parameters.AddWithValue("pipeline_name",
+                        result.ShouldIncludeMetadata("pipeline_name") ? result.PipelineName : "");
                     cmd.Parameters.AddWithValue("source_id", result.SourceId ?? "");
                     cmd.Parameters.AddWithValue("content_hash", result.ContentHash);
                     cmd.Parameters.AddWithValue("embedded_at", DateTime.UtcNow);
@@ -117,9 +118,13 @@ public class PostgresDestinationWriter : IDestinationWriter
                         else
                             insertCmd.Parameters.AddWithValue("id", result.DocId);
                         insertCmd.Parameters.AddWithValue("embedding", embeddingStr);
-                        insertCmd.Parameters.AddWithValue("content", result.Content);
+                        // StoreContent: null/true → write content (back-compat default);
+                        // false → write empty string so the column stays NOT NULL-safe.
+                        insertCmd.Parameters.AddWithValue("content",
+                            result.StoreContent == false ? "" : result.Content);
                         insertCmd.Parameters.AddWithValue("pipeline_id", result.PipelineId);
-                        insertCmd.Parameters.AddWithValue("pipeline_name", result.PipelineName);
+                        insertCmd.Parameters.AddWithValue("pipeline_name",
+                            result.ShouldIncludeMetadata("pipeline_name") ? result.PipelineName : "");
                         insertCmd.Parameters.AddWithValue("source_id", result.SourceId ?? "");
                         insertCmd.Parameters.AddWithValue("content_hash", result.ContentHash);
                         insertCmd.Parameters.AddWithValue("embedded_at", DateTime.UtcNow);
