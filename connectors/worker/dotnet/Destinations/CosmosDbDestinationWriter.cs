@@ -246,4 +246,86 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
             }));
     }
+
+    /// <summary>
+    /// Delete every destination document matching (source_id, source_ref).
+    /// Used by BlobEventConsumer to propagate BlobDeleted events.
+    /// Queries by source_id+source_ref so it removes all chunks
+    /// (doc_id is "{source_ref}" or "{source_ref}-chunk-N").
+    /// </summary>
+    public async Task DeleteByRefAsync(
+        Dictionary<string, object> config,
+        List<DeleteRequest> requests,
+        CancellationToken ct)
+    {
+        if (requests.Count == 0) return;
+        var endpoint = config["endpoint"]?.ToString() ?? "";
+        var database = config["database"]?.ToString() ?? "";
+        var containerName = config["container"]?.ToString() ?? "";
+        var client = GetOrCreateClient(endpoint);
+        var container = client.GetDatabase(database).GetContainer(containerName);
+
+        foreach (var req in requests)
+        {
+            try
+            {
+                var query = new QueryDefinition(
+                    "SELECT c.id FROM c WHERE c.source_id = @sid AND c.source_ref = @ref")
+                    .WithParameter("@sid", req.SourceId)
+                    .WithParameter("@ref", req.SourceRef);
+                var pk = new PartitionKey(req.PartitionKeyValue);
+                using var iter = container.GetItemQueryIterator<DeletedIdDoc>(
+                    query,
+                    requestOptions: new QueryRequestOptions { PartitionKey = pk });
+
+                var ids = new List<string>();
+                while (iter.HasMoreResults)
+                {
+                    var page = await iter.ReadNextAsync(ct);
+                    foreach (var d in page) if (!string.IsNullOrEmpty(d.Id)) ids.Add(d.Id);
+                }
+
+                if (ids.Count == 0)
+                {
+                    _logger.LogInformation(
+                        "Delete: no Cosmos docs for source_id={SrcId} source_ref={Ref}",
+                        req.SourceId, req.SourceRef);
+                    continue;
+                }
+
+                for (int i = 0; i < ids.Count; i += 100)
+                {
+                    var chunk = ids.Skip(i).Take(100).ToList();
+                    var batch = container.CreateTransactionalBatch(pk);
+                    foreach (var id in chunk) batch.DeleteItem(id);
+                    using var resp = await batch.ExecuteAsync(ct);
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning(
+                            "Cosmos delete batch status={Status} for src={SrcId} ref={Ref}",
+                            resp.StatusCode, req.SourceId, req.SourceRef);
+                    }
+                }
+                _logger.LogInformation(
+                    "Deleted {Count} Cosmos doc(s) for source_id={SrcId} source_ref={Ref}",
+                    ids.Count, req.SourceId, req.SourceRef);
+            }
+            catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                // Already deleted — fine
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Cosmos delete failed for src={SrcId} ref={Ref}",
+                    req.SourceId, req.SourceRef);
+                throw;
+            }
+        }
+    }
+
+    private sealed class DeletedIdDoc
+    {
+        [Newtonsoft.Json.JsonProperty("id")]
+        public string Id { get; set; } = "";
+    }
 }
