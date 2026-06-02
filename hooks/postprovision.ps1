@@ -875,6 +875,15 @@ if (-not $LOCATION) { $LOCATION = Get-AzdValue "AZURE_LOCATION" }
 if (-not $LOCATION) { $LOCATION = "eastus2" }
 $FQDN = "${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
 
+# Persist the OmniVec server URL into the azd env so subsequent CLI
+# invocations / tooling can pick it up without re-deriving from the cluster.
+$OMNIVEC_API_URL = "http://$FQDN"
+azd env set OMNIVEC_API_URL $OMNIVEC_API_URL 2>$null | Out-Null
+azd env set OMNIVEC_UI_URL  "$OMNIVEC_API_URL/ui" 2>$null | Out-Null
+if ($externalIp) {
+    azd env set OMNIVEC_API_IP "http://$externalIp" 2>$null | Out-Null
+}
+
 if ($externalIp) {
     Write-Host ""
     Write-Host "  OmniVec FQDN:  `e[36mhttp://${FQDN}/ui`e[0m"
