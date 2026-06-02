@@ -10,7 +10,6 @@
 #   preflight_require_providers NS [NS ...] — az provider register (idempotent)
 #   preflight_vcpu_quota LOCATION REQ VCPUS — check vCPU headroom for requested skus
 #   preflight_name_collisions RG_NAME       — RG already owned by someone else?
-#   preflight_blob_flip_guard RG_NAME WANT  — forbid enabling/disabling blob-source on existing RG
 
 set -u
 
@@ -203,29 +202,11 @@ preflight_name_collisions() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────
-# b3: forbid DISABLING blob-source on an existing deployment. If the RG tag
-# `omnivec-blob` is `true` and user sets FALSE, we refuse — Storage Account /
-# ServiceBus / EventGrid would be orphaned. The reverse (false → true) is
-# allowed: Bicep is idempotent and will create the missing modules on the
-# next azd up.
+# preflight_blob_flip_guard — deprecated no-op.
+# Storage Account / Service Bus / Event Grid are always provisioned now
+# (Option A), so there is no flip to guard. Function kept for backward
+# compatibility with any external callers; always returns 0.
 # ──────────────────────────────────────────────────────────────────────────
 preflight_blob_flip_guard() {
-    _rg=$1
-    _want=$2
-    _existing=$(az group show --name "$_rg" --query "tags.\"omnivec-blob\"" -o tsv </dev/null 2>/dev/null || printf '')
-    _existing=$(printf '%s' "$_existing" | tr -d '\r\n ')
-    [ -z "$_existing" ] && return 0  # no prior tag, nothing to guard
-    _want_norm=$(printf '%s' "$_want" | tr -d '\r\n ' | tr '[:upper:]' '[:lower:]')
-    _existing_norm=$(printf '%s' "$_existing" | tr '[:upper:]' '[:lower:]')
-    # Block only the destructive direction: existing=true and want=false.
-    if [ "$_existing_norm" = "true" ] && [ "$_want_norm" = "false" ]; then
-        printf "\n  ${RED}✗ Cannot disable OMNIVEC_ENABLE_BLOB_SOURCE (true -> false) on existing deployment.${NC}\n"
-        printf "  ${YELLOW}This would orphan Storage/ServiceBus/EventGrid resources.${NC}\n"
-        printf "  ${YELLOW}Run 'azd down' first, or pick a different AZURE_ENV_NAME.${NC}\n"
-        return 1
-    fi
-    if [ "$_existing_norm" = "false" ] && [ "$_want_norm" = "true" ]; then
-        printf "  ${YELLOW}! Enabling blob source on existing deployment (false -> true). Storage/ServiceBus/EventGrid will be created.${NC}\n"
-    fi
     return 0
 }

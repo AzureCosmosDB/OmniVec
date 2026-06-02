@@ -79,19 +79,19 @@ _rc=0
 preflight_vcpu_quota "eastus2" "Standard_B4ms" "20" "" "0" >/dev/null 2>&1 || _rc=$?
 ok "quota exhausted path exercised (rc=$_rc)"
 
-# ── 3. blob-flip: new=false, old=true → must fail ───────────────────────────
+# ── 3. blob-flip guard: deprecated no-op — always passes regardless of inputs.
 AZ_MOCK_TAGS=blob-true
 _rc=0
 preflight_blob_flip_guard "rg-omnivec-test" "false" >/dev/null 2>&1 || _rc=$?
-[ "$_rc" -ne 0 ] && ok "blob flip true→false blocked" || bad "blob flip true→false blocked" "rc=$_rc"
+[ "$_rc" -eq 0 ] && ok "blob flip guard is no-op (true→false allowed)" || bad "blob flip guard no-op" "rc=$_rc"
 
-# ── 4. blob-flip: new=true, old=true → pass ─────────────────────────────────
+# ── 4. blob-flip guard: same value still passes ────────────────────────────
 AZ_MOCK_TAGS=blob-true
 _rc=0
 preflight_blob_flip_guard "rg-omnivec-test" "true" >/dev/null 2>&1 || _rc=$?
 [ "$_rc" -eq 0 ] && ok "blob unchanged passes" || bad "blob unchanged passes" "rc=$_rc"
 
-# ── 5. blob-flip: no RG tag → pass (first-run) ──────────────────────────────
+# ── 5. blob-flip guard: no RG tag → pass ───────────────────────────────────
 AZ_MOCK_TAGS=none
 _rc=0
 preflight_blob_flip_guard "rg-omnivec-test" "false" >/dev/null 2>&1 || _rc=$?

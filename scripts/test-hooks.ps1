@@ -1000,7 +1000,7 @@ function Test-Scenario12 {
     Initialize-LockDir "test-env"
 
     $envFile = Join-Path $testDir ".env"
-    Set-Content $envFile "OMNIVEC_METADATA_STORE=`"cosmosdb-serverless`"`nOMNIVEC_ENABLE_BLOB_SOURCE=`"true`"" -Encoding UTF8
+    Set-Content $envFile "OMNIVEC_METADATA_STORE=`"cosmosdb-serverless`"" -Encoding UTF8
 
     $azBody = Get-AzMockBody @{
         "group exists"    = @{ Output = "false"; ExitCode = 0 }
@@ -1029,9 +1029,8 @@ function Test-Scenario12 {
         -StdinText "4`n2`n0`n"
 
     $skippedMeta = $result.Output -match "cosmosdb-serverless.*already set"
-    $skippedBlob = $result.Output -match "true.*already set"
     $showedSku   = $result.Output -match "System node pool|Common options"
-    Assert-Test "Scenario 12: Partial config — skips set vars, prompts missing ones" ($skippedMeta -and $skippedBlob -and $showedSku)
+    Assert-Test "Scenario 12: Partial config — skips set vars, prompts missing ones" ($skippedMeta -and $showedSku)
 
     Remove-TestDir $testDir
 }

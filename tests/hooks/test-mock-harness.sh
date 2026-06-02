@@ -68,8 +68,7 @@ chmod +x "$MOCKS_DIR"/azd "$MOCKS_DIR"/az "$MOCKS_DIR"/kubectl "$MOCKS_DIR"/helm
         'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_B4ms' \
         'OMNIVEC_SYSTEM_NODE_COUNT=2' \
         'OMNIVEC_GPU_NODE_COUNT=0' \
-        'OMNIVEC_METADATA_STORE=cosmosdb-serverless' \
-        'OMNIVEC_ENABLE_BLOB_SOURCE=true'; do
+        'OMNIVEC_METADATA_STORE=cosmosdb-serverless'; do
         if ! grep -q "^${kv}\$" "$AZDENV"; then
             printf 'missing %s\n--- env store ---\n%s\n--- mock log ---\n%s\n' \
                 "$kv" "$(cat "$AZDENV")" "$(cat "$LOG")" >&2

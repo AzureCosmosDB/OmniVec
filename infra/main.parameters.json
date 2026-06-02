@@ -22,9 +22,6 @@
     },
     "gpuNodeCount": {
       "value": "${OMNIVEC_GPU_NODE_COUNT}"
-    },
-    "enableBlobSource": {
-      "value": "${OMNIVEC_ENABLE_BLOB_SOURCE}"
     }
   }
 }

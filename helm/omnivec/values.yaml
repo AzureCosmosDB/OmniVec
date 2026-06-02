@@ -175,11 +175,10 @@ changefeed:
 # Blob Ingestor - Dedicated single-replica deployment for azure-blob sources.
 # Runs the same image as changefeed but with EnableBlobSources=true,
 # EnableCosmosSources=false. Keeps blob enumeration off the Cosmos CFP scale unit.
-# Gated by ENABLE_BLOB_SOURCE in postprovision.sh; default false so azd deployments
-# that don't enable blob never get an empty-config pod.
+# Always enabled (Option A: Storage + Service Bus + Event Grid always provisioned).
 # =============================================================================
 blobIngestor:
-  enabled: false
+  enabled: true
   replicaCount: 1
   resources:
     requests:
