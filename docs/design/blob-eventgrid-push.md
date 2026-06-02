@@ -25,10 +25,10 @@ Storage Account
 4. **api/api.py**:
    - Modify `create_eventgrid_subscription`: replace `endpointType: "WebHook"` with `endpointType: "ServiceBusQueue"`, target the `blob-events` queue (env `OMNIVEC_BLOB_EVENT_QUEUE_RESOURCE_ID`).
    - Add auto-call from `create_pipeline` when source.type == azure-blob AND processing_mode == queue AND not already configured. Race-safe: provision EG **first**, then prefill - consumer dedupes by url+etag.
-   - Add `POST /api/triggers/eventgrid/bulk_provision` to backfill existing pipelines on wintest.
-5. **Manual setup on wintest** (until next bicep deploy):
+   - Add `POST /api/triggers/eventgrid/bulk_provision` to backfill existing pipelines.
+5. **Manual setup on an existing cluster** (until next bicep deploy):
    ```pwsh
-   az servicebus queue create --namespace-name omnivec-sb-<cluster-suffix> -g rg-omnivec-wintest-3 --name blob-events --max-delivery-count 10
+   az servicebus queue create --namespace-name <SB_NAMESPACE> -g <RESOURCE_GROUP> --name blob-events --max-delivery-count 10
    ```
 6. **Smoke test**: hit `/api/triggers/eventgrid/create` against an existing source, verify subscription in portal points to SB queue, upload blob, see message land in queue.
 
@@ -60,13 +60,13 @@ Storage Account
 
 11. **Smoke + flip**:
     - Roll out with `UseEventGrid=true`, watch consumer logs.
-    - Upload, modify, delete blobs on wintest source - verify embed + delete propagate end-to-end.
+    - Upload, modify, delete blobs on a test source - verify embed + delete propagate end-to-end.
     - Confirm dot-net poll loop is quiet for that source.
 
 ## Risks / decisions to confirm before starting
 - RBAC: probe storage account perms first; fall back gracefully and surface "needs RBAC" in pipeline status.
 - Filter granularity: EG sub per source with `subjectBeginsWith=/blobServices/default/containers/<c>/blobs/<prefix>`. Two sources on same container+prefix double-fan-out (acceptable, dedup at destination).
-- Backfill: existing pipelines on wintest need a one-time `bulk_provision` call.
+- Backfill: existing pipelines need a one-time `bulk_provision` call.
 - Polling fallback: keep behind a flag for initial bake-in; remove after 1 week stable.
 
 ## Out of scope
@@ -96,12 +96,3 @@ Phase B:
 - Phase A: ~2h
 - Phase B: ~3h
 - Total: ~5h, one PR.
-
-## Wintest context for the new session
-- AKS context: `omnivec-aks-<cluster-suffix>`
-- Resource group: `rg-omnivec-wintest-3`
-- SB namespace: `omnivec-sb-<cluster-suffix>.servicebus.windows.net` (existing queue `jobs`, topic `embeddings`, subscription `worker`)
-- ACR: `omnivecacr<cluster-suffix>.azurecr.io` (env) + `omnivecregistry.azurecr.io` (CI build output)
-- MI client id: `<MI_CLIENT_ID>`
-- Existing pipeline: `pip-29511bf3` (paused), `pip-4705eaa3` (paused, ui-test)
-- Test source: `src-b74b772f` (blob), dest: `dst-1e35d37d` (Cosmos), model: `mdl-ext-de45f285`

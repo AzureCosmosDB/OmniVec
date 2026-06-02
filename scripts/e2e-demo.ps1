@@ -217,7 +217,7 @@ if (-not $Quiet) {
 # ─── Configuration ───────────────────────────────────────────────────────────
 $ENV_NAME        = "omnivec-e2e-demo"
 $LOCATION        = "eastus2"
-$SUBSCRIPTION    = "<AZURE_SUBSCRIPTION_ID>"
+$SUBSCRIPTION    = if ($env:AZURE_SUBSCRIPTION_ID) { $env:AZURE_SUBSCRIPTION_ID } else { "" }
 $MODEL_NAME      = "azure-openai-embed"
 $SOURCE_NAME     = "demo-cosmosdb-source"
 $DEST_NAME       = "demo-vector-store"
