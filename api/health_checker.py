@@ -433,6 +433,14 @@ async def check_model(model_id: str, client: httpx.AsyncClient) -> dict:
                                     result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"Deployment not found at {endpoint} (HTTP 404)"})
                                 else:
                                     result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"HTTP {status_code}: {detail}"})
+                        elif hc.status_code == 404:
+                            # The deployed DocGrok build (Rust router) does not
+                            # implement the per-model /healthcheck admin route.
+                            # The embedding data path is independent and works,
+                            # so degrade to "warning" rather than failing the model.
+                            if result["status"] == "healthy":
+                                result["status"] = "warning"
+                            result["checks"].append({"check": "endpoint_accessible", "status": "warn", "detail": "DocGrok build does not implement per-model healthcheck route — embedding path is independent and unaffected"})
                         else:
                             result["status"] = "unhealthy"
                             result["checks"].append({"check": "endpoint_accessible", "status": "fail", "detail": f"DocGrok healthcheck HTTP {hc.status_code}: {hc.text[:150]}"})
