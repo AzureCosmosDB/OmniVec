@@ -314,6 +314,13 @@
         }),
         'ValidationError': dict({
           'properties': dict({
+            'ctx': dict({
+              'title': 'Context',
+              'type': 'object',
+            }),
+            'input': dict({
+              'title': 'Input',
+            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
@@ -1809,6 +1816,13 @@
         }),
         'ValidationError': dict({
           'properties': dict({
+            'ctx': dict({
+              'title': 'Context',
+              'type': 'object',
+            }),
+            'input': dict({
+              'title': 'Input',
+            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
@@ -6080,9 +6094,31 @@
           'summary': 'Get Stats',
         }),
       }),
+      '/api/triggers/eventgrid/bulk_provision': dict({
+        'post': dict({
+          'description': '''
+            Idempotently provision Event Grid subscriptions for every active blob source
+            that is referenced by a queue-mode pipeline. Useful for backfilling existing
+            deployments after enabling event-driven blob ingestion.
+          ''',
+          'operationId': 'bulk_provision_eventgrid_api_triggers_eventgrid_bulk_provision_post',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Bulk Provision Eventgrid',
+        }),
+      }),
       '/api/triggers/eventgrid/create': dict({
         'post': dict({
-          'description': 'Create an Event Grid subscription for a blob storage source.',
+          'description': 'Create (or update) an Event Grid subscription for a blob storage source.',
           'operationId': 'create_eventgrid_subscription_api_triggers_eventgrid_create_post',
           'requestBody': dict({
             'content': dict({
@@ -7456,6 +7492,15 @@
     ),
     tuple(
       'post',
+      '/api/triggers/eventgrid/bulk_provision',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'post',
       '/api/triggers/eventgrid/create',
       list([
       ]),
@@ -7645,6 +7690,13 @@
         }),
         'ValidationError': dict({
           'properties': dict({
+            'ctx': dict({
+              'title': 'Context',
+              'type': 'object',
+            }),
+            'input': dict({
+              'title': 'Input',
+            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
@@ -9741,6 +9793,13 @@
         }),
         'ValidationError': dict({
           'properties': dict({
+            'ctx': dict({
+              'title': 'Context',
+              'type': 'object',
+            }),
+            'input': dict({
+              'title': 'Input',
+            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
