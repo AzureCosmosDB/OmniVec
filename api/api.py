@@ -960,28 +960,19 @@ PIPELINE_WORKER_BASE = DOCGROK_URL if ROUTE_PIPELINE_VIA_DOCGROK else PIPELINE_W
 SEARCH_SERVICE_URL = os.getenv("SEARCH_SERVICE_URL", "http://omnivec-search").rstrip("/")
 SEARCH_INTERNAL_TOKEN = os.getenv("SEARCH_INTERNAL_TOKEN", "")
 
-# Feature flag: set by postprovision based on infra.enableBlobSource (Bicep).
-# When disabled, Service Bus + Storage + Event Grid are NOT deployed, so we
-# must refuse any request that would require them:
-#   - creating an azure-blob source (needs Storage + Event Grid)
-#   - creating/switching a pipeline to queue mode (needs Service Bus)
-_BLOB_SOURCE_ENABLED = os.getenv("ENABLE_BLOB_SOURCE", "true").strip().lower() not in ("false", "0", "no", "")
+# Blob source infra (Storage + Service Bus + Event Grid) is always provisioned
+# by Bicep — Option A (always-provision). The legacy ENABLE_BLOB_SOURCE env var
+# is no longer required; we keep the flag pinned to True so the helper below is
+# a no-op kept for backward compatibility with callers.
+_BLOB_SOURCE_ENABLED = True
 
 
 def _require_blob_source_enabled(kind: str) -> None:
-    """Raise 400 when the deployment was provisioned without blob/service bus.
+    """No-op (kept for backward compatibility).
 
-    kind is a short label used in the error message ('source', 'queue-mode pipeline').
+    Blob source infrastructure is always provisioned, so this never rejects.
     """
-    if not _BLOB_SOURCE_ENABLED:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Cannot create {kind}: this deployment was provisioned with "
-                "blob source disabled (no Storage Account / Service Bus / Event Grid). "
-                "Re-deploy with OMNIVEC_ENABLE_BLOB_SOURCE=true to enable."
-            ),
-        )
+    return
 
 
 # HTTP Client
