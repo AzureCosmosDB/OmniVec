@@ -204,6 +204,16 @@ class Source(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+    @field_validator("triggers", mode="before")
+    @classmethod
+    def _normalize_triggers(cls, v):
+        # Tolerate legacy persisted form "eventgrid" (no hyphen) so existing
+        # documents created before the TriggerType enum was tightened still
+        # validate. New writes use the canonical "event-grid".
+        if isinstance(v, list):
+            return [("event-grid" if t == "eventgrid" else t) for t in v]
+        return v
+
 
 class Destination(BaseModel):
     id: Optional[str] = None

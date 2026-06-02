@@ -4306,8 +4306,8 @@ async def _provision_blob_eventgrid(source) -> dict:
 
         store = get_store()
         source.triggers = source.triggers or []
-        if "eventgrid" not in source.triggers:
-            source.triggers.append("eventgrid")
+        if "event-grid" not in source.triggers and "eventgrid" not in source.triggers:
+            source.triggers.append("event-grid")
         store.upsert(_to_doc(source, "source"))
 
         return {
@@ -4418,8 +4418,8 @@ async def delete_eventgrid_subscription(source_id: str):
 
         EVENT_GRID_SUBSCRIPTIONS.pop(account_name, None)
 
-        if source.triggers and "eventgrid" in source.triggers:
-            source.triggers.remove("eventgrid")
+        if source.triggers and ("eventgrid" in source.triggers or "event-grid" in source.triggers):
+            source.triggers = [t for t in source.triggers if t not in ("eventgrid", "event-grid")]
         store.upsert(_to_doc(source, "source"))
 
         return {"success": True, "message": f"Event Grid subscription '{subscription_name}' deleted"}
