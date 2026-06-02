@@ -95,7 +95,8 @@ public class MsSqlDestinationWriter : IDestinationWriter
                         cmd.Parameters.AddWithValue("id", result.DocId);
                     cmd.Parameters.AddWithValue("embedding", embeddingJson);
                     cmd.Parameters.AddWithValue("pipeline_id", result.PipelineId);
-                    cmd.Parameters.AddWithValue("pipeline_name", result.PipelineName);
+                    cmd.Parameters.AddWithValue("pipeline_name",
+                        result.ShouldIncludeMetadata("pipeline_name") ? result.PipelineName : "");
                     cmd.Parameters.AddWithValue("content_hash", result.ContentHash);
                     cmd.Parameters.AddWithValue("embedded_at", DateTime.UtcNow);
                     cmd.Parameters.AddWithValue("gen", result.PipelineGeneration ?? "");
@@ -110,9 +111,13 @@ public class MsSqlDestinationWriter : IDestinationWriter
                         else
                             mergeCmd.Parameters.AddWithValue("id", result.DocId);
                         mergeCmd.Parameters.AddWithValue("embedding", embeddingJson);
-                        mergeCmd.Parameters.AddWithValue("content", result.Content);
+                        // StoreContent: null/true → write content (back-compat default);
+                        // false → write empty string.
+                        mergeCmd.Parameters.AddWithValue("content",
+                            result.StoreContent == false ? "" : result.Content);
                         mergeCmd.Parameters.AddWithValue("pipeline_id", result.PipelineId);
-                        mergeCmd.Parameters.AddWithValue("pipeline_name", result.PipelineName);
+                        mergeCmd.Parameters.AddWithValue("pipeline_name",
+                            result.ShouldIncludeMetadata("pipeline_name") ? result.PipelineName : "");
                         mergeCmd.Parameters.AddWithValue("content_hash", result.ContentHash);
                         mergeCmd.Parameters.AddWithValue("embedded_at", DateTime.UtcNow);
                         mergeCmd.Parameters.AddWithValue("gen", result.PipelineGeneration ?? "");

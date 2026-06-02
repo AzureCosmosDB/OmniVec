@@ -3320,6 +3320,18 @@ async def create_pipeline(req: CreatePipelineRequest):
             raise HTTPException(status_code=400, detail="chunk_overlap must be less than chunk_size")
         chunk_config = ChunkConfig(**cc)
 
+    # store_content only makes sense when source and destination are different
+    # stores. For same-store (inline) pipelines, the original content is
+    # already present on the document — opting in would be misleading.
+    if req.store_content is True and _is_inline_compatible(store, req.sources, dest_doc):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "store_content=true is not applicable when the source and destination "
+                "point at the same store; the original document content is already preserved."
+            ),
+        )
+
     # Pipeline always starts PAUSED â€” user must explicitly resume/run to activate
     initial_status = PipelineStatus.PAUSED
 
@@ -3338,6 +3350,9 @@ async def create_pipeline(req: CreatePipelineRequest):
         processing_mode=req.processing_mode,
         content_strategy=content_strategy,
         chunk_config=chunk_config,
+        store_content=req.store_content,
+        content_field=(req.content_field or "content"),
+        metadata_fields=req.metadata_fields,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
@@ -3412,6 +3427,19 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if req.chunk_config and pipeline.content_strategy == "chunk":
         from models import ChunkConfig
         pipeline.chunk_config = ChunkConfig(**req.chunk_config)
+    # store_content: same constraint as create — reject true on same-store pipelines.
+    if req.store_content is True and _is_inline_compatible(store, pipeline.sources, dest_doc):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "store_content=true is not applicable when the source and destination "
+                "point at the same store; the original document content is already preserved."
+            ),
+        )
+    pipeline.store_content = req.store_content
+    if req.content_field is not None:
+        pipeline.content_field = req.content_field or "content"
+    pipeline.metadata_fields = req.metadata_fields
     pipeline.updated_at = datetime.utcnow()
 
     await asyncio.to_thread(store.upsert, _to_doc(pipeline, "pipeline"))

@@ -314,13 +314,6 @@
         }),
         'ValidationError': dict({
           'properties': dict({
-            'ctx': dict({
-              'title': 'Context',
-              'type': 'object',
-            }),
-            'input': dict({
-              'title': 'Input',
-            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
@@ -1361,6 +1354,17 @@
               ]),
               'title': 'Chunk Config',
             }),
+            'content_field': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Content Field',
+            }),
             'content_strategy': dict({
               'default': 'truncate',
               'title': 'Content Strategy',
@@ -1391,6 +1395,20 @@
               'title': 'Docgrok Pipeline',
               'type': 'string',
             }),
+            'metadata_fields': dict({
+              'anyOf': list([
+                dict({
+                  'items': dict({
+                    'type': 'string',
+                  }),
+                  'type': 'array',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Metadata Fields',
+            }),
             'metadata_mapping': dict({
               'additionalProperties': dict({
                 'type': 'string',
@@ -1420,6 +1438,17 @@
               }),
               'title': 'Sources',
               'type': 'array',
+            }),
+            'store_content': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'boolean',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Store Content',
             }),
             'vector_index_path': dict({
               'title': 'Vector Index Path',
@@ -1516,6 +1545,19 @@
             'name',
           ]),
           'title': 'CreateTokenRequest',
+          'type': 'object',
+        }),
+        'DestinationEnableRequest': dict({
+          'properties': dict({
+            'enabled': dict({
+              'title': 'Enabled',
+              'type': 'boolean',
+            }),
+          }),
+          'required': list([
+            'enabled',
+          ]),
+          'title': 'DestinationEnableRequest',
           'type': 'object',
         }),
         'DestinationType': dict({
@@ -1767,13 +1809,6 @@
         }),
         'ValidationError': dict({
           'properties': dict({
-            'ctx': dict({
-              'title': 'Context',
-              'type': 'object',
-            }),
-            'input': dict({
-              'title': 'Input',
-            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
@@ -2843,7 +2878,6 @@
       }),
       '/api/destinations/{dest_id}': dict({
         'delete': dict({
-          'description': 'Delete a destination.',
           'operationId': 'delete_destination_api_destinations__dest_id__delete',
           'parameters': list([
             dict({
@@ -2916,6 +2950,62 @@
           }),
           'summary': 'Get Destination',
         }),
+        'patch': dict({
+          'description': '''
+            Toggle a destination's enabled flag.
+            
+            On flip false->true we re-probe the destination so users get an
+            immediate, actionable error if the underlying container/table is
+            still not ready (e.g. no vector embedding policy). On success we
+            also reset every pipeline that targets this destination so the
+            change-feed replays any documents that were skipped while the
+            destination was disabled.
+          ''',
+          'operationId': 'patch_destination_api_destinations__dest_id__patch',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'dest_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Dest Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/DestinationEnableRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Patch Destination',
+        }),
         'put': dict({
           'description': 'Update a destination.',
           'operationId': 'update_destination_api_destinations__dest_id__put',
@@ -2962,6 +3052,55 @@
             }),
           }),
           'summary': 'Update Destination',
+        }),
+      }),
+      '/api/destinations/{dest_id}/sample': dict({
+        'get': dict({
+          'description': 'Return a small random sample of vectors stored in this destination.',
+          'operationId': 'sample_destination_api_destinations__dest_id__sample_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'dest_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Dest Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'query',
+              'name': 'limit',
+              'required': False,
+              'schema': dict({
+                'default': 5,
+                'title': 'Limit',
+                'type': 'integer',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Sample Destination',
         }),
       }),
       '/api/destinations/{dest_id}/test': dict({
@@ -4640,7 +4779,12 @@
       }),
       '/api/models/{model_id}/test': dict({
         'post': dict({
-          'description': "Test a model's connectivity and auth by making a small embed call.",
+          'description': '''
+            Test a model's connectivity and auth by making a small embed call.
+            
+            Accepts either the model id (mdl-ext-... / mdl-native-...) or the
+            user-visible model name. CLI passes the name; UI passes the id.
+          ''',
           'operationId': 'test_model_health_api_models__model_id__test_post',
           'parameters': list([
             dict({
@@ -4808,8 +4952,26 @@
       }),
       '/api/pipelines': dict({
         'get': dict({
-          'description': 'List all pipelines.',
+          'description': '''
+            List all pipelines.
+            
+            include_stats=false skips per-pipeline Cosmos count aggregation, which is
+            expensive and only useful for the UI. Internal consumers (CFP, agents) that
+            only need pipeline config should pass include_stats=false for a fast path.
+          ''',
           'operationId': 'list_pipelines_api_pipelines_get',
+          'parameters': list([
+            dict({
+              'in': 'query',
+              'name': 'include_stats',
+              'required': False,
+              'schema': dict({
+                'default': True,
+                'title': 'Include Stats',
+                'type': 'boolean',
+              }),
+            }),
+          ]),
           'responses': dict({
             '200': dict({
               'content': dict({
@@ -4819,6 +4981,16 @@
                 }),
               }),
               'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
             }),
           }),
           'summary': 'List Pipelines',
@@ -5217,6 +5389,11 @@
             
             Sets pipeline status to ACTIVE. The controller picks up active pipelines
             and starts creating PENDING jobs; workers process them.
+            
+            If the target destination is currently disabled (e.g. because the cosmos
+            container had no vector policy at create time), we re-probe it here and
+            auto-enable on success. This saves the user from having to manually flip
+            the destination back on after fixing the underlying resource.
           ''',
           'operationId': 'run_pipeline_api_pipelines__pipeline_id__run_post',
           'parameters': list([
@@ -5681,6 +5858,55 @@
             }),
           }),
           'summary': 'Create Source Deployments',
+        }),
+      }),
+      '/api/sources/{source_id}/sample': dict({
+        'get': dict({
+          'description': 'Return a small random sample of items currently in the source.',
+          'operationId': 'sample_source_api_sources__source_id__sample_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'source_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Source Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'query',
+              'name': 'limit',
+              'required': False,
+              'schema': dict({
+                'default': 5,
+                'title': 'Limit',
+                'type': 'integer',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Sample Source',
         }),
       }),
       '/api/sources/{source_id}/sync': dict({
@@ -6342,10 +6568,33 @@
       ]),
     ),
     tuple(
+      'patch',
+      '/api/destinations/{dest_id}',
+      list([
+        'dest_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'put',
       '/api/destinations/{dest_id}',
       list([
         'dest_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/destinations/{dest_id}/sample',
+      list([
+        'dest_id',
+        'limit',
       ]),
       list([
         '200',
@@ -6909,9 +7158,11 @@
       'get',
       '/api/pipelines',
       list([
+        'include_stats',
       ]),
       list([
         '200',
+        '422',
       ]),
     ),
     tuple(
@@ -7141,6 +7392,18 @@
       'post',
       '/api/sources/{source_id}/deployments',
       list([
+        'source_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/sources/{source_id}/sample',
+      list([
+        'limit',
         'source_id',
       ]),
       list([
@@ -7382,13 +7645,6 @@
         }),
         'ValidationError': dict({
           'properties': dict({
-            'ctx': dict({
-              'title': 'Context',
-              'type': 'object',
-            }),
-            'input': dict({
-              'title': 'Input',
-            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
@@ -7639,6 +7895,194 @@
             }),
           }),
           'summary': 'Get Registry Model',
+          'tags': list([
+            'admin',
+          ]),
+        }),
+      }),
+      '/admin/models/registry/{model_id}/api-key': dict({
+        'delete': dict({
+          'description': 'Revoke the api_key for a model (crypto-shred its envelope).',
+          'operationId': 'revoke_model_api_key_admin_models_registry__model_id__api_key_delete',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'model_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Model Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Revoke Model Api Key',
+          'tags': list([
+            'admin',
+          ]),
+        }),
+        'get': dict({
+          'description': 'Return metadata about whether an api_key is configured (never the key).',
+          'operationId': 'get_model_api_key_status_admin_models_registry__model_id__api_key_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'model_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Model Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Get Model Api Key Status',
+          'tags': list([
+            'admin',
+          ]),
+        }),
+        'put': dict({
+          'description': '''
+            Rotate (or set) the api_key for an external model.
+            
+            Body: {"api_key": "<new-key>"}
+            The plaintext key is never logged and never persisted in cleartext.
+          ''',
+          'operationId': 'rotate_model_api_key_admin_models_registry__model_id__api_key_put',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'model_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Model Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  'additionalProperties': True,
+                  'title': 'Request',
+                  'type': 'object',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Rotate Model Api Key',
+          'tags': list([
+            'admin',
+          ]),
+        }),
+      }),
+      '/admin/models/registry/{model_id}/healthcheck': dict({
+        'post': dict({
+          'description': '''
+            Verify an external model is reachable and the stored api_key is valid.
+            
+            api.py callers used to fetch model config (with a redacted api_key) and
+            call the upstream themselves — that always 401'd. Doing the probe here
+            means the decrypted key never leaves docgrok and we still get an
+            authoritative reachability + auth signal.
+          ''',
+          'operationId': 'healthcheck_model_admin_models_registry__model_id__healthcheck_post',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'model_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Model Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Healthcheck Model',
           'tags': list([
             'admin',
           ]),
@@ -8259,6 +8703,50 @@
       ]),
     ),
     tuple(
+      'delete',
+      '/admin/models/registry/{model_id}/api-key',
+      list([
+        'model_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/admin/models/registry/{model_id}/api-key',
+      list([
+        'model_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'put',
+      '/admin/models/registry/{model_id}/api-key',
+      list([
+        'model_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/admin/models/registry/{model_id}/healthcheck',
+      list([
+        'model_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'post',
       '/admin/models/{name}/disable',
       list([
@@ -8591,6 +9079,18 @@
               'description': 'Caller-supplied label; echoed in results',
               'title': 'Id',
               'type': 'string',
+            }),
+            'pipeline_id': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'description': 'Source pipeline id; surfaced into result metadata for blob preview',
+              'title': 'Pipeline Id',
             }),
             'return_fields': dict({
               'items': dict({
@@ -9241,13 +9741,6 @@
         }),
         'ValidationError': dict({
           'properties': dict({
-            'ctx': dict({
-              'title': 'Context',
-              'type': 'object',
-            }),
-            'input': dict({
-              'title': 'Input',
-            }),
             'loc': dict({
               'items': dict({
                 'anyOf': list([
