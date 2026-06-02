@@ -426,6 +426,7 @@ public class SourceWatcher : ISourceWatcher
                             PipelineGeneration = pipeline.Generation,
                             SourceContentFields = contentFields,
                             StoreContent = pipeline.StoreContent,
+                            ContentField = pipeline.ContentField,
                             MetadataFields = pipeline.MetadataFields,
                         };
                         if (att is not null)

@@ -2633,12 +2633,19 @@
                             </div>
                             <div class="form-group" id="pl-store-content-group" style="display: none;">
                                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                    <input type="checkbox" name="store_content">
+                                    <input type="checkbox" name="store_content" id="pl-store-content-checkbox" onchange="togglePipelineContentFieldInput(this.checked)">
                                     <span>Store embedded text on destination document</span>
                                 </label>
                                 <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
                                     Persists the (possibly truncated) text that was actually sent to the embedding model. Only applies when source and destination are different stores. Be mindful of Cosmos's 2 MB per-document limit when enabling for large blobs — consider Chunk strategy.
                                 </small>
+                                <div id="pl-content-field-group" style="display: none; margin-top: 10px; padding-left: 24px;">
+                                    <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Destination field name</label>
+                                    <input type="text" class="form-input" name="content_field" placeholder="content" style="max-width: 280px;">
+                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                        Name of the field on the destination document that receives the embedded text. Defaults to <code>content</code>. (Cosmos only — SQL writers use the destination's <code>content_column</code>.)
+                                    </small>
+                                </div>
                             </div>
                             <div class="form-group">
                                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -5749,15 +5756,22 @@
                         const sameContainerGen = isPipelineSameContainer(pipeline);
                         let html = '';
                         if (!sameContainerGen) {
+                            const cfVal = (pipeline.content_field || 'content');
+                            const scChecked = pipeline.store_content === true;
                             html += `
                     <div class="form-group">
                         <label style="display: flex; align-items: center; gap: 12px; cursor: pointer; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
-                            <input type="checkbox" id="pip-detail-store-content" ${pipeline.store_content === true ? 'checked' : ''} style="width: 20px; height: 20px;" onchange="markPipelineDetailDirty()">
+                            <input type="checkbox" id="pip-detail-store-content" ${scChecked ? 'checked' : ''} style="width: 20px; height: 20px;" onchange="markPipelineDetailDirty(); document.getElementById('pip-detail-content-field-group').style.display = this.checked ? 'block' : 'none';">
                             <div>
                                 <div style="font-weight: 500; font-size: 14px;">Store Embedded Text on Destination</div>
                                 <div style="font-size: 13px; color: var(--text-tertiary);">Persists the (already-truncated) text actually sent to the embedding model alongside the vector. Only applies when source ≠ destination. Mind Cosmos's 2 MB doc limit.</div>
                             </div>
                         </label>
+                        <div id="pip-detail-content-field-group" style="display: ${scChecked ? 'block' : 'none'}; margin-top: 10px; padding-left: 44px;">
+                            <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Destination field name</label>
+                            <input type="text" class="form-input" id="pip-detail-content-field" value="${cfVal.replace(/"/g,'&quot;')}" placeholder="content" style="max-width: 280px;" onchange="markPipelineDetailDirty()" oninput="markPipelineDetailDirty()">
+                            <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">Defaults to <code>content</code>. Cosmos only.</small>
+                        </div>
                     </div>`;
                         }
                         const mdEnabled = !Array.isArray(pipeline.metadata_fields) || pipeline.metadata_fields.length > 0;
@@ -6827,6 +6841,11 @@
             if (docIdEl) editedPipelineData.doc_id_pattern = docIdEl.value;
             const storeContentEl = document.getElementById('pip-detail-store-content');
             if (storeContentEl) editedPipelineData.store_content = storeContentEl.checked;
+            const contentFieldEl = document.getElementById('pip-detail-content-field');
+            if (contentFieldEl) {
+                const v = (contentFieldEl.value || '').trim();
+                editedPipelineData.content_field = v || 'content';
+            }
             const mdEnabledEl = document.getElementById('pip-detail-metadata-enabled');
             if (mdEnabledEl) {
                 if (!mdEnabledEl.checked) {
@@ -6902,6 +6921,7 @@
                         chunk_config: editedPipelineData.chunk_config || pipeline.chunk_config || null,
                         processing_mode: editedPipelineData.processing_mode || pipeline.processing_mode || 'inline',
                         store_content: editedPipelineData.store_content !== undefined ? editedPipelineData.store_content : pipeline.store_content,
+                        content_field: editedPipelineData.content_field !== undefined ? editedPipelineData.content_field : (pipeline.content_field || 'content'),
                         metadata_fields: editedPipelineData.metadata_fields !== undefined ? editedPipelineData.metadata_fields : pipeline.metadata_fields,
                     })
                 });
@@ -7415,6 +7435,8 @@
                 if (!visible) {
                     const cb = storeContentGroup.querySelector('input[name="store_content"]');
                     if (cb) cb.checked = false;
+                    const cfGroup = document.getElementById('pl-content-field-group');
+                    if (cfGroup) cfGroup.style.display = 'none';
                 }
             }
 
@@ -7717,6 +7739,11 @@
         function togglePipelineMetadataFields(enabled) {
             const section = document.getElementById('pl-metadata-fields-section');
             if (section) section.style.display = enabled ? 'block' : 'none';
+        }
+
+        function togglePipelineContentFieldInput(enabled) {
+            const group = document.getElementById('pl-content-field-group');
+            if (group) group.style.display = enabled ? 'block' : 'none';
         }
 
         function isPipelineSameContainer(pipeline) {
@@ -8163,6 +8190,10 @@
             const storeContentEl = form.querySelector('input[name="store_content"]');
             if (storeContentEl && storeContentEl.checked) {
                 data.store_content = true;
+                const cfRaw = (form.querySelector('input[name="content_field"]')?.value || '').trim();
+                if (cfRaw && cfRaw !== 'content') {
+                    data.content_field = cfRaw;
+                }
             }
             // metadata_fields: omit (null = server default = all) when switch is on AND all options are checked.
             const mdEnabled = form.querySelector('input[name="metadata_enabled"]')?.checked !== false;

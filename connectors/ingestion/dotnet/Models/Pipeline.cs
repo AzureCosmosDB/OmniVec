@@ -43,6 +43,13 @@ public class Pipeline
     [JsonPropertyName("store_content")]
     public bool? StoreContent { get; set; }
 
+    /// <summary>
+    /// Destination field name that receives the embedded text when
+    /// store_content is true. Cosmos only. Default "content".
+    /// </summary>
+    [JsonPropertyName("content_field")]
+    public string? ContentField { get; set; }
+
     [JsonPropertyName("metadata_fields")]
     public List<string>? MetadataFields { get; set; }
 }

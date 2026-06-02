@@ -97,7 +97,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                     // pipeline opts in. Default for Cosmos is to NOT store it
                     // (preserves prior behavior + avoids the 2 MB doc limit).
                     if (doc.StoreContent == true && !string.IsNullOrEmpty(doc.Content))
-                        ops.Add(PatchOperation.Set("/content", doc.Content));
+                        ops.Add(PatchOperation.Set($"/{doc.ContentField ?? "content"}", doc.Content));
                     batch.PatchItem(doc.DocId, ops);
                 }
 
@@ -187,7 +187,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                         item["source_id"] = doc.SourceId;
                     // Opt-in: persist the (already-truncated) embedded text.
                     if (doc.StoreContent == true && !string.IsNullOrEmpty(doc.Content))
-                        item["content"] = doc.Content;
+                        item[doc.ContentField ?? "content"] = doc.Content;
                     // Copy source content fields with their original names (e.g. "summary", "title")
                     if (doc.SourceContentFields != null)
                     {
