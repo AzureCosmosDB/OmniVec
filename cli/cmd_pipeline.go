@@ -346,7 +346,17 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 		mu.Unlock()
 	}()
 
-	// 4. Trigger / event bus status
+	// 4. Trigger / event bus status (only relevant in queue mode)
+	procMode, _ := pipeline["processing_mode"].(string)
+	if procMode != "" && procMode != "queue" {
+		mu.Lock()
+		results = append(results, healthResult{
+			name:   "Triggers / Event Bus",
+			status: "ok",
+			detail: fmt.Sprintf("not applicable in %s mode", procMode),
+		})
+		mu.Unlock()
+	} else {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -375,7 +385,9 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 		}
 
 		details := []string{}
-		// Check blob sources
+		// Check blob sources — eventgrid is an optional push optimization;
+		// the .NET watcher always live-polls, so absence is not an error.
+		blobNotConfigured := false
 		if blobs, ok := triggerStatus["blob_sources"].([]any); ok {
 			for _, b := range blobs {
 				bm, ok := b.(map[string]any)
@@ -387,10 +399,16 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 					continue
 				}
 				st, _ := bm["status"].(string)
-				details = append(details, fmt.Sprintf("eventgrid(%s): %s", id, st))
+				if st == "not_configured" {
+					blobNotConfigured = true
+					details = append(details, fmt.Sprintf("eventgrid(%s): not_configured (live-poll active)", id))
+				} else {
+					details = append(details, fmt.Sprintf("eventgrid(%s): %s", id, st))
+				}
 			}
 		}
-		// Check cosmosdb sources
+		// Check cosmosdb sources — change feed is required for live updates
+		cosmosNotConfigured := false
 		if cosmos, ok := triggerStatus["cosmosdb_sources"].([]any); ok {
 			for _, cs := range cosmos {
 				cm, ok := cs.(map[string]any)
@@ -403,6 +421,9 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 				}
 				st, _ := cm["status"].(string)
 				details = append(details, fmt.Sprintf("change_feed(%s): %s", id, st))
+				if st == "not_configured" {
+					cosmosNotConfigured = true
+				}
 			}
 		}
 
@@ -411,18 +432,16 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 			details = append(details, fmt.Sprintf("queue_size: %d", int(qs)))
 		}
 
+		_ = blobNotConfigured
 		if len(details) == 0 {
 			r.status = "ok"
 			r.detail = "no triggers for this pipeline"
 		} else {
 			r.status = "ok"
 			r.detail = strings.Join(details, ", ")
-			// Mark error if any source is "not_configured"
-			for _, d := range details {
-				if strings.Contains(d, "not_configured") {
-					r.status = "error"
-					break
-				}
+			// Only cosmos change feed missing is a real problem; blob falls back to polling.
+			if cosmosNotConfigured {
+				r.status = "error"
 			}
 		}
 
@@ -430,6 +449,7 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 		results = append(results, r)
 		mu.Unlock()
 	}()
+	}
 
 	wg.Wait()
 
@@ -473,7 +493,7 @@ func toInt(v any) int {
 func newPipelineCreateCmd() *cobra.Command {
 	var name, description, source, destination, model, contentFields, vectorIndexPath string
 	var contentMode, contentStrategy, fileTypes, docIdPattern string
-	var processingMode, embeddingField string
+	var processingMode, embeddingField, storeContent, metadataFields, contentField string
 	var chunkSize, chunkOverlap int
 	var processExisting bool
 	cmd := &cobra.Command{
@@ -556,6 +576,35 @@ func newPipelineCreateCmd() *cobra.Command {
 			if docIdPattern != "" {
 				body["doc_id_pattern"] = docIdPattern
 			}
+			switch strings.ToLower(strings.TrimSpace(storeContent)) {
+			case "":
+				// unset → omit (server default = per-destination)
+			case "true", "1", "yes":
+				body["store_content"] = true
+			case "false", "0", "no":
+				body["store_content"] = false
+			default:
+				exitErr("--store-content must be true or false")
+			}
+			if cf := strings.TrimSpace(contentField); cf != "" {
+				body["content_field"] = cf
+			}
+			if mf := strings.TrimSpace(metadataFields); mf != "" {
+				switch strings.ToLower(mf) {
+				case "all", "default":
+					// unset → server default (write all optional fields)
+				case "none":
+					body["metadata_fields"] = []string{}
+				default:
+					parts := []string{}
+					for _, f := range strings.Split(mf, ",") {
+						if t := strings.TrimSpace(f); t != "" {
+							parts = append(parts, t)
+						}
+					}
+					body["metadata_fields"] = parts
+				}
+			}
 			c := getClient()
 			data, err := c.Post("/api/pipelines", body)
 			if err != nil {
@@ -589,12 +638,16 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&processingMode, "processing-mode", "", "Processing mode: inline or queue (default queue)")
 	cmd.Flags().StringVar(&embeddingField, "embedding-field", "", "Destination field to write embedding into (default: embedding)")
 	cmd.Flags().BoolVar(&processExisting, "process-existing", true, "Process existing documents on creation")
+	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false (default: per-destination — Postgres/MsSql=true, Cosmos=false)")
+	cmd.Flags().StringVar(&contentField, "content-field", "", "Destination field name receiving the embedded text (Cosmos only; default: content)")
+	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all' (default), 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
 	return cmd
 }
 
 func newPipelineUpdateCmd() *cobra.Command {
 	var name, description, destination, model string
-	var contentFields, contentStrategy, docIdPattern, vectorIndexPath string
+	var contentFields, contentStrategy, docIdPattern, vectorIndexPath, storeContent, contentField string
+	var metadataFields string
 	var chunkSize, chunkOverlap int
 	cmd := &cobra.Command{
 		Use:   "update <pipeline-id>",
@@ -658,6 +711,35 @@ func newPipelineUpdateCmd() *cobra.Command {
 				}
 				body["chunk_config"] = cc
 			}
+			switch strings.ToLower(strings.TrimSpace(storeContent)) {
+			case "":
+				// unset → keep existing value
+			case "true", "1", "yes":
+				body["store_content"] = true
+			case "false", "0", "no":
+				body["store_content"] = false
+			default:
+				exitErr("--store-content must be true or false")
+			}
+			if cf := strings.TrimSpace(contentField); cf != "" {
+				body["content_field"] = cf
+			}
+			if mf := strings.TrimSpace(metadataFields); mf != "" {
+				switch strings.ToLower(mf) {
+				case "all", "default":
+					body["metadata_fields"] = nil
+				case "none":
+					body["metadata_fields"] = []string{}
+				default:
+					parts := []string{}
+					for _, f := range strings.Split(mf, ",") {
+						if t := strings.TrimSpace(f); t != "" {
+							parts = append(parts, t)
+						}
+					}
+					body["metadata_fields"] = parts
+				}
+			}
 			data, err := c.Put(fmt.Sprintf("/api/pipelines/%s", id), body)
 			if err != nil {
 				exitErr("%v", err)
@@ -681,6 +763,9 @@ func newPipelineUpdateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 0, "Chunk overlap in characters")
 	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path")
+	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false")
+	cmd.Flags().StringVar(&contentField, "content-field", "", "Destination field name receiving the embedded text (Cosmos only)")
+	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all', 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
 	return cmd
 }
 

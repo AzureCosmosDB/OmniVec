@@ -33,6 +33,25 @@ public class Pipeline
 
     [JsonPropertyName("vector_index_path")]
     public string VectorIndexPath { get; set; } = "embedding";
+
+    /// <summary>
+    /// Optional opt-in to persist the (already-truncated) embedded text on the
+    /// destination document alongside the vector. null = per-destination
+    /// default (Postgres/MsSql write content; Cosmos does not). true = always
+    /// write. false = never write.
+    /// </summary>
+    [JsonPropertyName("store_content")]
+    public bool? StoreContent { get; set; }
+
+    /// <summary>
+    /// Destination field name that receives the embedded text when
+    /// store_content is true. Cosmos only. Default "content".
+    /// </summary>
+    [JsonPropertyName("content_field")]
+    public string? ContentField { get; set; }
+
+    [JsonPropertyName("metadata_fields")]
+    public List<string>? MetadataFields { get; set; }
 }
 
 public class PipelineSource

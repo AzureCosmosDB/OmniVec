@@ -2631,6 +2631,46 @@
                                     Truncate embeds full text as one vector. Chunk splits text and creates multiple vector documents.
                                 </small>
                             </div>
+                            <div class="form-group" id="pl-store-content-group" style="display: none;">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" name="store_content" id="pl-store-content-checkbox" onchange="togglePipelineContentFieldInput(this.checked)">
+                                    <span>Store embedded text on destination document</span>
+                                </label>
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    Persists the (possibly truncated) text that was actually sent to the embedding model. Only applies when source and destination are different stores. Be mindful of Cosmos's 2 MB per-document limit when enabling for large blobs — consider Chunk strategy.
+                                </small>
+                                <div id="pl-content-field-group" style="display: none; margin-top: 10px; padding-left: 24px;">
+                                    <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Destination field name</label>
+                                    <input type="text" class="form-input" name="content_field" placeholder="content" style="max-width: 280px;">
+                                    <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                        Name of the field on the destination document that receives the embedded text. Defaults to <code>content</code>. (Cosmos only — SQL writers use the destination's <code>content_column</code>.)
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" name="metadata_enabled" id="pl-metadata-enabled" checked onchange="togglePipelineMetadataFields(this.checked)">
+                                    <span>Write pipeline metadata on destination documents</span>
+                                </label>
+                                <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
+                                    Required fields (<code>pipeline_id</code>, <code>source_id</code>, <code>content_hash</code>, <code>embedded_at</code>, <code>pipeline_generation</code>) are always written — they are needed for purge, dashboards, and CFP validation. Uncheck to drop the optional fields below.
+                                </small>
+                                <div id="pl-metadata-fields-section" style="margin-top: 10px; padding: 10px; background: var(--bg-tertiary); border-radius: var(--radius-md); display: block;">
+                                    <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; font-weight: 600; letter-spacing: 0.5px;">Optional Metadata Fields</div>
+                                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+                                        <input type="checkbox" name="md_pipeline_name" checked>
+                                        <span style="font-size: 13px;"><code>pipeline_name</code> — human-readable pipeline name</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+                                        <input type="checkbox" name="md_embedding_dims" checked>
+                                        <span style="font-size: 13px;"><code>embedding_dims</code> — vector dimensionality</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                        <input type="checkbox" name="md_source_ref" checked>
+                                        <span style="font-size: 13px;"><code>source_ref</code> — original source reference (Cosmos upsert only)</span>
+                                    </label>
+                                </div>
+                            </div>
                             <div id="chunk-config-section" style="display: none; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); margin-top: 8px;">
                                 <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 10px; font-weight: 600; letter-spacing: 0.5px;">Chunk Settings</div>
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
@@ -5712,6 +5752,51 @@
                             </div>
                         </label>
                     </div>
+                    ${(() => {
+                        const sameContainerGen = isPipelineSameContainer(pipeline);
+                        let html = '';
+                        if (!sameContainerGen) {
+                            const cfVal = (pipeline.content_field || 'content');
+                            const scChecked = pipeline.store_content === true;
+                            html += `
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 12px; cursor: pointer; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
+                            <input type="checkbox" id="pip-detail-store-content" ${scChecked ? 'checked' : ''} style="width: 20px; height: 20px;" onchange="markPipelineDetailDirty(); document.getElementById('pip-detail-content-field-group').style.display = this.checked ? 'block' : 'none';">
+                            <div>
+                                <div style="font-weight: 500; font-size: 14px;">Store Embedded Text on Destination</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Persists the (already-truncated) text actually sent to the embedding model alongside the vector. Only applies when source ≠ destination. Mind Cosmos's 2 MB doc limit.</div>
+                            </div>
+                        </label>
+                        <div id="pip-detail-content-field-group" style="display: ${scChecked ? 'block' : 'none'}; margin-top: 10px; padding-left: 44px;">
+                            <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px;">Destination field name</label>
+                            <input type="text" class="form-input" id="pip-detail-content-field" value="${cfVal.replace(/"/g,'&quot;')}" placeholder="content" style="max-width: 280px;" onchange="markPipelineDetailDirty()" oninput="markPipelineDetailDirty()">
+                            <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">Defaults to <code>content</code>. Cosmos only.</small>
+                        </div>
+                    </div>`;
+                        }
+                        const mdEnabled = !Array.isArray(pipeline.metadata_fields) || pipeline.metadata_fields.length > 0;
+                        const fields = ['pipeline_name', 'embedding_dims', 'source_ref'];
+                        const isChecked = (f) => !Array.isArray(pipeline.metadata_fields) || pipeline.metadata_fields.includes(f);
+                        html += `
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 12px; cursor: pointer; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
+                            <input type="checkbox" id="pip-detail-metadata-enabled" ${mdEnabled ? 'checked' : ''} style="width: 20px; height: 20px;" onchange="markPipelineDetailDirty(); document.getElementById('pip-detail-metadata-fields').style.display = this.checked ? 'block' : 'none';">
+                            <div>
+                                <div style="font-weight: 500; font-size: 14px;">Write Pipeline Metadata on Destination</div>
+                                <div style="font-size: 13px; color: var(--text-tertiary);">Required fields (<code>pipeline_id</code>, <code>source_id</code>, <code>content_hash</code>, <code>embedded_at</code>, <code>pipeline_generation</code>) are always written. Uncheck to drop the optional fields below.</div>
+                            </div>
+                        </label>
+                        <div id="pip-detail-metadata-fields" style="margin-top: 10px; padding: 12px 16px; background: var(--bg-tertiary); border-radius: 8px; display: ${mdEnabled ? 'block' : 'none'};">
+                            <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 8px; font-weight: 600;">Optional Metadata Fields</div>
+                            ${fields.map(f => `
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+                                <input type="checkbox" class="pip-detail-md-field" data-field="${f}" ${isChecked(f) ? 'checked' : ''} onchange="markPipelineDetailDirty()">
+                                <span style="font-size: 13px;"><code>${f}</code></span>
+                            </label>`).join('')}
+                        </div>
+                    </div>`;
+                        return html;
+                    })()}
                     <div style="margin-top: 20px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; font-size: 13px;">
                             <div>
@@ -6626,6 +6711,10 @@
             })();
 
             const triggerCheck = (async () => {
+                const procMode = pipeline.processing_mode || 'queue';
+                if (procMode !== 'queue') {
+                    return { name: 'Triggers / Event Bus', ok: true, detail: `not applicable in ${procMode} mode`, type: 'trigger' };
+                }
                 try {
                     const res = await apiFetch('/api/triggers/status');
                     const data = await res.json();
@@ -6635,13 +6724,17 @@
 
                     for (const b of (data.blob_sources || [])) {
                         if (pipSourceIds.has(b.id)) {
-                            details.push(`EventGrid(${b.name || b.id}): ${b.status}`);
-                            if (b.status === 'not_configured') hasError = true;
+                            if (b.status === 'not_configured') {
+                                details.push(`EventGrid(${b.name || b.id}): not_configured (live-poll active)`);
+                            } else {
+                                details.push(`EventGrid(${b.name || b.id}): ${b.status}`);
+                            }
                         }
                     }
                     for (const c of (data.cosmosdb_sources || [])) {
                         if (pipSourceIds.has(c.id)) {
                             details.push(`ChangeFeed(${c.name || c.id}): ${c.status}`);
+                            if (c.status === 'not_configured') hasError = true;
                         }
                     }
                     if (data.event_queue_size !== undefined) details.push(`Queue size: ${data.event_queue_size}`);
@@ -6754,6 +6847,25 @@
             const storeTextEl = document.getElementById('pip-detail-store-text');
             const docIdEl = document.getElementById('pip-detail-doc-id-pattern');
             if (docIdEl) editedPipelineData.doc_id_pattern = docIdEl.value;
+            const storeContentEl = document.getElementById('pip-detail-store-content');
+            if (storeContentEl) editedPipelineData.store_content = storeContentEl.checked;
+            const contentFieldEl = document.getElementById('pip-detail-content-field');
+            if (contentFieldEl) {
+                const v = (contentFieldEl.value || '').trim();
+                editedPipelineData.content_field = v || 'content';
+            }
+            const mdEnabledEl = document.getElementById('pip-detail-metadata-enabled');
+            if (mdEnabledEl) {
+                if (!mdEnabledEl.checked) {
+                    editedPipelineData.metadata_fields = [];
+                } else {
+                    const selected = Array.from(document.querySelectorAll('.pip-detail-md-field'))
+                        .filter(cb => cb.checked).map(cb => cb.dataset.field);
+                    const all = ['pipeline_name', 'embedding_dims', 'source_ref'];
+                    // null = server default = write all; only send explicit list if it's a strict subset
+                    editedPipelineData.metadata_fields = selected.length === all.length ? null : selected;
+                }
+            }
             if (csEl && csEl.value === 'chunk') {
                 const chunkDocIdEl = document.getElementById('pip-detail-chunk-doc-id-pattern');
                 editedPipelineData.chunk_config = {
@@ -6816,6 +6928,9 @@
                         content_strategy: editedPipelineData.content_strategy || pipeline.content_strategy || 'truncate',
                         chunk_config: editedPipelineData.chunk_config || pipeline.chunk_config || null,
                         processing_mode: editedPipelineData.processing_mode || pipeline.processing_mode || 'inline',
+                        store_content: editedPipelineData.store_content !== undefined ? editedPipelineData.store_content : pipeline.store_content,
+                        content_field: editedPipelineData.content_field !== undefined ? editedPipelineData.content_field : (pipeline.content_field || 'content'),
+                        metadata_fields: editedPipelineData.metadata_fields !== undefined ? editedPipelineData.metadata_fields : pipeline.metadata_fields,
                     })
                 });
 
@@ -7320,6 +7435,19 @@
                 }
             }
 
+            // Show store_content checkbox only when both are selected AND they are different stores
+            const storeContentGroup = document.getElementById('pl-store-content-group');
+            if (storeContentGroup) {
+                const visible = bothSelected && !sameContainer;
+                storeContentGroup.style.display = visible ? 'block' : 'none';
+                if (!visible) {
+                    const cb = storeContentGroup.querySelector('input[name="store_content"]');
+                    if (cb) cb.checked = false;
+                    const cfGroup = document.getElementById('pl-content-field-group');
+                    if (cfGroup) cfGroup.style.display = 'none';
+                }
+            }
+
             // Enforce processing-mode compatibility based on source/destination:
             //   not both selected -> leave both enabled (user hasn't decided yet)
             //   same store        -> only 'inline' allowed (queue is redundant)
@@ -7614,6 +7742,33 @@
 
         function toggleChunkConfig(value) {
             document.getElementById('chunk-config-section').style.display = value === 'chunk' ? 'block' : 'none';
+        }
+
+        function togglePipelineMetadataFields(enabled) {
+            const section = document.getElementById('pl-metadata-fields-section');
+            if (section) section.style.display = enabled ? 'block' : 'none';
+        }
+
+        function togglePipelineContentFieldInput(enabled) {
+            const group = document.getElementById('pl-content-field-group');
+            if (group) group.style.display = enabled ? 'block' : 'none';
+        }
+
+        function isPipelineSameContainer(pipeline) {
+            if (!pipeline) return false;
+            const pipSrc = pipeline.sources?.[0];
+            const srcObj = sources.find(s => s.id === pipSrc?.source_id);
+            const destObj = destinations.find(d => d.id === pipeline.destination_id);
+            if (!srcObj || !destObj) return false;
+            const sameCosmos = srcObj.type === 'cosmosdb' && destObj.type === 'cosmosdb-vector' &&
+                (srcObj.config?.endpoint || '').replace(/\/$/, '') === (destObj.config?.endpoint || '').replace(/\/$/, '') &&
+                srcObj.config?.database === destObj.config?.database &&
+                srcObj.config?.container === destObj.config?.container;
+            const samePg = srcObj.type === 'postgresql' && destObj.type === 'pgvector' &&
+                srcObj.config?.host === destObj.config?.host &&
+                srcObj.config?.database === destObj.config?.database &&
+                srcObj.config?.table === destObj.config?.table;
+            return sameCosmos || samePg;
         }
 
         function showPipelineStep(step) {
@@ -8040,6 +8195,25 @@
                 processing_mode: processingMode,
             };
             data.doc_id_pattern = formData.get('doc_id_pattern') || '{source}';
+            const storeContentEl = form.querySelector('input[name="store_content"]');
+            if (storeContentEl && storeContentEl.checked) {
+                data.store_content = true;
+                const cfRaw = (form.querySelector('input[name="content_field"]')?.value || '').trim();
+                if (cfRaw && cfRaw !== 'content') {
+                    data.content_field = cfRaw;
+                }
+            }
+            // metadata_fields: omit (null = server default = all) when switch is on AND all options are checked.
+            const mdEnabled = form.querySelector('input[name="metadata_enabled"]')?.checked !== false;
+            if (!mdEnabled) {
+                data.metadata_fields = [];
+            } else {
+                const opts = ['pipeline_name', 'embedding_dims', 'source_ref'];
+                const selected = opts.filter(o => form.querySelector(`input[name="md_${o}"]`)?.checked);
+                if (selected.length !== opts.length) {
+                    data.metadata_fields = selected; // explicit subset
+                }
+            }
             if (contentStrategy === 'chunk') {
                 data.chunk_config = {
                     chunk_size: parseInt(formData.get('chunk_size')) || 1000,
