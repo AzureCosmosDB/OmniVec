@@ -473,7 +473,7 @@ func toInt(v any) int {
 func newPipelineCreateCmd() *cobra.Command {
 	var name, description, source, destination, model, contentFields, vectorIndexPath string
 	var contentMode, contentStrategy, fileTypes, docIdPattern string
-	var processingMode, embeddingField string
+	var processingMode, embeddingField, storeContent, metadataFields string
 	var chunkSize, chunkOverlap int
 	var processExisting bool
 	cmd := &cobra.Command{
@@ -556,6 +556,32 @@ func newPipelineCreateCmd() *cobra.Command {
 			if docIdPattern != "" {
 				body["doc_id_pattern"] = docIdPattern
 			}
+			switch strings.ToLower(strings.TrimSpace(storeContent)) {
+			case "":
+				// unset → omit (server default = per-destination)
+			case "true", "1", "yes":
+				body["store_content"] = true
+			case "false", "0", "no":
+				body["store_content"] = false
+			default:
+				exitErr("--store-content must be true or false")
+			}
+			if mf := strings.TrimSpace(metadataFields); mf != "" {
+				switch strings.ToLower(mf) {
+				case "all", "default":
+					// unset → server default (write all optional fields)
+				case "none":
+					body["metadata_fields"] = []string{}
+				default:
+					parts := []string{}
+					for _, f := range strings.Split(mf, ",") {
+						if t := strings.TrimSpace(f); t != "" {
+							parts = append(parts, t)
+						}
+					}
+					body["metadata_fields"] = parts
+				}
+			}
 			c := getClient()
 			data, err := c.Post("/api/pipelines", body)
 			if err != nil {
@@ -589,12 +615,15 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&processingMode, "processing-mode", "", "Processing mode: inline or queue (default queue)")
 	cmd.Flags().StringVar(&embeddingField, "embedding-field", "", "Destination field to write embedding into (default: embedding)")
 	cmd.Flags().BoolVar(&processExisting, "process-existing", true, "Process existing documents on creation")
+	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false (default: per-destination — Postgres/MsSql=true, Cosmos=false)")
+	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all' (default), 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
 	return cmd
 }
 
 func newPipelineUpdateCmd() *cobra.Command {
 	var name, description, destination, model string
-	var contentFields, contentStrategy, docIdPattern, vectorIndexPath string
+	var contentFields, contentStrategy, docIdPattern, vectorIndexPath, storeContent string
+	var metadataFields string
 	var chunkSize, chunkOverlap int
 	cmd := &cobra.Command{
 		Use:   "update <pipeline-id>",
@@ -658,6 +687,32 @@ func newPipelineUpdateCmd() *cobra.Command {
 				}
 				body["chunk_config"] = cc
 			}
+			switch strings.ToLower(strings.TrimSpace(storeContent)) {
+			case "":
+				// unset → keep existing value
+			case "true", "1", "yes":
+				body["store_content"] = true
+			case "false", "0", "no":
+				body["store_content"] = false
+			default:
+				exitErr("--store-content must be true or false")
+			}
+			if mf := strings.TrimSpace(metadataFields); mf != "" {
+				switch strings.ToLower(mf) {
+				case "all", "default":
+					body["metadata_fields"] = nil
+				case "none":
+					body["metadata_fields"] = []string{}
+				default:
+					parts := []string{}
+					for _, f := range strings.Split(mf, ",") {
+						if t := strings.TrimSpace(f); t != "" {
+							parts = append(parts, t)
+						}
+					}
+					body["metadata_fields"] = parts
+				}
+			}
 			data, err := c.Put(fmt.Sprintf("/api/pipelines/%s", id), body)
 			if err != nil {
 				exitErr("%v", err)
@@ -681,6 +736,8 @@ func newPipelineUpdateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&chunkOverlap, "chunk-overlap", 0, "Chunk overlap in characters")
 	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path")
+	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false")
+	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all', 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
 	return cmd
 }
 

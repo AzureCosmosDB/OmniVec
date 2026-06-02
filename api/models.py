@@ -2,8 +2,16 @@
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union  # lgtm[py/unused-import]
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
+
+
+# Optional informational metadata fields that destination writers may persist
+# on each vector document. Functionally-required fields (id, vector,
+# pipeline_id, source_id, content_hash, embedded_at, cfp_generation /
+# pipeline_generation) are NOT toggleable because purge-by-source, CFP
+# regeneration, and dashboards depend on them.
+ALLOWED_METADATA_FIELDS = {"pipeline_name", "embedding_dims", "source_ref"}
 
 
 # =============================================================================
@@ -237,10 +245,37 @@ class Pipeline(BaseModel):
     content_strategy: str = "truncate"  # "truncate" or "chunk"
     chunk_config: Optional[ChunkConfig] = None
     doc_id_pattern: str = "{source}"  # Template for vector doc IDs: {source}, {source_ref}, {source_hash}, {pipeline}, {job}
+    # When set, controls whether the (possibly truncated) text actually sent
+    # to the embedding model is persisted to the destination alongside the
+    # vector. None = per-destination default (Postgres/MsSql write content,
+    # Cosmos does not — back-compat). True = always write. False = never write.
+    # Only meaningful for queue-mode pipelines; ignored when source and
+    # destination point at the same store (inline mode preserves the original
+    # document content already).
+    store_content: Optional[bool] = None
+    # Optional informational metadata fields to persist on the destination
+    # document. None (default) → write all supported optional fields
+    # (back-compat). [] → write none of them. List subset → write only those.
+    # Allowed values: see ALLOWED_METADATA_FIELDS.
+    metadata_fields: Optional[List[str]] = None
     generation: str = "1"  # Incremented on reset - docs with mismatched generation are reprocessed
     reset_at: Optional[datetime] = None  # Set when pipeline is reset for reprocessing
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    @field_validator("metadata_fields")
+    @classmethod
+    def _validate_metadata_fields(cls, v):
+        if v is None:
+            return v
+        bad = [f for f in v if f not in ALLOWED_METADATA_FIELDS]
+        if bad:
+            raise ValueError(
+                f"Unknown metadata_fields {bad}. Allowed: {sorted(ALLOWED_METADATA_FIELDS)}"
+            )
+        # de-dupe while preserving order
+        seen = set()
+        return [f for f in v if not (f in seen or seen.add(f))]
 
 
 # =============================================================================
@@ -328,6 +363,25 @@ class CreatePipelineRequest(BaseModel):
     content_strategy: str = "truncate"  # "truncate" or "chunk"
     chunk_config: Optional[Dict[str, Any]] = None
     doc_id_pattern: str = "{source}"  # Template for vector doc IDs: {source}, {source_ref}, {source_hash}, {pipeline}, {job}
+    # Optional: persist the embedded text on the destination document.
+    # See Pipeline.store_content for full semantics.
+    store_content: Optional[bool] = None
+    # Optional informational metadata fields to persist on destination docs.
+    # See Pipeline.metadata_fields for semantics and ALLOWED_METADATA_FIELDS.
+    metadata_fields: Optional[List[str]] = None
+
+    @field_validator("metadata_fields")
+    @classmethod
+    def _validate_metadata_fields(cls, v):
+        if v is None:
+            return v
+        bad = [f for f in v if f not in ALLOWED_METADATA_FIELDS]
+        if bad:
+            raise ValueError(
+                f"Unknown metadata_fields {bad}. Allowed: {sorted(ALLOWED_METADATA_FIELDS)}"
+            )
+        seen = set()
+        return [f for f in v if not (f in seen or seen.add(f))]
 
 
 class SyncSourceRequest(BaseModel):

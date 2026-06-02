@@ -478,6 +478,8 @@ public class PostgresCdcWatcher : ISourceWatcher
                 ContentHash = d.contentHash,
                 PartitionKeyValue = d.docId,
                 PipelineGeneration = Generation,
+                StoreContent = pipeline.StoreContent,
+                MetadataFields = pipeline.MetadataFields,
             }).ToList();
 
             await _sbPublisher!.PublishBatchAsync(messages, ct);

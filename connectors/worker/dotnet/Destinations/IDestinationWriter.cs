@@ -11,7 +11,18 @@ public record EmbeddingResult(
     string PipelineGeneration,
     string Content,
     Dictionary<string, string>? SourceContentFields = null,
-    string SourceId = "");
+    string SourceId = "",
+    bool? StoreContent = null,
+    List<string>? MetadataFields = null)
+{
+    /// <summary>
+    /// Returns true when the named optional metadata field should be written.
+    /// Convention: null MetadataFields → write everything (back-compat default).
+    /// Empty list → write nothing optional.
+    /// </summary>
+    public bool ShouldIncludeMetadata(string field)
+        => MetadataFields is null || MetadataFields.Contains(field);
+}
 
 public interface IDestinationWriter
 {

@@ -296,6 +296,8 @@ public class BlobSourceWatcher : ISourceWatcher
                     ContentHash = contentHash,
                     PartitionKeyValue = blob.Name,
                     PipelineGeneration = Generation,
+                    StoreContent = pipeline.StoreContent,
+                    MetadataFields = pipeline.MetadataFields,
                     ContentType = "blob_ref",
                     BlobAccountUrl = _source.BlobAccountUrl,
                     BlobConnectionString = _source.BlobConnectionString,

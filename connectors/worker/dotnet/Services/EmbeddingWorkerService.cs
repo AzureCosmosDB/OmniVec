@@ -254,7 +254,9 @@ public class EmbeddingWorkerService : BackgroundService
                     PipelineGeneration: msg.PipelineGeneration,
                     Content: chunkText,
                     SourceContentFields: new Dictionary<string, string>(),
-                    SourceId: msg.SourceId));
+                    SourceId: msg.SourceId,
+                    StoreContent: msg.StoreContent,
+                    MetadataFields: msg.MetadataFields));
             }
 
             // Write to destination
@@ -345,7 +347,9 @@ public class EmbeddingWorkerService : BackgroundService
                 PipelineGeneration: msg.PipelineGeneration,
                 Content: "",
                 SourceContentFields: new Dictionary<string, string>(),
-                SourceId: msg.SourceId);
+                SourceId: msg.SourceId,
+                StoreContent: msg.StoreContent,
+                MetadataFields: msg.MetadataFields);
             var key = $"{msg.DestinationType}|{msg.DestinationId}";
             if (!resultsByDest.TryGetValue(key, out var bucket))
             {
@@ -446,7 +450,9 @@ public class EmbeddingWorkerService : BackgroundService
                     PipelineGeneration: msg.PipelineGeneration,
                     Content: msg.Content,
                     SourceContentFields: msg.SourceContentFields,
-                    SourceId: msg.SourceId);
+                    SourceId: msg.SourceId,
+                    StoreContent: msg.StoreContent,
+                    MetadataFields: msg.MetadataFields);
 
                 var destKey = msg.DestinationId;
                 if (!resultsByDest.ContainsKey(destKey))
