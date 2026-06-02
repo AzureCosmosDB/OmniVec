@@ -28,7 +28,7 @@ param gpuNodeVmSize string = 'Standard_NC6s_v3'
 @description('Initial GPU node count (0 to skip GPU pool). String for the same reason as systemNodeCount.')
 param gpuNodeCount string = '0'
 
-@description('Enable blob storage as a document source (creates Storage Account, Service Bus, Event Grid). String form: "true"/"false"/"1"/"0"/"yes"/"no" (case-insensitive). Empty -> defaults to true.')
+@description('DEPRECATED: Storage Account, Service Bus, and Event Grid are now always provisioned. This parameter is kept for backward compatibility with existing azd envs and is ignored.')
 param enableBlobSource string = 'true'
 
 // =============================================================================
@@ -41,14 +41,9 @@ param enableBlobSource string = 'true'
 
 var _sysCountClean  = trim(replace(replace(systemNodeCount, '\u{FEFF}', ''), '\r', ''))
 var _gpuCountClean  = trim(replace(replace(gpuNodeCount,    '\u{FEFF}', ''), '\r', ''))
-var _blobClean      = toLower(trim(replace(replace(enableBlobSource, '\u{FEFF}', ''), '\r', '')))
 
 var systemNodeCountInt   = empty(_sysCountClean) ? 2 : int(_sysCountClean)
 var gpuNodeCountInt      = empty(_gpuCountClean) ? 0 : int(_gpuCountClean)
-// Empty -> preserves prior default (true). Explicit false-tokens -> false. Anything else -> true.
-var enableBlobSourceBool = empty(_blobClean)
-  ? true
-  : !(_blobClean == 'false' || _blobClean == '0' || _blobClean == 'no')
 
 // =============================================================================
 // NAMING (must be computed before resource group to avoid circular dependency)
@@ -117,8 +112,9 @@ module keyvault 'modules/keyvault.bicep' = {
   }
 }
 
-// 4. Storage Account (only when blob source is enabled)
-module storage 'modules/storage.bicep' = if (enableBlobSourceBool) {
+// 4. Storage Account (always provisioned — required for blob sources and
+//    queue-mode processing without a separate redeploy).
+module storage 'modules/storage.bicep' = {
   name: 'storage'
   scope: rg
   params: {
@@ -129,8 +125,9 @@ module storage 'modules/storage.bicep' = if (enableBlobSourceBool) {
   }
 }
 
-// 4. Service Bus (only when blob source is enabled)
-module servicebus 'modules/servicebus.bicep' = if (enableBlobSourceBool) {
+// 4. Service Bus (always provisioned — needed for the queue processing
+//    mode embeddings topic and for blob-event push delivery).
+module servicebus 'modules/servicebus.bicep' = {
   name: 'servicebus'
   scope: rg
   params: {
@@ -141,15 +138,16 @@ module servicebus 'modules/servicebus.bicep' = if (enableBlobSourceBool) {
   }
 }
 
-// 5. Event Grid (only when blob source is enabled)
-module eventgrid 'modules/eventgrid.bicep' = if (enableBlobSourceBool) {
+// 5. Event Grid (always provisioned — used for blob-event push delivery
+//    to the Service Bus queue).
+module eventgrid 'modules/eventgrid.bicep' = {
   name: 'eventgrid'
   scope: rg
   params: {
     topicName: '${prefix}-blob-events-${resourceToken}'
     location: location
     tags: tags
-    storageAccountId: storage!.outputs.accountId
+    storageAccountId: storage.outputs.accountId
     identityPrincipalId: identity.outputs.principalId
   }
 }
@@ -233,12 +231,14 @@ output AZURE_ACR_LOGIN_SERVER string = acr.outputs.loginServer
 output AZURE_ACR_NAME string = acr.outputs.registryName
 output AZURE_COSMOS_ENDPOINT string = cosmosdb.outputs.endpoint
 output AZURE_COSMOS_ACCOUNT_NAME string = cosmosdb.outputs.accountName
-output AZURE_ENABLE_BLOB_SOURCE string = enableBlobSourceBool ? 'true' : 'false'
-output AZURE_STORAGE_ACCOUNT_NAME string = enableBlobSourceBool ? storage!.outputs.accountName : ''
-output AZURE_STORAGE_BLOB_ENDPOINT string = enableBlobSourceBool ? storage!.outputs.primaryBlobEndpoint : ''
-output AZURE_STORAGE_QUEUE_ENDPOINT string = enableBlobSourceBool ? storage!.outputs.queueEndpoint : ''
-output AZURE_SERVICEBUS_NAMESPACE string = enableBlobSourceBool ? servicebus!.outputs.namespaceName : ''
-output AZURE_SERVICEBUS_ENDPOINT string = enableBlobSourceBool ? servicebus!.outputs.endpoint : ''
+// AZURE_ENABLE_BLOB_SOURCE retained as a constant 'true' so any downstream
+// hook / script that still reads it gets a safe value.
+output AZURE_ENABLE_BLOB_SOURCE string = 'true'
+output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.accountName
+output AZURE_STORAGE_BLOB_ENDPOINT string = storage.outputs.primaryBlobEndpoint
+output AZURE_STORAGE_QUEUE_ENDPOINT string = storage.outputs.queueEndpoint
+output AZURE_SERVICEBUS_NAMESPACE string = servicebus.outputs.namespaceName
+output AZURE_SERVICEBUS_ENDPOINT string = servicebus.outputs.endpoint
 output AZURE_IDENTITY_CLIENT_ID string = identity.outputs.clientId
 output AZURE_KEYVAULT_URI string = keyvault.outputs.vaultUri
 output AZURE_APPINSIGHTS_CONNECTION_STRING string = appinsights.outputs.connectionString

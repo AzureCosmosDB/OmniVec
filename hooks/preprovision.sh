@@ -186,7 +186,6 @@ apply_quickstart_defaults() {
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
-  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "true" < /dev/null
 }
 
 # a2: Fail fast when we would need to prompt but can't. Far better than a
@@ -210,7 +209,6 @@ require_tty_or_preset() {
   printf "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms\n" >&2
   printf "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2\n" >&2
   printf "         azd env set OMNIVEC_GPU_NODE_COUNT 0\n" >&2
-  printf "         azd env set OMNIVEC_ENABLE_BLOB_SOURCE true\n" >&2
   printf "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless\n" >&2
   exit 1
 }
@@ -320,39 +318,17 @@ RG_EXISTS=$(printf '%s' "$RG_EXISTS" | tr -d '\r\n ')
 if [ "$RG_EXISTS" = "true" ]; then
   printf "\n${GREEN}Existing deployment detected (RG: ${RG_NAME}). Importing config from tags...${NC}\n"
 
-  # Snapshot user's blob-source override BEFORE tag import overwrites azd env.
-  # User can request a flip via either `azd env set OMNIVEC_ENABLE_BLOB_SOURCE true`
-  # or `azd env set AZURE_ENABLE_BLOB_SOURCE true`. OMNIVEC_ takes precedence.
-  _user_blob_override=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
-  if [ -z "$_user_blob_override" ]; then
-    _user_blob_override=$(azd_get AZURE_ENABLE_BLOB_SOURCE)
-  fi
-  _user_blob_override=$(printf '%s' "$_user_blob_override" | tr -d '\r\n ' | tr '[:upper:]' '[:lower:]')
-
   for _pair in \
     "omnivec-sys-sku:OMNIVEC_SYSTEM_NODE_VM_SIZE" \
     "omnivec-sys-count:OMNIVEC_SYSTEM_NODE_COUNT" \
     "omnivec-gpu-sku:OMNIVEC_GPU_NODE_VM_SIZE" \
     "omnivec-gpu-count:OMNIVEC_GPU_NODE_COUNT" \
     "omnivec-metadata:OMNIVEC_METADATA_STORE" \
-    "omnivec-blob:OMNIVEC_ENABLE_BLOB_SOURCE" \
     "omnivec-build:OMNIVEC_BUILD_MODE"; do
     _tag=$(echo "$_pair" | cut -d: -f1)
     _env=$(echo "$_pair" | cut -d: -f2)
     _val=$(az group show --name "$RG_NAME" --query "tags.\"$_tag\"" -o tsv < /dev/null 2>/dev/null || true)
     _val=$(printf '%s' "$_val" | tr -d '\r\n')
-    # Honor user-intended blob-source flip instead of re-importing the stale tag.
-    if [ "$_env" = "OMNIVEC_ENABLE_BLOB_SOURCE" ] && [ -n "$_user_blob_override" ] && [ "$_user_blob_override" != "$(printf '%s' "$_val" | tr '[:upper:]' '[:lower:]')" ]; then
-      # Validate flip direction (blocks destructive on->off; allows off->on).
-      if command -v preflight_blob_flip_guard >/dev/null 2>&1; then
-        if ! preflight_blob_flip_guard "$RG_NAME" "$_user_blob_override"; then
-          exit 1
-        fi
-      fi
-      azd env set "$_env" "$_user_blob_override" < /dev/null 2>/dev/null
-      printf "  ${_env} = ${_user_blob_override} ${YELLOW}(user override; tag was '${_val}')${NC}\n"
-      continue
-    fi
     if [ -n "$_val" ]; then
       azd env set "$_env" "$_val" < /dev/null 2>/dev/null
       printf "  ${_env} = ${_val}\n"
@@ -386,34 +362,21 @@ setup_mode=${setup_mode:-1}
 
 if [ "$setup_mode" = "1" ]; then
   printf "\n${GREEN}Applying recommended defaults:${NC}\n"
-  # Honor a pre-set blob-source preference (either var name) so users can opt out
-  # of blob ingestion via `azd env set` before `azd up`.
-  _qs_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
-  if [ -z "$_qs_blob" ]; then
-    _qs_blob=$(azd_get AZURE_ENABLE_BLOB_SOURCE)
-  fi
-  _qs_blob=${_qs_blob:-true}
   azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
   azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
-  azd env set OMNIVEC_ENABLE_BLOB_SOURCE  "$_qs_blob" < /dev/null
   echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_B4ms"
   echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
   echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
   echo "  OMNIVEC_GPU_NODE_COUNT      = 0"
   echo "  OMNIVEC_METADATA_STORE      = cosmosdb-serverless"
-  echo "  OMNIVEC_ENABLE_BLOB_SOURCE  = $_qs_blob"
   echo ""
   echo "  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
   echo "  GPU pool: none (use Azure OpenAI for embeddings)"
   echo "  Metadata: CosmosDB Serverless"
-  if [ "$_qs_blob" = "true" ]; then
-    echo "  Blob source: enabled"
-  else
-    echo "  Blob source: disabled (CosmosDB sources only)"
-  fi
+  echo "  Blob storage source: enabled"
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
 fi
@@ -439,34 +402,6 @@ else
     *)
       printf "${GREEN}Using CosmosDB Serverless for metadata storage.${NC}\n"
       azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless" < /dev/null
-      ;;
-  esac
-fi
-
-# ── Blob storage source ─────────────────────────────────────────────────────
-
-cur_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
-if [ -n "$cur_blob" ]; then
-  printf "${GREEN}Blob source: ${cur_blob} (already set)${NC}\n"
-else
-  echo ""
-  printf "${YELLOW}Will you use Azure Blob Storage as a document source?${NC}\n"
-  echo "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
-  echo "  will be created alongside the Storage Account."
-  echo ""
-  echo "  1) Yes — enable blob source ingestion"
-  echo "  2) No  — CosmosDB sources only (skip Service Bus + Event Grid)"
-  echo ""
-  blob_choice=$(read_input "Choice [1]: ")
-  blob_choice=${blob_choice:-1}
-  case "$blob_choice" in
-    1)
-      printf "${GREEN}Blob source enabled.${NC}\n"
-      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true" < /dev/null
-      ;;
-    *)
-      printf "${GREEN}Blob source disabled.${NC}\n"
-      azd env set OMNIVEC_ENABLE_BLOB_SOURCE "false" < /dev/null
       ;;
   esac
 fi
@@ -613,7 +548,7 @@ azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count" < /dev/null
 
 # ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
 printf "\n${CYAN}Sanitizing environment values...${NC}\n"
-for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE; do
+for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE; do
   raw=$(azd_get "$key")
   if [ -n "$raw" ]; then
     clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -628,11 +563,7 @@ printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment.
 printf "${CYAN}Environment: ${AZURE_ENV_NAME}${NC}\n"
 printf "${CYAN}Each installation gets a unique resource token derived from (subscription + resource group + env name).${NC}\n"
 
-# ── b4/c2: Final preflight — quota + blob-flip guard + re-sanitize ──────────
-if command -v preflight_blob_flip_guard >/dev/null 2>&1; then
-  _want_blob=$(azd_get OMNIVEC_ENABLE_BLOB_SOURCE)
-  preflight_blob_flip_guard "$RG_NAME" "${_want_blob:-true}" || exit 1
-fi
+# ── b4/c2: Final preflight — quota + re-sanitize ────────────────────────────
 if command -v preflight_vcpu_quota >/dev/null 2>&1; then
   _sys_sku=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
   _sys_count=$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)
@@ -641,7 +572,7 @@ if command -v preflight_vcpu_quota >/dev/null 2>&1; then
   preflight_vcpu_quota "$LOCATION" "$_sys_sku" "$_sys_count" "$_gpu_sku" "$_gpu_count" || true
 fi
 if command -v preflight_sanitize_env >/dev/null 2>&1; then
-  for _k in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_ENABLE_BLOB_SOURCE OMNIVEC_METADATA_STORE; do
+  for _k in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE; do
     preflight_sanitize_env "$_k" || true
   done
 fi

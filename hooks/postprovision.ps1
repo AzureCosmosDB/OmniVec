@@ -55,8 +55,6 @@ if (-not $BUILD_MODE) {
         if ($LASTEXITCODE -eq 0) { $BUILD_MODE = "docker" } else { $BUILD_MODE = "acr" }
     } else { $BUILD_MODE = "acr" }
 }
-$ENABLE_BLOB_SOURCE = if (Get-AzdValue "AZURE_ENABLE_BLOB_SOURCE") { Get-AzdValue "AZURE_ENABLE_BLOB_SOURCE" } else { "false" }
-
 $STORAGE_ACCOUNT = Get-AzdValue "AZURE_STORAGE_ACCOUNT_NAME"
 $STORAGE_BLOB_ENDPOINT = Get-AzdValue "AZURE_STORAGE_BLOB_ENDPOINT"
 $STORAGE_QUEUE_ENDPOINT = Get-AzdValue "AZURE_STORAGE_QUEUE_ENDPOINT"
@@ -90,8 +88,8 @@ foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","CO
     }
 }
 
-if ($ENABLE_BLOB_SOURCE -eq "true" -and -not $SB_ENDPOINT) {
-    Write-Host "`e[31mMissing Service Bus endpoint while blob source is enabled.`e[0m"
+if (-not $SB_ENDPOINT) {
+    Write-Host "`e[31mMissing Service Bus endpoint output. Run 'azd provision' first.`e[0m"
     exit 1
 }
 
@@ -100,11 +98,8 @@ Write-Host "  Instance ID:     $INSTANCE_ID"
 Write-Host "  AKS cluster:     $AKS_CLUSTER"
 Write-Host "  ACR:             $ACR_LOGIN_SERVER"
 Write-Host "  CosmosDB:        $COSMOS_ENDPOINT"
-Write-Host "  Blob source:     $ENABLE_BLOB_SOURCE"
-if ($ENABLE_BLOB_SOURCE -eq "true") {
-    Write-Host "  Storage:         $STORAGE_ACCOUNT"
-    Write-Host "  Service Bus:     $SB_ENDPOINT"
-}
+Write-Host "  Storage:         $STORAGE_ACCOUNT"
+Write-Host "  Service Bus:     $SB_ENDPOINT"
 Write-Host "  Identity:        $IDENTITY_CLIENT_ID"
 Write-Host "  Build mode:      $BUILD_MODE"
 if ($DNS_LABEL_RESERVED) {
@@ -119,7 +114,6 @@ $sysCnt = Get-AzdValue "OMNIVEC_SYSTEM_NODE_COUNT"
 $gpuVm = Get-AzdValue "OMNIVEC_GPU_NODE_VM_SIZE"
 $gpuCnt = Get-AzdValue "OMNIVEC_GPU_NODE_COUNT"
 $meta = Get-AzdValue "OMNIVEC_METADATA_STORE"
-$blob = Get-AzdValue "OMNIVEC_ENABLE_BLOB_SOURCE"
 $build = Get-AzdValue "OMNIVEC_BUILD_MODE"
 az tag update --resource-id (az group show --name $RESOURCE_GROUP --query "id" -o tsv) --operation merge --tags `
     "omnivec-sys-sku=$sysVm" `
@@ -127,7 +121,6 @@ az tag update --resource-id (az group show --name $RESOURCE_GROUP --query "id" -
     "omnivec-gpu-sku=$gpuVm" `
     "omnivec-gpu-count=$gpuCnt" `
     "omnivec-metadata=$meta" `
-    "omnivec-blob=$blob" `
     "omnivec-build=$build" `
     "omnivec-instance=$INSTANCE_ID" 2>$null | Out-Null
 Write-Host "  `e[32mConfig saved to RG tags.`e[0m"
@@ -514,14 +507,12 @@ if ($LASTEXITCODE -ne 0) { Write-Host "`e[31mFailed to create namespace docgrok`
 kubectl --context $KUBE_CONTEXT label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite | Out-Null
 kubectl --context $KUBE_CONTEXT annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite | Out-Null
 
-if ($ENABLE_BLOB_SOURCE -eq "true") {
-    kubectl --context $KUBE_CONTEXT create secret generic omnivec-storage `
-        --namespace omnivec `
-        --from-literal=account-name="$STORAGE_ACCOUNT" `
-        --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" `
-        --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
-    Write-Host "  `e[32momnivec-storage secret created.`e[0m"
-}
+kubectl --context $KUBE_CONTEXT create secret generic omnivec-storage `
+    --namespace omnivec `
+    --from-literal=account-name="$STORAGE_ACCOUNT" `
+    --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" `
+    --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+Write-Host "  `e[32momnivec-storage secret created.`e[0m"
 
 # Agent internal token secret (used for agent <-> API service-to-service auth)
 $AGENT_INTERNAL_TOKEN = Get-AzdValue "OMNIVEC_AGENT_INTERNAL_TOKEN"
@@ -658,15 +649,11 @@ if ($SB_ENDPOINT) {
     )
 }
 
-if ($ENABLE_BLOB_SOURCE -eq "true") {
-    $helmArgs += @(
-        "--set", "azure.storage.accountName=$STORAGE_ACCOUNT",
-        "--set", "azure.storage.blobEndpoint=$STORAGE_BLOB_ENDPOINT",
-        "--set", "blobIngestor.enabled=true"
-    )
-} else {
-    $helmArgs += @("--set", "blobIngestor.enabled=false")
-}
+$helmArgs += @(
+    "--set", "azure.storage.accountName=$STORAGE_ACCOUNT",
+    "--set", "azure.storage.blobEndpoint=$STORAGE_BLOB_ENDPOINT",
+    "--set", "blobIngestor.enabled=true"
+)
 
 # Image tags are NOT overridden here — postprovision imports every image
 # into the env-specific ACR tagged :latest (from OMNIVEC_IMAGE_TAG / branch),

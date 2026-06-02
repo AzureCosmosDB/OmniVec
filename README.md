@@ -71,7 +71,6 @@ azd env set OMNIVEC_SYSTEM_NODE_COUNT   2
 azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
 azd env set OMNIVEC_GPU_NODE_COUNT      0
 azd env set OMNIVEC_METADATA_STORE      cosmosdb-serverless
-azd env set OMNIVEC_ENABLE_BLOB_SOURCE  true
 azd up
 ```
 
@@ -302,7 +301,6 @@ This removes the resource group, all Azure services, and local environment confi
 | `OMNIVEC_GPU_NODE_VM_SIZE` | No | `""` | GPU VM SKU (empty = no GPU pool) |
 | `OMNIVEC_GPU_NODE_COUNT` | No | `0` | GPU nodes (0 = external models only) |
 | `OMNIVEC_METADATA_STORE` | Yes | prompted | `cosmosdb-serverless` or `cosmosdb-provisioned` |
-| `OMNIVEC_ENABLE_BLOB_SOURCE` | Yes | prompted | `true` = create Storage + Service Bus + Event Grid |
 | `OMNIVEC_SHARED_REGISTRY_TOKEN` | No | prompted | Token for pre-built images (skip = build from source) |
 | `OMNIVEC_BUILD_MODE` | No | auto-detect | `acr` (cloud build) or `docker` (local build) |
 | `OMNIVEC_BUILD` | No | `false` | `true` = force building from source |

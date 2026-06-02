@@ -84,8 +84,7 @@ fi
     rc=$?
     if [ "$rc" -eq 0 ] \
        && ! printf '%s' "$out" | grep -q POSTCALL \
-       && grep -q 'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_B4ms' "$AZDENV_FILE" \
-       && grep -q 'OMNIVEC_ENABLE_BLOB_SOURCE=true' "$AZDENV_FILE"; then
+       && grep -q 'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_B4ms' "$AZDENV_FILE"; then
         exit 0
     fi
     printf 'rc=%s\nout=%s\nenv=%s\n' "$rc" "$out" "$(cat "$AZDENV_FILE")" >&2
