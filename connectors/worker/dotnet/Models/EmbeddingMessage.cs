@@ -61,6 +61,21 @@ public class EmbeddingMessage
     [JsonPropertyName("source_content_fields")]
     public Dictionary<string, string> SourceContentFields { get; set; } = new();
 
+    /// <summary>
+    /// Optional opt-in to persist the embedded text on the destination doc.
+    /// null = per-destination default; true = always write; false = never write.
+    /// </summary>
+    [JsonPropertyName("store_content")]
+    public bool? StoreContent { get; set; }
+
+    /// <summary>Destination field name receiving the embedded text (Cosmos only; default "content").</summary>
+    [JsonPropertyName("content_field")]
+    public string? ContentField { get; set; }
+
+    /// <summary>Subset of optional metadata fields to persist on destination docs (null = all, empty = none).</summary>
+    [JsonPropertyName("metadata_fields")]
+    public List<string>? MetadataFields { get; set; }
+
     [JsonPropertyName("enqueued_at")]
     public string EnqueuedAt { get; set; } = DateTime.UtcNow.ToString("O");
 

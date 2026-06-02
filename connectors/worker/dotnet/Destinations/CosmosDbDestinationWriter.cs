@@ -84,13 +84,20 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                     {
                         PatchOperation.Set($"/{vectorField}", doc.Embedding.ToList()),
                         PatchOperation.Set("/embedded_at", now),
-                        PatchOperation.Set("/embedding_dims", doc.Embedding.Length),
                         PatchOperation.Set("/pipeline_id", doc.PipelineId),
-                        PatchOperation.Set("/pipeline_name", doc.PipelineName),
                         PatchOperation.Set("/content_hash", doc.ContentHash),
                     };
+                    if (doc.ShouldIncludeMetadata("embedding_dims"))
+                        ops.Add(PatchOperation.Set("/embedding_dims", doc.Embedding.Length));
+                    if (doc.ShouldIncludeMetadata("pipeline_name"))
+                        ops.Add(PatchOperation.Set("/pipeline_name", doc.PipelineName));
                     if (!string.IsNullOrEmpty(doc.PipelineGeneration))
                         ops.Add(PatchOperation.Set("/pipeline_generation", doc.PipelineGeneration));
+                    // Persist the (already-truncated) embedded text when the
+                    // pipeline opts in. Default for Cosmos is to NOT store it
+                    // (preserves prior behavior + avoids the 2 MB doc limit).
+                    if (doc.StoreContent == true && !string.IsNullOrEmpty(doc.Content))
+                        ops.Add(PatchOperation.Set($"/{doc.ContentField ?? "content"}", doc.Content));
                     batch.PatchItem(doc.DocId, ops);
                 }
 
@@ -164,17 +171,23 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                     var item = new Dictionary<string, object>
                     {
                         ["id"] = doc.DocId,
-                        ["source_ref"] = doc.SourceRef,
                         [vectorField] = doc.Embedding.ToList(),
                         ["embedded_at"] = now,
-                        ["embedding_dims"] = doc.Embedding.Length,
                         ["pipeline_id"] = doc.PipelineId,
-                        ["pipeline_name"] = doc.PipelineName,
                         ["content_hash"] = doc.ContentHash,
                     };
+                    if (doc.ShouldIncludeMetadata("source_ref"))
+                        item["source_ref"] = doc.SourceRef;
+                    if (doc.ShouldIncludeMetadata("embedding_dims"))
+                        item["embedding_dims"] = doc.Embedding.Length;
+                    if (doc.ShouldIncludeMetadata("pipeline_name"))
+                        item["pipeline_name"] = doc.PipelineName;
                     // T-VEC-1: persist source_id so purge-by-source can target rows.
                     if (!string.IsNullOrEmpty(doc.SourceId))
                         item["source_id"] = doc.SourceId;
+                    // Opt-in: persist the (already-truncated) embedded text.
+                    if (doc.StoreContent == true && !string.IsNullOrEmpty(doc.Content))
+                        item[doc.ContentField ?? "content"] = doc.Content;
                     // Copy source content fields with their original names (e.g. "summary", "title")
                     if (doc.SourceContentFields != null)
                     {
