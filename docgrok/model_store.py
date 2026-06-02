@@ -6,7 +6,7 @@ Storage backends:
 
 Configuration via environment variables:
   MODEL_STORE_TYPE=cosmosdb
-  COSMOS_ENDPOINT=https://omnivec-cosmos.documents.azure.com:443/
+  COSMOS_ENDPOINT=https://<your-cosmos-account>.documents.azure.com:443/
   COSMOS_DATABASE=omnivec
   COSMOS_CONTAINER=metadata
 """

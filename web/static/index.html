@@ -8631,7 +8631,7 @@
             const principalMatch = error ? error.match(/principal \[([a-f0-9-]+)\]/i) : null;
             const identityId = principalMatch ? principalMatch[1] : 'YOUR_PRINCIPAL_ID';
 
-            // Extract account name from error if available (e.g., "Auth omnivec-skf-rag-test")
+            // Extract account name from error if available (e.g., "Auth <account-name>")
             const accountMatch = error ? error.match(/Auth ([a-zA-Z0-9-]+)\s*:/) : null;
 
             if (type === 'azure-blob') {
@@ -9037,7 +9037,7 @@
         }
 
         function getDestAccessGuidance(type, config) {
-            const identityId = '9c9958c0-8563-421b-a8d9-128ca937c684';
+            const identityId = (window.OMNIVEC_IDENTITY_ID || '<your-omnivec-identity-client-id>');
             if (type === 'cosmosdb-vector') {
                 const accountName = config.endpoint ? config.endpoint.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME';
                 return `

@@ -3,6 +3,8 @@
 set -e
 
 KUBE_CONTEXT="${KUBE_CONTEXT:-$(kubectl config current-context)}"
+COSMOS_ACCOUNT="${COSMOS_ACCOUNT:?COSMOS_ACCOUNT env var is required}"
+RESOURCE_GROUP="${RESOURCE_GROUP:?RESOURCE_GROUP env var is required}"
 RUN=$1
 echo "=========================================="
 echo "  RUN $RUN"
@@ -10,8 +12,8 @@ echo "=========================================="
 
 # Delete lease containers
 echo "[$(date -u +%H:%M:%S)] Deleting lease containers..."
-for lid in $(az cosmosdb sql container list --account-name omnivec-cosmos -g cdb-mvs-rg --database-name omnivec --query "[?starts_with(name, 'leases-')].name" -o tsv 2>/dev/null); do
-    az cosmosdb sql container delete --account-name omnivec-cosmos -g cdb-mvs-rg --database-name omnivec --name "$lid" --yes 2>/dev/null
+for lid in $(az cosmosdb sql container list --account-name "$COSMOS_ACCOUNT" -g "$RESOURCE_GROUP" --database-name omnivec --query "[?starts_with(name, 'leases-')].name" -o tsv 2>/dev/null); do
+    az cosmosdb sql container delete --account-name "$COSMOS_ACCOUNT" -g "$RESOURCE_GROUP" --database-name omnivec --name "$lid" --yes 2>/dev/null
 done
 
 # Reset pipeline

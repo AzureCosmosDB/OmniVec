@@ -10,6 +10,7 @@ Usage:
   python3 clear_embeddings.py bge-small-test-100k --workers 200
 """
 
+import os
 import sys  # lgtm[py/unused-import]
 import time
 import argparse
@@ -18,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 
-ENDPOINT = "https://cosmosdb-omnivec-test.documents.azure.com:443/"
+ENDPOINT = os.environ.get("COSMOS_ENDPOINT") or sys.exit("COSMOS_ENDPOINT env var is required")
 DATABASE = "documents"
 
 EMBEDDING_FIELDS = ["embedding", "embedding_dims", "embedded_at", "content_hash", "pipeline_name", "pipeline_id"]

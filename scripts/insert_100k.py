@@ -1,11 +1,13 @@
 """Insert 100K test documents into throughput-test container."""
 import asyncio
+import os
+import sys
 import time
 import uuid  # lgtm[py/unused-import]
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import DefaultAzureCredential
 
-ENDPOINT = "https://cosmosdb-omnivec-test.documents.azure.com:443/"
+ENDPOINT = os.environ.get("COSMOS_ENDPOINT") or sys.exit("COSMOS_ENDPOINT env var is required")
 DATABASE = "documents"
 CONTAINER = "throughput-test-10"
 TOTAL_DOCS = 100_000
