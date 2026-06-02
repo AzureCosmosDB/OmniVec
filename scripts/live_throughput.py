@@ -14,6 +14,7 @@ Examples:
   python3 live_throughput.py throughput-test --interval 1
 """
 
+import os
 import sys  # lgtm[py/unused-import]
 import time
 import argparse
@@ -22,7 +23,7 @@ from datetime import datetime
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 
-DEFAULT_ENDPOINT = "https://cosmosdb-omnivec-test.documents.azure.com:443/"
+DEFAULT_ENDPOINT = os.environ.get("COSMOS_ENDPOINT", "")
 DEFAULT_DATABASE = "documents"
 
 

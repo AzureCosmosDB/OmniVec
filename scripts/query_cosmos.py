@@ -15,7 +15,7 @@ import json
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 
-ENDPOINT = "https://cosmosdb-omnivec-test.documents.azure.com:443/"
+ENDPOINT = os.environ.get("COSMOS_ENDPOINT") or sys.exit("COSMOS_ENDPOINT env var is required")
 DATABASE = "documents"
 
 # Known test containers

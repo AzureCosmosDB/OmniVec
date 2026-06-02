@@ -101,3 +101,6 @@ scripts/cli-demo.ps1
 *.sarif
 
 security-report.html
+scripts/copy_cosmos_data.py
+scripts/bench_embedding
+scripts/bench_embedding_rs_bin

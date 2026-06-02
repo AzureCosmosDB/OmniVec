@@ -4787,7 +4787,9 @@ def get_changefeed_leases():
 
     result = []
     credential = DefaultAzureCredential()
-    cosmos_endpoint = os.getenv("COSMOS_ENDPOINT", "https://omnivec-cosmos.documents.azure.com:443/")
+    cosmos_endpoint = os.getenv("COSMOS_ENDPOINT")
+    if not cosmos_endpoint:
+        raise RuntimeError("COSMOS_ENDPOINT environment variable is required")
     client = CosmosClient(cosmos_endpoint, credential=credential)
     db = client.get_database_client(os.getenv("COSMOS_DATABASE", "omnivec"))
 
