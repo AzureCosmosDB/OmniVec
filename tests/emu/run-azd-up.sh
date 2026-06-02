@@ -75,7 +75,6 @@ azd env set AZURE_STORAGE_QUEUE_ENDPOINT    "https://omnivecstg${INSTANCE_ID}.qu
 azd env set AZURE_SERVICEBUS_ENDPOINT       "omnivec-sb-${INSTANCE_ID}.servicebus.windows.net"
 azd env set AZURE_APPINSIGHTS_CONNECTION_STRING "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://emu.applicationinsights.azure.com/"
 azd env set AZURE_LOG_ANALYTICS_WORKSPACE_ID "00000000-0000-0000-0000-000000000000"
-azd env set AZURE_ENABLE_BLOB_SOURCE        "true"
 azd env set OMNIVEC_BUILD_MODE              "acr"
 
 # ── Phase 3: postprovision ──────────────────────────────────────────────────

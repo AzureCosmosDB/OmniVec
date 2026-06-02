@@ -185,7 +185,6 @@ function Use-QuickstartDefaults {
         'OMNIVEC_GPU_NODE_VM_SIZE'    = ''
         'OMNIVEC_GPU_NODE_COUNT'      = '0'
         'OMNIVEC_METADATA_STORE'      = 'cosmosdb-serverless'
-        'OMNIVEC_ENABLE_BLOB_SOURCE'  = 'true'
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value 2>$null
@@ -211,7 +210,6 @@ function Require-InteractiveOrPreset {
     Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms"
     Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2"
     Write-Host "         azd env set OMNIVEC_GPU_NODE_COUNT 0"
-    Write-Host "         azd env set OMNIVEC_ENABLE_BLOB_SOURCE true"
     Write-Host "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless"
     Release-Lock
     exit 1
@@ -276,14 +274,6 @@ $rgExists = az group exists --name $rgName 2>$null
 if ("$rgExists".Trim() -eq "true") {
     Write-Host "`n`e[32mExisting deployment detected (RG: $rgName). Importing config...`e[0m"
 
-    # Snapshot user's blob-source override BEFORE tag import overwrites azd env.
-    $_userBlobOverride = (& azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)
-    if (-not $_userBlobOverride -or "$_userBlobOverride" -match "ERROR") {
-        $_userBlobOverride = (& azd env get-value AZURE_ENABLE_BLOB_SOURCE 2>$null)
-    }
-    if ("$_userBlobOverride" -match "ERROR") { $_userBlobOverride = "" }
-    $_userBlobOverride = "$_userBlobOverride".Trim().ToLower()
-
     $tags = az group show --name $rgName --query "tags" -o json 2>$null | ConvertFrom-Json
     if ($tags) {
         $tagMap = @{
@@ -292,26 +282,10 @@ if ("$rgExists".Trim() -eq "true") {
             "omnivec-gpu-sku"    = "OMNIVEC_GPU_NODE_VM_SIZE"
             "omnivec-gpu-count"  = "OMNIVEC_GPU_NODE_COUNT"
             "omnivec-metadata"   = "OMNIVEC_METADATA_STORE"
-            "omnivec-blob"       = "OMNIVEC_ENABLE_BLOB_SOURCE"
             "omnivec-build"      = "OMNIVEC_BUILD_MODE"
         }
         foreach ($tag in $tagMap.GetEnumerator()) {
             $val = $tags.PSObject.Properties[$tag.Key].Value
-            # Honor user-intended blob-source flip over stale tag.
-            if ($tag.Value -eq "OMNIVEC_ENABLE_BLOB_SOURCE" -and $_userBlobOverride -and $_userBlobOverride -ne ("$val".Trim().ToLower())) {
-                if ($_userBlobOverride -eq "false" -and ("$val".Trim().ToLower()) -eq "true") {
-                    Write-Host "`n  `e[31m✗ Cannot disable OMNIVEC_ENABLE_BLOB_SOURCE (true -> false) on existing deployment.`e[0m"
-                    Write-Host "  `e[33mThis would orphan Storage/ServiceBus/EventGrid resources.`e[0m"
-                    Write-Host "  `e[33mRun 'azd down' first, or pick a different AZURE_ENV_NAME.`e[0m"
-                    exit 1
-                }
-                if ($_userBlobOverride -eq "true" -and ("$val".Trim().ToLower()) -eq "false") {
-                    Write-Host "  `e[33m! Enabling blob source on existing deployment (false -> true). Storage/ServiceBus/EventGrid will be created.`e[0m"
-                }
-                azd env set OMNIVEC_ENABLE_BLOB_SOURCE $_userBlobOverride 2>$null
-                Write-Host "  OMNIVEC_ENABLE_BLOB_SOURCE = $_userBlobOverride `e[33m(user override; tag was '$val')`e[0m"
-                continue
-            }
             if ($val) {
                 azd env set $tag.Value "$val" 2>$null
                 Write-Host "  $($tag.Value) = $val"
@@ -346,20 +320,12 @@ $setupMode = Read-InputSafely -Prompt "Choice [1]" -Default "1"
 
 if ($setupMode -eq "1") {
     Write-Host "`n`e[32mApplying recommended defaults:`e[0m"
-    # Honor a pre-set blob-source preference (either var name)
-    $qsBlob = (& azd env get-value OMNIVEC_ENABLE_BLOB_SOURCE 2>$null)
-    if (-not $qsBlob -or "$qsBlob" -match "ERROR") {
-        $qsBlob = (& azd env get-value AZURE_ENABLE_BLOB_SOURCE 2>$null)
-    }
-    if (-not $qsBlob -or "$qsBlob" -match "ERROR") { $qsBlob = "true" }
-    $qsBlob = "$qsBlob".Trim()
     $defaults = [ordered]@{
         "OMNIVEC_SYSTEM_NODE_VM_SIZE" = "Standard_B4ms"
         "OMNIVEC_SYSTEM_NODE_COUNT"   = "2"
         "OMNIVEC_GPU_NODE_VM_SIZE"    = ""
         "OMNIVEC_GPU_NODE_COUNT"      = "0"
         "OMNIVEC_METADATA_STORE"      = "cosmosdb-serverless"
-        "OMNIVEC_ENABLE_BLOB_SOURCE"  = $qsBlob
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value
@@ -368,11 +334,7 @@ if ($setupMode -eq "1") {
     Write-Host "`n  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
     Write-Host "  GPU pool: none (use Azure OpenAI for embeddings)"
     Write-Host "  Metadata: CosmosDB Serverless"
-    if ($qsBlob -eq "true") {
-        Write-Host "  Blob source: enabled"
-    } else {
-        Write-Host "  Blob source: disabled (CosmosDB sources only)"
-    }
+    Write-Host "  Blob storage source: enabled"
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
 }
@@ -409,30 +371,6 @@ if ($curMeta) {
             Write-Host "`e[32mUsing CosmosDB Serverless for metadata storage.`e[0m"
             azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
         }
-    }
-}
-
-# -- Blob storage source --
-$curBlob = Get-EnvValue "OMNIVEC_ENABLE_BLOB_SOURCE"
-if ($curBlob) {
-    Write-Host "`e[32mBlob source: $curBlob (already set)`e[0m"
-} else {
-    $defBlobNum = "1"
-    Write-Host ""
-    Write-Host "`e[33mWill you use Azure Blob Storage as a document source?`e[0m"
-    Write-Host "  If yes, Service Bus (jobs queue) and Event Grid (blob event routing)"
-    Write-Host "  will be created alongside the Storage Account."
-    Write-Host ""
-    Write-Host "  1) Yes - enable blob source ingestion"
-    Write-Host "  2) No  - CosmosDB sources only (skip Service Bus + Event Grid)"
-    Write-Host ""
-    $blobChoice = Read-InputSafely -Prompt "Choice [$defBlobNum]" -Default $defBlobNum
-    if ($blobChoice -eq "1") {
-        Write-Host "`e[32mBlob source enabled.`e[0m"
-        azd env set OMNIVEC_ENABLE_BLOB_SOURCE "true"
-    } else {
-        Write-Host "`e[32mBlob source disabled.`e[0m"
-        azd env set OMNIVEC_ENABLE_BLOB_SOURCE "false"
     }
 }
 
@@ -636,7 +574,7 @@ azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
 
 # -- Sanitize env values: strip BOM, tabs, carriage returns --
 Write-Host "`n`e[36mSanitizing environment values...`e[0m"
-$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_ENABLE_BLOB_SOURCE", "OMNIVEC_METADATA_STORE")
+$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_METADATA_STORE")
 foreach ($key in $envKeys) {
     $ErrorActionPreference = "SilentlyContinue"
     $raw = azd env get-value $key 2>$null
