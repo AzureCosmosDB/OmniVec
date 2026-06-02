@@ -54,6 +54,14 @@ spec:
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: ENABLE_BLOB_SOURCE
               value: {{ .Values.blobIngestor.enabled | default false | quote }}
+            {{- if .Values.azure.subscriptionId }}
+            - name: AZURE_SUBSCRIPTION_ID
+              value: {{ .Values.azure.subscriptionId | quote }}
+            {{- end }}
+            {{- if .Values.azure.serviceBus.blobEventsQueueResourceId }}
+            - name: OMNIVEC_BLOB_EVENT_QUEUE_RESOURCE_ID
+              value: {{ .Values.azure.serviceBus.blobEventsQueueResourceId | quote }}
+            {{- end }}
             {{- if .Values.api.adminToken }}
             - name: OMNIVEC_ADMIN_TOKEN
               value: {{ .Values.api.adminToken | quote }}

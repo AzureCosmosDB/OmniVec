@@ -68,4 +68,21 @@ public class ChangeFeedOptions
 
     /// <summary>When true, this process watches Azure Blob sources (default: true).</summary>
     public bool EnableBlobSources { get; set; } = true;
+
+    /// <summary>When true, BlobEventConsumer consumes blob events from the
+    /// <see cref="BlobEventQueueName"/> Service Bus queue (default: false).</summary>
+    public bool BlobEventConsumerEnabled { get; set; } = false;
+
+    /// <summary>Service Bus queue name receiving Event Grid blob events
+    /// (default: "blob-events"). Used when BlobEventConsumerEnabled=true.</summary>
+    public string BlobEventQueueName { get; set; } = "blob-events";
+
+    /// <summary>When false, BlobSourceWatcher skips the Phase 2 live polling
+    /// loop (still runs Phase 1 prefill). Set false once Event Grid push
+    /// (BlobEventConsumer) is taking over live updates. Default true for
+    /// back-compat.</summary>
+    public bool BlobLivePollingEnabled { get; set; } = true;
+
+    /// <summary>Max concurrent message handlers for BlobEventConsumer.</summary>
+    public int BlobEventConsumerConcurrency { get; set; } = 8;
 }

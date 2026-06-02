@@ -47,6 +47,12 @@ spec:
               value: {{ .Values.azure.serviceBus.namespace | quote }}
             - name: ChangeFeed__ServiceBusTopicName
               value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            - name: ChangeFeed__BlobEventConsumerEnabled
+              value: {{ .Values.blobIngestor.eventGrid.consumerEnabled | default false | quote }}
+            - name: ChangeFeed__BlobEventQueueName
+              value: {{ .Values.azure.serviceBus.blobEventsQueue | default "blob-events" | quote }}
+            - name: ChangeFeed__BlobLivePollingEnabled
+              value: {{ .Values.blobIngestor.livePollingEnabled | default true | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.blobIngestor.resources | nindent 12 }}

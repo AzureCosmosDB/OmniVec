@@ -138,7 +138,16 @@ public class BlobSourceWatcher : ISourceWatcher
         if (_prefillDone)
             _logger.LogInformation("Blob prefill complete for {Source}, switching to live polling", _source.Name);
 
-        // Phase 2: Live polling — check for new/modified blobs
+        // Phase 2: Live polling — disabled when Event Grid push is taking over
+        // (BlobEventConsumer consumes BlobCreated/Renamed/Deleted from SB queue).
+        if (!_options.BlobLivePollingEnabled)
+        {
+            _logger.LogInformation(
+                "Blob live polling disabled for {Source} (BlobLivePollingEnabled=false); relying on Event Grid push",
+                _source.Name);
+            return;
+        }
+
         _lastPollTime = DateTimeOffset.UtcNow;
         while (!ct.IsCancellationRequested)
         {
