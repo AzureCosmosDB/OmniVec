@@ -125,6 +125,20 @@ public class EmbeddingWorkerService : BackgroundService
 
                 if (items.Count == 0) continue;
 
+                // Split out delete messages (BlobDeleted via Event Grid). Deletes
+                // are grouped by destination and dispatched to the writer's
+                // DeleteByRefAsync — no embedding / DocGrok call needed.
+                var deleteItems = items.Where(i => string.Equals(i.msg.MessageType, "delete",
+                    StringComparison.OrdinalIgnoreCase)).ToList();
+                items = items.Where(i => !string.Equals(i.msg.MessageType, "delete",
+                    StringComparison.OrdinalIgnoreCase)).ToList();
+                if (deleteItems.Count > 0)
+                {
+                    await ProcessDeleteBatchAsync(receiver, deleteItems, ct);
+                }
+
+                if (items.Count == 0) continue;
+
                 // Split blob_ref messages from text messages — they have different processing paths
                 var blobItems = items.Where(i => i.msg.ContentType == "blob_ref").ToList();
                 var textItems = items.Where(i => i.msg.ContentType != "blob_ref").ToList();
@@ -198,6 +212,55 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 _logger.LogError(ex, "Error in receive loop, backing off 5s");
                 try { await Task.Delay(5000, ct); } catch { break; }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Group delete-type messages by destination and dispatch to the writer's
+    /// DeleteByRefAsync. Completes the SB messages on success.
+    /// </summary>
+    private async Task ProcessDeleteBatchAsync(
+        ServiceBusReceiver receiver,
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> items,
+        CancellationToken ct)
+    {
+        var byDest = items.GroupBy(i => i.msg.DestinationId).ToList();
+        foreach (var grp in byDest)
+        {
+            var sample = grp.First().msg;
+            if (!_writers.TryGetValue(sample.DestinationType, out var writer))
+            {
+                _logger.LogWarning(
+                    "No writer for destination type {Type} — dead-lettering {Count} delete msg(s)",
+                    sample.DestinationType, grp.Count());
+                foreach (var (_, sbMsg) in grp)
+                    try { await receiver.DeadLetterMessageAsync(sbMsg, "UnknownDestinationType",
+                        $"No writer for {sample.DestinationType}", ct); } catch { }
+                continue;
+            }
+
+            var requests = grp.Select(i => new DeleteRequest(
+                SourceId: i.msg.SourceId,
+                SourceRef: i.msg.SourceRef,
+                PartitionKeyValue: string.IsNullOrEmpty(i.msg.PartitionKeyValue) ? i.msg.SourceRef : i.msg.PartitionKeyValue,
+                PipelineId: i.msg.PipelineId)).ToList();
+
+            try
+            {
+                await writer.DeleteByRefAsync(sample.DestinationConfig, requests, ct);
+                foreach (var (_, sbMsg) in grp)
+                    await receiver.CompleteMessageAsync(sbMsg, ct);
+                _logger.LogInformation(
+                    "Delete: processed {Count} ref(s) on dest {Dest}",
+                    requests.Count, sample.DestinationId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Delete batch failed for dest {Dest}, abandoning {Count} msg(s)",
+                    sample.DestinationId, grp.Count());
+                foreach (var (_, sbMsg) in grp)
+                    try { await receiver.AbandonMessageAsync(sbMsg, cancellationToken: ct); } catch { }
             }
         }
     }

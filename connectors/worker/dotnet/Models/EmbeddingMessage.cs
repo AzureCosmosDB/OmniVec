@@ -98,4 +98,9 @@ public class EmbeddingMessage
     /// <summary>Blob name (path within container)</summary>
     [JsonPropertyName("blob_name")]
     public string? BlobName { get; set; }
+
+    /// <summary>"upsert" (default) or "delete". When "delete", the worker
+    /// removes all destination documents matching source_id + source_ref.</summary>
+    [JsonPropertyName("message_type")]
+    public string MessageType { get; set; } = "upsert";
 }

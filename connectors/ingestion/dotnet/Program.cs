@@ -61,6 +61,7 @@ builder.Services.AddSingleton<ContentHasher>();
 builder.Services.AddSingleton<ServiceBusPublisher>();
 builder.Services.AddSingleton<SourceWatcherManager>();
 builder.Services.AddHostedService<SourceDiscoveryService>();
+builder.Services.AddHostedService<BlobEventConsumer>();
 
 var host = builder.Build();
 

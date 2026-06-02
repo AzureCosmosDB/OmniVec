@@ -33,4 +33,21 @@ public interface IDestinationWriter
         Dictionary<string, object> config,
         List<EmbeddingResult> results,
         CancellationToken ct);
+
+    /// <summary>
+    /// Remove all destination documents matching (source_id, source_ref) for the
+    /// given pipeline. Used by Event-Grid-driven blob delete propagation.
+    /// Default implementation is a no-op so existing writers compile without
+    /// change; destinations that can support deletes (e.g. Cosmos) override it.
+    /// </summary>
+    Task DeleteByRefAsync(
+        Dictionary<string, object> config,
+        List<DeleteRequest> requests,
+        CancellationToken ct) => Task.CompletedTask;
 }
+
+public record DeleteRequest(
+    string SourceId,
+    string SourceRef,
+    string PartitionKeyValue,
+    string PipelineId);

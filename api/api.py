@@ -3358,7 +3358,34 @@ async def create_pipeline(req: CreatePipelineRequest):
     )
     store.upsert(_to_doc(pipeline, "pipeline"))
 
-    return {"success": True, "pipeline": pipeline}
+    # Best-effort: auto-provision Event Grid subscription for any azure-blob
+    # source backing a queue-mode pipeline. Live blob events are pushed to the
+    # Service Bus blob-events queue and consumed by BlobEventConsumer in the
+    # .NET ingestion service. Errors are non-fatal (pipeline creation still
+    # succeeds; falls back to BlobSourceWatcher poll loop).
+    auto_provision_results = []
+    if str(req.processing_mode or "").lower() == "queue":
+        for ps in (req.sources or []):
+            src_doc = store.get(ps.source_id, "source")
+            if not src_doc:
+                continue
+            src = _source_from_doc(src_doc)
+            if src.type != SourceType.AZURE_BLOB or not src.enabled:
+                continue
+            try:
+                res = await _provision_blob_eventgrid(src)
+                auto_provision_results.append({"source_id": ps.source_id, **res})
+            except Exception as e:  # lgtm[py/catch-base-exception]
+                auto_provision_results.append({
+                    "source_id": ps.source_id,
+                    "success": False,
+                    "error": f"auto-provision failed: {e}",
+                })
+
+    resp = {"success": True, "pipeline": pipeline}
+    if auto_provision_results:
+        resp["eventgrid_provisioning"] = auto_provision_results
+    return resp
 
 
 @app.put("/api/pipelines/{pipeline_id}")
@@ -4101,9 +4128,210 @@ class CreateEventGridRequest(BaseModel):
     subscription_name: Optional[str] = None
 
 
+async def _resolve_subscription_id() -> Optional[str]:
+    sub_id = os.getenv("AZURE_SUBSCRIPTION_ID")
+    if sub_id:
+        return sub_id
+    try:
+        resp = await http_client.get(
+            "http://169.254.169.254/metadata/instance/compute/subscriptionId?api-version=2021-02-01",
+            headers={"Metadata": "true"},
+            timeout=5.0,
+        )
+        return resp.text.strip('"')
+    except Exception:  # lgtm[py/catch-base-exception]
+        return None
+
+
+def _ensure_system_topic_for_storage(eventgrid_client, resource_group: str, storage_account):
+    """Ensure an EG system topic exists for the storage account with SystemAssigned identity.
+
+    Returns (system_topic_name, principal_id). Idempotent.
+    """
+    try:
+        for st in eventgrid_client.system_topics.list_by_resource_group(resource_group):
+            if (st.source or "").lower() == storage_account.id.lower():
+                if not (st.identity and getattr(st.identity, "principal_id", None)):
+                    st = eventgrid_client.system_topics.begin_create_or_update(
+                        resource_group_name=resource_group,
+                        system_topic_name=st.name,
+                        system_topic_info={
+                            "location": storage_account.location,
+                            "source": storage_account.id,
+                            "topicType": "microsoft.storage.storageaccounts",
+                            "identity": {"type": "SystemAssigned"},
+                        },
+                    ).result()
+                return st.name, (st.identity.principal_id if st.identity else None)
+    except Exception:
+        pass
+
+    topic_name = f"omnivec-stg-{storage_account.name}"
+    topic = eventgrid_client.system_topics.begin_create_or_update(
+        resource_group_name=resource_group,
+        system_topic_name=topic_name,
+        system_topic_info={
+            "location": storage_account.location,
+            "source": storage_account.id,
+            "topicType": "microsoft.storage.storageaccounts",
+            "identity": {"type": "SystemAssigned"},
+        },
+    ).result()
+    return topic.name, (topic.identity.principal_id if topic.identity else None)
+
+
+async def _provision_blob_eventgrid(source) -> dict:
+    """Provision (idempotently) an Event Grid subscription for a blob source.
+
+    Preferred mode: deliver to the Service Bus queue specified by
+    ``OMNIVEC_BLOB_EVENT_QUEUE_RESOURCE_ID`` (consumed by BlobEventConsumer).
+    Fallback mode (back-compat, no env var): WebHook to the in-cluster API.
+    """
+    from azure.identity import DefaultAzureCredential
+    from azure.mgmt.eventgrid import EventGridManagementClient
+    from azure.mgmt.storage import StorageManagementClient
+    from urllib.parse import urlparse
+
+    if source.type != SourceType.AZURE_BLOB:
+        return {"success": False, "error": "Event Grid is only for blob storage sources"}
+
+    account_url = source.config.get("account_url", "")
+    parsed = urlparse(account_url)
+    account_name = parsed.netloc.split(".")[0] if parsed.netloc else ""
+    container_name = source.config.get("container", "")
+    prefix = source.config.get("prefix", "")
+
+    if not account_name or not container_name:
+        return {"success": False, "error": "Source missing account_url or container"}
+
+    subscription_id = await _resolve_subscription_id()
+    if not subscription_id:
+        return {
+            "success": False,
+            "error": "AZURE_SUBSCRIPTION_ID not set",
+            "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id),
+        }
+
+    credential = DefaultAzureCredential()
+    storage_client = StorageManagementClient(credential, subscription_id)
+    storage_account = None
+    resource_group = None
+    for account in storage_client.storage_accounts.list():
+        if account.name == account_name:
+            storage_account = account
+            parts = account.id.split("/")
+            rg_idx = parts.index("resourceGroups") + 1
+            resource_group = parts[rg_idx]
+            break
+    if not storage_account:
+        return {
+            "success": False,
+            "error": f"Storage account '{account_name}' not found in subscription",
+            "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id),
+        }
+
+    eventgrid_client = EventGridManagementClient(credential, subscription_id)
+    subscription_name = f"omnivec-{source.id}"
+
+    subject_begins = f"/blobServices/default/containers/{container_name}/"
+    if prefix:
+        subject_begins = f"/blobServices/default/containers/{container_name}/blobs/{prefix}"
+    base_filter = {
+        "includedEventTypes": [
+            "Microsoft.Storage.BlobCreated",
+            "Microsoft.Storage.BlobDeleted",
+            "Microsoft.Storage.BlobRenamed",
+        ],
+        "subjectBeginsWith": subject_begins,
+        "subjectEndsWith": "",
+        "isSubjectCaseSensitive": False,
+    }
+
+    queue_resource_id = os.getenv("OMNIVEC_BLOB_EVENT_QUEUE_RESOURCE_ID", "").strip()
+
+    try:
+        if queue_resource_id:
+            # Identity-based Service Bus queue delivery (works with disableLocalAuth)
+            topic_name, _principal = _ensure_system_topic_for_storage(
+                eventgrid_client, resource_group, storage_account
+            )
+            sub_info = {
+                "deliveryWithResourceIdentity": {
+                    "identity": {"type": "SystemAssigned"},
+                    "destination": {
+                        "endpointType": "ServiceBusQueue",
+                        "properties": {"resourceId": queue_resource_id},
+                    },
+                },
+                "filter": base_filter,
+                "eventDeliverySchema": "EventGridSchema",
+            }
+            result = eventgrid_client.system_topic_event_subscriptions.begin_create_or_update(
+                resource_group_name=resource_group,
+                system_topic_name=topic_name,
+                event_subscription_name=subscription_name,
+                event_subscription_info=sub_info,
+            ).result()
+            destination_kind = "ServiceBusQueue"
+            destination_target = queue_resource_id
+        else:
+            # Legacy WebHook fallback
+            webhook_url = os.getenv("OMNIVEC_WEBHOOK_URL", "").strip()
+            if not webhook_url:
+                svc_ip = os.getenv("OMNIVEC_EXTERNAL_IP", "")
+                if svc_ip:
+                    webhook_url = f"http://{svc_ip}/api/webhooks/eventgrid"
+            if not webhook_url:
+                return {
+                    "success": False,
+                    "error": "Neither OMNIVEC_BLOB_EVENT_QUEUE_RESOURCE_ID nor OMNIVEC_WEBHOOK_URL/OMNIVEC_EXTERNAL_IP is set",
+                    "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id),
+                }
+            sub_info = {
+                "destination": {
+                    "endpointType": "WebHook",
+                    "properties": {"endpointUrl": webhook_url},
+                },
+                "filter": base_filter,
+            }
+            result = eventgrid_client.event_subscriptions.begin_create_or_update(
+                scope=storage_account.id,
+                event_subscription_name=subscription_name,
+                event_subscription_info=sub_info,
+            ).result()
+            destination_kind = "WebHook"
+            destination_target = webhook_url
+
+        EVENT_GRID_SUBSCRIPTIONS[account_name] = subscription_name
+
+        store = get_store()
+        source.triggers = source.triggers or []
+        if "eventgrid" not in source.triggers:
+            source.triggers.append("eventgrid")
+        store.upsert(_to_doc(source, "source"))
+
+        return {
+            "success": True,
+            "message": f"Event Grid subscription '{subscription_name}' provisioned ({destination_kind})",
+            "subscription_id": result.id,
+            "subscription_name": subscription_name,
+            "storage_account": account_name,
+            "container": container_name,
+            "destination": destination_kind,
+            "target": destination_target,
+        }
+
+    except Exception as e:  # lgtm[py/stack-trace-exposure]
+        return {
+            "success": False,
+            "error": str(e),
+            "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id),
+        }
+
+
 @app.post("/api/triggers/eventgrid/create")
 async def create_eventgrid_subscription(req: CreateEventGridRequest):
-    """Create an Event Grid subscription for a blob storage source."""
+    """Create (or update) an Event Grid subscription for a blob storage source."""
     store = get_store()
     doc = store.get(req.source_id, "source")
     if not doc:
@@ -4113,133 +4341,35 @@ async def create_eventgrid_subscription(req: CreateEventGridRequest):
     if source.type != SourceType.AZURE_BLOB:
         raise HTTPException(status_code=400, detail="Event Grid is only for blob storage sources")
 
-    try:
-        from azure.identity import DefaultAzureCredential
-        from azure.mgmt.eventgrid import EventGridManagementClient
-        from azure.mgmt.storage import StorageManagementClient
-        from urllib.parse import urlparse
+    return await _provision_blob_eventgrid(source)
 
-        credential = DefaultAzureCredential()
 
-        account_url = source.config.get("account_url", "")
-        parsed = urlparse(account_url)
-        account_name = parsed.netloc.split(".")[0]
-        container_name = source.config.get("container", "")
+@app.post("/api/triggers/eventgrid/bulk_provision")
+async def bulk_provision_eventgrid():
+    """Idempotently provision Event Grid subscriptions for every active blob source
+    that is referenced by a queue-mode pipeline. Useful for backfilling existing
+    deployments after enabling event-driven blob ingestion."""
+    store = get_store()
+    pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
+    source_ids = set()
+    for p in pipelines:
+        if str(getattr(p, "processing_mode", "") or "").lower() != "queue":
+            continue
+        for ps in (p.sources or []):
+            source_ids.add(ps.source_id)
 
-        subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
-        if not subscription_id:
-            try:
-                resp = await http_client.get(
-                    "http://169.254.169.254/metadata/instance/compute/subscriptionId?api-version=2021-02-01",
-                    headers={"Metadata": "true"},
-                    timeout=5.0
-                )
-                subscription_id = resp.text.strip('"')
-            except:  # lgtm[py/empty-except]  # lgtm[py/catch-base-exception]
-                pass
+    results = []
+    for sid in source_ids:
+        doc = store.get(sid, "source")
+        if not doc:
+            continue
+        src = _source_from_doc(doc)
+        if src.type != SourceType.AZURE_BLOB or not src.enabled:
+            continue
+        res = await _provision_blob_eventgrid(src)
+        results.append({"source_id": sid, **res})
 
-        if not subscription_id:
-            return {
-                "success": False,
-                "error": "AZURE_SUBSCRIPTION_ID environment variable not set",
-                "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id)
-            }
-
-        storage_client = StorageManagementClient(credential, subscription_id)
-
-        storage_account = None
-        resource_group = None
-        for account in storage_client.storage_accounts.list():
-            if account.name == account_name:
-                storage_account = account
-                parts = account.id.split("/")
-                rg_idx = parts.index("resourceGroups") + 1
-                resource_group = parts[rg_idx]  # lgtm[py/unused-local-variable]
-                break
-
-        if not storage_account:
-            return {
-                "success": False,
-                "error": f"Storage account '{account_name}' not found in subscription",
-                "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id)
-            }
-
-        eventgrid_client = EventGridManagementClient(credential, subscription_id)
-
-        subscription_name = req.subscription_name or f"omnivec-{source.id}"
-
-        webhook_url = os.getenv("OMNIVEC_WEBHOOK_URL")
-        if not webhook_url:
-            svc_ip = os.getenv("OMNIVEC_EXTERNAL_IP", "")
-            if svc_ip:
-                webhook_url = f"http://{svc_ip}/api/webhooks/eventgrid"
-            else:
-                return {
-                    "success": False,
-                    "error": "OMNIVEC_WEBHOOK_URL or OMNIVEC_EXTERNAL_IP environment variable not set",
-                    "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id)
-                }
-
-        subject_filter = {
-            "subjectBeginsWith": f"/blobServices/default/containers/{container_name}/",
-            "subjectEndsWith": "",
-            "isSubjectCaseSensitive": False
-        }
-
-        prefix = source.config.get("prefix", "")
-        if prefix:
-            subject_filter["subjectBeginsWith"] = f"/blobServices/default/containers/{container_name}/blobs/{prefix}"
-
-        event_subscription = {
-            "destination": {
-                "endpointType": "WebHook",
-                "properties": {
-                    "endpointUrl": webhook_url
-                }
-            },
-            "filter": {
-                "includedEventTypes": [
-                    "Microsoft.Storage.BlobCreated",
-                    "Microsoft.Storage.BlobDeleted"
-                ],
-                **subject_filter
-            }
-        }
-
-        result = eventgrid_client.event_subscriptions.begin_create_or_update(
-            scope=storage_account.id,
-            event_subscription_name=subscription_name,
-            event_subscription_info=event_subscription
-        ).result()
-
-        EVENT_GRID_SUBSCRIPTIONS[account_name] = subscription_name
-
-        source.triggers = source.triggers or []
-        if "eventgrid" not in source.triggers:
-            source.triggers.append("eventgrid")
-        store.upsert(_to_doc(source, "source"))
-
-        return {
-            "success": True,
-            "message": f"Event Grid subscription '{subscription_name}' created",
-            "subscription_id": result.id,
-            "storage_account": account_name,
-            "container": container_name,
-            "webhook_url": webhook_url
-        }
-
-    except Exception as e:
-        error_msg = str(e)
-        account_url = source.config.get("account_url", "")
-        parsed_url = urlparse(account_url) if account_url else None
-        account_name = parsed_url.netloc.split(".")[0] if parsed_url else "<storage-account>"
-        container_name = source.config.get("container", "<container>")
-
-        return {  # lgtm[py/stack-trace-exposure]
-            "success": False,
-            "error": error_msg,
-            "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id)
-        }
+    return {"count": len(results), "results": results}
 
 
 @app.delete("/api/triggers/eventgrid/{source_id}")
