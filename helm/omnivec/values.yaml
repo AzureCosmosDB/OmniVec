@@ -188,6 +188,14 @@ blobIngestor:
     limits:
       memory: "512Mi"
       cpu: "500m"
+  # Event-Grid push consumption (see docs/design/blob-eventgrid-push.md).
+  # When enabled the ingestor consumes BlobCreated/BlobDeleted/BlobRenamed
+  # events from the SB blob-events queue (provisioned by api.py) and fans
+  # them out as embedding messages. Disable live polling once the consumer
+  # is healthy in production.
+  eventGrid:
+    consumerEnabled: false
+  livePollingEnabled: true
 
 # =============================================================================
 # DOTNET WORKER (.NET Service Bus worker for queue-mode embedding)
