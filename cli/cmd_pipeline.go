@@ -385,7 +385,9 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 		}
 
 		details := []string{}
-		// Check blob sources
+		// Check blob sources — eventgrid is an optional push optimization;
+		// the .NET watcher always live-polls, so absence is not an error.
+		blobNotConfigured := false
 		if blobs, ok := triggerStatus["blob_sources"].([]any); ok {
 			for _, b := range blobs {
 				bm, ok := b.(map[string]any)
@@ -397,10 +399,16 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 					continue
 				}
 				st, _ := bm["status"].(string)
-				details = append(details, fmt.Sprintf("eventgrid(%s): %s", id, st))
+				if st == "not_configured" {
+					blobNotConfigured = true
+					details = append(details, fmt.Sprintf("eventgrid(%s): not_configured (live-poll active)", id))
+				} else {
+					details = append(details, fmt.Sprintf("eventgrid(%s): %s", id, st))
+				}
 			}
 		}
-		// Check cosmosdb sources
+		// Check cosmosdb sources — change feed is required for live updates
+		cosmosNotConfigured := false
 		if cosmos, ok := triggerStatus["cosmosdb_sources"].([]any); ok {
 			for _, cs := range cosmos {
 				cm, ok := cs.(map[string]any)
@@ -413,6 +421,9 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 				}
 				st, _ := cm["status"].(string)
 				details = append(details, fmt.Sprintf("change_feed(%s): %s", id, st))
+				if st == "not_configured" {
+					cosmosNotConfigured = true
+				}
 			}
 		}
 
@@ -421,18 +432,16 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 			details = append(details, fmt.Sprintf("queue_size: %d", int(qs)))
 		}
 
+		_ = blobNotConfigured
 		if len(details) == 0 {
 			r.status = "ok"
 			r.detail = "no triggers for this pipeline"
 		} else {
 			r.status = "ok"
 			r.detail = strings.Join(details, ", ")
-			// Mark error if any source is "not_configured"
-			for _, d := range details {
-				if strings.Contains(d, "not_configured") {
-					r.status = "error"
-					break
-				}
+			// Only cosmos change feed missing is a real problem; blob falls back to polling.
+			if cosmosNotConfigured {
+				r.status = "error"
 			}
 		}
 

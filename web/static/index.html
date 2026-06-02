@@ -6724,13 +6724,17 @@
 
                     for (const b of (data.blob_sources || [])) {
                         if (pipSourceIds.has(b.id)) {
-                            details.push(`EventGrid(${b.name || b.id}): ${b.status}`);
-                            if (b.status === 'not_configured') hasError = true;
+                            if (b.status === 'not_configured') {
+                                details.push(`EventGrid(${b.name || b.id}): not_configured (live-poll active)`);
+                            } else {
+                                details.push(`EventGrid(${b.name || b.id}): ${b.status}`);
+                            }
                         }
                     }
                     for (const c of (data.cosmosdb_sources || [])) {
                         if (pipSourceIds.has(c.id)) {
                             details.push(`ChangeFeed(${c.name || c.id}): ${c.status}`);
+                            if (c.status === 'not_configured') hasError = true;
                         }
                     }
                     if (data.event_queue_size !== undefined) details.push(`Queue size: ${data.event_queue_size}`);
