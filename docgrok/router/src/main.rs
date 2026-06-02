@@ -301,6 +301,10 @@ async fn main() {
                 "/admin/models/registry/{model_id}/chat",
                 post(chat_via_model),
             )
+            .route(
+                "/admin/models/registry/{model_id}/healthcheck",
+                post(healthcheck_model),
+            )
             // Admin — K8s models
             .route("/admin/models", get(list_k8s_models))
             .route("/admin/models/{name}/scale", post(scale_model))
@@ -1398,6 +1402,91 @@ async fn delete_registry_model(
 
     info!("Deleted model: {model_id}");
     Ok(Json(json!({"deleted": model_id})))
+}
+
+// Proxy an OpenAI-compatible chat-completion call through a registered
+// external model. Body: {messages, tools?, tool_choice?, temperature?, max_tokens?}.
+// Returns: {model_id, content, tool_calls, role, finish_reason, usage}.
+// Perform a real probe of an external model's embedding endpoint to determine
+// live health. Mirrors the inline check inside `run_health_check_loop` so
+// per-model health calls reflect actual upstream behavior (auth + reachability).
+// Returns {"ok": bool, "status": <upstream HTTP code>, "detail": "..."}.
+async fn healthcheck_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let cfg = state
+        .registry
+        .get(&model_id)
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Model '{model_id}' not found")))?
+        .value()
+        .clone();
+
+    let model_type = cfg["type"].as_str().unwrap_or("").to_string();
+    let endpoint = cfg["endpoint"].as_str().unwrap_or("").trim_end_matches('/').to_string();
+    let deployment = cfg["deployment"]
+        .as_str()
+        .or_else(|| cfg["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_version = cfg["api_version"].as_str().unwrap_or("2024-06-01").to_string();
+    let api_key = cfg["api_key"].as_str().unwrap_or("").to_string();
+
+    if endpoint.is_empty() {
+        return Ok(Json(json!({
+            "ok": false,
+            "status": 0,
+            "detail": "No endpoint configured"
+        })));
+    }
+
+    let test_url = match model_type.as_str() {
+        "azure-openai" => format!(
+            "{endpoint}/openai/deployments/{deployment}/embeddings?api-version={api_version}"
+        ),
+        "openai" => format!("{endpoint}/embeddings"),
+        _ => endpoint.clone(),
+    };
+
+    let mut req = state
+        .http
+        .post(&test_url)
+        .timeout(Duration::from_secs(10))
+        .json(&json!({"input": "health", "model": &deployment}));
+
+    if model_type == "azure-openai" {
+        if !api_key.is_empty() {
+            req = req.header("api-key", &api_key);
+        } else if let Ok(token) = get_aoai_token(&state.http).await {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+    } else if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    match req.send().await {
+        Ok(r) => {
+            let status_code = r.status().as_u16();
+            // 200 = pass, 429 = throttled but reachable + authed = pass.
+            let ok = r.status().is_success() || status_code == 429;
+            let body = r.text().await.unwrap_or_default();
+            let detail = if ok {
+                format!("HTTP {status_code}")
+            } else {
+                format!("HTTP {status_code}: {}", &body[..body.len().min(150)])
+            };
+            Ok(Json(json!({
+                "ok": ok,
+                "status": status_code,
+                "detail": detail,
+            })))
+        }
+        Err(e) => Ok(Json(json!({
+            "ok": false,
+            "status": 0,
+            "detail": format!("Cannot reach endpoint: {e}"),
+        }))),
+    }
 }
 
 // Proxy an OpenAI-compatible chat-completion call through a registered
