@@ -3351,6 +3351,7 @@ async def create_pipeline(req: CreatePipelineRequest):
         content_strategy=content_strategy,
         chunk_config=chunk_config,
         store_content=req.store_content,
+        content_field=(req.content_field or "content"),
         metadata_fields=req.metadata_fields,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
@@ -3436,6 +3437,8 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
             ),
         )
     pipeline.store_content = req.store_content
+    if req.content_field is not None:
+        pipeline.content_field = req.content_field or "content"
     pipeline.metadata_fields = req.metadata_fields
     pipeline.updated_at = datetime.utcnow()
 

@@ -253,6 +253,10 @@ class Pipeline(BaseModel):
     # destination point at the same store (inline mode preserves the original
     # document content already).
     store_content: Optional[bool] = None
+    # Name of the destination field that receives the embedded text when
+    # store_content is true. Cosmos only — for Postgres/MsSql the column is
+    # set on the destination as `content_column`. Default "content".
+    content_field: str = "content"
     # Optional informational metadata fields to persist on the destination
     # document. None (default) → write all supported optional fields
     # (back-compat). [] → write none of them. List subset → write only those.
@@ -366,6 +370,8 @@ class CreatePipelineRequest(BaseModel):
     # Optional: persist the embedded text on the destination document.
     # See Pipeline.store_content for full semantics.
     store_content: Optional[bool] = None
+    # Override the destination content field name. Cosmos only. Default "content".
+    content_field: Optional[str] = None
     # Optional informational metadata fields to persist on destination docs.
     # See Pipeline.metadata_fields for semantics and ALLOWED_METADATA_FIELDS.
     metadata_fields: Optional[List[str]] = None

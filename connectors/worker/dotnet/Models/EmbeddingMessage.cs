@@ -68,6 +68,10 @@ public class EmbeddingMessage
     [JsonPropertyName("store_content")]
     public bool? StoreContent { get; set; }
 
+    /// <summary>Destination field name receiving the embedded text (Cosmos only; default "content").</summary>
+    [JsonPropertyName("content_field")]
+    public string? ContentField { get; set; }
+
     /// <summary>Subset of optional metadata fields to persist on destination docs (null = all, empty = none).</summary>
     [JsonPropertyName("metadata_fields")]
     public List<string>? MetadataFields { get; set; }

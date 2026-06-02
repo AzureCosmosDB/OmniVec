@@ -13,7 +13,8 @@ public record EmbeddingResult(
     Dictionary<string, string>? SourceContentFields = null,
     string SourceId = "",
     bool? StoreContent = null,
-    List<string>? MetadataFields = null)
+    List<string>? MetadataFields = null,
+    string? ContentField = null)
 {
     /// <summary>
     /// Returns true when the named optional metadata field should be written.

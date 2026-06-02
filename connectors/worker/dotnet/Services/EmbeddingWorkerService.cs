@@ -256,7 +256,8 @@ public class EmbeddingWorkerService : BackgroundService
                     SourceContentFields: new Dictionary<string, string>(),
                     SourceId: msg.SourceId,
                     StoreContent: msg.StoreContent,
-                    MetadataFields: msg.MetadataFields));
+                    MetadataFields: msg.MetadataFields,
+                    ContentField: msg.ContentField));
             }
 
             // Write to destination
@@ -349,7 +350,8 @@ public class EmbeddingWorkerService : BackgroundService
                 SourceContentFields: new Dictionary<string, string>(),
                 SourceId: msg.SourceId,
                 StoreContent: msg.StoreContent,
-                MetadataFields: msg.MetadataFields);
+                MetadataFields: msg.MetadataFields,
+                ContentField: msg.ContentField);
             var key = $"{msg.DestinationType}|{msg.DestinationId}";
             if (!resultsByDest.TryGetValue(key, out var bucket))
             {
@@ -452,7 +454,8 @@ public class EmbeddingWorkerService : BackgroundService
                     SourceContentFields: msg.SourceContentFields,
                     SourceId: msg.SourceId,
                     StoreContent: msg.StoreContent,
-                    MetadataFields: msg.MetadataFields);
+                    MetadataFields: msg.MetadataFields,
+                    ContentField: msg.ContentField);
 
                 var destKey = msg.DestinationId;
                 if (!resultsByDest.ContainsKey(destKey))

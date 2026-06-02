@@ -502,6 +502,7 @@ public class MsSqlCdcWatcher : ISourceWatcher
                 PartitionKeyValue = d.docId,
                 PipelineGeneration = Generation,
                 StoreContent = pipeline.StoreContent,
+                ContentField = pipeline.ContentField,
                 MetadataFields = pipeline.MetadataFields,
             }).ToList();
 

@@ -473,7 +473,7 @@ func toInt(v any) int {
 func newPipelineCreateCmd() *cobra.Command {
 	var name, description, source, destination, model, contentFields, vectorIndexPath string
 	var contentMode, contentStrategy, fileTypes, docIdPattern string
-	var processingMode, embeddingField, storeContent, metadataFields string
+	var processingMode, embeddingField, storeContent, metadataFields, contentField string
 	var chunkSize, chunkOverlap int
 	var processExisting bool
 	cmd := &cobra.Command{
@@ -566,6 +566,9 @@ func newPipelineCreateCmd() *cobra.Command {
 			default:
 				exitErr("--store-content must be true or false")
 			}
+			if cf := strings.TrimSpace(contentField); cf != "" {
+				body["content_field"] = cf
+			}
 			if mf := strings.TrimSpace(metadataFields); mf != "" {
 				switch strings.ToLower(mf) {
 				case "all", "default":
@@ -616,13 +619,14 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&embeddingField, "embedding-field", "", "Destination field to write embedding into (default: embedding)")
 	cmd.Flags().BoolVar(&processExisting, "process-existing", true, "Process existing documents on creation")
 	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false (default: per-destination — Postgres/MsSql=true, Cosmos=false)")
+	cmd.Flags().StringVar(&contentField, "content-field", "", "Destination field name receiving the embedded text (Cosmos only; default: content)")
 	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all' (default), 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
 	return cmd
 }
 
 func newPipelineUpdateCmd() *cobra.Command {
 	var name, description, destination, model string
-	var contentFields, contentStrategy, docIdPattern, vectorIndexPath, storeContent string
+	var contentFields, contentStrategy, docIdPattern, vectorIndexPath, storeContent, contentField string
 	var metadataFields string
 	var chunkSize, chunkOverlap int
 	cmd := &cobra.Command{
@@ -697,6 +701,9 @@ func newPipelineUpdateCmd() *cobra.Command {
 			default:
 				exitErr("--store-content must be true or false")
 			}
+			if cf := strings.TrimSpace(contentField); cf != "" {
+				body["content_field"] = cf
+			}
 			if mf := strings.TrimSpace(metadataFields); mf != "" {
 				switch strings.ToLower(mf) {
 				case "all", "default":
@@ -737,6 +744,7 @@ func newPipelineUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path")
 	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false")
+	cmd.Flags().StringVar(&contentField, "content-field", "", "Destination field name receiving the embedded text (Cosmos only)")
 	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all', 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
 	return cmd
 }
