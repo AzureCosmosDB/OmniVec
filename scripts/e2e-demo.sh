@@ -306,7 +306,7 @@ fi
 # ─── Configuration ───────────────────────────────────────────────────────────
 ENV_NAME="${USER_ENV_NAME:-omnivec-e2e-demo}"
 LOCATION="eastus2"
-SUBSCRIPTION="074d02eb-4d74-486a-b299-b262264d1536"
+SUBSCRIPTION="${AZURE_SUBSCRIPTION_ID:-}"
 
 # ─── Helper: load azd env values (must be defined before --existing block) ───
 load_azd_values() {

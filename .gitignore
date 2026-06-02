@@ -75,3 +75,27 @@ helm/omnivec/.last-deploy-fingerprint
 # .NET publish artifacts
 connectors/worker/dotnet/publish/
 
+# CLI build outputs — release binaries should ship via GH Releases, not in repo
+cli/omnivec
+cli/omnivec.exe
+cli/omnivec-cli.exe
+cli/omnivec-darwin-*
+cli/omnivec-linux-*
+cli/omnivec-windows-*
+cli/bin/
+dist/
+dist-v*/
+
+# One-off / scratch scripts and data dumps
+cli/check_dest.py
+cli/purge_and_verify.py
+items.json
+scripts/cli-blob-demo.ps1
+scripts/cli-blob-pdf-demo.ps1
+scripts/cli-demo.ps1
+
+# Local azd logs
+.azd-logs/
+
+# Security scan results (uploaded to Security tab via workflow, not committed)
+*.sarif

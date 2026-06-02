@@ -18,16 +18,16 @@ spec:
       serviceAccountName: omnivec-api
       containers:
         - name: api
-          image: cdbmvsacr4cc259.azurecr.io/omnivec-api:v22
+          image: ghcr.io/azurecosmosdb/omnivec-api:latest
           ports:
             - containerPort: 8080
           env:
             - name: DOCGROK_URL
               value: "http://docgrok.docgrok.svc.cluster.local:80"
             - name: AZURE_SUBSCRIPTION_ID
-              value: "074d02eb-4d74-486a-b299-b262264d1536"
+              value: "<YOUR_AZURE_SUBSCRIPTION_ID>"
             - name: OMNIVEC_EXTERNAL_IP
-              value: "20.242.139.166"
+              value: "<YOUR_EXTERNAL_IP>"
           resources:
             requests:
               memory: "256Mi"
