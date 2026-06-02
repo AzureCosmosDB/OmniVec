@@ -346,7 +346,17 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 		mu.Unlock()
 	}()
 
-	// 4. Trigger / event bus status
+	// 4. Trigger / event bus status (only relevant in queue mode)
+	procMode, _ := pipeline["processing_mode"].(string)
+	if procMode != "" && procMode != "queue" {
+		mu.Lock()
+		results = append(results, healthResult{
+			name:   "Triggers / Event Bus",
+			status: "ok",
+			detail: fmt.Sprintf("not applicable in %s mode", procMode),
+		})
+		mu.Unlock()
+	} else {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -430,6 +440,7 @@ func runPipelineHealth(c *Client, pipeline map[string]any) []map[string]any {
 		results = append(results, r)
 		mu.Unlock()
 	}()
+	}
 
 	wg.Wait()
 
