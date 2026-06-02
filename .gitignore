@@ -99,3 +99,5 @@ scripts/cli-demo.ps1
 
 # Security scan results (uploaded to Security tab via workflow, not committed)
 *.sarif
+
+security-report.html
