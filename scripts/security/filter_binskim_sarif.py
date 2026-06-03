@@ -16,10 +16,10 @@ import sys
 from pathlib import Path
 
 
-def load_suppressions(path: Path) -> list[dict]:
+def load_suppressions(path: Path) -> tuple[list[dict], list[dict]]:
     with path.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
-    return data.get("suppressions", [])
+    return data.get("suppressions", []), data.get("invocation_notifications", [])
 
 
 def matches(result: dict, supp: dict) -> bool:
@@ -89,6 +89,61 @@ def _ensure_message_text(sarif: dict) -> int:
     return patched
 
 
+def _notification_matches(notif: dict, supp: dict) -> bool:
+    """Match a SARIF toolConfigurationNotification against a suppression entry."""
+    desc_id = (notif.get("descriptor") or {}).get("id") or notif.get("ruleId")
+    if desc_id != supp.get("descriptorId"):
+        return False
+    binary = supp.get("binary", "")
+    if not binary:
+        return True
+    for loc in notif.get("locations", []) or []:
+        uri = (
+            loc.get("physicalLocation", {})
+            .get("artifactLocation", {})
+            .get("uri", "")
+        )
+        if uri.lower().endswith(binary.lower()):
+            return True
+    return False
+
+
+def _normalize_invocations(sarif: dict, notif_suppressions: list[dict]) -> int:
+    """Demote accepted invocation notifications to ``note`` (with audit-trail
+    suppression annotation) and flip ``executionSuccessful`` back to True when
+    no error-level notifications remain. Returns the number of notifications
+    that were demoted."""
+    demoted = 0
+    for run in sarif.get("runs", []) or []:
+        for inv in run.get("invocations", []) or []:
+            for notif in inv.get("toolConfigurationNotifications", []) or []:
+                if notif.get("level") not in ("error", "warning"):
+                    continue
+                matched = next(
+                    (s for s in notif_suppressions if _notification_matches(notif, s)),
+                    None,
+                )
+                if not matched:
+                    continue
+                notif["level"] = "note"
+                notif.setdefault("suppressions", []).append(
+                    {
+                        "kind": "external",
+                        "status": "accepted",
+                        "justification": matched.get("reason", ""),
+                    }
+                )
+                demoted += 1
+            remaining_errors = sum(
+                1
+                for n in inv.get("toolConfigurationNotifications", []) or []
+                if n.get("level") in ("error", "warning")
+            )
+            if remaining_errors == 0:
+                inv["executionSuccessful"] = True
+    return demoted
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
@@ -101,7 +156,7 @@ def main(argv: list[str]) -> int:
         else Path(__file__).with_name("binskim_suppressions.json")
     )
 
-    suppressions = load_suppressions(supp_path)
+    suppressions, notif_suppressions = load_suppressions(supp_path)
 
     with inp.open("r", encoding="utf-8") as fh:
         sarif = json.load(fh)
@@ -135,6 +190,7 @@ def main(argv: list[str]) -> int:
 
     outp.parent.mkdir(parents=True, exist_ok=True)
     patched = _ensure_message_text(sarif)
+    notif_demoted = _normalize_invocations(sarif, notif_suppressions)
     with outp.open("w", encoding="utf-8") as fh:
         json.dump(sarif, fh, indent=2)
 
@@ -146,7 +202,8 @@ def main(argv: list[str]) -> int:
     )
     print(
         f"BinSkim filter: kept={kept} suppressed={dropped} "
-        f"unsuppressed_fails_or_warnings={fails} message_text_patched={patched} -> {outp}"
+        f"unsuppressed_fails_or_warnings={fails} message_text_patched={patched} "
+        f"notifications_demoted={notif_demoted} -> {outp}"
     )
     return 0 if fails == 0 else 1
 

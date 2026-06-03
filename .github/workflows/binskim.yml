@@ -46,19 +46,24 @@ jobs:
           $bs = (Get-ChildItem "$env:RUNNER_TEMP\bs\Microsoft.CodeAnalysis.BinSkim\tools\net*\win-x64\BinSkim.exe" | Select-Object -First 1).FullName
           & $bs analyze publish-out/OmniVec.Worker.dll --output binskim-dotnet.sarif --recurse false
 
+      - name: Apply documented upstream-toolchain suppressions
+        run: python scripts/security/filter_binskim_sarif.py binskim-dotnet.sarif binskim-dotnet-final.sarif
+
       - name: Upload BinSkim SARIF
         if: always()
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: binskim-dotnet.sarif
+          sarif_file: binskim-dotnet-final.sarif
           category: binskim-dotnet
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: binskim-dotnet-sarif
-          path: binskim-dotnet.sarif
+          path: |
+            binskim-dotnet.sarif
+            binskim-dotnet-final.sarif
 
   binskim-go:
     name: BinSkim Go CLI
@@ -84,19 +89,24 @@ jobs:
           $bs = (Get-ChildItem "$env:RUNNER_TEMP\bs\Microsoft.CodeAnalysis.BinSkim\tools\net*\win-x64\BinSkim.exe" | Select-Object -First 1).FullName
           & $bs analyze cli/omnivec.exe --output binskim-go.sarif --ignorePdbLoadError
 
+      - name: Apply documented upstream-toolchain suppressions
+        run: python scripts/security/filter_binskim_sarif.py binskim-go.sarif binskim-go-final.sarif
+
       - name: Upload BinSkim SARIF
         if: always()
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: binskim-go.sarif
+          sarif_file: binskim-go-final.sarif
           category: binskim-go
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: binskim-go-sarif
-          path: binskim-go.sarif
+          path: |
+            binskim-go.sarif
+            binskim-go-final.sarif
 
   binskim-rust:
     name: BinSkim Rust router (docgrok-router)

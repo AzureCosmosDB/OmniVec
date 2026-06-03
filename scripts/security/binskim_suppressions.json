@@ -11,5 +11,12 @@
       "binary": "docgrok-router.exe",
       "reason": "Spectre mitigations (/Qspectre) are an MSVC cl.exe codegen feature. rustc / LLVM does not currently emit the IDD_VC_FEATURE Spectre marker into the PE COFF debug record, so BinSkim's BA2024 detector cannot observe the mitigation. The C runtime modules linked from libcmt.lib/libucrt.lib would also require the optional 'C++ Spectre-mitigated libs' VS workload to be installed in the build environment. Threat surface is bounded: docgrok-router does not execute user-supplied indices on shared cores in a multi-tenant manner. Re-evaluate when rust-lang/rust adds Spectre marker emission (rust-lang/rust#103956)."
     }
+  ],
+  "invocation_notifications": [
+    {
+      "descriptorId": "ERR997.ExceptionLoadingPdb",
+      "binary": "omnivec.exe",
+      "reason": "Go binaries built with `go build -trimpath -ldflags '-s -w'` do not emit Microsoft PDB files. BinSkim's PE/COFF analyzers cannot evaluate Go binaries — this is the documented limitation, not a tool failure. Go's security posture is enforced by the Go toolchain (govulncheck, the runtime's bounds-checking and W^X-by-default semantics) rather than the MSVC linker switches BinSkim inspects. Accepting this notification keeps the BinSkim configuration upload clean while we continue to scan Go for vulnerabilities via separate workflows."
+    }
   ]
 }
