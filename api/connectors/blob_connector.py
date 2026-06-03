@@ -19,7 +19,8 @@ def _validate_account_url(url: str) -> str:
     """Validate an admin-supplied storage account URL: HTTPS scheme, no
     credentials, and host must end with a known Azure blob suffix
     (override via env BLOB_ACCOUNT_HOST_ALLOWLIST for dev scenarios).
-    Returns a URL reconstructed from validated components."""
+    Returns a URL reconstructed from validated components — path/query
+    are preserved verbatim so SAS-bearing URLs continue to work."""
     from urllib.parse import urlunparse
     if not isinstance(url, str) or not url:
         raise ValueError("account_url must be a non-empty string")
@@ -39,11 +40,10 @@ def _validate_account_url(url: str) -> str:
     suffixes = _AZURE_BLOB_HOST_SUFFIXES + extra
     if not any(host.endswith(suf) for suf in suffixes):
         raise ValueError(f"account_url host '{host}' not in allowlist")
-    # Reconstruct from validated parts so callers (and static analyzers) see
-    # an explicit sanitization boundary. Drops path/query/fragment/userinfo —
-    # the account URL is only ever a scheme://host[:port] root.
+    # Reconstruct from validated parts. Drops userinfo + fragment but keeps
+    # any path/query intact (some callers append a SAS or a container path).
     port = f":{parsed.port}" if parsed.port else ""
-    return urlunparse(("https", f"{host}{port}", "", "", "", ""))
+    return urlunparse(("https", f"{host}{port}", parsed.path or "", "", parsed.query or "", ""))
 
 
 async def get_blob_client(config: Dict[str, Any]) -> BlobServiceClient:

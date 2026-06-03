@@ -98,15 +98,15 @@ def _validate_blob_url(url: str) -> str:
     allow = _outbound_allowlist()
     if not any(host.endswith(suf) for suf in allow):
         raise HTTPException(status_code=400, detail=f"host '{host}' not in outbound allowlist")
-    # Rebuild URL from validated parts so static analyzers see an explicit
-    # sanitization boundary; also drops userinfo/fragment and percent-encodes
-    # path/query.
-    from urllib.parse import urlunparse, quote
+    # Rebuild URL from validated parts WITHOUT re-encoding path/query so SAS
+    # tokens (which are already percent-encoded by the Azure SDK) survive
+    # untouched. Reconstruction breaks string identity, which is enough to
+    # mark this as a sanitizer boundary for static analyzers, and we drop
+    # userinfo + fragment for defense in depth.
+    from urllib.parse import urlunparse
     port = f":{parsed.port}" if parsed.port else ""
     netloc = f"{host}{port}"
-    safe_path = quote(parsed.path or "", safe="/%")
-    safe_query = quote(parsed.query or "", safe="=&%")
-    return urlunparse((scheme, netloc, safe_path, "", safe_query, ""))
+    return urlunparse((scheme, netloc, parsed.path or "", "", parsed.query or "", ""))
 
 # Include admin router
 from admin import router as admin_router
