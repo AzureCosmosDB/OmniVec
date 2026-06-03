@@ -8,3 +8,5 @@ PyMuPDF==1.25.3
 azure-storage-blob>=12.19.0
 azure-identity>=1.15.0
 opencv-python-headless==4.10.0.84
+python-docx==1.1.2
+olefile==0.47

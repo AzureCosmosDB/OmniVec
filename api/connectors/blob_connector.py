@@ -96,7 +96,7 @@ async def list_blobs(config: Dict[str, Any], full_sync: bool = False) -> List[Di
     elif extensions:
         allowed_extensions = set(extensions)
     else:
-        allowed_extensions = {".pdf", ".txt", ".json", ".md", ".csv"}
+        allowed_extensions = {".pdf", ".txt", ".json", ".md", ".csv", ".docx", ".doc"}
 
     prefix = config.get("prefix", "")
 
@@ -150,7 +150,7 @@ async def list_blobs_paginated(
     elif extensions:
         allowed_extensions = set(extensions)
     else:
-        allowed_extensions = {".pdf", ".txt", ".json", ".md", ".csv"}
+        allowed_extensions = {".pdf", ".txt", ".json", ".md", ".csv", ".docx", ".doc"}
 
     prefix = config.get("prefix", "")
 
