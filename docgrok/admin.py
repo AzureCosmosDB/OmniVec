@@ -2,6 +2,7 @@
 
 import os
 import uuid
+import logging
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -13,6 +14,8 @@ from pipelines import (
 from model_store import ModelStore, create_store
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+logger = logging.getLogger(__name__)
 
 # Try to load kubernetes config
 try:
@@ -321,8 +324,9 @@ async def healthcheck_model(model_id: str):
             cred = DefaultAzureCredential(managed_identity_client_id=client_id) if client_id else DefaultAzureCredential()
             token = cred.get_token("https://cognitiveservices.azure.com/.default").token
             headers["Authorization"] = f"Bearer {token}"
-        except Exception as e:
-            return {"ok": False, "status": 0, "detail": f"failed to acquire MI token: {str(e)[:150]}"}
+        except Exception:
+            logger.exception("failed to acquire MI token for model %s", model_id)
+            return {"ok": False, "status": 0, "detail": "failed to acquire managed-identity token; see server logs"}
     else:
         if not api_key:
             return {"ok": False, "status": 0, "detail": "no api_key configured"}
@@ -332,8 +336,9 @@ async def healthcheck_model(model_id: str):
     async with _httpx.AsyncClient(timeout=15.0) as c:
         try:
             r = await c.post(url, headers=headers, json={"input": "health check", "model": deployment})
-        except Exception as e:
-            return {"ok": False, "status": 0, "detail": f"request failed: {str(e)[:150]}"}
+        except Exception:
+            logger.exception("healthcheck request failed for model %s", model_id)
+            return {"ok": False, "status": 0, "detail": "request failed; see server logs"}
 
     body = r.text[:200]
     if r.status_code == 200:

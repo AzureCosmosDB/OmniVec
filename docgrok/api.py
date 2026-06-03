@@ -98,7 +98,15 @@ def _validate_blob_url(url: str) -> str:
     allow = _outbound_allowlist()
     if not any(host.endswith(suf) for suf in allow):
         raise HTTPException(status_code=400, detail=f"host '{host}' not in outbound allowlist")
-    return url
+    # Rebuild URL from validated parts so static analyzers see an explicit
+    # sanitization boundary; also drops userinfo/fragment and percent-encodes
+    # path/query.
+    from urllib.parse import urlunparse, quote
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{host}{port}"
+    safe_path = quote(parsed.path or "", safe="/%")
+    safe_query = quote(parsed.query or "", safe="=&%")
+    return urlunparse((scheme, netloc, safe_path, "", safe_query, ""))
 
 # Include admin router
 from admin import router as admin_router

@@ -3402,8 +3402,8 @@
                 + `<pre style="margin:6px 0; padding:8px; background:#fff; border:1px solid #fde68a; border-radius:6px; overflow:auto; font-size:11px;">${argsStr.replace(/</g, '&lt;')}</pre>`
                 + `<textarea id="approve-comment-${callId}" placeholder="Optional comment (sent to the LLM on deny)" style="width:100%; min-height:40px; margin-top:6px; padding:6px; border:1px solid #fde68a; border-radius:6px; font-family:inherit; font-size:12px; resize:vertical;"></textarea>`
                 + `<div style="display:flex; gap:8px; margin-top:8px; justify-content:flex-end;">`
-                + `<button class="btn-danger" onclick="agentDecide('${callId}', '${tool.replace(/'/g, "\\'")}', 'deny')" style="padding:6px 12px;">Deny</button>`
-                + `<button class="btn-primary" onclick="agentDecide('${callId}', '${tool.replace(/'/g, "\\'")}', 'approve')" style="padding:6px 12px; background:#16a34a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Approve &amp; run</button>`
+                + `<button class="btn-danger" onclick="agentDecide('${callId}', '${tool.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', 'deny')" style="padding:6px 12px;">Deny</button>`
+                + `<button class="btn-primary" onclick="agentDecide('${callId}', '${tool.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', 'approve')" style="padding:6px 12px; background:#16a34a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Approve &amp; run</button>`
                 + `</div>`;
             t.appendChild(wrap);
             t.scrollTop = t.scrollHeight;

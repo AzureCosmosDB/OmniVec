@@ -178,9 +178,10 @@ def is_azure_blob_url(url: str) -> bool:
 
 
 def _validate_blob_url(url: str) -> str:
-    """Reject SSRF payloads before any outbound HTTP. Returns the URL on
-    success, raises ``HTTPException(400)`` on rejection."""
-    from urllib.parse import urlparse
+    """Reject SSRF payloads before any outbound HTTP. Returns a URL
+    reconstructed from validated components so static analyzers can see
+    the sanitization boundary. Raises ``HTTPException(400)`` on rejection."""
+    from urllib.parse import urlparse, urlunparse, quote
     if not isinstance(url, str) or not url:
         raise HTTPException(status_code=400, detail="blobUrl must be a non-empty string")
     parsed = urlparse(url)
@@ -201,7 +202,14 @@ def _validate_blob_url(url: str) -> str:
     allow = _outbound_allowlist()
     if not any(host.endswith(suf) for suf in allow):
         raise HTTPException(status_code=400, detail=f"host '{host}' not in outbound allowlist")
-    return url
+    # Rebuild the URL from validated parts. This drops fragments/userinfo and
+    # percent-encodes path/query, which both hardens the request and acts as
+    # an explicit sanitizer boundary for CodeQL.
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{host}{port}"
+    safe_path = quote(parsed.path or "", safe="/%")
+    safe_query = quote(parsed.query or "", safe="=&%")
+    return urlunparse((scheme, netloc, safe_path, "", safe_query, ""))
 
 
 def download_azure_blob(url: str) -> bytes:

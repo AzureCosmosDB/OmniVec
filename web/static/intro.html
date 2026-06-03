@@ -512,7 +512,7 @@ function drawWires(svgId, n, klass){
         <stop offset="1" stop-color="#34d399"/>
       </linearGradient>
     </defs>`;
-  const cols = document.querySelectorAll(`#${svgId.replace('wires','scene')}`.replace('scene','scene') + ' .col');
+  const cols = document.querySelectorAll(`#${svgId.replace('wires','scene')} .col`);
   // find scene root via svg parent
   const sceneRoot = svg.parentElement;
   const sCol = sceneRoot.querySelector('.col.src');
