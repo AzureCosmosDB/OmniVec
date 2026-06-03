@@ -39,6 +39,56 @@ def matches(result: dict, supp: dict) -> bool:
     return False
 
 
+def _resolve_message_text(result: dict, rule: dict | None) -> str:
+    """Resolve SARIF message.text from message.id + arguments when the tool
+    only emitted a message reference. GitHub Code Scanning requires
+    message.text directly; missing text yields the upload error
+    "expected a result message".
+    """
+    msg = result.get("message") or {}
+    text = msg.get("text")
+    if text:
+        return text
+    msg_id = msg.get("id")
+    args = msg.get("arguments") or []
+    template = ""
+    if rule and msg_id:
+        strings = rule.get("messageStrings") or {}
+        entry = strings.get(msg_id) or {}
+        template = entry.get("text") or ""
+    if not template:
+        # Fall back to a deterministic placeholder so SARIF stays uploadable.
+        return f"{result.get('ruleId', 'rule')}: {msg_id or 'no message text'}"
+    try:
+        # SARIF templates use {0}, {1}, ... placeholders.
+        return template.format(*args)
+    except (IndexError, KeyError):
+        return template
+
+
+def _ensure_message_text(sarif: dict) -> int:
+    """Walk all results and synthesize message.text if missing. Returns
+    the number of results that were patched."""
+    patched = 0
+    for run in sarif.get("runs", []) or []:
+        rules = ((run.get("tool") or {}).get("driver") or {}).get("rules") or []
+        for r in run.get("results", []) or []:
+            msg = r.get("message") or {}
+            if msg.get("text"):
+                continue
+            idx = r.get("ruleIndex")
+            rule = None
+            if isinstance(idx, int) and 0 <= idx < len(rules):
+                rule = rules[idx]
+            if rule is None:
+                rid = r.get("ruleId")
+                rule = next((x for x in rules if x.get("id") == rid), None)
+            msg["text"] = _resolve_message_text(r, rule)
+            r["message"] = msg
+            patched += 1
+    return patched
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
@@ -84,6 +134,7 @@ def main(argv: list[str]) -> int:
         run["results"] = new_results
 
     outp.parent.mkdir(parents=True, exist_ok=True)
+    patched = _ensure_message_text(sarif)
     with outp.open("w", encoding="utf-8") as fh:
         json.dump(sarif, fh, indent=2)
 
@@ -95,7 +146,7 @@ def main(argv: list[str]) -> int:
     )
     print(
         f"BinSkim filter: kept={kept} suppressed={dropped} "
-        f"unsuppressed_fails_or_warnings={fails} -> {outp}"
+        f"unsuppressed_fails_or_warnings={fails} message_text_patched={patched} -> {outp}"
     )
     return 0 if fails == 0 else 1
 
