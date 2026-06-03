@@ -115,7 +115,7 @@ STAGE_CATALOG: Dict[str, Any] = {
         ),
         "params": {
             "doctype": {
-                "type": "enum[auto|pdf|text]", "default": "auto",
+                "type": "enum[auto|pdf|text|docx|doc]", "default": "auto",
                 "description": "How to interpret the input. 'auto' = detect from filename / pipeline hint.",
             },
             "ocr_engine": {
@@ -315,6 +315,37 @@ BUILTIN_TRANSFORMS: List[Dict[str, Any]] = [
             {
                 "type": "chunk", "name": "chunk_text",
                 "config": {"strategy": "recursive", "max_chars": 2000, "overlap_chars": 200, "min_chars": 0},
+            },
+            {
+                "type": "embed", "name": "embed_vectors",
+                "config": {"model_id": None, "router_url": None, "batch_size": 1},
+            },
+        ],
+    },
+    {
+        "name": "word-transform",
+        "version": "1.0.0",
+        "description": (
+            "Extract text from Microsoft Word documents (.docx via "
+            "python-docx, legacy .doc via olefile), split into "
+            "~1500-char paragraph-aware chunks, embed each chunk."
+        ),
+        "applies_to": {
+            "extensions": [".docx", ".doc"],
+            "content_types": [
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+            ],
+        },
+        "priority": 25,
+        "stages": [
+            {
+                "type": "extract", "name": "extract_word",
+                "config": {"doctype": "auto"},
+            },
+            {
+                "type": "chunk", "name": "chunk_text",
+                "config": {"strategy": "paragraph", "max_chars": 1500, "overlap_chars": 100, "min_chars": 0},
             },
             {
                 "type": "embed", "name": "embed_vectors",
@@ -797,6 +828,41 @@ _TEXT_EXTS = {".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".log",
               ".yml", ".yaml", ".xml", ".html", ".htm", ".py", ".js",
               ".ts", ".go", ".java", ".c", ".cpp", ".h", ".sh", ".sql"}
 _PDF_EXTS = {".pdf"}
+_DOCX_EXTS = {".docx"}
+_DOC_EXTS = {".doc"}
+
+
+def _classify_blob_doctype(blob_name: Optional[str], pipeline_hint: Optional[str]) -> str:
+    """Return one of: 'docx', 'doc', 'text', 'pdf' for auto-detection.
+
+    Order of precedence:
+      1. Pipeline name hint (text, word/docx, pdf).
+      2. Blob filename extension.
+      3. Default 'pdf' (backward compatible).
+    """
+    if pipeline_hint:
+        p = pipeline_hint.lower()
+        if "docx" in p or "word" in p:
+            return "docx"
+        if "text" in p or p.endswith("-txt") or p.startswith("txt-"):
+            return "text"
+        if "pdf" in p:
+            return "pdf"
+    if blob_name:
+        name = blob_name.lower()
+        for ext in _DOCX_EXTS:
+            if name.endswith(ext):
+                return "docx"
+        for ext in _DOC_EXTS:
+            if name.endswith(ext):
+                return "doc"
+        for ext in _TEXT_EXTS:
+            if name.endswith(ext):
+                return "text"
+        for ext in _PDF_EXTS:
+            if name.endswith(ext):
+                return "pdf"
+    return "pdf"
 
 
 def _is_text_blob(blob_name: Optional[str], pipeline_hint: Optional[str]) -> bool:
@@ -807,21 +873,7 @@ def _is_text_blob(blob_name: Optional[str], pipeline_hint: Optional[str]) -> boo
       2. Blob filename extension: .txt/.md/.json/... → text; .pdf → PDF.
       3. Default: PDF (existing behavior for backward compat).
     """
-    if pipeline_hint:
-        p = pipeline_hint.lower()
-        if "text" in p or p.endswith("-txt") or p.startswith("txt-"):
-            return True
-        if "pdf" in p:
-            return False
-    if blob_name:
-        name = blob_name.lower()
-        for ext in _TEXT_EXTS:
-            if name.endswith(ext):
-                return True
-        for ext in _PDF_EXTS:
-            if name.endswith(ext):
-                return False
-    return False  # default → PDF path (unchanged historical behavior)
+    return _classify_blob_doctype(blob_name, pipeline_hint) == "text"
 
 
 # ── Embedding via DocGrok Router ───────────────────────────────────────
@@ -1074,7 +1126,7 @@ async def _stage_extract(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, A
         elif source_kind == "inline_b64":
             doctype = "pdf"
         else:
-            doctype = "text" if _is_text_blob(blob_name, pipeline_hint) else "pdf"
+            doctype = _classify_blob_doctype(blob_name, pipeline_hint)
         srec.notes.append(f"doctype auto-detected as '{doctype}'")
     else:
         doctype = requested
@@ -1098,6 +1150,66 @@ async def _stage_extract(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, A
         ctx["page_texts"] = [full_text]
         srec.output["chars"] = len(full_text)
         srec.output["pages_total"] = 1
+        return
+
+    if doctype in ("docx", "doc"):
+        suffix = "." + doctype
+        if source_kind == "blob":
+            word_path = _download_blob_to_file(
+                ctx["blob_container"], blob_name,
+                ctx.get("blob_connection_string"), ctx.get("blob_account_url"),
+            )
+            srec.notes.append(f"streamed blob to temp file for {doctype} extraction")
+        elif source_kind == "inline_b64":
+            try:
+                raw = base64.b64decode(ctx.get("inline_b64") or "")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
+            fd, word_path = tempfile.mkstemp(suffix=suffix, prefix="docgrok-")
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            del raw
+            gc.collect()
+            srec.notes.append(f"decoded base64 input to temp {doctype} file")
+        else:
+            raise HTTPException(status_code=400, detail=f"{doctype} doctype requires Word input")
+
+        try:
+            size = os.path.getsize(word_path)
+        except Exception:
+            size = -1
+        srec.output["bytes"] = size
+
+        from word_extract import extract_docx, extract_doc
+        try:
+            if doctype == "docx":
+                sections = extract_docx(word_path)
+            else:
+                sections = extract_doc(word_path)
+        except HTTPException:
+            raise
+        except (ValueError, RuntimeError) as e:
+            status = 415 if doctype == "doc" else 400
+            raise HTTPException(status_code=status,
+                                detail=f"Failed to parse {doctype}: {e}")
+        except Exception as e:
+            raise HTTPException(status_code=400,
+                                detail=f"Failed to parse {doctype}: {e}")
+        finally:
+            if source_kind == "inline_b64":
+                try:
+                    os.unlink(word_path)
+                except OSError:
+                    pass
+
+        ctx["page_texts"] = sections or [""]
+        total_chars = sum(len(s) for s in sections)
+        srec.output["chars"] = total_chars
+        srec.output["pages_total"] = len(sections)
+        srec.output["sections"] = len(sections)
+        srec.notes.append(
+            f"extracted {len(sections)} section(s), {total_chars} chars from {doctype}"
+        )
         return
 
     # doctype == "pdf"
