@@ -52,6 +52,7 @@ from models import (  # lgtm[py/unused-import]
 )
 from store import init_store, get_store
 from security_utils import safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
+from urllib.parse import quote as _urlquote
 
 logger = logging.getLogger(__name__)
 
@@ -1139,8 +1140,10 @@ async def agent_session_approvals(session_id: str, request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
+    safe_user = _urlquote(user, safe="")
+    safe_sid = _urlquote(session_id, safe="")
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-        r = await client.get(f"{_AGENT_URL}/v1/sessions/{user}/{session_id}/approvals", headers=_agent_headers(request))
+        r = await client.get(f"{_AGENT_URL}/v1/sessions/{safe_user}/{safe_sid}/approvals", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
 
 
@@ -1163,8 +1166,9 @@ async def agent_sessions_list(request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
+    safe_user = _urlquote(user, safe="")
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-        r = await client.get(f"{_AGENT_URL}/v1/sessions/{user}", headers=_agent_headers(request))
+        r = await client.get(f"{_AGENT_URL}/v1/sessions/{safe_user}", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
 
 
@@ -1173,8 +1177,10 @@ async def agent_session_get(session_id: str, request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
+    safe_user = _urlquote(user, safe="")
+    safe_sid = _urlquote(session_id, safe="")
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-        r = await client.get(f"{_AGENT_URL}/v1/sessions/{user}/{session_id}", headers=_agent_headers(request))
+        r = await client.get(f"{_AGENT_URL}/v1/sessions/{safe_user}/{safe_sid}", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
 
 
@@ -1183,8 +1189,10 @@ async def agent_session_delete(session_id: str, request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
+    safe_user = _urlquote(user, safe="")
+    safe_sid = _urlquote(session_id, safe="")
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-        r = await client.delete(f"{_AGENT_URL}/v1/sessions/{user}/{session_id}", headers=_agent_headers(request))
+        r = await client.delete(f"{_AGENT_URL}/v1/sessions/{safe_user}/{safe_sid}", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
 
 
@@ -1980,14 +1988,16 @@ async def purge_source_vectors(source_id: str, request: Request, cascade: bool =
                 })
                 continue
         except Exception as e:  # lgtm[py/catch-base-exception]
-            logger.warning("purge failed for pipeline %s: %s", p.id, e)
+            error_id = uuid.uuid4().hex[:12]
+            logger.warning("purge failed for pipeline %s (error_id=%s): %s", p.id, error_id, e, exc_info=True)
             deleted_per_destination.append({
                 "pipeline_id": p.id,
                 "destination_id": p.destination_id,
                 "destination_type": dtype,
                 "deleted": 0,
                 "legacy_deleted": 0,
-                "error": str(e),
+                "error": "purge failed; see server logs",
+                "error_id": error_id,
             })
             continue
 
@@ -4313,9 +4323,12 @@ async def _provision_blob_eventgrid(source) -> dict:
         }
 
     except Exception as e:  # lgtm[py/stack-trace-exposure]
+        error_id = uuid.uuid4().hex[:12]
+        logger.exception("eventgrid provisioning failed (error_id=%s)", error_id)
         return {
             "success": False,
-            "error": str(e),
+            "error": "eventgrid provisioning failed; see server logs",
+            "error_id": error_id,
             "manual_setup": get_eventgrid_setup_commands(account_name, container_name, source.id),
         }
 

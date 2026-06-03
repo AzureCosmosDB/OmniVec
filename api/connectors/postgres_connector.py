@@ -573,8 +573,11 @@ async def delete_by_source_id(
     async with pool.acquire() as conn:
         result = await conn.execute(query, source_id)
     count = int(result.split()[-1]) if result else 0
+    # source_id originates from caller-supplied input; strip CR/LF and truncate
+    # to defeat log forging / injection of fake log lines.
+    safe_source_id = str(source_id).replace("\r", " ").replace("\n", " ")[:256]
     logger.info("Deleted %d vectors from %s where %s=%s",
-                count, table, col, source_id)
+                count, table, col, safe_source_id)
     return count
 
 
