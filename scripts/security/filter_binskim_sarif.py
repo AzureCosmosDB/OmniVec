@@ -126,13 +126,19 @@ def _normalize_invocations(sarif: dict, notif_suppressions: list[dict]) -> int:
                 if not matched:
                     continue
                 notif["level"] = "note"
-                notif.setdefault("suppressions", []).append(
-                    {
-                        "kind": "external",
-                        "status": "accepted",
-                        "justification": matched.get("reason", ""),
-                    }
-                )
+                # NOTE: SARIF 2.1.0 does not allow `suppressions` on
+                # toolConfigurationNotifications (only on results). The audit
+                # trail lives in binskim_suppressions.json; here we just record
+                # the justification in the notification message for visibility.
+                reason = matched.get("reason", "")
+                if reason:
+                    msg = notif.setdefault("message", {})
+                    base_text = msg.get("text") or msg.get("id", "")
+                    msg["text"] = (
+                        f"{base_text}\n[binskim_suppressions.json] {reason}"
+                        if base_text
+                        else f"[binskim_suppressions.json] {reason}"
+                    )
                 demoted += 1
             remaining_errors = sum(
                 1
