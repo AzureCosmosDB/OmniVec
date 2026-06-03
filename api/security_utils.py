@@ -155,6 +155,26 @@ def validate_sql_identifier(name: str, *, allow_dot: bool = False) -> str:
 # pip-*, trp-*, asst-*) plus user-defined transform/pipeline names.
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 
+# Caller-id / agent-session segments — also allow '@' and '+' for UPNs / emails.
+_AGENT_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.+@\-]{1,256}$")
+
+
+def safe_agent_segment(value: str) -> str:
+    """Validate a caller-id or session-id for use as a URL path segment.
+
+    Accepts the union of IDs, GUIDs, emails and UPNs. Rejects anything
+    that could escape the segment (``/``, ``?``, ``#``, control chars,
+    or path traversal). Returns the value unchanged on success — the
+    regex guarantees it is already safe to interpolate into a URL.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError("segment must be a non-empty string")
+    if not _AGENT_SEGMENT_RE.match(value):
+        raise ValueError(f"unsafe agent segment: {value!r}")
+    if value in (".", ".."):
+        raise ValueError("segment must not be '.' or '..'")
+    return value
+
 
 def safe_url_segment(value: str) -> str:
     """Validate and percent-encode ``value`` for use as a single URL path

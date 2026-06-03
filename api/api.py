@@ -51,8 +51,8 @@ from models import (  # lgtm[py/unused-import]
     ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest
 )
 from store import init_store, get_store
-from security_utils import safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
-from urllib.parse import quote as _urlquote
+from security_utils import safe_agent_segment, safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
+from urllib.parse import quote as _urlquote  # noqa: F401 — kept for downstream callers
 
 logger = logging.getLogger(__name__)
 
@@ -1140,8 +1140,11 @@ async def agent_session_approvals(session_id: str, request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
-    safe_user = _urlquote(user, safe="")
-    safe_sid = _urlquote(session_id, safe="")
+    try:
+        safe_user = safe_agent_segment(user)
+        safe_sid = safe_agent_segment(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
         r = await client.get(f"{_AGENT_URL}/v1/sessions/{safe_user}/{safe_sid}/approvals", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
@@ -1166,7 +1169,10 @@ async def agent_sessions_list(request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
-    safe_user = _urlquote(user, safe="")
+    try:
+        safe_user = safe_agent_segment(user)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
         r = await client.get(f"{_AGENT_URL}/v1/sessions/{safe_user}", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
@@ -1177,8 +1183,11 @@ async def agent_session_get(session_id: str, request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
-    safe_user = _urlquote(user, safe="")
-    safe_sid = _urlquote(session_id, safe="")
+    try:
+        safe_user = safe_agent_segment(user)
+        safe_sid = safe_agent_segment(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
         r = await client.get(f"{_AGENT_URL}/v1/sessions/{safe_user}/{safe_sid}", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
@@ -1189,8 +1198,11 @@ async def agent_session_delete(session_id: str, request: Request):
     if not _INTERNAL_API_TOKEN:
         raise HTTPException(status_code=503, detail="agent: INTERNAL_API_TOKEN not configured")
     user = _caller_id(request)
-    safe_user = _urlquote(user, safe="")
-    safe_sid = _urlquote(session_id, safe="")
+    try:
+        safe_user = safe_agent_segment(user)
+        safe_sid = safe_agent_segment(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
         r = await client.delete(f"{_AGENT_URL}/v1/sessions/{safe_user}/{safe_sid}", headers=_agent_headers(request))
         return JSONResponse(status_code=r.status_code, content=r.json())
