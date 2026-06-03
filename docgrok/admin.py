@@ -325,7 +325,8 @@ async def healthcheck_model(model_id: str):
             token = cred.get_token("https://cognitiveservices.azure.com/.default").token
             headers["Authorization"] = f"Bearer {token}"
         except Exception:
-            logger.exception("failed to acquire MI token for model %s", model_id)
+            safe_id = str(model_id).replace("\r", " ").replace("\n", " ")[:128]
+            logger.exception("failed to acquire MI token for model %s", safe_id)
             return {"ok": False, "status": 0, "detail": "failed to acquire managed-identity token; see server logs"}
     else:
         if not api_key:
@@ -337,7 +338,8 @@ async def healthcheck_model(model_id: str):
         try:
             r = await c.post(url, headers=headers, json={"input": "health check", "model": deployment})
         except Exception:
-            logger.exception("healthcheck request failed for model %s", model_id)
+            safe_id = str(model_id).replace("\r", " ").replace("\n", " ")[:128]
+            logger.exception("healthcheck request failed for model %s", safe_id)
             return {"ok": False, "status": 0, "detail": "request failed; see server logs"}
 
     body = r.text[:200]
