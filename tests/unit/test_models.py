@@ -23,7 +23,7 @@ from hypothesis import given, strategies as st
 class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
-            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http"
+            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks"
         }
 
     def test_destination_type_values(self, api_models):

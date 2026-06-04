@@ -1729,6 +1729,7 @@
             'mssql',
             's3',
             'http',
+            'databricks',
           ]),
           'title': 'SourceType',
           'type': 'string',

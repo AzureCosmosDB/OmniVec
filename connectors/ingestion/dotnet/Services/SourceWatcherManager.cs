@@ -93,11 +93,14 @@ public class SourceWatcherManager : IAsyncDisposable
         CancellationToken ct)
     {
         // Filter by source-type toggles so each deployment owns a subset of sources.
-        // Blob enumeration runs in its own single-replica deployment; Cosmos CFP scales independently.
+        // Blob enumeration runs in its own single-replica deployment; Cosmos CFP scales independently;
+        // Databricks Delta CDF runs in its own poll-only deployment.
         desiredSources = desiredSources.Where(s =>
         {
-            bool isBlob = string.Equals(s.Type, "azure-blob", StringComparison.OrdinalIgnoreCase);
-            return isBlob ? _options.EnableBlobSources : _options.EnableCosmosSources;
+            var t = (s.Type ?? "").ToLowerInvariant();
+            if (t == "azure-blob") return _options.EnableBlobSources;
+            if (t == "databricks") return _options.EnableDatabricksSources;
+            return _options.EnableCosmosSources;
         }).ToList();
 
         var desiredIds = desiredSources.Select(s => s.Id).ToHashSet();
@@ -111,17 +114,21 @@ public class SourceWatcherManager : IAsyncDisposable
             // For azure-blob sources we partition across replicas with a Cosmos lease so
             // only one pod enumerates a given container. Without this, all 15 replicas
             // publish the same blobs → duplicate work and can blow past SB capacity.
+            // The same is true for databricks sources — only one pod should poll the
+            // SQL warehouse for CDF changes per source.
             bool isBlob = string.Equals(source.Type, "azure-blob", StringComparison.OrdinalIgnoreCase);
-            if (isBlob)
+            bool isDatabricks = string.Equals(source.Type, "databricks", StringComparison.OrdinalIgnoreCase);
+            if (isBlob || isDatabricks)
             {
                 var haveLease = await _blobLeaseManager.TryAcquireAsync(source.Id, ct);
                 if (!haveLease)
                 {
-                    // Another pod owns this blob source. If we were running it, stop.
+                    // Another pod owns this source. If we were running it, stop.
                     if (_watchers.TryRemove(source.Id, out var old))
                     {
                         _logger.LogInformation(
-                            "Lost blob lease for source {SourceId}, stopping local watcher", source.Id);
+                            "Lost lease for source {SourceId} ({Type}), stopping local watcher",
+                            source.Id, source.Type);
                         await old.DisposeAsync();
                     }
                     continue;
@@ -258,6 +265,12 @@ public class SourceWatcherManager : IAsyncDisposable
                 _loggerFactory.CreateLogger<BlobSourceWatcher>(),
                 generation: generation,
                 sbPublisher: _sbPublisher.IsEnabled ? _sbPublisher : null),
+
+            "databricks" => new DatabricksCdcWatcher(
+                source, _options, _apiClient, _hasher,
+                _loggerFactory.CreateLogger<DatabricksCdcWatcher>(),
+                generation: generation,
+                sbPublisher: _sbPublisher),
 
             _ => new SourceWatcher(
                 source, _options, _apiClient, _leaseManager, _hasher,

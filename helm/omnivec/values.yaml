@@ -197,6 +197,25 @@ blobIngestor:
   livePollingEnabled: true
 
 # =============================================================================
+# Databricks Watcher - Dedicated single-replica deployment for databricks sources.
+# Runs the same image as changefeed but with EnableDatabricksSources=true,
+# EnableCosmosSources=false, EnableBlobSources=false. Polls Delta Change Data
+# Feed for each registered databricks source via the SQL Statement Execution API.
+# Disabled by default; flip on when you have at least one databricks source.
+# =============================================================================
+databricksWatcher:
+  enabled: false
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  pollIntervalSeconds: 30
+
+# =============================================================================
 # DOTNET WORKER (.NET Service Bus worker for queue-mode embedding)
 # =============================================================================
 dotnetWorker:

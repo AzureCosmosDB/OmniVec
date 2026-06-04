@@ -1,0 +1,58 @@
+{{- if .Values.databricksWatcher.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-databricks-watcher
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-databricks-watcher
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.databricksWatcher.replicaCount }}
+  selector:
+    matchLabels:
+      app: omnivec-databricks-watcher
+  template:
+    metadata:
+      labels:
+        app: omnivec-databricks-watcher
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      containers:
+        - name: changefeed
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.changefeed.image.repository }}:{{ .Values.changefeed.image.tag }}
+          imagePullPolicy: {{ .Values.changefeed.image.pullPolicy }}
+          env:
+            - name: ChangeFeed__OmniVecCosmosEndpoint
+              value: {{ .Values.azure.cosmos.endpoint | quote }}
+            - name: ChangeFeed__OmniVecDatabase
+              value: {{ .Values.azure.cosmos.database | quote }}
+            - name: ChangeFeed__OmniVecApiBaseUrl
+              value: "http://omnivec-api:80"
+            - name: ChangeFeed__DocGrokBaseUrl
+              value: "http://docgrok.omnivec.svc.cluster.local:80"
+            # This deployment polls Databricks Delta Change Data Feed only —
+            # Cosmos / Blob sources are handled by other deployments so we turn
+            # them off here to avoid duplicate enumeration.
+            - name: ChangeFeed__EnableCosmosSources
+              value: "false"
+            - name: ChangeFeed__EnableBlobSources
+              value: "false"
+            - name: ChangeFeed__EnableDatabricksSources
+              value: "true"
+            - name: ChangeFeed__SourcePollIntervalSeconds
+              value: {{ .Values.databricksWatcher.pollIntervalSeconds | default 30 | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            {{- if .Values.azure.serviceBus.namespace }}
+            - name: ChangeFeed__ServiceBusEnabled
+              value: "true"
+            - name: ChangeFeed__ServiceBusNamespace
+              value: {{ .Values.azure.serviceBus.namespace | quote }}
+            - name: ChangeFeed__ServiceBusTopicName
+              value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.databricksWatcher.resources | nindent 12 }}
+{{- end }}
