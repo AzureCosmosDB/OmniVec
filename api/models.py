@@ -2,7 +2,7 @@
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union  # lgtm[py/unused-import]
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
 
@@ -25,6 +25,7 @@ class SourceType(str, Enum):
     MSSQL = "mssql"
     S3 = "s3"
     HTTP = "http"
+    DATABRICKS = "databricks"
 
 
 class DestinationType(str, Enum):
@@ -139,6 +140,38 @@ class HTTPConfig(BaseModel):
     method: str = "GET"
     headers: Dict[str, str] = {}
     auth_type: Optional[str] = None  # "bearer", "basic", "api-key"
+
+
+class DatabricksSourceConfig(BaseModel):
+    """Databricks Delta Lake source consumed via Change Data Feed (CDF).
+
+    The connector polls `table_changes('<catalog>.<schema>.<table>', <since>+1)`
+    on a SQL Warehouse and emits one ingest event per inserted/updated row.
+    Deletes propagate as tombstone events (worker side removes the vector).
+
+    auth_type:
+      - "pat"               : personal access token, fetched at scan time via
+                              `pat_secret_ref` (Azure Key Vault secret id) or
+                              `DATABRICKS_TOKEN` env var fallback.
+      - "managed-identity"  : workspace OAuth token from Azure AD using the
+                              Databricks resource id `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`
+                              and the worker pod's MI/Workload Identity.
+    """
+    workspace_url: str                 # https://adb-<id>.<region>.azuredatabricks.net
+    http_path: str                     # /sql/1.0/warehouses/<warehouse-id>
+    catalog: str
+    # NB: field is named schema_name to avoid clashing with pydantic BaseModel.schema;
+    # the JSON wire form uses the "schema" key (consumed by the .NET watcher).
+    schema_name: str = Field(alias="schema")
+    table: str
+    auth_type: str = "managed-identity"  # "pat" | "managed-identity"
+    pat_secret_ref: Optional[str] = None  # Key Vault secret URI when auth_type=pat
+    content_column: str = "content"
+    id_column: str = "id"
+    poll_interval_seconds: int = 60
+    batch_size: int = 200              # max rows per CDF page
+
+    model_config = {"populate_by_name": True}
 
 
 # =============================================================================

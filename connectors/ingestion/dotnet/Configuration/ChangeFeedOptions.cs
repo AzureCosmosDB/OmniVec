@@ -69,6 +69,9 @@ public class ChangeFeedOptions
     /// <summary>When true, this process watches Azure Blob sources (default: true).</summary>
     public bool EnableBlobSources { get; set; } = true;
 
+    /// <summary>When true, this process watches Databricks Delta Lake sources via Change Data Feed (default: false).</summary>
+    public bool EnableDatabricksSources { get; set; } = false;
+
     /// <summary>When true, BlobEventConsumer consumes blob events from the
     /// <see cref="BlobEventQueueName"/> Service Bus queue (default: false).</summary>
     public bool BlobEventConsumerEnabled { get; set; } = false;

@@ -30,6 +30,19 @@ public class Source
     public string? SchemaName => TryGetString("schema_name") ?? TryGetString("schema");
     public string? PrimaryKey => TryGetString("primary_key") ?? "id";
 
+    // Databricks Delta Lake source config accessors (consumed via Change Data Feed)
+    public string? DatabricksWorkspaceUrl => TryGetString("workspace_url");
+    public string? DatabricksHttpPath => TryGetString("http_path");
+    public string? DatabricksCatalog => TryGetString("catalog");
+    // NB: shares the "schema" key with SQL sources via SchemaName above.
+    // NB: shares the "table" key with SQL sources via Table above.
+    public string DatabricksContentColumn => TryGetString("content_column") ?? "content";
+    public string DatabricksIdColumn => TryGetString("id_column") ?? "id";
+    // "pat" or "managed-identity" (default)
+    public string DatabricksAuthType => TryGetString("auth_type") ?? "managed-identity";
+    // Key Vault secret URI when auth_type=pat
+    public string? DatabricksPatSecretRef => TryGetString("pat_secret_ref");
+
     // Blob source config accessors
     public string? BlobAccountUrl => TryGetString("account_url");
     public string? BlobConnectionString => TryGetString("connection_string");

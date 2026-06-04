@@ -54,7 +54,7 @@ public class SourceDiscoveryService : BackgroundService
             try
             {
                 var sources = await _apiClient.GetSourcesByTypesAsync(
-                    new[] { "cosmosdb", "mssql", "postgresql", "azure-blob" }, ct);
+                    new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks" }, ct);
                 var pipelines = await _apiClient.GetActivePipelinesAsync(ct);
                 var destinations = await _apiClient.GetDestinationsAsync(ct);
 

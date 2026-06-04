@@ -1049,9 +1049,9 @@ async def get_capabilities():
         "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
         "agent_enabled": bool(os.getenv("AGENT_URL", "").strip()),
         "allowed_source_types": (
-            ["azure-blob", "cosmosdb", "postgres", "mssql"]
+            ["azure-blob", "cosmosdb", "postgres", "mssql", "databricks"]
             if _BLOB_SOURCE_ENABLED else
-            ["cosmosdb", "postgres", "mssql"]
+            ["cosmosdb", "postgres", "mssql", "databricks"]
         ),
         "allowed_processing_modes": (
             ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
