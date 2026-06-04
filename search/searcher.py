@@ -278,6 +278,126 @@ async def search_cosmos(
     return await asyncio.to_thread(_run)
 
 
+# =============================================================================
+# Cosmos full-text search
+# =============================================================================
+
+
+_FTS_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9_'\-]+")
+_FTS_MAX_TERMS = int(os.getenv("SEARCH_FTS_MAX_TERMS", "16"))
+
+
+def _tokenize_fts_query(query: str) -> List[str]:
+    """Conservative tokenizer for Cosmos FullTextScore.
+
+    Splits on non-alphanumeric (keeping hyphens, apostrophes, underscores),
+    lowercases, drops empties + duplicates while preserving order, and caps
+    at SEARCH_FTS_MAX_TERMS to bound SQL size + RU cost.
+    """
+    if not query:
+        return []
+    seen: Dict[str, None] = {}
+    for tok in _FTS_TOKEN_RE.findall(query.lower()):
+        if tok and tok not in seen:
+            seen[tok] = None
+            if len(seen) >= _FTS_MAX_TERMS:
+                break
+    return list(seen.keys())
+
+
+async def search_cosmos_fts(
+    store: CosmosStore,
+    fts_field: str,
+    query_terms: List[str],
+    top_k: int,
+    content_fields: List[str],
+    return_fields: List[str],
+    index_filter: Optional[IndexFilter],
+    include_vector: bool,
+) -> List[dict]:
+    """Cosmos DB full-text search via `FullTextScore` (sync SDK wrapped).
+
+    Requires the target container to have a full-text indexing policy on
+    `fts_field`. FullTextScore can only appear in `ORDER BY RANK`, so the
+    native BM25 score is not returned — hits get `score=None` and merge via
+    rank-derived RRF.
+    """
+    from azure.cosmos import CosmosClient
+    from azure.identity import DefaultAzureCredential
+
+    if not _FTS_FIELD_RE.match(fts_field):
+        raise ValueError(f"invalid fts_field {fts_field!r}")
+    if not query_terms:
+        return []
+
+    if getattr(store.auth, "mode", "managed_identity") == "key":
+        key = await resolve_secret_ref(store.auth.secret_ref)  # type: ignore[attr-defined]
+        client_args = {"credential": key}
+    else:
+        client_args = {"credential": DefaultAzureCredential()}
+
+    def _run():
+        client = CosmosClient(store.endpoint, **client_args)
+        database = client.get_database_client(store.database)
+        container = database.get_container_client(store.container)
+
+        ff = fts_field.lstrip("/").replace("/", ".")
+
+        params: List[dict] = [{"name": "@top_k", "value": int(top_k)}]
+        term_placeholders: List[str] = []
+        for i, term in enumerate(query_terms):
+            ph = f"@term{i}"
+            term_placeholders.append(ph)
+            params.append({"name": ph, "value": term})
+
+        where = ""
+        if index_filter and index_filter.where:
+            where = f"WHERE {index_filter.where}"
+            if isinstance(index_filter.params, dict):
+                for k, v in index_filter.params.items():
+                    name = k if k.startswith("@") else f"@{k}"
+                    params.append({"name": name, "value": v})
+
+        term_args = ", ".join(term_placeholders)
+        query = (
+            f"SELECT TOP @top_k c FROM c {where} "
+            f"ORDER BY RANK FullTextScore(c.{ff}, {term_args})"
+        )
+
+        hits: List[dict] = []
+        for item in container.query_items(
+            query=query, parameters=params, enable_cross_partition_query=True
+        ):
+            if isinstance(item, dict) and "c" in item:
+                doc = item.get("c") or {}
+            else:
+                # Cosmos may return the doc inlined when only one column is projected.
+                doc = item if isinstance(item, dict) else {}
+            text, text_parts = _extract_text(doc, content_fields)
+
+            metadata: Dict[str, Any] = dict(doc.get("metadata", {}) or {})
+            for f in return_fields:
+                if f in doc and f not in metadata:
+                    metadata[f] = doc[f]
+
+            hit: Dict[str, Any] = {
+                "id": doc.get("id"),
+                "score": None,  # FullTextScore not available in projection
+                "text": text,
+                "text_parts": text_parts,
+                "metadata": metadata,
+                "source": doc.get("source"),
+                "source_ref": doc.get("source_ref") or doc.get("title") or doc.get("url"),
+            }
+            if include_vector:
+                hit["vector"] = None
+            hits.append(hit)
+        return hits
+
+    return await asyncio.to_thread(_run)
+
+
 async def search_pgvector(
     store: PgVectorStore,
     vec_field: str,
@@ -400,6 +520,50 @@ async def _search_one_index(
     """Embed (if needed) + search one index. Never raises."""
     info = PerIndexInfo(index_id=idx.id)
     per_top_k = idx.top_k or default_per_index_top_k
+
+    # -------------------------------------------------------------------------
+    # FTS branch — no embedding call; Cosmos-only in v1.
+    # -------------------------------------------------------------------------
+    if idx.mode == "fts":
+        info.embedding_model = "fts"
+        if not query:
+            info.error = "fts mode requires text query"
+            return info, []
+        if not isinstance(idx.store, CosmosStore):
+            info.error = "fts mode only supports cosmosdb store in v1"
+            return info, []
+        terms = _tokenize_fts_query(query)
+        if not terms:
+            info.error = "fts mode: query produced no searchable tokens"
+            return info, []
+        fts_field = idx.fts_field or (idx.content_fields[0] if idx.content_fields else "content")
+        t1 = time.time()
+        try:
+            hits = await asyncio.wait_for(
+                search_cosmos_fts(
+                    idx.store, fts_field, terms, per_top_k,
+                    idx.content_fields, idx.return_fields, idx.filter, include_vector,
+                ),
+                timeout=PER_INDEX_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            info.error = f"per-index timeout > {PER_INDEX_TIMEOUT_S}s"
+            info.search_ms = int((time.time() - t1) * 1000)
+            return info, []
+        except Exception as e:
+            info.error = f"search: {str(e)[:180]}"
+            info.search_ms = int((time.time() - t1) * 1000)
+            return info, []
+        info.search_ms = int((time.time() - t1) * 1000)
+        info.result_count = len(hits)
+        return info, hits
+
+    # -------------------------------------------------------------------------
+    # Vector branch — embed then search.
+    # -------------------------------------------------------------------------
+    if idx.embedding is None:
+        info.error = "embedding policy required for vector mode"
+        return info, []
 
     # Embed
     t0 = time.time()
@@ -573,6 +737,10 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
         warnings.append(
             "mixed embedding models with merge.strategy=score; scores are not directly comparable — consider 'rrf'"
         )
+    if req.merge.strategy == "score" and any(ix.mode == "fts" for ix in req.indexes):
+        warnings.append(
+            "merge.strategy=score with fts indexes will rank fts hits as None — use 'rrf' for hybrid"
+        )
 
     if req.strict and errors:
         raise RuntimeError(
@@ -587,7 +755,10 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
     idx_modality: Dict[str, str] = {}
     idx_pipeline: Dict[str, str] = {}
     for ix in req.indexes:
-        mod = getattr(ix.embedding, "input_modality", "text")
+        if ix.mode == "fts":
+            mod = "text"
+        else:
+            mod = getattr(ix.embedding, "input_modality", "text") if ix.embedding else "text"
         idx_modality[ix.id] = mod
         pid = getattr(ix, "pipeline_id", None)
         if pid:
@@ -646,15 +817,33 @@ async def explain_search(req: SearchRequest) -> Dict[str, Any]:
     """Dry-run: return the resolved plan without executing embedding/search."""
     plan = []
     for idx in req.indexes:
+        if idx.mode == "fts":
+            fts_field = idx.fts_field or (idx.content_fields[0] if idx.content_fields else None)
+            plan.append({
+                "index_id": idx.id,
+                "mode": "fts",
+                "store_type": idx.store.type,
+                "fts_field": fts_field,
+                "fts_terms": _tokenize_fts_query(req.query or ""),
+                "embedding": None,
+                "content_fields": idx.content_fields,
+                "return_fields": idx.return_fields,
+                "has_filter": idx.filter is not None,
+                "top_k": idx.top_k or req.merge.per_index_top_k,
+            })
+            continue
         emb = idx.embedding
         if isinstance(emb, ModelEmbedding):
             emb_desc = {"policy": "model", "model_id": emb.model_id, "normalize": emb.normalize}
         elif isinstance(emb, PipelineEmbedding):
             emb_desc = {"policy": "pipeline", "pipeline": emb.pipeline, "normalize": emb.normalize}
-        else:
+        elif isinstance(emb, PrecomputedEmbedding):
             emb_desc = {"policy": "precomputed", "dims": len(emb.vector)}
+        else:
+            emb_desc = None
         plan.append({
             "index_id": idx.id,
+            "mode": "vector",
             "store_type": idx.store.type,
             "vector_field": idx.vector.field,
             "metric": idx.vector.metric,
