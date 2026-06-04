@@ -8,6 +8,7 @@ admin-tier resolver that hydrates index specs from stored destination docs).
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
@@ -129,16 +130,58 @@ class IndexFilter(BaseModel):
 # -----------------------------------------------------------------------------
 
 
+_FTS_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
 class IndexSpec(BaseModel):
     id: str = Field(..., description="Caller-supplied label; echoed in results")
     store: StoreConfig = Field(..., discriminator="type")
+    mode: Literal["vector", "fts"] = Field(
+        default="vector",
+        description=(
+            "Search mode. 'vector' (default) performs ANN over a vector column. "
+            "'fts' performs Cosmos DB full-text search via FullTextScore and requires "
+            "the container to have a full-text indexing policy on `fts_field`."
+        ),
+    )
     vector: VectorConfig = Field(default_factory=VectorConfig)
-    embedding: EmbeddingPolicy = Field(..., discriminator="policy")
+    embedding: Optional[EmbeddingPolicy] = Field(
+        default=None,
+        discriminator="policy",
+        description="Required when mode='vector'; ignored when mode='fts'.",
+    )
+    fts_field: Optional[str] = Field(
+        default=None,
+        description=(
+            "Document path to full-text search (e.g. 'content' or 'body.text'). "
+            "When omitted, defaults to the first entry in `content_fields`. "
+            "Only used when mode='fts'."
+        ),
+    )
     content_fields: List[str] = Field(default_factory=lambda: ["content"])
     return_fields: List[str] = Field(default_factory=list)
     filter: Optional[IndexFilter] = None
     top_k: Optional[int] = Field(default=None, ge=1, le=500)
     pipeline_id: Optional[str] = Field(default=None, description="Source pipeline id; surfaced into result metadata for blob preview")
+
+    @model_validator(mode="after")
+    def _validate_mode(self):
+        if self.mode == "vector":
+            if self.embedding is None:
+                raise ValueError("embedding is required when mode='vector'")
+        else:  # fts
+            if not isinstance(self.store, CosmosStore):
+                raise ValueError("mode='fts' is only supported for cosmosdb store in v1")
+            field = self.fts_field or (self.content_fields[0] if self.content_fields else None)
+            if not field:
+                raise ValueError(
+                    "mode='fts' requires `fts_field` or at least one entry in `content_fields`"
+                )
+            if not _FTS_FIELD_RE.match(field):
+                raise ValueError(
+                    f"invalid fts_field {field!r}: must match [A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*"
+                )
+        return self
 
 
 # -----------------------------------------------------------------------------

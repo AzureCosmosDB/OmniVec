@@ -9097,25 +9097,33 @@
               'type': 'array',
             }),
             'embedding': dict({
-              'discriminator': dict({
-                'mapping': dict({
-                  'model': '#/components/schemas/ModelEmbedding',
-                  'pipeline': '#/components/schemas/PipelineEmbedding',
-                  'precomputed': '#/components/schemas/PrecomputedEmbedding',
-                }),
-                'propertyName': 'policy',
-              }),
-              'oneOf': list([
+              'anyOf': list([
                 dict({
-                  '$ref': '#/components/schemas/ModelEmbedding',
+                  'discriminator': dict({
+                    'mapping': dict({
+                      'model': '#/components/schemas/ModelEmbedding',
+                      'pipeline': '#/components/schemas/PipelineEmbedding',
+                      'precomputed': '#/components/schemas/PrecomputedEmbedding',
+                    }),
+                    'propertyName': 'policy',
+                  }),
+                  'oneOf': list([
+                    dict({
+                      '$ref': '#/components/schemas/ModelEmbedding',
+                    }),
+                    dict({
+                      '$ref': '#/components/schemas/PipelineEmbedding',
+                    }),
+                    dict({
+                      '$ref': '#/components/schemas/PrecomputedEmbedding',
+                    }),
+                  ]),
                 }),
                 dict({
-                  '$ref': '#/components/schemas/PipelineEmbedding',
-                }),
-                dict({
-                  '$ref': '#/components/schemas/PrecomputedEmbedding',
+                  'type': 'null',
                 }),
               ]),
+              'description': "Required when mode='vector'; ignored when mode='fts'.",
               'title': 'Embedding',
             }),
             'filter': dict({
@@ -9128,9 +9136,31 @@
                 }),
               ]),
             }),
+            'fts_field': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'description': "Document path to full-text search (e.g. 'content' or 'body.text'). When omitted, defaults to the first entry in `content_fields`. Only used when mode='fts'.",
+              'title': 'Fts Field',
+            }),
             'id': dict({
               'description': 'Caller-supplied label; echoed in results',
               'title': 'Id',
+              'type': 'string',
+            }),
+            'mode': dict({
+              'default': 'vector',
+              'description': "Search mode. 'vector' (default) performs ANN over a vector column. 'fts' performs Cosmos DB full-text search via FullTextScore and requires the container to have a full-text indexing policy on `fts_field`.",
+              'enum': list([
+                'vector',
+                'fts',
+              ]),
+              'title': 'Mode',
               'type': 'string',
             }),
             'pipeline_id': dict({
@@ -9190,7 +9220,6 @@
           'required': list([
             'id',
             'store',
-            'embedding',
           ]),
           'title': 'IndexSpec',
           'type': 'object',
