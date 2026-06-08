@@ -627,9 +627,16 @@ async def _search_one_index(
 
 
 def _merge(
-    per_index_hits: List[Tuple[str, List[dict]]], cfg: MergeConfig, top_k: int
+    per_index_hits: List[Tuple[str, List[dict]]], cfg: MergeConfig, top_k: int,
+    fusion_groups: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
-    """Return merged list of hit dicts with fields: index_id, id, rank, score, rrf_score, ..."""
+    """Return merged list of hit dicts with fields: index_id, id, rank, score, rrf_score, ...
+
+    fusion_groups maps index_id -> fusion_group. Under rrf, indexes sharing a
+    fusion_group are fused on (fusion_group, doc_id) so the same document found by
+    a vector spec and an fts spec over the same container (hybrid search) collapses
+    into one result with a combined RRF score."""
+    fusion_groups = fusion_groups or {}
     if cfg.strategy == "per_index":
         out: List[dict] = []
         for idx_id, hits in per_index_hits:
@@ -643,12 +650,13 @@ def _merge(
     if cfg.strategy == "rrf":
         scores: Dict[Tuple[str, Any], Dict[str, Any]] = {}
         for idx_id, hits in per_index_hits:
+            group = fusion_groups.get(idx_id) or idx_id
             for rank, h in enumerate(hits, start=1):
-                key = (idx_id, h.get("id"))
+                key = (group, h.get("id"))
                 contrib = 1.0 / (cfg.rrf_k + rank)
                 if key not in scores:
                     entry = dict(h)
-                    entry["index_id"] = idx_id
+                    entry["index_id"] = group
                     entry["rrf_score"] = contrib
                     scores[key] = entry
                 else:
@@ -748,7 +756,8 @@ async def run_search(http: httpx.AsyncClient, req: SearchRequest) -> SearchRespo
         )
 
     t_merge = time.time()
-    merged = _merge(per_index_hits, req.merge, req.top_k)
+    fusion_groups = {ix.id: ix.fusion_group for ix in req.indexes if ix.fusion_group}
+    merged = _merge(per_index_hits, req.merge, req.top_k, fusion_groups)
     merge_ms = int((time.time() - t_merge) * 1000)
 
     # Build index_id -> input_modality map for entity_type tagging.

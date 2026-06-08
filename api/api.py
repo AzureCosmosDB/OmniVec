@@ -5495,11 +5495,29 @@ class PlaygroundSearchRequest(BaseModel):
     destination_ids: List[str]
     top_k: int = 5
     merge_strategy: str = "rrf"  # rrf | interleave | score
+    search_mode: str = "vector"  # vector | fts | hybrid
+    fts_field: Optional[str] = None  # full-text path; defaults to first content field
 
 
-async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str, Any]], List[str]]:
+async def _build_index_specs(
+    destination_ids: List[str],
+    search_mode: str = "vector",
+    fts_field: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], List[str]]:
     """Build IndexSpec[] for a set of destination ids by joining with pipelines.
+
+    search_mode controls which index specs are emitted per destination:
+      - "vector": ANN over the embedding column (default).
+      - "fts":    Cosmos full-text search over the content field.
+      - "hybrid": both a vector and an fts spec per destination, combined via RRF.
+    In hybrid mode the two specs get suffixed ids ("<dest>::vec" / "<dest>::fts")
+    so the merge layer treats them as distinct indexes.
+
     Returns (indexes, warnings)."""
+    search_mode = (search_mode or "vector").lower()
+    want_vector = search_mode in ("vector", "hybrid")
+    want_fts = search_mode in ("fts", "hybrid")
+    hybrid = search_mode == "hybrid"
     warnings: List[str] = []
     indexes: List[Dict[str, Any]] = []
     store = get_store()
@@ -5571,21 +5589,40 @@ async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str,
                             if vi_path == vf:
                                 break
             dims = dims or 1024
-            indexes.append({
-                "id": dest_id,
-                "store": {
-                    "type": "cosmosdb",
-                    "endpoint": inline_override_endpoint or cfg.get("endpoint", ""),
-                    "database": inline_override_database or cfg.get("database", ""),
-                    "container": inline_override_container or cfg.get("container", ""),
-                    "auth": {"mode": "managed_identity"},
-                },
-                "vector": {"field": vf, "dims": dims, "metric": "cosine"},
-                "embedding": embedding,
-                "content_fields": cf,
-                "pipeline_id": matched_pip.get("id"),
-            })
+            cosmos_store = {
+                "type": "cosmosdb",
+                "endpoint": inline_override_endpoint or cfg.get("endpoint", ""),
+                "database": inline_override_database or cfg.get("database", ""),
+                "container": inline_override_container or cfg.get("container", ""),
+                "auth": {"mode": "managed_identity"},
+            }
+            if want_vector:
+                indexes.append({
+                    "id": f"{dest_id}::vec" if hybrid else dest_id,
+                    "store": cosmos_store,
+                    "mode": "vector",
+                    "vector": {"field": vf, "dims": dims, "metric": "cosine"},
+                    "embedding": embedding,
+                    "content_fields": cf,
+                    "pipeline_id": matched_pip.get("id"),
+                    **({"fusion_group": dest_id} if hybrid else {}),
+                })
+            if want_fts:
+                indexes.append({
+                    "id": f"{dest_id}::fts" if hybrid else dest_id,
+                    "store": cosmos_store,
+                    "mode": "fts",
+                    "fts_field": fts_field or (cf[0] if cf else "content"),
+                    "content_fields": cf,
+                    "pipeline_id": matched_pip.get("id"),
+                    **({"fusion_group": dest_id} if hybrid else {}),
+                })
         elif dtype == "pgvector":
+            if want_fts and not want_vector:
+                warnings.append(f"destination {dest_id} (pgvector) does not support full-text search")
+                continue
+            if want_fts:
+                warnings.append(f"destination {dest_id} (pgvector) does not support full-text search; using vector only")
             indexes.append({
                 "id": dest_id,
                 "store": {
@@ -5600,6 +5637,7 @@ async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str,
                     "id_column": cfg.get("id_column", "id"),
                     "content_column": cfg.get("content_column", "content"),
                 },
+                "mode": "vector",
                 "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
                 "embedding": embedding,
                 "content_fields": cf,
@@ -5624,11 +5662,29 @@ async def playground_search(req: PlaygroundSearchRequest):
     if not SEARCH_INTERNAL_TOKEN:
         raise HTTPException(status_code=503, detail="Search service not configured (SEARCH_INTERNAL_TOKEN missing)")
 
-    indexes, warnings = await _build_index_specs(req.destination_ids)
+    search_mode = (req.search_mode or "vector").lower()
+    if search_mode not in ("vector", "fts", "hybrid"):
+        raise HTTPException(status_code=400, detail=f"invalid search_mode '{req.search_mode}'")
+    # FTS needs a text query; image-only queries can't drive full-text search.
+    if search_mode == "fts" and not has_text:
+        raise HTTPException(status_code=400, detail="full-text search requires a text query")
+
+    indexes, warnings = await _build_index_specs(req.destination_ids, search_mode, req.fts_field)
     if not indexes:
         raise HTTPException(
             status_code=400,
             detail="No searchable indexes resolved from destination_ids: " + "; ".join(warnings))
+    # Hybrid emits two specs (vector + fts) per Cosmos destination; the search
+    # service caps a request at 10 indexes.
+    if len(indexes) > 10:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Too many indexes for one search "
+                f"({len(indexes)} > 10). "
+                + ("Hybrid mode uses 2 indexes per destination; select fewer destinations."
+                   if search_mode == "hybrid" else "Select fewer destinations.")
+            ))
 
     # Map UI merge strategy to search-service merge spec.
     # Search service accepts: rrf | score | round_robin | per_index
@@ -5642,15 +5698,32 @@ async def playground_search(req: PlaygroundSearchRequest):
         "per_index": "per_index",
     }
     merge_strategy = strategy_map.get(ui_strategy, "rrf")
+    # FTS hits carry no comparable native score, and hybrid fuses heterogeneous
+    # vector + FTS rankings; RRF is the only strategy that ranks these correctly.
+    if search_mode in ("fts", "hybrid") and merge_strategy != "rrf":
+        merge_strategy = "rrf"
     merge_spec = {"strategy": merge_strategy}
 
     # Build lookup of destination metadata for enriching the response with names.
+    # In hybrid mode index ids are suffixed ("<dest>::vec" / "<dest>::fts"); strip
+    # the suffix to resolve the destination name and append a mode label.
     store = get_store()
     dest_name_map: Dict[str, str] = {}
     for dest_id in req.destination_ids:
         dd = await asyncio.to_thread(store.get, dest_id, "destination")
         if dd:
             dest_name_map[dest_id] = dd.get("name") or dest_id
+
+    def _resolve_index_name(idx_id: Optional[str]) -> Optional[str]:
+        if not idx_id:
+            return idx_id
+        base, _, suffix = idx_id.partition("::")
+        name = dest_name_map.get(base, base)
+        if suffix == "vec":
+            return f"{name} (vector)"
+        if suffix == "fts":
+            return f"{name} (full-text)"
+        return name
 
     payload = {
         "query": req.query,
@@ -5685,13 +5758,14 @@ async def playground_search(req: PlaygroundSearchRequest):
     # Enrich each result with a friendly index_name (destination name).
     for r in results:
         idx_id = r.get("index_id")
-        if idx_id and idx_id in dest_name_map:
-            r["index_name"] = dest_name_map[idx_id]
+        name = _resolve_index_name(idx_id)
+        if name:
+            r["index_name"] = name
 
     indexes_searched = [
         {
             "index_id": pi.get("index_id"),
-            "index_name": dest_name_map.get(pi.get("index_id"), pi.get("index_id")),
+            "index_name": _resolve_index_name(pi.get("index_id")),
             "result_count": pi.get("result_count", 0),
             "search_time_ms": pi.get("search_ms", 0),
             "error": pi.get("error"),
