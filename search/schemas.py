@@ -163,6 +163,16 @@ class IndexSpec(BaseModel):
     filter: Optional[IndexFilter] = None
     top_k: Optional[int] = Field(default=None, ge=1, le=500)
     pipeline_id: Optional[str] = Field(default=None, description="Source pipeline id; surfaced into result metadata for blob preview")
+    fusion_group: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional grouping key for rank fusion. Indexes sharing the same "
+            "fusion_group are treated as one logical source during RRF merge, so a "
+            "document returned by several of them (e.g. a vector spec and an fts spec "
+            "over the same container in hybrid search) is fused into a single result "
+            "with combined RRF score instead of appearing once per index."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_mode(self):

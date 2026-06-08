@@ -1727,7 +1727,7 @@
 
             <section id="section-playground" class="section" style="display: none;">
                 <header class="header">
-                    <h2 class="header-title">Vector Search Playground</h2>
+                    <h2 class="header-title">Search Playground</h2>
                 </header>
 
                 <div class="content">
@@ -1755,19 +1755,20 @@
                             </div>
                             <div style="margin-top: 16px; display: flex; gap: 16px; align-items: center;">
                                 <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
+                                    <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Mode:</label>
+                                    <select class="form-input" id="playground-search-mode" style="width: 130px; padding: 6px 10px;" onchange="onPlaygroundModeChange()">
+                                        <option value="vector" selected>Vector</option>
+                                        <option value="fts">Full-Text</option>
+                                        <option value="hybrid">Hybrid</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
                                     <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Top K:</label>
                                     <input type="number" class="form-input" id="playground-topk" value="5" min="1" max="20" style="width: 70px; text-align: center;">
                                 </div>
                                 <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
-                                    <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Merge:</label>
-                                    <select class="form-input" id="playground-merge-strategy" style="width: 170px; padding: 6px 10px;">
-                                        <option value="interleave" selected>Interleave by Score</option>
-                                        <option value="round_robin">Round Robin</option>
-                                        <option value="per_index">Per-Index Cap</option>
-                                    </select>
-                                </div>
-                                <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
                                     <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Image:</label>
+                                    <input type="hidden" id="playground-merge-strategy" value="rrf">
                                     <input type="file" id="playground-image-file" accept="image/*" style="font-size: 12px;" onchange="onPlaygroundImageChange(event)">
                                     <span id="playground-image-status" style="font-size: 12px; color: var(--text-tertiary);"></span>
                                     <button type="button" class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;" onclick="clearPlaygroundImage()">Clear</button>
@@ -11952,12 +11953,27 @@
             });
         }
 
+        function onPlaygroundModeChange() {
+            const mode = document.getElementById('playground-search-mode').value;
+            const mergeEl = document.getElementById('playground-merge-strategy');
+            const imageEl = document.getElementById('playground-image-file');
+            // Hybrid fuses vector + full-text rankings; RRF is the right merge.
+            if (mode === 'hybrid' && mergeEl) {
+                mergeEl.value = 'rrf';
+            }
+            // Full-text search is text-only; disable the image input.
+            if (imageEl) {
+                imageEl.disabled = (mode === 'fts');
+            }
+        }
+
         async function performVectorSearch() {
             const query = document.getElementById('playground-query').value.trim();
             const destIds = getSelectedDestIds();
             const destInfo = getSelectedDestInfo();
             const topK = parseInt(document.getElementById('playground-topk').value) || 5;
             const mergeStrategy = document.getElementById('playground-merge-strategy').value;
+            const searchMode = document.getElementById('playground-search-mode').value;
             const statusEl = document.getElementById('playground-status');
             const resultsEl = document.getElementById('playground-results');
 
@@ -11965,8 +11981,12 @@
                 alert('Please enter a search query or upload an image');
                 return;
             }
+            if (searchMode === 'fts' && !query) {
+                alert('Full-Text mode requires a text query');
+                return;
+            }
             if (destIds.length === 0) {
-                alert('Please select at least one vector index');
+                alert('Please select at least one index');
                 return;
             }
 
@@ -11983,7 +12003,8 @@
                         query_image_b64: _playgroundImageB64,
                         destination_ids: destIds,
                         top_k: topK,
-                        merge_strategy: mergeStrategy
+                        merge_strategy: mergeStrategy,
+                        search_mode: searchMode
                     })
                 });
 
@@ -12021,11 +12042,13 @@
                 }
 
                 // Per-index breakdown (if multiple indexes)
+                const baseIndexId = (id) => String(id || '').split('::')[0];
                 let breakdownHtml = '';
                 if (searched.length > 1) {
                     breakdownHtml = `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">` +
                         searched.map(idx => {
-                            const info = indexColorMap[idx.index_id] || { color: '#6b7280', name: idx.index_name };
+                            const base = indexColorMap[baseIndexId(idx.index_id)];
+                            const info = { color: (base && base.color) || '#6b7280', name: idx.index_name || (base && base.name) || idx.index_id };
                             const statusBadge = idx.error
                                 ? `<span style="color:var(--error);font-size:11px;">Failed</span>`
                                 : `<span style="font-size:11px;color:var(--text-tertiary);">${idx.result_count} results, ${idx.search_time_ms}ms</span>`;
@@ -12038,7 +12061,10 @@
 
                 const multiIndex = searched.length > 1;
                 resultsEl.innerHTML = breakdownHtml + data.results.map((r, i) => {
-                    const idxInfo = indexColorMap[r.index_id] || { color: '#6b7280', name: r.index_name || 'Unknown' };
+                    const idxInfo = (() => {
+                        const base = indexColorMap[baseIndexId(r.index_id)];
+                        return { color: (base && base.color) || '#6b7280', name: r.index_name || (base && base.name) || 'Unknown' };
+                    })();
                     const indexBadge = multiIndex
                         ? `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;background:${idxInfo.color}20;color:${idxInfo.color};border:1px solid ${idxInfo.color}40;">
                             <span style="width:6px;height:6px;border-radius:50%;background:${idxInfo.color};"></span>
