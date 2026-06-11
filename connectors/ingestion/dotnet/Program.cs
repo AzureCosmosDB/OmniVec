@@ -9,6 +9,8 @@ using OmniVec.ChangeFeed.Services;
 // 500 threads for 100K RU/s provisioned throughput
 ThreadPool.SetMinThreads(1000, 1000);
 
+const string CosmosMetadataUserAgent = "OmniVec-MetadataCosmos/1.0";
+
 var builder = Host.CreateApplicationBuilder(args);
 
 // Bind configuration from env vars: ChangeFeed__OmniVecCosmosEndpoint, etc.
@@ -23,6 +25,7 @@ builder.Services.AddSingleton(sp =>
     return new CosmosClient(opts.OmniVecCosmosEndpoint, new DefaultAzureCredential(),
         new CosmosClientOptions
         {
+            ApplicationName = CosmosMetadataUserAgent,
             ConnectionMode = ConnectionMode.Direct,
             MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
             MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
@@ -40,6 +43,7 @@ builder.Services.AddKeyedSingleton<CosmosClient>("lease", (sp, _) =>
     return new CosmosClient(leaseEndpoint, new DefaultAzureCredential(),
         new CosmosClientOptions
         {
+            ApplicationName = CosmosMetadataUserAgent,
             ConnectionMode = ConnectionMode.Direct,
             MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
             MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
