@@ -16,6 +16,8 @@ namespace OmniVec.ChangeFeed.Services;
 /// </summary>
 public class SourceWatcher : ISourceWatcher
 {
+    private const string CosmosDataUserAgent = "OmniVec-DataCosmos/1.0";
+
     private readonly Source _source;
     private readonly ChangeFeedOptions _options;
     private readonly OmniVecApiClient _apiClient;
@@ -106,6 +108,7 @@ public class SourceWatcher : ISourceWatcher
             new DefaultAzureCredential(),
             new CosmosClientOptions
             {
+                ApplicationName = CosmosDataUserAgent,
                 ConnectionMode = ConnectionMode.Direct,
                 ConsistencyLevel = ConsistencyLevel.Eventual,
                 MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,

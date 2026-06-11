@@ -6,6 +6,8 @@ namespace OmniVec.Worker.Destinations;
 
 public class CosmosDbDestinationWriter : IDestinationWriter
 {
+    private const string CosmosDataUserAgent = "OmniVec-DataCosmos/1.0";
+
     private readonly ILogger<CosmosDbDestinationWriter> _logger;
     private static readonly ConcurrentDictionary<string, CosmosClient> _clients = new();
     private static readonly ConcurrentDictionary<string, string> _pkPathCache = new();
@@ -241,6 +243,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
         return _clients.GetOrAdd(endpoint, ep =>
             new CosmosClient(ep, new DefaultAzureCredential(), new CosmosClientOptions
             {
+                ApplicationName = CosmosDataUserAgent,
                 ConnectionMode = ConnectionMode.Direct,
                 MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
                 MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
