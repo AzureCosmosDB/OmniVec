@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -11,6 +13,12 @@ var transformColumns = []Column{
 	{Header: "NAME", Key: "name"},
 	{Header: "DESCRIPTION", Key: "description", Width: 50},
 	{Header: "STEPS", Key: "_steps"},
+}
+
+var stageCatalogColumns = []Column{
+	{Header: "STAGE", Key: "name"},
+	{Header: "PARAMS", Key: "_params", Width: 40},
+	{Header: "SUMMARY", Key: "summary", Width: 70},
 }
 
 func newTransformCmd() *cobra.Command {
@@ -25,8 +33,59 @@ func newTransformCmd() *cobra.Command {
 		newTransformCreateCmd(),
 		newTransformUpdateCmd(),
 		newTransformDeleteCmd(),
+		newTransformStageCatalogCmd(),
 	)
 	return cmd
+}
+
+func newTransformStageCatalogCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "stage-catalog",
+		Aliases: []string{"stages"},
+		Short:   "List available transform stage types and their config params",
+		Long: "Fetch the catalog of reusable pipeline stage types (extract, chunk, " +
+			"card_extract, embed, …) and the config-param schema for each. Use this to " +
+			"discover which stages a transform pipeline can be composed from.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := getClient()
+			data, err := c.Get("/api/docgrok/transforms/stage-catalog", nil)
+			if err != nil {
+				exitErr("%v", err)
+			}
+			if flagOutput != "table" {
+				var raw any
+				json.Unmarshal(data, &raw)
+				outputResult(raw, nil)
+				return nil
+			}
+			obj := parseJSONObject(data)
+			stages, _ := obj["stages"].(map[string]any)
+			names := make([]string, 0, len(stages))
+			for name := range stages {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			rows := make([]map[string]any, 0, len(names))
+			for _, name := range names {
+				def, _ := stages[name].(map[string]any)
+				summary, _ := def["summary"].(string)
+				var paramKeys []string
+				if params, ok := def["params"].(map[string]any); ok {
+					for k := range params {
+						paramKeys = append(paramKeys, k)
+					}
+					sort.Strings(paramKeys)
+				}
+				rows = append(rows, map[string]any{
+					"name":    name,
+					"_params": strings.Join(paramKeys, ", "),
+					"summary": summary,
+				})
+			}
+			outputList(rows, stageCatalogColumns)
+			return nil
+		},
+	}
 }
 
 func newTransformListCmd() *cobra.Command {

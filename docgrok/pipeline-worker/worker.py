@@ -192,6 +192,51 @@ STAGE_CATALOG: Dict[str, Any] = {
             },
         },
     },
+    "card_extract": {
+        "summary": (
+            "Turn each chunk into one or more self-contained, typed CARDS "
+            "using an LLM, driven entirely by a user-supplied extraction "
+            "spec (the `fields` param). When a passage covers several "
+            "distinct cases that differ only by their conditions, it is "
+            "split into separate cards so near-duplicate scenarios stay "
+            "distinguishable to vector + FTS search. Replaces the chunks "
+            "fed downstream; runs between `chunk` and `embed`. Nothing here "
+            "is dataset-specific — the spec is the only input and lives in "
+            "the pipeline / transform definition."
+        ),
+        "params": {
+            "model_id": {
+                "type": "str|null", "default": None,
+                "description": "Chat model id (an azure-openai model registered in the router) used for extraction. null = use the request model_id.",
+            },
+            "fields": {
+                "type": "list[object]", "default": [],
+                "description": (
+                    "The extraction spec: the fields to pull onto every card. Each item is "
+                    "{name, type(text|list|enum|bool), embed?(bool), fts?(bool), "
+                    "discriminator?(bool), values?(list, for enum), description?(str)}. "
+                    "embed=include in the embedded text; fts=include in full-text-search text; "
+                    "discriminator=keep as a distinguishing facet in card metadata."
+                ),
+            },
+            "instructions": {
+                "type": "str", "default": "",
+                "description": "Optional extra guidance appended to the extraction prompt (domain hints, what to split a passage on).",
+            },
+            "max_cards_per_chunk": {
+                "type": "int", "default": 6,
+                "description": "Upper bound on the number of cards emitted per input chunk.",
+            },
+            "max_tokens": {
+                "type": "int", "default": 1200,
+                "description": "Maximum tokens for each extraction LLM call.",
+            },
+            "temperature": {
+                "type": "float", "default": 0.1,
+                "description": "Sampling temperature for the extraction LLM call (lower = more deterministic).",
+            },
+        },
+    },
     "embed": {
         "summary": (
             "Generate a vector for each chunk via the model router. "
@@ -905,6 +950,38 @@ async def embed_via_router(texts: list[str], model_id: str, router_url: str) -> 
     return vectors
 
 
+# ── Chat via DocGrok Router ────────────────────────────────────────────
+async def chat_via_router(
+    messages: list[dict],
+    model_id: str,
+    router_url: str,
+    temperature: float = 0.1,
+    max_tokens: int = 1200,
+) -> str:
+    """Call the DocGrok router chat endpoint for a registered azure-openai model.
+
+    Mirrors the router contract at POST /admin/models/registry/{model_id}/chat
+    (body: {messages, temperature?, max_tokens?}; response: {content, ...}).
+    Returns the assistant message content string.
+    """
+    url = f"{router_url.rstrip('/')}/admin/models/registry/{model_id}/chat"
+    payload = {
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            logger.error("Router chat error: %d %s", resp.status_code, resp.text[:300])
+            raise HTTPException(
+                status_code=502,
+                detail=f"Chat error from router for model '{model_id}': {resp.status_code}",
+            )
+        result = resp.json()
+        return (result.get("content") or "").strip()
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────
 def pdf_extract_text_stream_with_stats(
     pdf_source,
@@ -1315,6 +1392,92 @@ async def _stage_embed(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, Any
     srec.output["vector_count"] = len(embeddings)
     srec.output["dim"] = len(embeddings[0]) if embeddings else 0
     srec.output["model_id"] = model_id
+
+
+async def _stage_card_extract(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, Any]):
+    """Turn each chunk into one or more self-contained, typed CARDS via an LLM,
+    driven entirely by a user-supplied extraction spec (cfg['fields']).
+
+    Reads ctx['chunks'] and replaces it with the rendered card texts that the
+    downstream embed stage vectorises. Per-card field values (including any
+    fields flagged `discriminator`) are stashed in ctx['card_records'], aligned
+    with the new chunks. On a per-chunk extraction failure the original chunk
+    text is kept so the pipeline still produces a vector. Nothing in this stage
+    is dataset-specific — the spec is the only input.
+    """
+    from card_extract import (
+        normalize_spec, build_messages, parse_cards,
+        render_card_text, card_metadata,
+    )
+
+    chunks: List[str] = ctx.get("chunks") or []
+    spec = normalize_spec(cfg)
+    model_id = spec.get("model_id") or ctx.get("model_id")
+    router_url = cfg.get("router_url") or ctx.get("router_url")
+    if not model_id:
+        raise HTTPException(status_code=400, detail="No model_id available for card_extract stage")
+    if not router_url:
+        raise HTTPException(status_code=400, detail="No router_url available for card_extract stage")
+
+    new_chunks: List[str] = []
+    card_records: List[Dict[str, Any]] = []
+    cards_total = 0
+    fallback_chunks = 0
+
+    for idx, chunk in enumerate(chunks):
+        text = (chunk or "").strip()
+        if not text:
+            continue
+        cards: List[Dict[str, Any]] = []
+        try:
+            content = await chat_via_router(
+                build_messages(spec, text), model_id, router_url,
+                temperature=spec["temperature"], max_tokens=spec["max_tokens"],
+            )
+            cards = parse_cards(content, spec)
+        except HTTPException:
+            raise
+        except Exception as e:
+            srec.notes.append(f"chunk {idx}: extraction failed ({e!r}) — keeping raw chunk")
+
+        if not cards:
+            new_chunks.append(text)
+            card_records.append({"source_chunk": idx, "fallback": True, "fields": None})
+            fallback_chunks += 1
+            continue
+
+        for card in cards:
+            card_text = render_card_text(card, spec)
+            if not card_text.strip():
+                continue
+            new_chunks.append(card_text)
+            card_records.append({
+                "source_chunk": idx,
+                "fallback": False,
+                "fields": card_metadata(card, spec),
+            })
+            cards_total += 1
+
+    if not new_chunks:
+        new_chunks = [(c or "").strip() for c in chunks if (c or "").strip()] or ["[empty document]"]
+        card_records = [
+            {"source_chunk": i, "fallback": True, "fields": None}
+            for i in range(len(new_chunks))
+        ]
+        srec.notes.append("no cards extracted from any chunk — fell back to raw chunks")
+
+    ctx["chunks"] = new_chunks
+    ctx["card_records"] = card_records
+    srec.output["input_chunks"] = len(chunks)
+    srec.output["cards"] = cards_total
+    srec.output["fallback_chunks"] = fallback_chunks
+    srec.output["output_chunks"] = len(new_chunks)
+    srec.output["fields"] = [f["name"] for f in spec["fields"]]
+    srec.output["model_id"] = model_id
+    srec.notes.append(
+        f"{cards_total} cards from {len(chunks)} chunks "
+        f"({fallback_chunks} fallback) using {len(spec['fields'])} fields"
+    )
 
 
 async def _stage_caption(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, Any]):
@@ -1740,6 +1903,7 @@ STAGE_HANDLERS = {
     "extract": _stage_extract,
     "caption": _stage_caption,
     "chunk": _stage_chunk,
+    "card_extract": _stage_card_extract,
     "embed": _stage_embed,
     "image_embed": _stage_image_embed,
     "extract_frames": _stage_extract_frames,

@@ -9968,7 +9968,7 @@
         }
 
         function _stageTypeOptions(selected) {
-            const types = (dgStageCatalog && dgStageCatalog.stages) ? Object.keys(dgStageCatalog.stages) : ['extract', 'caption', 'chunk', 'embed'];
+            const types = (dgStageCatalog && dgStageCatalog.stages) ? Object.keys(dgStageCatalog.stages) : ['extract', 'caption', 'chunk', 'card_extract', 'embed'];
             return types.map(t => `<option value="${_escape(t)}" ${t === selected ? 'selected' : ''}>${_escape(t)}</option>`).join('');
         }
 
