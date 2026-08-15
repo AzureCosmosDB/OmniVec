@@ -216,6 +216,23 @@ databricksWatcher:
   pollIntervalSeconds: 30
 
 # =============================================================================
+# SharePoint Watcher - Microsoft Graph delta polling for SharePoint Online.
+# Requires the workload identity to have Sites.Selected (with site grant) or
+# Files.Read.All application permission in Microsoft Graph.
+# =============================================================================
+sharepointWatcher:
+  enabled: false
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  discoveryPollIntervalSeconds: 30
+
+# =============================================================================
 # DOTNET WORKER (.NET Service Bus worker for queue-mode embedding)
 # =============================================================================
 dotnetWorker:

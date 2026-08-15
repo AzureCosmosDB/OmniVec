@@ -18,6 +18,7 @@ public class EmbeddingWorkerService : BackgroundService
     private readonly WorkerOptions _options;
     private readonly ServiceBusClient? _sbClient;
     private readonly DocGrokClient _docGrok;
+    private readonly SharePointContentClient _sharePoint;
     private readonly MetricsReporter _metrics;
     private readonly Dictionary<string, IDestinationWriter> _writers;
     private readonly ILogger<EmbeddingWorkerService> _logger;
@@ -26,6 +27,7 @@ public class EmbeddingWorkerService : BackgroundService
         IOptions<WorkerOptions> options,
         ServiceBusClient? sbClient,
         DocGrokClient docGrok,
+        SharePointContentClient sharePoint,
         MetricsReporter metrics,
         IEnumerable<IDestinationWriter> writers,
         ILogger<EmbeddingWorkerService> logger)
@@ -33,6 +35,7 @@ public class EmbeddingWorkerService : BackgroundService
         _options = options.Value;
         _sbClient = sbClient;
         _docGrok = docGrok;
+        _sharePoint = sharePoint;
         _metrics = metrics;
         _writers = writers.ToDictionary(w => w.DestinationType);
         _logger = logger;
@@ -138,6 +141,20 @@ public class EmbeddingWorkerService : BackgroundService
                 }
 
                 if (items.Count == 0) continue;
+
+                var sharePointItems = items.Where(i => i.msg.ContentType == "sharepoint_ref").ToList();
+                items = items.Where(i => i.msg.ContentType != "sharepoint_ref").ToList();
+                if (sharePointItems.Count > 0)
+                {
+                    var gate = new SemaphoreSlim(_options.BlobConcurrency, _options.BlobConcurrency);
+                    var tasks = sharePointItems.Select(async item =>
+                    {
+                        await gate.WaitAsync(ct);
+                        try { await ProcessSharePointMessageAsync(receiver, item, ct); }
+                        finally { gate.Release(); }
+                    });
+                    await Task.WhenAll(tasks);
+                }
 
                 // Split blob_ref messages from text messages — they have different processing paths
                 var blobItems = items.Where(i => i.msg.ContentType == "blob_ref").ToList();
@@ -350,6 +367,66 @@ public class EmbeddingWorkerService : BackgroundService
             _logger.LogError(ex, "Failed to process blob {BlobName}", msg.BlobName);
             try { await receiver.AbandonMessageAsync(item.sbMsg, cancellationToken: ct); }
             catch { /* ignore */ }
+        }
+    }
+
+    private async Task ProcessSharePointMessageAsync(
+        ServiceBusReceiver receiver,
+        (EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg) item,
+        CancellationToken ct)
+    {
+        var msg = item.msg;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(msg.SharePointSiteId)
+                || string.IsNullOrWhiteSpace(msg.SharePointDriveId)
+                || string.IsNullOrWhiteSpace(msg.SharePointItemId))
+                throw new InvalidOperationException("SharePoint message is missing site, drive, or item ID");
+
+            var bytes = await _sharePoint.DownloadAsync(
+                msg.SharePointSiteId,
+                msg.SharePointDriveId,
+                msg.SharePointItemId,
+                msg.SharePointMaxFileSizeBytes,
+                ct);
+            var chunks = await _docGrok.EmbedDataAsync(
+                msg.DocgrokPipeline,
+                bytes,
+                msg.SharePointFileName ?? msg.SourceRef,
+                ct);
+
+            var results = chunks.Select((chunk, index) => new EmbeddingResult(
+                DocId: chunks.Count == 1 ? msg.SourceRef : $"{msg.SourceRef}#chunk{index}",
+                SourceRef: msg.SourceRef,
+                Embedding: chunk.Embedding,
+                ContentHash: msg.ContentHash,
+                PartitionKeyValue: msg.PartitionKeyValue,
+                PipelineId: msg.PipelineId,
+                PipelineName: msg.PipelineName,
+                PipelineGeneration: msg.PipelineGeneration,
+                Content: chunk.ChunkText,
+                SourceContentFields: new Dictionary<string, string>(),
+                SourceId: msg.SourceId,
+                StoreContent: msg.StoreContent,
+                MetadataFields: msg.MetadataFields,
+                ContentField: msg.ContentField)).ToList();
+
+            if (_writers.TryGetValue(msg.DestinationType, out var writer))
+                await writer.WriteBatchAsync(msg.DestinationConfig, results, ct);
+            else
+                throw new InvalidOperationException($"No writer for destination type {msg.DestinationType}");
+
+            await receiver.CompleteMessageAsync(item.sbMsg, ct);
+            _ = _metrics.ReportInlineMetricsAsync(
+                msg.PipelineId, results.Count, 0, 0,
+                $"sharepoint:{msg.SourceRef}:{msg.ContentHash}");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process SharePoint item {SourceRef}", msg.SourceRef);
+            try { await receiver.AbandonMessageAsync(item.sbMsg, cancellationToken: ct); }
+            catch { }
         }
     }
 

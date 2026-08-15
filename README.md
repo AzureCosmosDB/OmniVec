@@ -331,6 +331,7 @@ This removes the resource group, all Azure services, and local environment confi
 | `azure-blob` | account_url, container, prefix |
 | `postgresql` | host, port, database, table |
 | `mssql` | host, port, database, table |
+| `sharepoint` | site_id, drive_id, folder_path, file_types |
 
 **Destinations** are where vectors are stored. When you test a destination, OmniVec probes its vector indexing policy and returns available vector paths. You pick one when creating a pipeline.
 

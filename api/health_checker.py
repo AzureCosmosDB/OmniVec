@@ -161,6 +161,22 @@ async def check_source(source: Source, last_event_age_seconds: float = None) -> 
             finally:
                 conn.close()
 
+        elif source.type == SourceType.SHAREPOINT:
+            from api import _test_sharepoint_connection
+            ok, detail = await _test_sharepoint_connection(source.config)
+            if not ok:
+                raise RuntimeError(str(detail))
+            result["checks"].append({
+                "check": "connectivity",
+                "status": "pass",
+                "detail": detail.get("details", "SharePoint document library accessible"),
+            })
+            result["checks"].append({
+                "check": "read_permission",
+                "status": "pass",
+                "detail": "Microsoft Graph can read the configured document library",
+            })
+
         else:
             result["checks"].append({"check": "connectivity", "status": "skip", "detail": f"Unsupported source type: {source.type}"})
 

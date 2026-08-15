@@ -248,6 +248,52 @@ public class DocGrokClient
         return results;
     }
 
+    /// <summary>Process downloaded document bytes through the DocGrok pipeline.</summary>
+    public async Task<List<(string ChunkText, float[] Embedding)>> EmbedDataAsync(
+        string modelOrPipeline,
+        byte[] data,
+        string fileName,
+        CancellationToken ct)
+    {
+        var request = new Dictionary<string, object?>
+        {
+            ["data"] = Convert.ToBase64String(data),
+            ["requestId"] = fileName,
+            ["source_name"] = fileName,
+        };
+        if (modelOrPipeline.StartsWith("mdl-"))
+            request["model_id"] = modelOrPipeline;
+        else
+            request["pipeline"] = modelOrPipeline;
+
+        using var response = await _http.PostAsJsonAsync("/process", request, ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+            throw new EmbeddingClientException(
+                (int)response.StatusCode,
+                body,
+                $"Document processing returned {(int)response.StatusCode}: {Truncate(body, 500)}");
+
+        using var document = JsonDocument.Parse(body);
+        var results = new List<(string, float[])>();
+        if (!document.RootElement.TryGetProperty("chunks", out var chunks))
+            return results;
+
+        foreach (var chunk in chunks.EnumerateArray())
+        {
+            var text = chunk.TryGetProperty("text", out var textElement)
+                ? textElement.GetString() ?? ""
+                : "";
+            var embedding = chunk.GetProperty("embedding");
+            if (embedding.ValueKind == JsonValueKind.Array && embedding.GetArrayLength() > 0
+                && embedding[0].ValueKind == JsonValueKind.Array)
+                embedding = embedding[0];
+            var vector = embedding.EnumerateArray().Select(value => value.GetSingle()).ToArray();
+            results.Add((text, vector));
+        }
+        return results;
+    }
+
     /// <summary>
     /// Bulk blob embedding. Posts a single request to docgrok router with a
     /// list of blob names; the router forwards to the backend's bulk endpoint

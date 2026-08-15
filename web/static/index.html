@@ -2100,6 +2100,7 @@
                                 <label class="form-label">Type</label>
                                 <select class="form-input" name="type" onchange="updateSourceConfig(this.value)">
                                     <option value="azure-blob">Azure Blob Storage</option>
+                                    <option value="sharepoint">SharePoint Online</option>
                                     <option value="cosmosdb">CosmosDB</option>
                                     <option value="postgresql">PostgreSQL</option>
                                 </select>
@@ -2432,6 +2433,7 @@
                                             <label class="form-label">Type</label>
                                             <select class="form-input" id="pl-src-type" onchange="updateSourceConfigInline(this.value, 'pl-src')">
                                                 <option value="azure-blob">Azure Blob Storage</option>
+                                                <option value="sharepoint">SharePoint Online</option>
                                                 <option value="cosmosdb">CosmosDB</option>
                                                 <option value="postgresql">PostgreSQL</option>
                                             </select>
@@ -7556,6 +7558,16 @@
                                     <input type="checkbox" class="${prefix}-file-type" value="${ft}" ${['txt','json','pdf','md','csv'].includes(ft)?'checked':''}> .${ft}
                                 </label>`).join('')}
                         </div></div>`;
+            } else if (type === 'sharepoint') {
+                container.innerHTML = `
+                    <div class="form-group"><label class="form-label">Site ID</label>
+                        <input type="text" class="form-input" id="${prefix}-site-id" placeholder="contoso.sharepoint.com,site-guid,web-guid"></div>
+                    <div class="form-group"><label class="form-label">Drive ID</label>
+                        <input type="text" class="form-input" id="${prefix}-drive-id" placeholder="Document library drive ID"></div>
+                    <div class="form-group"><label class="form-label">Folder Path (optional)</label>
+                        <input type="text" class="form-input" id="${prefix}-folder-path" placeholder="Policies"></div>
+                    <div class="form-group"><label class="form-label">Poll Interval (sec)</label>
+                        <input type="number" class="form-input" id="${prefix}-poll-interval" value="60" min="10"></div>`;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Endpoint</label>
@@ -7657,6 +7669,12 @@
             if (type === 'azure-blob') {
                 config = { account_url: document.getElementById(`${prefix}-account-url`)?.value || '', container: document.getElementById(`${prefix}-container`)?.value || '' };
                 if (!config.account_url || !config.container) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Account URL and Container</div>'; return; }
+            } else if (type === 'sharepoint') {
+                config = {
+                    site_id: document.getElementById(`${prefix}-site-id`)?.value || '',
+                    drive_id: document.getElementById(`${prefix}-drive-id`)?.value || '',
+                };
+                if (!config.site_id || !config.drive_id) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Site ID and Drive ID</div>'; return; }
             } else if (type === 'cosmosdb') {
                 config = { endpoint: document.getElementById(`${prefix}-endpoint`)?.value || '', database: document.getElementById(`${prefix}-database`)?.value || '', container: document.getElementById(`${prefix}-container`)?.value || '' };
                 if (!config.endpoint || !config.database || !config.container) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in all fields</div>'; return; }
@@ -7716,6 +7734,16 @@
                     account_url: document.getElementById(`${prefix}-account-url`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || '',
                     prefix: document.getElementById(`${prefix}-prefix`)?.value || '',
+                };
+            } else if (sourceType === 'sharepoint') {
+                config = {
+                    site_id: document.getElementById(`${prefix}-site-id`)?.value || '',
+                    drive_id: document.getElementById(`${prefix}-drive-id`)?.value || '',
+                    folder_path: document.getElementById(`${prefix}-folder-path`)?.value || '',
+                    poll_interval_seconds: parseInt(document.getElementById(`${prefix}-poll-interval`)?.value) || 60,
+                    file_types: ['txt','json','pdf','docx','md','csv','html','xml'],
+                    max_file_size_bytes: 52428800,
+                    auth_type: 'managed-identity',
                 };
             } else if (sourceType === 'cosmosdb') {
                 config = {
@@ -7940,6 +7968,16 @@
                     account_url: formData.get('account_url'),
                     container: formData.get('container'),
                     prefix: formData.get('prefix') || '',
+                };
+            } else if (sourceType === 'sharepoint') {
+                config = {
+                    site_id: formData.get('site_id'),
+                    drive_id: formData.get('drive_id'),
+                    folder_path: formData.get('folder_path') || '',
+                    poll_interval_seconds: parseInt(formData.get('poll_interval_seconds')) || 60,
+                    file_types: ['txt','json','pdf','docx','md','csv','html','xml'],
+                    max_file_size_bytes: 52428800,
+                    auth_type: 'managed-identity',
                 };
             } else if (sourceType === 'cosmosdb') {
                 config = {
@@ -8385,6 +8423,26 @@
                     </div>
                     <p style="font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">File type filtering is configured per-pipeline in the pipeline source settings.</p>
                 `;
+            } else if (type === 'sharepoint') {
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label class="form-label">Site ID</label>
+                        <input type="text" class="form-input" name="site_id" placeholder="contoso.sharepoint.com,site-guid,web-guid">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Drive ID</label>
+                        <input type="text" class="form-input" name="drive_id" placeholder="Document library drive ID">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Folder Path (optional)</label>
+                        <input type="text" class="form-input" name="folder_path" placeholder="Policies">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Poll Interval (seconds)</label>
+                        <input type="number" class="form-input" name="poll_interval_seconds" value="60" min="10">
+                    </div>
+                    <p style="font-size: 12px; color: var(--text-tertiary);">Uses workload identity with Microsoft Graph Sites.Selected or Files.Read.All.</p>
+                `;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
                     <div class="form-group">
@@ -8537,6 +8595,11 @@
                 config.account_url = formData.get('account_url');
                 config.container = formData.get('container');
                 config.prefix = formData.get('prefix') || '';
+            } else if (type === 'sharepoint') {
+                config.site_id = formData.get('site_id');
+                config.drive_id = formData.get('drive_id');
+                config.folder_path = formData.get('folder_path') || '';
+                config.poll_interval_seconds = parseInt(formData.get('poll_interval_seconds')) || 60;
             } else if (type === 'cosmosdb') {
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
@@ -8558,6 +8621,11 @@
             // Validate required fields
             if (type === 'azure-blob' && (!config.account_url || !config.container)) {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Account URL and Container</div>`;
+                resultDiv.style.display = 'block';
+                return;
+            }
+            if (type === 'sharepoint' && (!config.site_id || !config.drive_id)) {
+                resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Site ID and Drive ID</div>`;
                 resultDiv.style.display = 'block';
                 return;
             }

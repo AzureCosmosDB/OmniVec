@@ -100,6 +100,7 @@ public class SourceWatcherManager : IAsyncDisposable
             var t = (s.Type ?? "").ToLowerInvariant();
             if (t == "azure-blob") return _options.EnableBlobSources;
             if (t == "databricks") return _options.EnableDatabricksSources;
+            if (t == "sharepoint") return _options.EnableSharePointSources;
             return _options.EnableCosmosSources;
         }).ToList();
 
@@ -118,7 +119,8 @@ public class SourceWatcherManager : IAsyncDisposable
             // SQL warehouse for CDF changes per source.
             bool isBlob = string.Equals(source.Type, "azure-blob", StringComparison.OrdinalIgnoreCase);
             bool isDatabricks = string.Equals(source.Type, "databricks", StringComparison.OrdinalIgnoreCase);
-            if (isBlob || isDatabricks)
+            bool isSharePoint = string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase);
+            if (isBlob || isDatabricks || isSharePoint)
             {
                 var haveLease = await _blobLeaseManager.TryAcquireAsync(source.Id, ct);
                 if (!haveLease)
@@ -269,6 +271,12 @@ public class SourceWatcherManager : IAsyncDisposable
             "databricks" => new DatabricksCdcWatcher(
                 source, _options, _apiClient, _hasher,
                 _loggerFactory.CreateLogger<DatabricksCdcWatcher>(),
+                generation: generation,
+                sbPublisher: _sbPublisher),
+
+            "sharepoint" => new SharePointSourceWatcher(
+                source, _options, _hasher,
+                _loggerFactory.CreateLogger<SharePointSourceWatcher>(),
                 generation: generation,
                 sbPublisher: _sbPublisher),
 

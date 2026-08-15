@@ -592,6 +592,7 @@ def get_ocr():
 # ── Request ────────────────────────────────────────────────────────────
 class ProcessRequest(BaseModel):
     data: Optional[str] = None       # base64-encoded PDF
+    source_name: Optional[str] = None  # original filename for inline data type detection
     text: Optional[str] = None       # pre-extracted text (skip OCR)
     pipeline: Optional[str] = None
     requestId: Optional[str] = ""
@@ -1116,6 +1117,7 @@ async def _stage_filter(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, An
 async def _stage_extract(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, Any]):
     source_kind = ctx["source_kind"]
     blob_name = ctx.get("blob_name")
+    source_name = ctx.get("source_name")
     pipeline_hint = ctx.get("pipeline_hint")
 
     # Resolve doctype
@@ -1124,7 +1126,7 @@ async def _stage_extract(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, A
         if source_kind == "inline_text":
             doctype = "text"
         elif source_kind == "inline_b64":
-            doctype = "pdf"
+            doctype = _classify_blob_doctype(source_name, pipeline_hint)
         else:
             doctype = _classify_blob_doctype(blob_name, pipeline_hint)
         srec.notes.append(f"doctype auto-detected as '{doctype}'")
@@ -1145,6 +1147,13 @@ async def _stage_extract(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, A
         elif source_kind == "inline_text":
             full_text = ctx.get("inline_text") or ""
             srec.notes.append("used pre-extracted text from request")
+        elif source_kind == "inline_b64":
+            try:
+                raw = base64.b64decode(ctx.get("inline_b64") or "")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
+            full_text = raw.decode("utf-8", errors="replace")
+            srec.notes.append("decoded inline document bytes as utf-8")
         else:
             raise HTTPException(status_code=400, detail="text doctype requires text input")
         ctx["page_texts"] = [full_text]
@@ -1856,6 +1865,7 @@ async def _run_default_pipeline(
     blob_connection_string: Optional[str],
     inline_b64: Optional[str],
     inline_text: Optional[str],
+    source_name: Optional[str],
     pipeline_hint: Optional[str],
     model_id: str,
     router_url: str,
@@ -1886,6 +1896,7 @@ async def _run_default_pipeline(
         "blob_connection_string": blob_connection_string,
         "inline_b64": inline_b64,
         "inline_text": inline_text,
+        "source_name": source_name,
         "pipeline_hint": pipeline_hint,
         "model_id": model_id,
         "router_url": router_url,
@@ -1897,7 +1908,7 @@ async def _run_default_pipeline(
     else:
         # Pick the first built-in transform whose applies_to matches.
         # Inline text input has no extension; default to text-transform.
-        pick_name = blob_name if source_kind == "blob" else None
+        pick_name = blob_name if source_kind == "blob" else source_name
         pdef = _pick_transform(pick_name, hint=pipeline_hint)
         if pdef is None and source_kind in ("inline_b64", "inline_text"):
             # Inline payloads → fall back by source kind
@@ -1954,6 +1965,7 @@ async def process(req: ProcessRequest):
             blob_connection_string=req.blob_connection_string,
             inline_b64=req.data,
             inline_text=None,
+            source_name=req.source_name,
             pipeline_hint=req.pipeline,
             model_id=model_id,
             router_url=router_url,
@@ -1978,6 +1990,7 @@ async def process(req: ProcessRequest):
             blob_connection_string=None,
             inline_b64=None,
             inline_text=req.text,
+            source_name=None,
             pipeline_hint=req.pipeline,
             model_id=model_id,
             router_url=router_url,
@@ -2074,6 +2087,7 @@ async def process_blob(req: BlobProcessRequest):
         blob_connection_string=req.blob_connection_string,
         inline_b64=None,
         inline_text=None,
+        source_name=None,
         pipeline_hint=req.pipeline,
         model_id=model_id,
         router_url=router_url,

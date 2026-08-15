@@ -23,7 +23,8 @@ from hypothesis import given, strategies as st
 class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
-            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks"
+            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks",
+            "sharepoint"
         }
 
     def test_destination_type_values(self, api_models):
@@ -74,6 +75,19 @@ class TestSource:
     def test_invalid_config_type(self, api_models):
         with pytest.raises(ValidationError):
             api_models.Source(name="x", type=api_models.SourceType.HTTP, config="not-a-dict")
+
+    def test_sharepoint_round_trip(self, api_models):
+        config = api_models.SharePointSourceConfig(
+            site_id="contoso.sharepoint.com,site-guid,web-guid",
+            drive_id="drive-guid",
+            folder_path="Shared Documents/Policies",
+        )
+        source = api_models.Source(
+            name="Policies",
+            type=api_models.SourceType.SHAREPOINT,
+            config=config.model_dump(),
+        )
+        assert api_models.Source(**source.model_dump()) == source
 
     @given(st.text(min_size=1, max_size=40))
     def test_name_text_round_trip(self, api_models, name):

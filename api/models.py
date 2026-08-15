@@ -26,6 +26,7 @@ class SourceType(str, Enum):
     S3 = "s3"
     HTTP = "http"
     DATABRICKS = "databricks"
+    SHAREPOINT = "sharepoint"
 
 
 class DestinationType(str, Enum):
@@ -172,6 +173,17 @@ class DatabricksSourceConfig(BaseModel):
     batch_size: int = 200              # max rows per CDF page
 
     model_config = {"populate_by_name": True}
+
+
+class SharePointSourceConfig(BaseModel):
+    """SharePoint Online document library accessed through Microsoft Graph."""
+    site_id: str
+    drive_id: str
+    folder_path: str = ""
+    file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv", "html", "xml"]
+    poll_interval_seconds: int = 60
+    max_file_size_bytes: int = 50 * 1024 * 1024
+    auth_type: str = "managed-identity"
 
 
 # =============================================================================

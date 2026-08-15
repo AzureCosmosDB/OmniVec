@@ -1049,9 +1049,9 @@ async def get_capabilities():
         "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
         "agent_enabled": bool(os.getenv("AGENT_URL", "").strip()),
         "allowed_source_types": (
-            ["azure-blob", "cosmosdb", "postgres", "mssql", "databricks"]
+            ["azure-blob", "cosmosdb", "postgres", "mssql", "databricks", "sharepoint"]
             if _BLOB_SOURCE_ENABLED else
-            ["cosmosdb", "postgres", "mssql", "databricks"]
+            ["cosmosdb", "postgres", "mssql", "databricks", "sharepoint"]
         ),
         "allowed_processing_modes": (
             ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
@@ -1861,6 +1861,17 @@ async def create_source(req: CreateSourceRequest):
                     "Cosmos DB Built-in Data Reader role on the account.")
         except Exception as e:
             warnings.append(f"Could not connect to CosmosDB source: {str(e)}")
+    elif req.type == SourceType.SHAREPOINT:
+        try:
+            ok, result = await _test_sharepoint_connection(clean_config)
+            if not ok:
+                warnings.append(
+                    f"SharePoint source validation failed: {result}. "
+                    "Grant the OmniVec managed identity Microsoft Graph application access "
+                    "(Sites.Selected or Files.Read.All) to the configured site."
+                )
+        except Exception as e:
+            warnings.append(f"Could not connect to SharePoint source: {str(e)}")
 
     source = Source(
         id=source_id,
@@ -2319,6 +2330,32 @@ class TestConnectionRequest(BaseModel):
     source_id: Optional[str] = None
 
 
+async def _test_sharepoint_connection(config: dict) -> tuple[bool, dict | str]:
+    site_id = (config.get("site_id") or "").strip()
+    drive_id = (config.get("drive_id") or "").strip()
+    if not site_id or not drive_id:
+        return False, "Site ID and Drive ID are required"
+
+    from azure.identity.aio import DefaultAzureCredential
+
+    credential = DefaultAzureCredential()
+    try:
+        token = await credential.get_token("https://graph.microsoft.com/.default")
+        url = f"https://graph.microsoft.com/v1.0/sites/{_urlquote(site_id, safe='')}/drives/{_urlquote(drive_id, safe='')}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {token.token}"})
+        if response.status_code >= 400:
+            return False, f"Microsoft Graph returned {response.status_code}: {response.text[:300]}"
+        drive = response.json()
+        return True, {
+            "success": True,
+            "message": "Connected successfully to SharePoint.",
+            "details": f"Document library: {drive.get('name', drive_id)}",
+        }
+    finally:
+        await credential.close()
+
+
 @app.post("/api/sources/test-connection")
 async def test_source_connection_before_save(req: TestConnectionRequest):
     """Test source connection before saving (used by UI)."""
@@ -2396,6 +2433,12 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
             if ok:
                 return result  # lgtm[py/stack-trace-exposure]
             raise Exception(result)
+
+        elif req.type == "sharepoint":
+            ok, result = await _test_sharepoint_connection(req.config)
+            if ok:
+                return result
+            return {"success": False, "error": str(result)}
 
         elif req.type == "postgresql":
             from health_checker import _connect_pg

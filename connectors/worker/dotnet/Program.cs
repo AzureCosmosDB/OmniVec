@@ -45,6 +45,11 @@ builder.Services.AddHttpClient<MetricsReporter>((sp, client) =>
     client.Timeout = TimeSpan.FromSeconds(10);
 });
 
+builder.Services.AddHttpClient<SharePointContentClient>(client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
+
 // Destination writers
 builder.Services.AddSingleton<IDestinationWriter, CosmosDbDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, PostgresDestinationWriter>();
