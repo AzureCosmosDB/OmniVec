@@ -58,50 +58,38 @@ public class ServiceBusPublisher : IAsyncDisposable
     {
         if (_sender is null || messages.Count == 0) return;
 
-        // Use Service Bus batch to respect size limits
-        using var batch = await _sender.CreateMessageBatchAsync(ct);
-        var overflow = new List<EmbeddingMessage>();
+        var pending = new Queue<EmbeddingMessage>(messages);
+        var published = 0;
 
-        foreach (var msg in messages)
+        while (pending.Count > 0)
         {
-            var json = JsonSerializer.Serialize(msg);
-            var sbMsg = new ServiceBusMessage(json)
-            {
-                MessageId = msg.MessageId,
-                ContentType = "application/json",
-                Subject = msg.PipelineId,
-            };
+            using var batch = await _sender.CreateMessageBatchAsync(ct);
 
-            if (!batch.TryAddMessage(sbMsg))
+            while (pending.Count > 0)
             {
-                overflow.Add(msg);
-            }
-        }
-
-        if (batch.Count > 0)
-        {
-            await _sender.SendMessagesAsync(batch, ct);
-            _logger.LogInformation("Published {Count} messages to Service Bus", batch.Count);
-        }
-
-        // Send overflow in a second batch
-        if (overflow.Count > 0)
-        {
-            using var batch2 = await _sender.CreateMessageBatchAsync(ct);
-            foreach (var msg in overflow)
-            {
-                var json = JsonSerializer.Serialize(msg);
-                var sbMsg = new ServiceBusMessage(json)
+                var msg = pending.Peek();
+                var sbMsg = new ServiceBusMessage(JsonSerializer.Serialize(msg))
                 {
                     MessageId = msg.MessageId,
                     ContentType = "application/json",
                     Subject = msg.PipelineId,
                 };
-                batch2.TryAddMessage(sbMsg);
+
+                if (!batch.TryAddMessage(sbMsg))
+                {
+                    if (batch.Count == 0)
+                        throw new InvalidOperationException($"Message {msg.MessageId} exceeds the Service Bus batch size limit.");
+                    break;
+                }
+
+                pending.Dequeue();
             }
-            if (batch2.Count > 0)
-                await _sender.SendMessagesAsync(batch2, ct);
+
+            await _sender.SendMessagesAsync(batch, ct);
+            published += batch.Count;
         }
+
+        _logger.LogInformation("Published {Count} messages to Service Bus", published);
     }
 
     /// <summary>

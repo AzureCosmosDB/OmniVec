@@ -414,7 +414,8 @@ public class EmbeddingWorkerService : BackgroundService
                 SourceId: msg.SourceId,
                 StoreContent: msg.StoreContent,
                 MetadataFields: msg.MetadataFields,
-                ContentField: msg.ContentField);
+                ContentField: msg.ContentField,
+                ModelName: msg.DocgrokPipeline);
             var key = $"{msg.DestinationType}|{msg.DestinationId}";
             if (!resultsByDest.TryGetValue(key, out var bucket))
             {
@@ -471,6 +472,11 @@ public class EmbeddingWorkerService : BackgroundService
         var sw = Stopwatch.StartNew();
         var modelKey = batch[0].msg.DocgrokPipeline;
         var pipelineId = batch[0].msg.PipelineId;
+        using var renewalCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var renewalTask = RenewLocksAsync(
+            receiver,
+            batch.Select(item => item.sbMsg).ToArray(),
+            renewalCts.Token);
 
         try
         {
@@ -518,7 +524,8 @@ public class EmbeddingWorkerService : BackgroundService
                     SourceId: msg.SourceId,
                     StoreContent: msg.StoreContent,
                     MetadataFields: msg.MetadataFields,
-                    ContentField: msg.ContentField);
+                    ContentField: msg.ContentField,
+                    ModelName: msg.DocgrokPipeline);
 
                 var destKey = msg.DestinationId;
                 if (!resultsByDest.ContainsKey(destKey))
@@ -563,6 +570,45 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 try { await receiver.AbandonMessageAsync(sbMsg, cancellationToken: ct); }
                 catch { /* ignore */ }
+            }
+        }
+        finally
+        {
+            renewalCts.Cancel();
+            try { await renewalTask; }
+            catch (OperationCanceledException) { }
+        }
+    }
+
+    private async Task RenewLocksAsync(
+        ServiceBusReceiver receiver,
+        IReadOnlyList<ServiceBusReceivedMessage> messages,
+        CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(20), ct);
+            foreach (var sbMsg in messages)
+            {
+                try
+                {
+                    await receiver.RenewMessageLockAsync(sbMsg, ct);
+                }
+                catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessageLockLost)
+                {
+                    // The message was already settled or its lock expired before renewal.
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "Could not renew lock for message {MessageId}: {Error}",
+                        sbMsg.MessageId,
+                        ex.Message);
+                }
             }
         }
     }

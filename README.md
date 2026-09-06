@@ -530,6 +530,7 @@ kubectl describe svc omnivec-web -n omnivec
 | `omnivec-controller` | Python | 1 | Source monitoring, job creation, metrics |
 | `omnivec-worker` | Python | 1–10 (HPA) | Job processing (download → embed → store) |
 | `omnivec-changefeed` | .NET | 15 | CosmosDB Change Feed processor (real-time CDC) |
+| `omnivec-onelake-iceberg-watcher` | Python/PyIceberg | disabled | OneLake Iceberg REST source watcher |
 | `docgrok` | Rust (Axum) | 1 | Embedding router (model discovery + routing) |
 | `docgrok-controller` | Rust | 1 | Model health monitoring, scale state |
 | `docgrok-pipeline-worker` | Python + PaddleOCR | 1 | Multi-step transforms (PDF → OCR → embed) |
@@ -546,6 +547,8 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `web/` | Web UI (static HTML/JS + nginx) |
 | `connectors/ingestion/dotnet/` | .NET Change Feed Processor connector |
 | `connectors/worker/dotnet/` | .NET embedding worker |
+| `connectors/ingestion/onelake_iceberg/` | OneLake Iceberg REST catalog watcher |
+| `connectors/fabric_spark/` | Fabric Spark Job Definition scripts |
 | `docgrok/` | Document intelligence engine (in-repo) |
 | `agent/` | OmniVec Agent — in-cluster read-only AI-ops agent (see [docs/agent.md](docs/agent.md)) |
 | `cli/` | Go CLI for managing pipelines, sources, and jobs |

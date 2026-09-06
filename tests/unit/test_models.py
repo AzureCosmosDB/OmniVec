@@ -23,12 +23,13 @@ from hypothesis import given, strategies as st
 class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
-            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks"
+            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks",
+            "onelake-iceberg",
         }
 
     def test_destination_type_values(self, api_models):
         assert {e.value for e in api_models.DestinationType} == {
-            "cosmosdb-vector", "pgvector", "mssql"
+            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg"
         }
 
     def test_job_status_values(self, api_models):
@@ -300,3 +301,61 @@ class TestHTTPConfig:
     def test_url_required(self, api_models):
         with pytest.raises(ValidationError):
             api_models.HTTPConfig(method="GET")
+
+
+class TestOneLakeIcebergConfig:
+    def test_source_defaults_and_round_trip(self, api_models):
+        config = api_models.OneLakeIcebergSourceConfig(
+            warehouse="workspace/item", namespace="dbo", table="documents"
+        )
+        assert config.catalog_uri == "https://onelake.table.fabric.microsoft.com/iceberg"
+        assert api_models.OneLakeIcebergSourceConfig(**config.model_dump()) == config
+
+    def test_destination_defaults_and_round_trip(self, api_models):
+        config = api_models.OneLakeIcebergDestinationConfig(
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            spark_job_definition_item_id="job-definition",
+            staging_file_system="workspace",
+            target_table="dbo.embeddings",
+        )
+        assert config.writeback_columns.embedding_field == "embedding"
+        assert api_models.OneLakeIcebergDestinationConfig(**config.model_dump()) == config
+
+    def test_destination_rejects_unsafe_writeback_column(self, api_models):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace", spark_job_definition_item_id="job-definition",
+                lakehouse_item_id="lakehouse",
+                staging_file_system="workspace", target_table="dbo.embeddings",
+                writeback_columns={"embedding_field": "embedding; DROP TABLE rows"},
+            )
+
+    @pytest.mark.parametrize("warehouse", ["workspace", "workspace/item/extra", "../item"])
+    def test_source_rejects_invalid_warehouse(self, api_models, warehouse):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergSourceConfig(
+                warehouse=warehouse, namespace="dbo", table="documents"
+            )
+
+    @pytest.mark.parametrize("target_table", ["dbo.documents;DROP", "dbo..documents", "dbo/documents"])
+    def test_destination_rejects_unsafe_target_table(self, api_models, target_table):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace",
+                lakehouse_item_id="lakehouse",
+                spark_job_definition_item_id="job-definition",
+                staging_file_system="workspace",
+                target_table=target_table,
+            )
+
+    def test_destination_rejects_staging_path_traversal(self, api_models):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace",
+                lakehouse_item_id="lakehouse",
+                spark_job_definition_item_id="job-definition",
+                staging_file_system="workspace",
+                staging_path="item/../Files/staging",
+                target_table="dbo.documents",
+            )

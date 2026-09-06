@@ -145,6 +145,7 @@ $IMAGES = @(
     "omnivec-web",
     "omnivec-changefeed",
     "omnivec-dotnet-worker",
+    "omnivec-onelake-iceberg-watcher",
     "omnivec-agent",
     "docgrok-pipeline-worker",
     "docgrok-router"
@@ -237,6 +238,7 @@ function Build-AllImages {
     Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
     Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
     Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
+    Build-Image -Name "omnivec-onelake-iceberg-watcher" -Dockerfile "$RootDir/connectors/ingestion/onelake_iceberg/Dockerfile" -Context "$RootDir/connectors/ingestion/onelake_iceberg/" -Tag "latest"
     Build-Image -Name "omnivec-agent" -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest"
 
     if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
@@ -257,6 +259,7 @@ function Build-MissingImages {
             "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
             "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
             "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
+            "omnivec-onelake-iceberg-watcher" { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/onelake_iceberg/Dockerfile" -Context "$RootDir/connectors/ingestion/onelake_iceberg/" -Tag "latest" }
             "omnivec-agent"           { Build-Image -Name $image -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest" }
             "docgrok-pipeline-worker" {
                 if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {

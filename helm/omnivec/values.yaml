@@ -216,6 +216,27 @@ databricksWatcher:
   pollIntervalSeconds: 30
 
 # =============================================================================
+# OneLake Iceberg Watcher - PyIceberg reads the read-only OneLake REST catalog.
+# Disabled until a workload identity has OneLake read, checkpoint write, and
+# Service Bus Send permissions. The .NET worker handles the destination.
+# =============================================================================
+onelakeIcebergWatcher:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: omnivec-onelake-iceberg-watcher
+    tag: latest
+    pullPolicy: Always
+  discoveryIntervalSeconds: 30
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# =============================================================================
 # DOTNET WORKER (.NET Service Bus worker for queue-mode embedding)
 # =============================================================================
 dotnetWorker:

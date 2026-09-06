@@ -14,7 +14,8 @@ public record EmbeddingResult(
     string SourceId = "",
     bool? StoreContent = null,
     List<string>? MetadataFields = null,
-    string? ContentField = null)
+    string? ContentField = null,
+    string ModelName = "")
 {
     /// <summary>
     /// Returns true when the named optional metadata field should be written.

@@ -44,11 +44,14 @@ builder.Services.AddHttpClient<MetricsReporter>((sp, client) =>
     client.BaseAddress = new Uri(opts.OmniVecApiBaseUrl);
     client.Timeout = TimeSpan.FromSeconds(10);
 });
+builder.Services.AddHttpClient("FabricJobs", client => client.Timeout = TimeSpan.FromSeconds(30));
 
 // Destination writers
-builder.Services.AddSingleton<IDestinationWriter, CosmosDbDestinationWriter>();
+builder.Services.AddSingleton<CosmosDbDestinationWriter>();
+builder.Services.AddSingleton<IDestinationWriter>(sp => sp.GetRequiredService<CosmosDbDestinationWriter>());
 builder.Services.AddSingleton<IDestinationWriter, PostgresDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, MsSqlDestinationWriter>();
+builder.Services.AddSingleton<IDestinationWriter, OneLakeIcebergDestinationWriter>();
 
 // Health endpoint (must be a hosted service so it runs alongside the worker)
 builder.Services.AddHostedService<HealthEndpointService>();

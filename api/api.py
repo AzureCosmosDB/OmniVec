@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Initialize telemetry (in-memory MetricsStore always active; App Insights if configured)
 try:
@@ -48,7 +48,8 @@ from models import (  # lgtm[py/unused-import]
     Source, Destination, Pipeline, Job, JobStatus, JobStats,
     CreateSourceRequest, CreateDestinationRequest, CreatePipelineRequest,
     SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
-    ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest
+    ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
+    OneLakeIcebergSourceConfig, OneLakeIcebergDestinationConfig,
 )
 from store import init_store, get_store
 from security_utils import safe_agent_segment, safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
@@ -1836,6 +1837,11 @@ async def create_source(req: CreateSourceRequest):
     source_id = f"src-{str(uuid.uuid4())[:8]}"
     # Strip whitespace from URL fields in config
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
     # Auto-validate source connectivity
     warnings = []
@@ -1898,6 +1904,11 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     # Preserve stored password if masked value was sent
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
@@ -2550,6 +2561,11 @@ async def create_destination(req: CreateDestinationRequest):
 
     # Auto-probe CosmosDB container for partition key, vector field, and validate
     config = dict(req.config)
+    if req.type == "onelake-iceberg":
+        try:
+            config = OneLakeIcebergDestinationConfig(**config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     warnings = []
     enabled = True
     if req.type == "cosmosdb-vector":
@@ -2648,6 +2664,11 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
 
     destination = _destination_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == "onelake-iceberg":
+        try:
+            clean_config = OneLakeIcebergDestinationConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     # Preserve stored password if masked value was sent
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
@@ -3256,6 +3277,56 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
             )
 
 
+def _require_onelake_iceberg_pipeline(store, req, dest_doc) -> None:
+    """Validate the constrained same-row write-back contract."""
+    if not dest_doc or dest_doc.get("type") != "onelake-iceberg":
+        return
+    if str(req.processing_mode or "").lower() != "queue":
+        raise HTTPException(
+            status_code=400,
+            detail="OneLake Iceberg write-back requires queue processing mode.",
+        )
+    if (req.content_strategy or "truncate").lower() != "truncate":
+        raise HTTPException(
+            status_code=400,
+            detail="OneLake Iceberg same-row write-back supports content_strategy='truncate' only.",
+        )
+
+    destination_config = dest_doc.get("config", {}) or {}
+    target_parts = str(destination_config.get("target_table", "")).split(".")
+    destination_workspace = str(destination_config.get("workspace_id", ""))
+    for pipeline_source in req.sources or []:
+        source_id = pipeline_source.source_id
+        source_doc = store.get(source_id, "source")
+        if not source_doc or source_doc.get("type") != "onelake-iceberg":
+            raise HTTPException(
+                status_code=400,
+                detail="A OneLake Iceberg destination can only write back rows from a OneLake Iceberg source.",
+            )
+        source_config = source_doc.get("config", {}) or {}
+        warehouse_parts = str(source_config.get("warehouse", "")).strip("/").split("/", 1)
+        if (
+            len(warehouse_parts) != 2
+            or warehouse_parts[0] != destination_workspace
+            or warehouse_parts[1] != str(destination_config.get("lakehouse_item_id", ""))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source '{source_id}' and the OneLake destination must use the same Fabric lakehouse.",
+            )
+        namespace = source_config.get("namespace", "")
+        namespace_parts = namespace.split(".") if isinstance(namespace, str) else list(namespace)
+        source_table_parts = [*namespace_parts, str(source_config.get("table", ""))]
+        if len(target_parts) < len(source_table_parts) or target_parts[-len(source_table_parts):] != source_table_parts:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"OneLake destination target_table must identify source '{source_id}' table "
+                    f"'{'.'.join(source_table_parts)}' for same-row write-back."
+                ),
+            )
+
+
 @app.post("/api/pipelines")
 async def create_pipeline(req: CreatePipelineRequest):
     """Create a new pipeline."""
@@ -3284,6 +3355,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
 
     # Reject inline mode when source and destination are different stores.
     # Inline mode writes embeddings back to source docs in-place, so the source
@@ -3434,6 +3506,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
 
     # Validate vector_index_path against destination if provided
     dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
     if dest_doc:
         dest_config = dest_doc.get("config", {})
         vector_indexes = dest_config.get("vector_indexes", [])
