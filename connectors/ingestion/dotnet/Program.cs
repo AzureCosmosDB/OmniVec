@@ -27,8 +27,8 @@ builder.Services.AddSingleton(sp =>
         {
             ApplicationName = CosmosMetadataUserAgent,
             ConnectionMode = ConnectionMode.Direct,
-            MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
-            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
+            MaxRetryAttemptsOnRateLimitedRequests = 5,
+            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
         });
 });
 
@@ -45,8 +45,8 @@ builder.Services.AddKeyedSingleton<CosmosClient>("lease", (sp, _) =>
         {
             ApplicationName = CosmosMetadataUserAgent,
             ConnectionMode = ConnectionMode.Direct,
-            MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
-            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
+            MaxRetryAttemptsOnRateLimitedRequests = 5,
+            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
         });
 });
 

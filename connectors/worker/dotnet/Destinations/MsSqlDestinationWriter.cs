@@ -81,7 +81,7 @@ public class MsSqlDestinationWriter : IDestinationWriter
 
         foreach (var result in results)
         {
-            var embeddingJson = "[" + string.Join(",", result.Embedding) + "]";
+            var embeddingJson = System.Text.Json.JsonSerializer.Serialize(result.Embedding);
 
             for (int attempt = 1; ; attempt++)
             {
@@ -126,13 +126,13 @@ public class MsSqlDestinationWriter : IDestinationWriter
                     break;
                 }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
+                catch (SqlException ex) when (ex.IsTransient)
                 {
                     if (attempt >= 5)
                     {
                         _logger.LogError("MSSQL write failed doc={DocId} after {Attempt} attempts: {Error}",
                             result.DocId, attempt, ex.Message);
-                        break;
+                        throw;
                     }
                     var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                     _logger.LogWarning("MSSQL upsert error doc={DocId}: {Error}, attempt {Attempt}, retrying",

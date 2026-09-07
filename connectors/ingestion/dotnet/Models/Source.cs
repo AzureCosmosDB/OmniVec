@@ -93,7 +93,8 @@ public class Source
             if (!string.IsNullOrEmpty(explicit_cs)) return explicit_cs;
 
             var host = TryGetString("host") ?? TryGetString("server") ?? "";
-            var port = TryGetString("port") ?? (Type?.ToLowerInvariant() == "mssql" ? "1433" : "5432");
+            var port = TryGetInt("port")?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ?? (Type?.ToLowerInvariant() == "mssql" ? "1433" : "5432");
             var database = TryGetString("database") ?? "";
             var user = TryGetString("user") ?? "";
             var password = TryGetString("password") ?? "";

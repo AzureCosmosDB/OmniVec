@@ -1,7 +1,11 @@
+using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Azure.Core;
 using Azure.Identity;
+using Microsoft.Azure.Cosmos;
 using OmniVec.ChangeFeed.Configuration;
 using OmniVec.ChangeFeed.Models;
 
@@ -17,6 +21,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private readonly Source _source;
     private readonly ChangeFeedOptions _options;
+    private readonly LeaseContainerManager _stateStore;
     private readonly ContentHasher _hasher;
     private readonly ServiceBusPublisher _sbPublisher;
     private readonly ILogger<SharePointSourceWatcher> _logger;
@@ -26,10 +31,16 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     private readonly object _pipelineLock = new();
 
     private List<Pipeline> _activePipelines = new();
+    private HashSet<string> _pipelineIds = new(StringComparer.Ordinal);
+    private bool _pipelineStateInitialized;
+    private bool _resetDeltaForNewPipeline;
     private List<Destination> _destinations = new();
     private CancellationTokenSource? _cts;
     private Task? _pollTask;
+    private Container? _stateContainer;
     private string? _deltaUrl;
+    private SharePointStateDocument _state = new();
+    private string? _stateEtag;
 
     public string SourceId => _source.Id;
     public string Generation { get; }
@@ -38,6 +49,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     public SharePointSourceWatcher(
         Source source,
         ChangeFeedOptions options,
+        LeaseContainerManager stateStore,
         ContentHasher hasher,
         ILogger<SharePointSourceWatcher> logger,
         string? generation = null,
@@ -45,6 +57,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     {
         _source = source;
         _options = options;
+        _stateStore = stateStore;
         _hasher = hasher;
         _logger = logger;
         _sbPublisher = sbPublisher
@@ -54,7 +67,17 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     public void UpdatePipelines(List<Pipeline> pipelines)
     {
-        lock (_pipelineLock) { _activePipelines = new List<Pipeline>(pipelines); }
+        lock (_pipelineLock)
+        {
+            _activePipelines = new List<Pipeline>(pipelines);
+            var nextPipelineIds = pipelines
+                .Where(p => p.Sources.Any(ps => ps.SourceId == _source.Id))
+                .Select(p => p.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            if (_pipelineStateInitialized && nextPipelineIds.Except(_pipelineIds).Any())
+                _resetDeltaForNewPipeline = true;
+            _pipelineIds = nextPipelineIds;
+        }
     }
 
     public void UpdateDestinations(List<Destination> destinations) => _destinations = destinations;
@@ -67,7 +90,9 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             || string.IsNullOrWhiteSpace(_source.SharePointDriveId))
             throw new InvalidOperationException("SharePoint source requires site_id and drive_id");
 
-        _deltaUrl = BuildInitialDeltaUrl();
+        _stateContainer = await _stateStore.EnsureLeaseContainerAsync(_source.Id, ct);
+        await LoadStateAsync(ct);
+        _deltaUrl ??= BuildInitialDeltaUrl();
         await ValidateDriveAsync(ct);
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -131,10 +156,38 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private async Task PollDeltaAsync(CancellationToken ct)
     {
-        var nextUrl = _deltaUrl ?? BuildInitialDeltaUrl();
-        while (!string.IsNullOrEmpty(nextUrl))
+        // Reload after every failure, including an ambiguous state-write result.
+        // A persisted outbox is always replayed before reading another Graph page.
+        await LoadStateAsync(ct);
+        if (!string.IsNullOrEmpty(_state.PendingJson))
+            await FlushPendingAsync(ct);
+        if (_state.Reconcile)
+            await ReconcileScanAsync(ct);
+        bool reset;
+        lock (_pipelineLock)
         {
-            using var response = await GraphGetAsync(nextUrl, ct);
+            reset = _resetDeltaForNewPipeline || _state.SchemaVersion < 2 || string.IsNullOrEmpty(_deltaUrl)
+                || _state.Generation != Generation || SkipContentHash;
+            _resetDeltaForNewPipeline = false;
+        }
+        if (reset)
+        {
+            await StartScanAsync(ct);
+            SkipContentHash = false;
+        }
+        var resetExpiredDelta = false;
+        while (!string.IsNullOrEmpty(_deltaUrl))
+        {
+            using var response = await GraphGetAsync(_deltaUrl, ct);
+            if (response.StatusCode == HttpStatusCode.Gone && !resetExpiredDelta)
+            {
+                resetExpiredDelta = true;
+                await StartScanAsync(ct);
+                _logger.LogWarning(
+                    "SharePoint delta token expired for {Source}; restarting a full enumeration",
+                    _source.Name);
+                continue;
+            }
             response.EnsureSuccessStatusCode();
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var root = document.RootElement;
@@ -142,40 +195,127 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             var changes = new List<SharePointChange>();
             if (root.TryGetProperty("value", out var values))
             {
-                foreach (var item in values.EnumerateArray())
+                // Graph can repeat an item within a page; its last occurrence wins.
+                foreach (var item in values.EnumerateArray()
+                    .GroupBy(item => GetString(item, "id")).Select(group => group.Last()))
                 {
-                    var change = ParseChange(item);
-                    if (change is not null) changes.Add(change);
+                    changes.AddRange(await ParseChangesAsync(item, ct));
                 }
             }
 
-            if (changes.Count > 0)
-                await PublishChangesAsync(changes, ct);
-
-            nextUrl = root.TryGetProperty("@odata.nextLink", out var next)
+            var nextUrl = root.TryGetProperty("@odata.nextLink", out var next)
                 ? next.GetString()
                 : null;
-            if (string.IsNullOrEmpty(nextUrl)
-                && root.TryGetProperty("@odata.deltaLink", out var delta))
-                _deltaUrl = delta.GetString();
+            var isDelta = string.IsNullOrEmpty(nextUrl);
+            if (isDelta && root.TryGetProperty("@odata.deltaLink", out var delta))
+                nextUrl = delta.GetString();
+            if (string.IsNullOrEmpty(nextUrl))
+                throw new InvalidOperationException("Graph delta response has no continuation or checkpoint");
+
+            await StagePageAsync(changes, nextUrl, isDelta, false, ct);
+            await FlushPendingAsync(ct);
+            if (isDelta)
+            {
+                if (_state.Reconcile) await ReconcileScanAsync(ct);
+                return;
+            }
         }
     }
 
-    private SharePointChange? ParseChange(JsonElement item)
+    private async Task StartScanAsync(CancellationToken ct)
+    {
+        _state.SchemaVersion = 2;
+        _state.Generation = Generation;
+        _state.ScanId = ++_state.Revision;
+        _state.FullScan = true;
+        _state.Reconcile = false;
+        lock (_pipelineLock) { _state.PipelineIds = _pipelineIds.Order().ToList(); }
+        _deltaUrl = BuildInitialDeltaUrl();
+        await PersistDeltaUrlAsync(ct);
+    }
+
+    private async Task StagePageAsync(
+        List<SharePointChange> changes, string nextUrl, bool isDelta, bool endsScan, CancellationToken ct)
+    {
+        ++_state.Revision;
+        var page = new PendingPage
+        {
+            Changes = changes,
+            Messages = BuildMessages(changes),
+            NextUrl = nextUrl,
+            IsDelta = isDelta,
+            EndsScan = endsScan,
+        };
+        _state.PendingJson = JsonSerializer.Serialize(page);
+        // No messages can be sent until their revision, targets and event IDs are durable.
+        await PersistDeltaUrlAsync(ct);
+    }
+
+    private async Task FlushPendingAsync(CancellationToken ct)
+    {
+        var page = JsonSerializer.Deserialize<PendingPage>(_state.PendingJson)
+            ?? throw new InvalidOperationException("Invalid SharePoint outbox");
+        await _sbPublisher.PublishBatchAsync(page.Messages, ct);
+        await PersistReferencesAsync(page.Changes, ct);
+        _deltaUrl = page.NextUrl;
+        _state.PendingJson = "";
+        if (page.EndsScan)
+        {
+            _state.FullScan = false;
+            _state.Reconcile = false;
+        }
+        else if (page.IsDelta && _state.FullScan)
+            _state.Reconcile = true;
+        await PersistDeltaUrlAsync(ct);
+    }
+
+    private async Task ReconcileScanAsync(CancellationToken ct)
+    {
+        var missing = new List<SharePointChange>();
+        if (_stateContainer is not null)
+        {
+            var query = new QueryDefinition(
+                "SELECT * FROM c WHERE IS_DEFINED(c.itemId) " +
+                "AND (NOT IS_DEFINED(c.deleted) OR c.deleted = false) " +
+                "AND (NOT IS_DEFINED(c.scanId) OR c.scanId < @scan)")
+                .WithParameter("@scan", _state.ScanId);
+            using var iterator = _stateContainer.GetItemQueryIterator<SharePointReferenceDocument>(query);
+            while (iterator.HasMoreResults)
+                foreach (var item in await iterator.ReadNextAsync(ct))
+                    missing.Add(new SharePointChange(item.ItemId, item.SourceRef, "", 0, true));
+        }
+        // Bound the outbox even for a large expired-token reconciliation.
+        foreach (var batch in missing.Chunk(100))
+        {
+            await StagePageAsync(batch.ToList(), _deltaUrl!, true, false, ct);
+            await FlushPendingAsync(ct);
+        }
+        await StagePageAsync([], _deltaUrl!, true, true, ct);
+        await FlushPendingAsync(ct);
+    }
+
+    private async Task<List<SharePointChange>> ParseChangesAsync(
+        JsonElement item,
+        CancellationToken ct)
     {
         var id = GetString(item, "id");
-        if (string.IsNullOrEmpty(id)) return null;
+        if (string.IsNullOrEmpty(id)) return [];
+
+        if (!_knownRefs.TryGetValue(id, out var previousRef))
+            previousRef = await LoadReferenceAsync(id, ct);
 
         if (item.TryGetProperty("deleted", out _))
         {
-            return _knownRefs.TryGetValue(id, out var deletedRef)
-                ? new SharePointChange(id, deletedRef, "", 0, true)
-                : null;
+            // Identity no longer depends on remembering the last display path.
+            return [new SharePointChange(id, previousRef ?? "", "", 0, true)];
         }
 
-        if (!item.TryGetProperty("file", out _)) return null;
+        if (!item.TryGetProperty("file", out _))
+            return DeletePreviousReference(id, previousRef);
+
         var name = GetString(item, "name");
-        if (string.IsNullOrEmpty(name) || !IsAllowedFile(name)) return null;
+        if (string.IsNullOrEmpty(name) || !IsAllowedFile(name))
+            return DeletePreviousReference(id, previousRef);
 
         var size = item.TryGetProperty("size", out var sizeElement) && sizeElement.TryGetInt64(out var parsedSize)
             ? parsedSize
@@ -185,7 +325,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             _logger.LogWarning(
                 "Skipping SharePoint file {Name}: {Size} bytes exceeds limit {Limit}",
                 name, size, _source.SharePointMaxFileSizeBytes);
-            return null;
+            return DeletePreviousReference(id, previousRef);
         }
 
         var parentPath = item.TryGetProperty("parentReference", out var parent)
@@ -195,8 +335,118 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         var relativeParent = marker >= 0 ? parentPath[(marker + 5)..].Trim('/') : "";
         var sourceRef = string.IsNullOrEmpty(relativeParent) ? name : $"{relativeParent}/{name}";
         var etag = GetString(item, "eTag");
-        _knownRefs[id] = sourceRef;
-        return new SharePointChange(id, sourceRef, etag, size, false);
+        // A rename is an update of the same identity, never a path-based delete.
+        return [new SharePointChange(id, sourceRef, etag, size, false)];
+    }
+
+    private static List<SharePointChange> DeletePreviousReference(
+        string itemId,
+        string? previousRef)
+        => string.IsNullOrEmpty(previousRef)
+            ? []
+            : [new SharePointChange(itemId, previousRef, "", 0, true)];
+
+    private async Task LoadStateAsync(CancellationToken ct)
+    {
+        if (_stateContainer is null) return;
+        try
+        {
+            var response = await _stateContainer.ReadItemAsync<SharePointStateDocument>(
+                SharePointStateDocument.StateId,
+                new PartitionKey(SharePointStateDocument.StateId),
+                cancellationToken: ct);
+            _deltaUrl = response.Resource.DeltaUrl;
+            _state = response.Resource;
+            _stateEtag = response.ETag;
+            _knownRefs.Clear();
+            lock (_pipelineLock)
+            {
+                if (_pipelineIds.Except(response.Resource.PipelineIds).Any())
+                    _resetDeltaForNewPipeline = true;
+                _pipelineStateInitialized = true;
+            }
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            _deltaUrl = null;
+            _state = new();
+            _stateEtag = null;
+            lock (_pipelineLock) { _pipelineStateInitialized = true; }
+        }
+    }
+
+    private async Task<string?> LoadReferenceAsync(string itemId, CancellationToken ct)
+    {
+        if (_stateContainer is null) return null;
+        var id = GetReferenceDocumentId(itemId);
+        try
+        {
+            var response = await _stateContainer.ReadItemAsync<SharePointReferenceDocument>(
+                id, new PartitionKey(id), cancellationToken: ct);
+            _knownRefs[itemId] = response.Resource.SourceRef;
+            return response.Resource.SourceRef;
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    private async Task PersistReferencesAsync(
+        IEnumerable<SharePointChange> changes,
+        CancellationToken ct)
+    {
+        foreach (var change in changes)
+        {
+            var id = GetReferenceDocumentId(change.ItemId);
+            if (_stateContainer is not null)
+            {
+                // Concurrent/replayed publishers must not regress a reference.
+                while (true)
+                {
+                    ItemResponse<SharePointReferenceDocument>? old = null;
+                    try { old = await _stateContainer.ReadItemAsync<SharePointReferenceDocument>(
+                        id, new PartitionKey(id), cancellationToken: ct); }
+                    catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound) { }
+                    if (old is not null && old.Resource.Revision > _state.Revision) break;
+                    var reference = new SharePointReferenceDocument
+                    {
+                        Id = id, ItemId = change.ItemId, SourceRef = change.SourceRef,
+                        Deleted = change.Deleted, Revision = _state.Revision, ScanId = _state.ScanId,
+                    };
+                    try
+                    {
+                        if (old is null)
+                            await _stateContainer.CreateItemAsync(reference, new PartitionKey(id), cancellationToken: ct);
+                        else
+                            await _stateContainer.ReplaceItemAsync(reference, id, new PartitionKey(id),
+                                new ItemRequestOptions { IfMatchEtag = old.ETag }, ct);
+                        break;
+                    }
+                    catch (CosmosException ex) when (ex.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed) { }
+                }
+            }
+            if (change.Deleted) _knownRefs.Remove(change.ItemId);
+            else _knownRefs[change.ItemId] = change.SourceRef;
+        }
+    }
+
+    private async Task PersistDeltaUrlAsync(CancellationToken ct)
+    {
+        if (_stateContainer is null || string.IsNullOrEmpty(_deltaUrl)) return;
+        _state.DeltaUrl = _deltaUrl;
+        var pk = new PartitionKey(SharePointStateDocument.StateId);
+        var response = _stateEtag is null
+            ? await _stateContainer.CreateItemAsync(_state, pk, cancellationToken: ct)
+            : await _stateContainer.ReplaceItemAsync(_state, SharePointStateDocument.StateId, pk,
+                new ItemRequestOptions { IfMatchEtag = _stateEtag }, ct);
+        _stateEtag = response.ETag;
+    }
+
+    private static string GetReferenceDocumentId(string itemId)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(itemId));
+        return $"sharepoint-ref-{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
     private bool IsAllowedFile(string name)
@@ -208,18 +458,22 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             string.Equals(value.Trim().TrimStart('.'), extension, StringComparison.OrdinalIgnoreCase));
     }
 
-    private async Task PublishChangesAsync(List<SharePointChange> changes, CancellationToken ct)
+    private List<EmbeddingMessage> BuildMessages(List<SharePointChange> changes)
     {
+        var allMessages = new List<EmbeddingMessage>();
         List<Pipeline> pipelines;
         lock (_pipelineLock) { pipelines = new List<Pipeline>(_activePipelines); }
 
         foreach (var pipeline in pipelines.Where(p => p.Sources.Any(ps => ps.SourceId == _source.Id)))
         {
             var destination = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-            if (destination is null) continue;
+            if (destination is null)
+                throw new InvalidOperationException($"SharePoint pipeline {pipeline.Id} has no destination");
 
             var messages = changes.Select(change => new EmbeddingMessage
             {
+                MessageId = HashIdentity(_source.Id, _source.SharePointSiteId!, _source.SharePointDriveId!,
+                    change.ItemId, pipeline.Id, _state.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 PipelineId = pipeline.Id,
                 PipelineName = pipeline.Name,
                 DocgrokPipeline = pipeline.DocgrokPipeline,
@@ -229,7 +483,8 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 DestinationType = destination.Type,
                 DestinationConfig = destination.Config,
                 ContentHash = _hasher.ComputeHash($"{change.ItemId}:{change.ETag}"),
-                PartitionKeyValue = change.SourceRef,
+                PartitionKeyValue = HashIdentity(_source.Id, _source.SharePointSiteId!,
+                    _source.SharePointDriveId!, change.ItemId, pipeline.Id),
                 PipelineGeneration = Generation,
                 StoreContent = pipeline.StoreContent,
                 ContentField = pipeline.ContentField,
@@ -239,19 +494,27 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 SharePointSiteId = _source.SharePointSiteId,
                 SharePointDriveId = _source.SharePointDriveId,
                 SharePointItemId = change.ItemId,
+                SharePointRevision = _state.Revision,
+                SharePointETag = change.ETag,
                 SharePointFileName = Path.GetFileName(change.SourceRef),
                 SharePointMaxFileSizeBytes = _source.SharePointMaxFileSizeBytes,
             }).ToList();
 
-            await _sbPublisher.PublishBatchAsync(messages, ct);
+            allMessages.AddRange(messages);
         }
+        return allMessages;
     }
+
+    private static string HashIdentity(params string[] parts)
+        => "sp-" + Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(parts)))).ToLowerInvariant();
 
     private async Task<HttpResponseMessage> GraphGetAsync(string url, CancellationToken ct)
     {
         var token = await _credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+        request.Headers.TryAddWithoutValidation("Prefer", "odata.maxpagesize=100");
         return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
@@ -275,4 +538,56 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         string ETag,
         long Size,
         bool Deleted);
+
+    private sealed class SharePointStateDocument
+    {
+        public const string StateId = "sharepoint-state";
+
+        [Newtonsoft.Json.JsonProperty("id")]
+        public string Id { get; set; } = StateId;
+
+        [Newtonsoft.Json.JsonProperty("deltaUrl")]
+        public string DeltaUrl { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("pipelineIds")]
+        public List<string> PipelineIds { get; set; } = new();
+
+        public int SchemaVersion { get; set; }
+        public string Generation { get; set; } = "";
+        public long Revision { get; set; }
+        public long ScanId { get; set; }
+        public bool FullScan { get; set; }
+        public bool Reconcile { get; set; }
+        public string PendingJson { get; set; } = "";
+    }
+
+    private sealed class PendingPage
+    {
+        public List<SharePointChange> Changes { get; set; } = new();
+        public List<EmbeddingMessage> Messages { get; set; } = new();
+        public string NextUrl { get; set; } = "";
+        public bool IsDelta { get; set; }
+        public bool EndsScan { get; set; }
+    }
+
+    private sealed class SharePointReferenceDocument
+    {
+        [Newtonsoft.Json.JsonProperty("id")]
+        public string Id { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("itemId")]
+        public string ItemId { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("sourceRef")]
+        public string SourceRef { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("deleted")]
+        public bool Deleted { get; set; }
+
+        [Newtonsoft.Json.JsonProperty("revision")]
+        public long Revision { get; set; }
+
+        [Newtonsoft.Json.JsonProperty("scanId")]
+        public long ScanId { get; set; }
+    }
 }

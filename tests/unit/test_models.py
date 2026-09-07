@@ -89,6 +89,39 @@ class TestSource:
         )
         assert api_models.Source(**source.model_dump()) == source
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("site_id", " "),
+            ("drive_id", ""),
+            ("poll_interval_seconds", 9),
+            ("max_file_size_bytes", 0),
+            ("max_file_size_bytes", 50 * 1024 * 1024 + 1),
+            ("auth_type", "client-secret"),
+            ("file_types", ["../pdf"]),
+        ],
+    )
+    def test_sharepoint_rejects_invalid_config(self, api_models, field, value):
+        config = {
+            "site_id": "contoso.sharepoint.com,site-guid,web-guid",
+            "drive_id": "drive-guid",
+            field: value,
+        }
+        with pytest.raises(ValidationError):
+            api_models.SharePointSourceConfig(**config)
+
+    def test_sharepoint_normalizes_config(self, api_models):
+        config = api_models.SharePointSourceConfig(
+            site_id="  contoso.sharepoint.com,site-guid,web-guid ",
+            drive_id=" drive-guid ",
+            folder_path="/Shared Documents/Policies/",
+            file_types=[".PDF", "pdf", " DOCX "],
+        )
+        assert config.site_id == "contoso.sharepoint.com,site-guid,web-guid"
+        assert config.drive_id == "drive-guid"
+        assert config.folder_path == "Shared Documents/Policies"
+        assert config.file_types == ["pdf", "docx"]
+
     @given(st.text(min_size=1, max_size=40))
     def test_name_text_round_trip(self, api_models, name):
         s = api_models.Source(name=name, type=api_models.SourceType.HTTP, config={})

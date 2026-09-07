@@ -22,6 +22,9 @@ public class EmbeddingWorkerService : BackgroundService
     private readonly MetricsReporter _metrics;
     private readonly Dictionary<string, IDestinationWriter> _writers;
     private readonly ILogger<EmbeddingWorkerService> _logger;
+    private readonly SemaphoreSlim _documentGate;
+    private readonly SemaphoreSlim _sharePointGate;
+    private readonly SemaphoreSlim _textGate;
 
     public EmbeddingWorkerService(
         IOptions<WorkerOptions> options,
@@ -33,6 +36,16 @@ public class EmbeddingWorkerService : BackgroundService
         ILogger<EmbeddingWorkerService> logger)
     {
         _options = options.Value;
+        if (_options.EmbedBatchSize <= 0 || _options.MaxConcurrentCalls <= 0
+            || _options.BlobConcurrency <= 0 || _options.BlobBatchSize <= 0
+            || _options.SharePointConcurrency <= 0
+            || _options.MaxProcessingMinutes <= 0 || _options.MaxLockRenewalMinutes <= 0
+            || _options.MaxBatchTokens <= 0 || _options.MaxSingleTextTokens <= 0 || _options.BatchAccumulateMs <= 0
+            || _options.DocGrokRequestTimeoutSeconds <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "Worker concurrency, batch sizes and processing budgets must be positive");
+        _documentGate = new(_options.BlobConcurrency, _options.BlobConcurrency);
+        _sharePointGate = new(_options.SharePointConcurrency, _options.SharePointConcurrency);
+        _textGate = new(_options.MaxConcurrentCalls, _options.MaxConcurrentCalls);
         _sbClient = sbClient;
         _docGrok = docGrok;
         _sharePoint = sharePoint;
@@ -50,7 +63,7 @@ public class EmbeddingWorkerService : BackgroundService
             // steady state — helm --wait must not hang on an optional worker).
             WorkerHeartbeat.MarkReady();
             // Stay alive but idle — don't crash the pod
-            await Task.Delay(Timeout.Infinite, ct);
+            await RunIdleAsync(ct, TimeSpan.FromSeconds(30));
             return;
         }
 
@@ -63,14 +76,12 @@ public class EmbeddingWorkerService : BackgroundService
             _options.SubscriptionName,
             new ServiceBusReceiverOptions
             {
-                PrefetchCount = _options.EmbedBatchSize,
+                // Prefetched locks age before we can register them for renewal.
+                PrefetchCount = 0,
                 ReceiveMode = ServiceBusReceiveMode.PeekLock,
             });
 
-        // Receiver constructed successfully — we can serve. Marking ready here
-        // (not on first message) so an empty queue does not keep the pod 0/1
-        // and cause helm --wait to hang for 25 minutes.
-        WorkerHeartbeat.MarkReady();
+        // A successful receive, including an empty one, establishes readiness.
 
         // Run multiple concurrent receive loops
         var tasks = Enumerable.Range(0, _options.MaxConcurrentCalls)
@@ -81,6 +92,15 @@ public class EmbeddingWorkerService : BackgroundService
 
         await receiver.DisposeAsync();
         _logger.LogInformation("Embedding worker stopped");
+    }
+
+    internal static async Task RunIdleAsync(CancellationToken ct, TimeSpan interval)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            WorkerHeartbeat.Beat();
+            await Task.Delay(interval, ct);
+        }
     }
 
     private async Task ReceiveLoopAsync(ServiceBusReceiver receiver, CancellationToken ct)
@@ -99,8 +119,29 @@ public class EmbeddingWorkerService : BackgroundService
                     TimeSpan.FromMilliseconds(_options.BatchAccumulateMs),
                     ct);
 
+                WorkerHeartbeat.MarkReady();
                 if (sbMessages.Count == 0) continue;
 
+                await using var scope = new MessageProcessingScope(receiver, sbMessages,
+                    TimeSpan.FromMinutes(Math.Min(_options.MaxProcessingMinutes, _options.MaxLockRenewalMinutes)), ct);
+                await ProcessReceivedBatchAsync(scope.Receiver, sbMessages, scope.Token);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Received batch exceeded processing/lock budget; unfinished messages will be redelivered");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in receive loop, backing off 5s");
+                try { await Task.Delay(5000, ct); } catch { break; }
+            }
+        }
+    }
+
+    private async Task ProcessReceivedBatchAsync(ServiceBusReceiver receiver,
+        IReadOnlyList<ServiceBusReceivedMessage> sbMessages, CancellationToken ct)
+    {
                 // First message received ever → mark ready.
                 WorkerHeartbeat.MarkReceivedFirstMessage();
 
@@ -114,44 +155,63 @@ public class EmbeddingWorkerService : BackgroundService
                         if (msg is null)
                         {
                             _logger.LogWarning("Could not deserialize message {MessageId}, dead-lettering", sbMsg.MessageId);
-                            await receiver.DeadLetterMessageAsync(sbMsg, "InvalidMessage", "Could not deserialize", ct);
+                            await DeadLetterWithMetricsAsync(receiver, sbMsg, "InvalidMessage", "Could not deserialize", ct);
+                            continue;
+                        }
+                        if (string.IsNullOrWhiteSpace(msg.DestinationType) || !_writers.ContainsKey(msg.DestinationType))
+                        {
+                            await DeadLetterWithMetricsAsync(receiver, sbMsg, "UnknownDestinationType",
+                                $"No writer for {msg.DestinationType}", ct);
                             continue;
                         }
                         items.Add((msg, sbMsg));
                     }
-                    catch (Exception ex)
+                    catch (JsonException ex)
                     {
                         _logger.LogWarning(ex, "Failed to deserialize message {MessageId}", sbMsg.MessageId);
-                        await receiver.DeadLetterMessageAsync(sbMsg, "DeserializationError", ex.Message, ct);
+                        await DeadLetterWithMetricsAsync(receiver, sbMsg, "DeserializationError", ex.Message, ct);
                     }
                 }
 
-                if (items.Count == 0) continue;
+                if (items.Count == 0) return;
+                // A slow/unavailable pipeline must not hold unrelated pipelines in
+                // the same receive batch behind its retries.
+                await Task.WhenAll(items.GroupBy(item => (item.msg.PipelineId, item.msg.DestinationId))
+                    .Select(group => ProcessItemsAsync(receiver, group.ToList(), ct)));
+    }
 
+    private async Task ProcessItemsAsync(ServiceBusReceiver receiver,
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> items, CancellationToken ct)
+    {
                 // Split out delete messages (BlobDeleted via Event Grid). Deletes
                 // are grouped by destination and dispatched to the writer's
                 // DeleteByRefAsync — no embedding / DocGrok call needed.
-                var deleteItems = items.Where(i => string.Equals(i.msg.MessageType, "delete",
+                // SharePoint deletes use the same revision-fenced replacement path as upserts.
+                var deleteItems = items.Where(i => i.msg.ContentType != "sharepoint_ref" && string.Equals(i.msg.MessageType, "delete",
                     StringComparison.OrdinalIgnoreCase)).ToList();
-                items = items.Where(i => !string.Equals(i.msg.MessageType, "delete",
-                    StringComparison.OrdinalIgnoreCase)).ToList();
+                items = items.Except(deleteItems).ToList();
                 if (deleteItems.Count > 0)
                 {
                     await ProcessDeleteBatchAsync(receiver, deleteItems, ct);
                 }
 
-                if (items.Count == 0) continue;
+                if (items.Count == 0) return;
 
                 var sharePointItems = items.Where(i => i.msg.ContentType == "sharepoint_ref").ToList();
                 items = items.Where(i => i.msg.ContentType != "sharepoint_ref").ToList();
                 if (sharePointItems.Count > 0)
                 {
-                    var gate = new SemaphoreSlim(_options.BlobConcurrency, _options.BlobConcurrency);
+                    var gate = _documentGate;
                     var tasks = sharePointItems.Select(async item =>
                     {
-                        await gate.WaitAsync(ct);
-                        try { await ProcessSharePointMessageAsync(receiver, item, ct); }
-                        finally { gate.Release(); }
+                        await _sharePointGate.WaitAsync(ct);
+                        try
+                        {
+                            await gate.WaitAsync(ct);
+                            try { await ProcessSharePointMessageAsync(receiver, item, ct); }
+                            finally { gate.Release(); }
+                        }
+                        finally { _sharePointGate.Release(); }
                     });
                     await Task.WhenAll(tasks);
                 }
@@ -183,7 +243,7 @@ public class EmbeddingWorkerService : BackgroundService
                     )).ToList();
 
                     var batchTasks = new List<Task>();
-                    var gate = new SemaphoreSlim(_options.BlobConcurrency, _options.BlobConcurrency);
+                    var gate = _documentGate;
                     foreach (var g in groups)
                     {
                         var list = g.ToList();
@@ -195,7 +255,7 @@ public class EmbeddingWorkerService : BackgroundService
                             {
                                 try { await ProcessBlobBatchAsync(receiver, slice, ct); }
                                 finally { gate.Release(); }
-                            }, ct));
+                            }));
                         }
                     }
                     foreach (var item in individual)
@@ -205,7 +265,7 @@ public class EmbeddingWorkerService : BackgroundService
                         {
                             try { await ProcessBlobMessageAsync(receiver, item, ct); }
                             finally { gate.Release(); }
-                        }, ct));
+                        }));
                     }
                     await Task.WhenAll(batchTasks);
                 }
@@ -220,23 +280,51 @@ public class EmbeddingWorkerService : BackgroundService
                     var validated = await ValidateAndTruncateAsync(receiver, group.ToList(), ct);
                     foreach (var subBatch in PackByTokenBudget(validated))
                     {
-                        await ProcessBatchAsync(receiver, subBatch, ct);
+                        await _textGate.WaitAsync(ct);
+                        try { await ProcessBatchAsync(receiver, subBatch, ct); }
+                        finally { _textGate.Release(); }
                     }
                 }
-            }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in receive loop, backing off 5s");
-                try { await Task.Delay(5000, ct); } catch { break; }
-            }
+    }
+
+    private async Task DeadLetterWithMetricsAsync(ServiceBusReceiver receiver,
+        ServiceBusReceivedMessage message, string reason, string description, CancellationToken ct)
+    {
+        await receiver.DeadLetterMessageAsync(message, reason, description, ct);
+        _logger.LogError("Dead-lettered message {MessageId}: {Reason}: {Description}",
+            message.MessageId, reason, description);
+        string? pipelineId = null;
+        try
+        {
+            pipelineId = JsonSerializer.Deserialize<EmbeddingMessage>(message.Body.ToString())?.PipelineId;
+        }
+        catch (JsonException) { }
+        // Only confirmed explicit DLQ settlement is counted as a terminal failure.
+        // Broker-automatic dead-lettering still requires Service Bus monitoring.
+        if (!string.IsNullOrWhiteSpace(pipelineId))
+            await _metrics.ReportInlineMetricsAsync(pipelineId, 0, 1, 0,
+                $"worker-dlq:{message.MessageId}", ct);
+    }
+
+    private async Task SettleFailureAsync(ServiceBusReceiver receiver,
+        ServiceBusReceivedMessage message, Exception error, CancellationToken ct)
+    {
+        try
+        {
+            if (error is NotSupportedException or ArgumentException
+                || error is EmbeddingClientException http && DocGrokClient.IsInputError(http.StatusCode))
+                await DeadLetterWithMetricsAsync(receiver, message, "PermanentProcessingFailure",
+                    error.Message[..Math.Min(4000, error.Message.Length)], ct);
+            else
+                await receiver.AbandonMessageAsync(message, cancellationToken: ct);
+        }
+        catch (Exception settlementError)
+        {
+            _logger.LogWarning(settlementError, "Could not settle failed message {MessageId}; lock expiry will redeliver",
+                message.MessageId);
         }
     }
 
-    /// <summary>
-    /// Group delete-type messages by destination and dispatch to the writer's
-    /// DeleteByRefAsync. Completes the SB messages on success.
-    /// </summary>
     private async Task ProcessDeleteBatchAsync(
         ServiceBusReceiver receiver,
         List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> items,
@@ -252,7 +340,7 @@ public class EmbeddingWorkerService : BackgroundService
                     "No writer for destination type {Type} — dead-lettering {Count} delete msg(s)",
                     sample.DestinationType, grp.Count());
                 foreach (var (_, sbMsg) in grp)
-                    try { await receiver.DeadLetterMessageAsync(sbMsg, "UnknownDestinationType",
+                    try { await DeadLetterWithMetricsAsync(receiver, sbMsg, "UnknownDestinationType",
                         $"No writer for {sample.DestinationType}", ct); } catch { }
                 continue;
             }
@@ -277,7 +365,7 @@ public class EmbeddingWorkerService : BackgroundService
                 _logger.LogError(ex, "Delete batch failed for dest {Dest}, abandoning {Count} msg(s)",
                     sample.DestinationId, grp.Count());
                 foreach (var (_, sbMsg) in grp)
-                    try { await receiver.AbandonMessageAsync(sbMsg, cancellationToken: ct); } catch { }
+                    await SettleFailureAsync(receiver, sbMsg, ex, ct);
             }
         }
     }
@@ -309,7 +397,7 @@ public class EmbeddingWorkerService : BackgroundService
 
             if (chunks.Count == 0)
             {
-                _logger.LogWarning("DocGrok returned 0 chunks for blob {BlobName}, completing message", msg.BlobName);
+                _logger.LogInformation("DocGrok explicitly skipped blob {BlobName}", msg.BlobName);
                 await receiver.CompleteMessageAsync(item.sbMsg, ct);
                 return;
             }
@@ -347,7 +435,7 @@ public class EmbeddingWorkerService : BackgroundService
             }
             else
             {
-                _logger.LogError("No writer for destination type {Type}", msg.DestinationType);
+                throw new NotSupportedException($"No writer for destination type {msg.DestinationType}");
             }
 
             await receiver.CompleteMessageAsync(item.sbMsg, ct);
@@ -365,8 +453,7 @@ public class EmbeddingWorkerService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to process blob {BlobName}", msg.BlobName);
-            try { await receiver.AbandonMessageAsync(item.sbMsg, cancellationToken: ct); }
-            catch { /* ignore */ }
+            await SettleFailureAsync(receiver, item.sbMsg, ex, ct);
         }
     }
 
@@ -378,29 +465,32 @@ public class EmbeddingWorkerService : BackgroundService
         var msg = item.msg;
         try
         {
-            if (string.IsNullOrWhiteSpace(msg.SharePointSiteId)
-                || string.IsNullOrWhiteSpace(msg.SharePointDriveId)
-                || string.IsNullOrWhiteSpace(msg.SharePointItemId))
-                throw new InvalidOperationException("SharePoint message is missing site, drive, or item ID");
-
-            var bytes = await _sharePoint.DownloadAsync(
-                msg.SharePointSiteId,
-                msg.SharePointDriveId,
-                msg.SharePointItemId,
-                msg.SharePointMaxFileSizeBytes,
-                ct);
-            var chunks = await _docGrok.EmbedDataAsync(
-                msg.DocgrokPipeline,
-                bytes,
-                msg.SharePointFileName ?? msg.SourceRef,
-                ct);
+            var identity = SharePointIdentity.Create(msg);
+            if (msg.SharePointRevision <= 0)
+                throw new InvalidOperationException("Legacy SharePoint message has no synchronization revision; drain old messages before migration");
+            if (!_writers.TryGetValue(msg.DestinationType, out var writer))
+                throw new NotSupportedException($"No writer for destination type {msg.DestinationType}");
+            var deleted = string.Equals(msg.MessageType, "delete", StringComparison.OrdinalIgnoreCase);
+            var chunks = new List<(string ChunkText, float[] Embedding)>();
+            if (!deleted)
+            {
+                if (string.IsNullOrWhiteSpace(msg.SharePointETag))
+                    throw new InvalidOperationException("SharePoint upsert has no Graph eTag");
+                var bytes = await _sharePoint.DownloadAsync(
+                    msg.SharePointSiteId!, msg.SharePointDriveId!, msg.SharePointItemId!,
+                    msg.SharePointMaxFileSizeBytes, ct, msg.SharePointETag);
+                // A zero-byte file is an explicit empty document, not a malformed processor response.
+                if (bytes.Length > 0)
+                    chunks = await _docGrok.EmbedDataAsync(
+                        msg.DocgrokPipeline, bytes, msg.SharePointFileName ?? msg.SourceRef, ct);
+            }
 
             var results = chunks.Select((chunk, index) => new EmbeddingResult(
-                DocId: chunks.Count == 1 ? msg.SourceRef : $"{msg.SourceRef}#chunk{index}",
+                DocId: $"{identity}-{msg.SharePointRevision}-chunk-{index}",
                 SourceRef: msg.SourceRef,
                 Embedding: chunk.Embedding,
                 ContentHash: msg.ContentHash,
-                PartitionKeyValue: msg.PartitionKeyValue,
+                PartitionKeyValue: identity,
                 PipelineId: msg.PipelineId,
                 PipelineName: msg.PipelineName,
                 PipelineGeneration: msg.PipelineGeneration,
@@ -411,22 +501,30 @@ public class EmbeddingWorkerService : BackgroundService
                 MetadataFields: msg.MetadataFields,
                 ContentField: msg.ContentField)).ToList();
 
-            if (_writers.TryGetValue(msg.DestinationType, out var writer))
-                await writer.WriteBatchAsync(msg.DestinationConfig, results, ct);
-            else
-                throw new InvalidOperationException($"No writer for destination type {msg.DestinationType}");
+            var applied = await writer.ReplaceSharePointAsync(msg.DestinationConfig,
+                new SharePointReplacement(identity, msg.SharePointRevision, msg.SourceId,
+                    msg.PipelineId, msg.SourceRef, results), ct);
 
             await receiver.CompleteMessageAsync(item.sbMsg, ct);
+            _logger.LogInformation("SharePoint {Identity} revision={Revision}: {Outcome}, chunks={Count}",
+                identity, msg.SharePointRevision, !applied ? "superseded" : deleted ? "deleted" : results.Count == 0 ? "skipped (empty/filtered)" : "indexed",
+                results.Count);
             _ = _metrics.ReportInlineMetricsAsync(
-                msg.PipelineId, results.Count, 0, 0,
-                $"sharepoint:{msg.SourceRef}:{msg.ContentHash}");
+                msg.PipelineId, applied ? results.Count : 0, 0, 0,
+                $"sharepoint:{identity}:{msg.SharePointRevision}");
         }
         catch (OperationCanceledException) { throw; }
+        catch (SharePointVersionChangedException ex)
+        {
+            // The watcher will publish the newer Graph version (or deletion).
+            // Never label this an indexed success or erase the last good vectors.
+            _logger.LogInformation("SharePoint item {ItemId} superseded: {Reason}", msg.SharePointItemId, ex.Message);
+            await receiver.CompleteMessageAsync(item.sbMsg, ct);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to process SharePoint item {SourceRef}", msg.SourceRef);
-            try { await receiver.AbandonMessageAsync(item.sbMsg, cancellationToken: ct); }
-            catch { }
+            await SettleFailureAsync(receiver, item.sbMsg, ex, ct);
         }
     }
 
@@ -463,8 +561,7 @@ public class EmbeddingWorkerService : BackgroundService
                 batch.Count, head.PipelineName);
             foreach (var it in batch)
             {
-                try { await receiver.AbandonMessageAsync(it.sbMsg, cancellationToken: ct); }
-                catch { /* ignore */ }
+                await SettleFailureAsync(receiver, it.sbMsg, ex, ct);
             }
             return;
         }
@@ -506,8 +603,7 @@ public class EmbeddingWorkerService : BackgroundService
             var destType = kvp.Key.Split('|', 2)[0];
             if (!_writers.TryGetValue(destType, out var writer))
             {
-                _logger.LogError("No writer for destination type {Type}", destType);
-                continue;
+                throw new NotSupportedException($"No writer for destination type {destType}");
             }
             try { await writer.WriteBatchAsync(cfg, docs, ct); }
             catch (Exception ex)
@@ -608,8 +704,7 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 if (!_writers.TryGetValue(destType, out var writer))
                 {
-                    _logger.LogError("No writer for destination type {Type}", destType);
-                    continue;
+                    throw new NotSupportedException($"No writer for destination type {destType}");
                 }
 
                 await writer.WriteBatchAsync(config, results, ct);
@@ -638,8 +733,7 @@ public class EmbeddingWorkerService : BackgroundService
             // Abandon all messages so Service Bus retries them
             foreach (var (_, sbMsg) in batch)
             {
-                try { await receiver.AbandonMessageAsync(sbMsg, cancellationToken: ct); }
-                catch { /* ignore */ }
+                await SettleFailureAsync(receiver, sbMsg, ex, ct);
             }
         }
     }
@@ -684,8 +778,8 @@ public class EmbeddingWorkerService : BackgroundService
                     item.msg.SourceRef, tokens, _options.MaxSingleTextTokens);
                 try
                 {
-                    await receiver.DeadLetterMessageAsync(
-                        item.sbMsg,
+                    await DeadLetterWithMetricsAsync(
+                        receiver, item.sbMsg,
                         "TokenLimitExceeded",
                         $"Estimated {tokens} tokens exceeds MaxSingleTextTokens={_options.MaxSingleTextTokens}",
                         ct);
@@ -753,7 +847,7 @@ public class EmbeddingWorkerService : BackgroundService
         {
             return await _docGrok.EmbedBatchAsync(modelKey, texts, ct);
         }
-        catch (EmbeddingClientException ex)
+        catch (EmbeddingClientException ex) when (DocGrokClient.IsInputError(ex.StatusCode))
         {
             if (batch.Count == 1)
             {
@@ -762,7 +856,7 @@ public class EmbeddingWorkerService : BackgroundService
                 // Most common cause of a single-message 400 is "context length
                 // exceeded" — our token estimate was off. Try truncating to half
                 // and re-embedding once before giving up.
-                if (_options.TruncateOversized && only.msg.Content?.Length > 1)
+                if (_options.TruncateOversized && ex.StatusCode is 400 or 413 && only.msg.Content?.Length > 1)
                 {
                     var orig = only.msg.Content;
                     only.msg.Content = orig.Substring(0, orig.Length / 2);
@@ -773,7 +867,7 @@ public class EmbeddingWorkerService : BackgroundService
                     {
                         return await _docGrok.EmbedBatchAsync(modelKey, new List<string> { only.msg.Content }, ct);
                     }
-                    catch (EmbeddingClientException ex2)
+                    catch (EmbeddingClientException ex2) when (DocGrokClient.IsInputError(ex2.StatusCode))
                     {
                         ex = ex2; // fall through to dead-letter with the second error
                     }
@@ -784,8 +878,8 @@ public class EmbeddingWorkerService : BackgroundService
                     only.msg.SourceRef, ex.StatusCode, ex.Message);
                 try
                 {
-                    await receiver.DeadLetterMessageAsync(
-                        only.sbMsg,
+                    await DeadLetterWithMetricsAsync(
+                        receiver, only.sbMsg,
                         $"EmbedRejected{ex.StatusCode}",
                         ex.Message.Length > 4000 ? ex.Message.Substring(0, 4000) : ex.Message,
                         ct);

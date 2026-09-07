@@ -29,6 +29,12 @@ public interface IDestinationWriter
 {
     string DestinationType { get; }
 
+    Task<bool> ReplaceSharePointAsync(
+        Dictionary<string, object> config,
+        SharePointReplacement replacement,
+        CancellationToken ct)
+        => throw new NotSupportedException("This destination does not support SharePoint synchronization");
+
     Task WriteBatchAsync(
         Dictionary<string, object> config,
         List<EmbeddingResult> results,
@@ -43,7 +49,7 @@ public interface IDestinationWriter
     Task DeleteByRefAsync(
         Dictionary<string, object> config,
         List<DeleteRequest> requests,
-        CancellationToken ct) => Task.CompletedTask;
+        CancellationToken ct) => throw new NotSupportedException("This destination does not support delete propagation");
 }
 
 public record DeleteRequest(
@@ -51,3 +57,11 @@ public record DeleteRequest(
     string SourceRef,
     string PartitionKeyValue,
     string PipelineId);
+
+public record SharePointReplacement(
+    string Identity,
+    long Revision,
+    string SourceId,
+    string PipelineId,
+    string SourceRef,
+    List<EmbeddingResult> Chunks);

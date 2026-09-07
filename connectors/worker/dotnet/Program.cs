@@ -34,7 +34,7 @@ builder.Services.AddHttpClient<DocGrokClient>((sp, client) =>
 {
     var opts = sp.GetRequiredService<IOptions<WorkerOptions>>().Value;
     client.BaseAddress = new Uri(opts.DocGrokBaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(120);
+    client.Timeout = opts.GetDocGrokRequestTimeout();
 });
 
 // Metrics reporter HTTP client

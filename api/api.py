@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Initialize telemetry (in-memory MetricsStore always active; App Insights if configured)
 try:
@@ -48,7 +48,8 @@ from models import (  # lgtm[py/unused-import]
     Source, Destination, Pipeline, Job, JobStatus, JobStats,
     CreateSourceRequest, CreateDestinationRequest, CreatePipelineRequest,
     SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
-    ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest
+    ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
+    SharePointSourceConfig,
 )
 from store import init_store, get_store
 from security_utils import safe_agent_segment, safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
@@ -944,6 +945,17 @@ def _to_doc(model: BaseModel, doc_type: str) -> dict:
     doc["doc_type"] = doc_type
     return doc
 
+
+def _replace_control_doc(store, original: dict, model: BaseModel, doc_type: str) -> dict:
+    """Reject stale lifecycle actions rather than overwriting newer state."""
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+
+    updated = {**original, **_to_doc(model, doc_type)}
+    try:
+        return store.replace_with_etag(updated, original["_etag"])
+    except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError):
+        raise HTTPException(status_code=409, detail="Resource changed during the operation; reload and retry")
+
 # Event processing queue
 EVENT_QUEUE: asyncio.Queue = None
 
@@ -1836,6 +1848,11 @@ async def create_source(req: CreateSourceRequest):
     source_id = f"src-{str(uuid.uuid4())[:8]}"
     # Strip whitespace from URL fields in config
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.SHAREPOINT:
+        try:
+            clean_config = SharePointSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid SharePoint configuration: {exc}") from exc
 
     # Auto-validate source connectivity
     warnings = []
@@ -1909,6 +1926,11 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.SHAREPOINT:
+        try:
+            clean_config = SharePointSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid SharePoint configuration: {exc}") from exc
     # Preserve stored password if masked value was sent
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
@@ -2331,26 +2353,51 @@ class TestConnectionRequest(BaseModel):
 
 
 async def _test_sharepoint_connection(config: dict) -> tuple[bool, dict | str]:
-    site_id = (config.get("site_id") or "").strip()
-    drive_id = (config.get("drive_id") or "").strip()
-    if not site_id or not drive_id:
-        return False, "Site ID and Drive ID are required"
+    try:
+        sharepoint = SharePointSourceConfig(**config)
+    except ValidationError as exc:
+        return False, f"Invalid SharePoint configuration: {exc}"
 
     from azure.identity.aio import DefaultAzureCredential
 
     credential = DefaultAzureCredential()
     try:
         token = await credential.get_token("https://graph.microsoft.com/.default")
-        url = f"https://graph.microsoft.com/v1.0/sites/{_urlquote(site_id, safe='')}/drives/{_urlquote(drive_id, safe='')}"
+        site_id = _urlquote(sharepoint.site_id, safe="")
+        drive_id = _urlquote(sharepoint.drive_id, safe="")
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}"
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
             response = await client.get(url, headers={"Authorization": f"Bearer {token.token}"})
-        if response.status_code >= 400:
-            return False, f"Microsoft Graph returned {response.status_code}: {response.text[:300]}"
-        drive = response.json()
+            if response.status_code >= 400:
+                return False, f"Microsoft Graph returned {response.status_code}: {response.text[:300]}"
+            drive = response.json()
+
+            folder_detail = ""
+            if sharepoint.folder_path:
+                encoded_folder = "/".join(
+                    _urlquote(segment, safe="")
+                    for segment in sharepoint.folder_path.split("/")
+                    if segment
+                )
+                folder_url = (
+                    f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}"
+                    f"/root:/{encoded_folder}"
+                )
+                folder_response = await client.get(
+                    folder_url,
+                    headers={"Authorization": f"Bearer {token.token}"},
+                )
+                if folder_response.status_code >= 400:
+                    return False, (
+                        f"Microsoft Graph could not access folder '{sharepoint.folder_path}' "
+                        f"({folder_response.status_code}): {folder_response.text[:300]}"
+                    )
+                folder_detail = f", folder: {sharepoint.folder_path}"
+
         return True, {
             "success": True,
             "message": "Connected successfully to SharePoint.",
-            "details": f"Document library: {drive.get('name', drive_id)}",
+            "details": f"Document library: {drive.get('name', sharepoint.drive_id)}{folder_detail}",
         }
     finally:
         await credential.close()
@@ -3299,6 +3346,131 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
             )
 
 
+def _inline_write_target(source: dict) -> tuple:
+    """Identify the source rows sharing inline pipeline/hash/timestamp metadata."""
+    kind = source.get("type")
+    config = source.get("config") or {}
+    if kind == "cosmosdb":
+        from urllib.parse import urlsplit, urlunsplit
+        endpoint = (config.get("endpoint") or "").strip().rstrip("/").lower()
+        try:
+            parsed = urlsplit(endpoint)
+            if (parsed.scheme, parsed.port) in (("https", 443), ("http", 80)):
+                endpoint = urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit(":", 1)[0]))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Cannot determine inline source ownership: invalid endpoint") from exc
+        return ("cosmosdb", endpoint, config.get("database"), config.get("container"))
+    if kind in ("postgresql", "pgvector", "mssql"):
+        host = config.get("host") or config.get("server") or ""
+        database = config.get("database")
+        port = config.get("port") or (1433 if kind == "mssql" else 5432)
+        connection = config.get("connection_string")
+        if connection:
+            # Connection strings override individual fields in the .NET watcher.
+            # Parse quoted ADO.NET values without exposing credentials in errors.
+            import re
+            parts = {}
+            position = 0
+            pattern = re.compile(r'''\s*([^=;]+?)\s*=\s*("(?:[^"]|"")*"|'(?:[^']|'')*'|[^;'"]*)\s*(?:;|$)''')
+            while position < len(connection):
+                if not connection[position:].strip(" ;\t\r\n"):
+                    break
+                match = pattern.match(connection, position)
+                if not match:
+                    raise HTTPException(status_code=409, detail="Cannot determine inline source ownership from connection string")
+                value = match[2].strip()
+                if value.startswith(('"', "'")):
+                    quote = value[0]
+                    value = value[1:-1].replace(quote * 2, quote)
+                parts[match[1].strip().lower()] = value
+                position = match.end()
+            host = next((parts[key] for key in ("host", "server", "data source", "address", "addr", "network address") if key in parts), "")
+            database = parts.get("database") or parts.get("initial catalog")
+            port = parts.get("port") or (1433 if kind == "mssql" else 5432)
+            if not host or not database:
+                raise HTTPException(status_code=409, detail="Inline source connection string must identify a server and database")
+        host = str(host).strip().lower().rstrip(".")
+        if kind == "mssql":
+            host = host.removeprefix("tcp:")
+            if "," in host:
+                host, port = host.rsplit(",", 1)
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Cannot determine inline source ownership: invalid port")
+        schema = config.get("schema_name") or config.get("schema") or ("dbo" if kind == "mssql" else "public")
+        return ("mssql" if kind == "mssql" else "postgresql", host, port, database, schema, config.get("table"))
+    return ("source", source["id"])
+
+
+def _require_exclusive_inline_sources(store, pipeline_sources, pipeline_id=None):
+    """Inline writers share metadata even when their vector fields differ."""
+    source_cache = {}
+
+    def targets(sources, *, reject_aliases=False):
+        result = set()
+        owners = {}
+        for entry in sources:
+            source_id = entry.source_id if hasattr(entry, "source_id") else entry["source_id"]
+            if source_id not in source_cache:
+                source_cache[source_id] = store.get(source_id, "source")
+            source = source_cache[source_id]
+            if source:
+                target = _inline_write_target(source)
+                if reject_aliases and target in owners and owners[target] != source_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Multiple source registrations in this pipeline share the same inline metadata. "
+                               "Use one source registration per physical target or queue processing.",
+                    )
+                owners[target] = source_id
+                result.add(target)
+        return result
+
+    requested = targets(pipeline_sources, reject_aliases=True)
+    for other in store.list("pipeline"):
+        if (other.get("id") == pipeline_id or other.get("status") != "active"
+                or other.get("processing_mode") != "inline"):
+            continue
+        if requested & targets(other.get("sources", [])):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Inline source metadata is already owned by active pipeline '{other['id']}'. "
+                       "Pause that pipeline before activating another inline writer, even with a different vector field.",
+            )
+
+
+def _require_sharepoint_compatible(store, req, destination):
+    if not any(
+        (store.get(source.source_id, "source") or {}).get("type") == "sharepoint"
+        for source in req.sources
+    ):
+        return
+    if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
+        raise HTTPException(status_code=400, detail="SharePoint requires queue processing and a Cosmos DB vector destination")
+    config = destination.get("config", {})
+    pk_path = config.get("partition_key_path") or ""
+    pk_parts = pk_path.lstrip("/").split("/")
+    reserved = {
+        "id", "_omnivec_sync", "source_id", "pipeline_id", "source_ref",
+        "embedded_at", "pipeline_generation", "pipeline_name", "content_hash", "embedding_dims", "ttl",
+    }
+    vector_field = req.vector_index_path.lstrip("/")
+    if (not pk_path.startswith("/") or not all(pk_parts)
+            or pk_parts[0] in reserved or pk_parts[0] == vector_field):
+        raise HTTPException(
+            status_code=400,
+            detail="SharePoint requires a probed dedicated document partition key such as /document_id, not /id or a metadata/vector field",
+        )
+    if not vector_field or "/" in vector_field or vector_field in reserved:
+        raise HTTPException(status_code=400, detail="SharePoint vector field conflicts with synchronization fields")
+    content_field = req.content_field or "content"
+    if req.store_content is True and (
+        content_field in reserved or content_field in (vector_field, pk_parts[0]) or "/" in content_field
+    ):
+        raise HTTPException(status_code=400, detail="SharePoint content field conflicts with synchronization fields")
+
+
 @app.post("/api/pipelines")
 async def create_pipeline(req: CreatePipelineRequest):
     """Create a new pipeline."""
@@ -3327,12 +3499,14 @@ async def create_pipeline(req: CreatePipelineRequest):
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+    _require_sharepoint_compatible(store, req, dest_doc)
 
     # Reject inline mode when source and destination are different stores.
     # Inline mode writes embeddings back to source docs in-place, so the source
     # container/table must be the same physical location as the destination.
     if str(req.processing_mode or "").lower() == "inline":
         _require_inline_compatible(store, req.sources, dest_doc)
+        _require_exclusive_inline_sources(store, req.sources)
 
     # Reject queue mode when source and destination ARE the same store.
     # Same-store pipelines must use inline (queue would be redundant).
@@ -3460,6 +3634,8 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if str(req.processing_mode or "").lower() == "inline":
         dest_doc_for_mode = await asyncio.to_thread(store.get, req.destination_id, "destination")
         _require_inline_compatible(store, req.sources, dest_doc_for_mode)
+        if doc.get("status") == PipelineStatus.ACTIVE.value:
+            await asyncio.to_thread(_require_exclusive_inline_sources, store, req.sources, pipeline_id)
 
     # Reject queue mode when source/destination ARE the same store.
     if str(req.processing_mode or "").lower() == "queue":
@@ -3478,6 +3654,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     # Validate vector_index_path against destination if provided
     dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
     if dest_doc:
+        _require_sharepoint_compatible(store, req, dest_doc)
         dest_config = dest_doc.get("config", {})
         vector_indexes = dest_config.get("vector_indexes", [])
         if vector_indexes:
@@ -3525,7 +3702,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.metadata_fields = req.metadata_fields
     pipeline.updated_at = datetime.utcnow()
 
-    await asyncio.to_thread(store.upsert, _to_doc(pipeline, "pipeline"))
+    await asyncio.to_thread(_replace_control_doc, store, doc, pipeline, "pipeline")
     return {"success": True, "pipeline": pipeline}
 
 
@@ -3552,7 +3729,7 @@ def pause_pipeline(pipeline_id: str):
     pipeline = _pipeline_from_doc(doc)
     pipeline.status = PipelineStatus.PAUSED
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
     return {"success": True}
 
 
@@ -3565,9 +3742,11 @@ def resume_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    if pipeline.processing_mode == "inline":
+        _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     pipeline.status = PipelineStatus.ACTIVE
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
     return {"success": True}
 
 
@@ -3586,6 +3765,8 @@ def set_processing_mode(pipeline_id: str, mode: str):
     if mode == "inline":
         dest_doc_for_mode = store.get(pipeline.destination_id, "destination")
         _require_inline_compatible(store, pipeline.sources, dest_doc_for_mode)
+        if pipeline.status == PipelineStatus.ACTIVE:
+            _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     if mode == "queue":
         dest_doc_for_queue = store.get(pipeline.destination_id, "destination")
         if _is_inline_compatible(store, pipeline.sources, dest_doc_for_queue):
@@ -3598,7 +3779,7 @@ def set_processing_mode(pipeline_id: str, mode: str):
             )
     pipeline.processing_mode = mode
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
     return {"success": True, "processing_mode": mode}
 
 
@@ -3620,10 +3801,14 @@ async def run_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    if pipeline.processing_mode == "inline":
+        await asyncio.to_thread(_require_exclusive_inline_sources, store, pipeline.sources, pipeline_id)
 
     dest_doc = store.get(pipeline.destination_id, "destination")
+    if not dest_doc:
+        raise HTTPException(status_code=409, detail="Cannot activate pipeline: destination no longer exists")
     if dest_doc:
-        destination = _destination_from_doc(dest_doc)
+        destination = _destination_from_doc(dest_doc, mask=False)
         if not destination.enabled:
             try:
                 if destination.type == "cosmosdb-vector":
@@ -3648,7 +3833,7 @@ async def run_pipeline(pipeline_id: str):
                         )
                 destination.enabled = True
                 destination.updated_at = datetime.utcnow()
-                store.upsert(_to_doc(destination, "destination"))
+                _replace_control_doc(store, dest_doc, destination, "destination")
                 logger.info("Destination %s auto-enabled by pipeline %s run", destination.id, pipeline_id)  # lgtm[py/log-injection]
                 pipeline.reset_at = datetime.utcnow()
             except HTTPException:
@@ -3661,7 +3846,7 @@ async def run_pipeline(pipeline_id: str):
 
     pipeline.status = PipelineStatus.ACTIVE
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
 
     return {"success": True, "message": "Pipeline activated — controller will begin processing"}
 
@@ -3674,6 +3859,8 @@ def reset_pipeline(pipeline_id: str):
     delete its lease container and restart the change feed from the beginning.
     Prior status (ACTIVE/PAUSED) is preserved so the user doesn't have to
     manually resume after every reset.
+    Cleanup failures leave the pipeline paused and are reported to the caller;
+    retry the reset after resolving the failure.
     """
     store = get_store()
     doc = store.get(pipeline_id, "pipeline")
@@ -3682,12 +3869,14 @@ def reset_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     prior_status = pipeline.status
+    if prior_status == PipelineStatus.ACTIVE and pipeline.processing_mode == "inline":
+        _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
 
     # Force pause before reset to prevent race with active changefeed
     if pipeline.status == PipelineStatus.ACTIVE:
         pipeline.status = PipelineStatus.PAUSED
         pipeline.updated_at = datetime.utcnow()
-        store.upsert(_to_doc(pipeline, "pipeline"))
+        doc = _replace_control_doc(store, doc, pipeline, "pipeline")
         logger.info("Pipeline %s paused before reset", pipeline_id)  # lgtm[py/log-injection]
 
     # Delete all jobs for this pipeline (skip for inline mode â€” no jobs created)
@@ -3702,8 +3891,12 @@ def reset_pipeline(pipeline_id: str):
             try:
                 store.delete(j["id"], "job")
                 deleted += 1
-            except Exception:  # lgtm[py/empty-except]
-                pass
+            except Exception as exc:
+                from azure.cosmos.exceptions import CosmosResourceNotFoundError
+                if isinstance(exc, CosmosResourceNotFoundError):
+                    continue
+                logger.exception("Failed to delete job %s during pipeline reset", j["id"])
+                raise HTTPException(status_code=503, detail="Job cleanup failed; pipeline remains paused. Retry reset.")
 
     # Reset pipeline metrics
     metrics_doc = store.get("global", "metrics")
@@ -3720,17 +3913,18 @@ def reset_pipeline(pipeline_id: str):
     if getattr(pipeline, 'content_strategy', 'truncate') == 'chunk':
         try:
             dest_doc = store.get(pipeline.destination_id, "destination")
-            if dest_doc:
-                destination = _destination_from_doc(dest_doc)
+            if dest_doc and dest_doc.get("type") == "cosmosdb-vector":
+                destination = _destination_from_doc(dest_doc, mask=False)
                 from connectors.cosmosdb_vector_connector import delete_chunks_by_prefix
                 import asyncio  # lgtm[py/repeated-import]
                 chunk_prefix = f"{pipeline_id}-"
-                chunks_deleted = asyncio.get_event_loop().run_until_complete(
+                chunks_deleted = asyncio.run(
                     delete_chunks_by_prefix(destination.config, chunk_prefix)
                 )
                 logger.info("Deleted %d chunk documents for pipeline %s", chunks_deleted, pipeline_id)  # lgtm[py/log-injection]
         except Exception as e:
             logger.warning("Failed to clean up chunks for pipeline %s: %s", pipeline_id, e)  # lgtm[py/log-injection]
+            raise HTTPException(status_code=503, detail="Chunk cleanup failed; pipeline remains paused. Retry reset.")
 
     # Set reset_at — the .NET CFP service watches this and will delete its
     # lease container + restart the change feed from the beginning
@@ -3746,7 +3940,8 @@ def reset_pipeline(pipeline_id: str):
     # replay happens regardless. Leaving paused was a UX footgun.
     pipeline.status = prior_status
     pipeline.updated_at = reset_ts
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
+    _pipeline_stats_cache.pop(pipeline_id, None)
 
     return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset — {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
 
@@ -3932,7 +4127,8 @@ def cancel_job(job_id: str):
         )
 
     job.status = JobStatus.CANCELLED
-    store.upsert(_to_doc(job, "job"))
+    job.completed_at = datetime.utcnow()
+    _replace_control_doc(store, doc, job, "job")
     return {"success": True}
 
 
@@ -3959,12 +4155,16 @@ def retry_job(job_id: str):
                    f"Investigate the root cause: {job.error}"
         )
 
+    pipeline = store.get(job.pipeline_id, "pipeline")
+    if not pipeline or pipeline.get("status") != PipelineStatus.ACTIVE.value:
+        raise HTTPException(status_code=409, detail="Activate the job's pipeline before retrying")
+
     job.status = JobStatus.PENDING
     job.error = None
     job.started_at = None
     job.completed_at = None
     job.retry_count += 1
-    store.upsert(_to_doc(job, "job"))
+    _replace_control_doc(store, doc, job, "job")
 
     return {"success": True, "message": f"Job reset to PENDING (retry {job.retry_count}/{MAX_MANUAL_RETRIES})"}
 

@@ -111,6 +111,7 @@ public class BlobSourceWatcher : ISourceWatcher
 
     private async Task RunAsync(CancellationToken ct)
     {
+        _lastPollTime = DateTimeOffset.UtcNow;
         // Phase 1: Prefill — enumerate all existing blobs with backpressure
         while (!ct.IsCancellationRequested && !_prefillDone)
         {
@@ -148,7 +149,6 @@ public class BlobSourceWatcher : ISourceWatcher
             return;
         }
 
-        _lastPollTime = DateTimeOffset.UtcNow;
         while (!ct.IsCancellationRequested)
         {
             try
@@ -178,6 +178,7 @@ public class BlobSourceWatcher : ISourceWatcher
 
         var pageSize = _options.BlobEnumerationPageSize;
         var blobs = new List<BlobItem>();
+        var nextContinuation = _continuationToken;
 
         // Use AsPages for continuation token support
         var pages = container.GetBlobsAsync(prefix: prefix, cancellationToken: ct)
@@ -194,18 +195,18 @@ public class BlobSourceWatcher : ISourceWatcher
                 blobs.Add(blob);
             }
 
-            _continuationToken = page.ContinuationToken;
+            nextContinuation = page.ContinuationToken;
             break; // Process one page at a time
         }
 
-        if (blobs.Count == 0 && string.IsNullOrEmpty(_continuationToken))
+        if (blobs.Count == 0 && string.IsNullOrEmpty(nextContinuation))
         {
             _prefillDone = true;
             return;
         }
 
         // Publish blob references to Service Bus
-        await PublishBlobMessagesAsync(blobs, ct);
+        await PublishPageAsync(blobs, nextContinuation, ct);
 
         _logger.LogInformation("Blob prefill page: {Count} blobs published for {Source}",
             blobs.Count, _source.Name);
@@ -217,8 +218,15 @@ public class BlobSourceWatcher : ISourceWatcher
     /// <summary>
     /// Poll for blobs modified since the last check.
     /// </summary>
+    internal async Task PublishPageAsync(List<BlobItem> blobs, string? nextContinuation, CancellationToken ct)
+    {
+        await PublishBlobMessagesAsync(blobs, ct);
+        _continuationToken = nextContinuation;
+    }
+
     private async Task PollForNewBlobsAsync(CancellationToken ct)
     {
+        var pollStartedAt = DateTimeOffset.UtcNow;
         var client = CreateBlobServiceClient();
         var container = client.GetBlobContainerClient(_source.BlobContainer);
         var prefix = _source.BlobPrefix ?? "";
@@ -262,7 +270,8 @@ public class BlobSourceWatcher : ISourceWatcher
                 newBlobs.Count, _source.Name);
         }
 
-        _lastPollTime = DateTimeOffset.UtcNow;
+        _lastPollTime = pollStartedAt;
+        _processedBlobs.Clear();
     }
 
     /// <summary>
@@ -276,23 +285,25 @@ public class BlobSourceWatcher : ISourceWatcher
         var relevantPipelines = pipelines
             .Where(p => p.Sources.Any(ps => ps.SourceId == _source.Id))
             .ToList();
-        if (relevantPipelines.Count == 0) return;
+        if (relevantPipelines.Count == 0)
+            throw new InvalidOperationException("No active pipeline; retaining Blob checkpoint");
 
         foreach (var pipeline in relevantPipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-            if (dest is null) continue;
+            if (dest is null) throw new InvalidOperationException($"Destination {pipeline.DestinationId} not found");
 
             var messages = blobs.Select(blob =>
             {
                 var blobKey = $"{blob.Name}:{blob.Properties.ETag}";
-                _processedBlobs.Add(blobKey);
 
                 // Content hash is based on blob name + etag (content fingerprint)
                 var contentHash = _hasher.ComputeHash(blobKey);
 
                 return new EmbeddingMessage
                 {
+                    MessageId = _hasher.ComputeHash(System.Text.Json.JsonSerializer.Serialize(
+                        new[] { _source.Id, pipeline.Id, blobKey, Generation })),
                     PipelineId = pipeline.Id,
                     PipelineName = pipeline.Name,
                     DocgrokPipeline = pipeline.DocgrokPipeline,
@@ -318,6 +329,7 @@ public class BlobSourceWatcher : ISourceWatcher
 
             await _sbPublisher!.PublishBatchAsync(messages, ct);
         }
+        foreach (var blob in blobs) _processedBlobs.Add($"{blob.Name}:{blob.Properties.ETag}");
     }
 
     public async ValueTask DisposeAsync()

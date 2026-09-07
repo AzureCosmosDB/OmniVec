@@ -1730,6 +1730,7 @@
             's3',
             'http',
             'databricks',
+            'sharepoint',
           ]),
           'title': 'SourceType',
           'type': 'string',
@@ -5321,6 +5322,8 @@
             delete its lease container and restart the change feed from the beginning.
             Prior status (ACTIVE/PAUSED) is preserved so the user doesn't have to
             manually resume after every reset.
+            Cleanup failures leave the pipeline paused and are reported to the caller;
+            retry the reset after resolving the failure.
           ''',
           'operationId': 'reset_pipeline_api_pipelines__pipeline_id__reset_post',
           'parameters': list([

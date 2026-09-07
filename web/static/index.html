@@ -7567,7 +7567,17 @@
                     <div class="form-group"><label class="form-label">Folder Path (optional)</label>
                         <input type="text" class="form-input" id="${prefix}-folder-path" placeholder="Policies"></div>
                     <div class="form-group"><label class="form-label">Poll Interval (sec)</label>
-                        <input type="number" class="form-input" id="${prefix}-poll-interval" value="60" min="10"></div>`;
+                        <input type="number" class="form-input" id="${prefix}-poll-interval" value="60" min="10"></div>
+                    <div class="form-group"><label class="form-label">File Types</label>
+                        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:12px;">
+                            ${['txt','json','pdf','docx','md','csv','html','xml'].map(ft =>
+                                `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                                    <input type="checkbox" class="${prefix}-sharepoint-file-type" value="${ft}" checked> .${ft}
+                                </label>`).join('')}
+                        </div></div>
+                    <div class="form-group"><label class="form-label">Maximum File Size (MiB)</label>
+                        <input type="number" class="form-input" id="${prefix}-max-file-size-mib" value="50" min="1" max="50"></div>
+                    <p style="font-size:12px;color:var(--text-tertiary);">Limit applies to raw bytes (50 MiB maximum; 70 MiB router JSON limit). Files are buffered in memory. Requires queue mode and a Cosmos vector destination with a dedicated partition key such as /document_id, not /id.</p>`;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Endpoint</label>
@@ -7673,6 +7683,7 @@
                 config = {
                     site_id: document.getElementById(`${prefix}-site-id`)?.value || '',
                     drive_id: document.getElementById(`${prefix}-drive-id`)?.value || '',
+                    folder_path: document.getElementById(`${prefix}-folder-path`)?.value || '',
                 };
                 if (!config.site_id || !config.drive_id) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Site ID and Drive ID</div>'; return; }
             } else if (type === 'cosmosdb') {
@@ -7741,8 +7752,11 @@
                     drive_id: document.getElementById(`${prefix}-drive-id`)?.value || '',
                     folder_path: document.getElementById(`${prefix}-folder-path`)?.value || '',
                     poll_interval_seconds: parseInt(document.getElementById(`${prefix}-poll-interval`)?.value) || 60,
-                    file_types: ['txt','json','pdf','docx','md','csv','html','xml'],
-                    max_file_size_bytes: 52428800,
+                    file_types: [...document.querySelectorAll(`.${prefix}-sharepoint-file-type:checked`)]
+                        .map(input => input.value),
+                    max_file_size_bytes:
+                        (parseInt(document.getElementById(`${prefix}-max-file-size-mib`)?.value) || 50)
+                        * 1024 * 1024,
                     auth_type: 'managed-identity',
                 };
             } else if (sourceType === 'cosmosdb') {
@@ -7975,8 +7989,8 @@
                     drive_id: formData.get('drive_id'),
                     folder_path: formData.get('folder_path') || '',
                     poll_interval_seconds: parseInt(formData.get('poll_interval_seconds')) || 60,
-                    file_types: ['txt','json','pdf','docx','md','csv','html','xml'],
-                    max_file_size_bytes: 52428800,
+                    file_types: formData.getAll('sharepoint_file_types'),
+                    max_file_size_bytes: (parseInt(formData.get('max_file_size_mib')) || 50) * 1024 * 1024,
                     auth_type: 'managed-identity',
                 };
             } else if (sourceType === 'cosmosdb') {
@@ -8441,7 +8455,20 @@
                         <label class="form-label">Poll Interval (seconds)</label>
                         <input type="number" class="form-input" name="poll_interval_seconds" value="60" min="10">
                     </div>
-                    <p style="font-size: 12px; color: var(--text-tertiary);">Uses workload identity with Microsoft Graph Sites.Selected or Files.Read.All.</p>
+                    <div class="form-group">
+                        <label class="form-label">File Types</label>
+                        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:12px;">
+                            ${['txt','json','pdf','docx','md','csv','html','xml'].map(ft =>
+                                `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                                    <input type="checkbox" name="sharepoint_file_types" value="${ft}" checked> .${ft}
+                                </label>`).join('')}
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Maximum File Size (MiB)</label>
+                        <input type="number" class="form-input" name="max_file_size_mib" value="50" min="1" max="50">
+                    </div>
+                    <p style="font-size: 12px; color: var(--text-tertiary);">Uses workload identity with Microsoft Graph Sites.Selected or Files.Read.All. Maximum 50 MiB raw bytes (70 MiB router JSON limit); files are buffered in memory. Requires queue mode and a Cosmos vector destination partitioned by a dedicated field such as /document_id, not /id.</p>
                 `;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
@@ -8600,6 +8627,8 @@
                 config.drive_id = formData.get('drive_id');
                 config.folder_path = formData.get('folder_path') || '';
                 config.poll_interval_seconds = parseInt(formData.get('poll_interval_seconds')) || 60;
+                config.file_types = formData.getAll('sharepoint_file_types');
+                config.max_file_size_bytes = (parseInt(formData.get('max_file_size_mib')) || 50) * 1024 * 1024;
             } else if (type === 'cosmosdb') {
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');

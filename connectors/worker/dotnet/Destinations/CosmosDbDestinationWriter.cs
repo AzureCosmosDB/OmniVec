@@ -4,7 +4,7 @@ using Microsoft.Azure.Cosmos;
 
 namespace OmniVec.Worker.Destinations;
 
-public class CosmosDbDestinationWriter : IDestinationWriter
+public partial class CosmosDbDestinationWriter : IDestinationWriter
 {
     private const string CosmosDataUserAgent = "OmniVec-DataCosmos/1.0";
 
@@ -119,6 +119,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
 
                 if (statusCode == 429 || statusCode >= 500)
                 {
+                    if (attempt >= 5) throw new InvalidOperationException($"Cosmos patch retries exhausted: {response.StatusCode}");
                     var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                     _logger.LogWarning("Batch {Status} pk={PK}, attempt {Attempt}, retrying in {Delay}ms",
                         response.StatusCode, pkValue, attempt, delay.TotalMilliseconds);
@@ -130,10 +131,10 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 throw new Exception($"Batch patch failed: {response.StatusCode}");
             }
             catch (CosmosException ex) when (
-                ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
+                attempt < 5 && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
                 ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
                 ex.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable ||
-                (int)ex.StatusCode >= 500)
+                (int)ex.StatusCode >= 500))
             {
                 var delay = ex.RetryAfter ?? TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                 _logger.LogWarning("Batch exception {Status} pk={PK}, attempt {Attempt}, retrying",
@@ -141,13 +142,6 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 await Task.Delay(delay, ct);
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                var delay = TimeSpan.FromMilliseconds(Math.Min(1000 * Math.Pow(2, attempt), 30_000));
-                _logger.LogWarning("Batch error pk={PK}: {Error}, attempt {Attempt}, retrying",
-                    pkValue, ex.Message, attempt);
-                await Task.Delay(delay, ct);
-            }
         }
     }
 
@@ -210,6 +204,7 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 var statusCode = (int)response.StatusCode;
                 if (statusCode == 429 || statusCode >= 500)
                 {
+                    if (attempt >= 5) throw new InvalidOperationException($"Cosmos upsert retries exhausted: {response.StatusCode}");
                     var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                     _logger.LogWarning("Upsert {Status} pk={PK}, attempt {Attempt}, retrying",
                         response.StatusCode, pk, attempt);
@@ -220,21 +215,14 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                 throw new Exception($"Batch upsert failed: {response.StatusCode}");
             }
             catch (CosmosException ex) when (
-                ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
+                attempt < 5 && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
                 ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
-                (int)ex.StatusCode >= 500)
+                (int)ex.StatusCode >= 500))
             {
                 var delay = ex.RetryAfter ?? TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                 await Task.Delay(delay, ct);
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                var delay = TimeSpan.FromMilliseconds(Math.Min(1000 * Math.Pow(2, attempt), 30_000));
-                _logger.LogWarning("Upsert error pk: {Error}, attempt {Attempt}, retrying",
-                    ex.Message, attempt);
-                await Task.Delay(delay, ct);
-            }
         }
     }
 
@@ -245,8 +233,8 @@ public class CosmosDbDestinationWriter : IDestinationWriter
             {
                 ApplicationName = CosmosDataUserAgent,
                 ConnectionMode = ConnectionMode.Direct,
-                MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
-                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
+                MaxRetryAttemptsOnRateLimitedRequests = 5,
+                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
             }));
     }
 
@@ -273,9 +261,10 @@ public class CosmosDbDestinationWriter : IDestinationWriter
             try
             {
                 var query = new QueryDefinition(
-                    "SELECT c.id FROM c WHERE c.source_id = @sid AND c.source_ref = @ref")
+                    "SELECT c.id FROM c WHERE c.source_id = @sid AND c.source_ref = @ref AND c.pipeline_id = @pid")
                     .WithParameter("@sid", req.SourceId)
-                    .WithParameter("@ref", req.SourceRef);
+                    .WithParameter("@ref", req.SourceRef)
+                    .WithParameter("@pid", req.PipelineId);
                 var pk = new PartitionKey(req.PartitionKeyValue);
                 using var iter = container.GetItemQueryIterator<DeletedIdDoc>(
                     query,
@@ -307,15 +296,12 @@ public class CosmosDbDestinationWriter : IDestinationWriter
                         _logger.LogWarning(
                             "Cosmos delete batch status={Status} for src={SrcId} ref={Ref}",
                             resp.StatusCode, req.SourceId, req.SourceRef);
+                        throw new InvalidOperationException($"Cosmos delete batch failed: {resp.StatusCode}");
                     }
                 }
                 _logger.LogInformation(
                     "Deleted {Count} Cosmos doc(s) for source_id={SrcId} source_ref={Ref}",
                     ids.Count, req.SourceId, req.SourceRef);
-            }
-            catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                // Already deleted — fine
             }
             catch (Exception ex)
             {

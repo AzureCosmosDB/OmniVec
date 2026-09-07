@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, Bytes},
-    extract::{Json, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Json, Path, Query, Request, State},
     http::{header, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -14,6 +14,15 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, compression::CompressionLayer, limit::RequestBodyLimitLayer};
 use tracing::{error, info, warn};
+
+// 50 MiB raw input expands to ~66.7 MiB base64, plus JSON metadata.
+const MAX_REQUEST_BODY_BYTES: usize = 70 * 1024 * 1024;
+
+fn with_request_body_limits<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Router<S> {
+    router
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_BYTES))
+}
 
 // ============================================================================
 // Types
@@ -348,10 +357,10 @@ async fn main() {
             .route("/pipeline/stages/catalog", get(proxy_pipeline_worker))
             .route("/process", post(proxy_pipeline_worker))
             .route("/process/blob", post(proxy_pipeline_worker))
-            .layer(RequestBodyLimitLayer::new(50 * 1024 * 1024)) // 50 MB limit for large PDFs
             .layer(CompressionLayer::new().gzip(true))
             .layer(CorsLayer::permissive())
             .with_state(state);
+        let app = with_request_body_limits(app);
 
         let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
@@ -2267,4 +2276,45 @@ async fn proxy_pipeline_worker(
         response.headers_mut().insert(header::CONTENT_TYPE, ct_val);
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod request_body_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn request_body_limits_allow_base64_maximum_and_reject_overflow() {
+        let app = with_request_body_limits(
+            Router::new().route("/process", post(|body: Bytes| async move {
+                Json(json!({ "bytes": body.len() }))
+            })),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/process", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new();
+        // Also exceeds Axum's default 2 MiB extractor cap.
+        let base64_length = 4 * ((50 * 1024 * 1024 + 2) / 3);
+        let payload = json!({ "data": "A".repeat(base64_length), "source_name": "file.txt" }).to_string();
+        assert!(payload.len() < MAX_REQUEST_BODY_BYTES);
+        let response = client.post(&url).body(payload).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = client.post(&url).body(vec![b'A'; MAX_REQUEST_BODY_BYTES]).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Send only headers for an oversized request. Sending the entire body
+        // can race the early 413 with a connection reset on Windows.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let address = url.strip_prefix("http://").unwrap().strip_suffix("/process").unwrap();
+        let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
+        let headers = format!(
+            "POST /process HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_REQUEST_BODY_BYTES + 1
+        );
+        connection.write_all(headers.as_bytes()).await.unwrap();
+        let mut response = [0u8; 4096];
+        let length = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut response))
+            .await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&response[..length]).starts_with("HTTP/1.1 413"));
+        server.abort();
+    }
 }

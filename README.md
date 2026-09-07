@@ -40,7 +40,7 @@ You also need:
 
 > `kubectl` and `helm` are installed automatically by the deployment hooks if not already present.
 
-> **Cost estimate:** The default configuration (2× Standard_B4ms nodes, no GPU, CosmosDB serverless) costs roughly **$5–10/day**. Run `azd down --purge --force` when you're done to stop all charges.
+> **Costs:** The default configuration uses 2× Standard_D4s_v5 nodes, no GPU, and CosmosDB serverless. Check regional pricing and quota before deployment. B-series VMs are [not supported for AKS system pools](https://learn.microsoft.com/azure/aks/use-system-pools#system-and-user-node-pools). `azd down --purge --force` permanently deletes the environment's resources and data; use it only when you intend to remove that environment.
 
 ### Deploy
 
@@ -66,7 +66,7 @@ When prompted, choose **1) Quick start** to use recommended defaults (no GPU, Co
 
 ```bash
 azd env set AZURE_LOCATION              eastus2
-azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms
+azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_D4s_v5
 azd env set OMNIVEC_SYSTEM_NODE_COUNT   2
 azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
 azd env set OMNIVEC_GPU_NODE_COUNT      0
@@ -79,6 +79,13 @@ What happens behind the scenes:
 1. **preprovision hook** — validates tools, checks for an existing deployment, collects any missing config interactively.
 2. **Bicep deployment** — provisions AKS, CosmosDB, ACR, Key Vault, Storage, Service Bus, and Event Grid.
 3. **postprovision hook** — imports pre-built container images (or builds from source), deploys all services via Helm.
+
+`azure.yaml` selects PowerShell hooks on Windows and POSIX shell hooks elsewhere.
+`deploy.sh` is a compatibility wrapper for `azd up`, not a separate Terraform
+installer. Existing Terraform-managed installations require a reviewed migration;
+do not run both stacks against the same resources. The examples below use the
+maintained Bicep/azd path. POSIX image imports use a portable watchdog; no GNU
+`timeout` or macOS coreutils installation is required.
 
 ### Save these values
 
@@ -108,8 +115,11 @@ Open the **OmniVec URL** in your browser. You should see the OmniVec dashboard.
 If the page doesn't load, wait 1–2 minutes for the load balancer to assign an external IP:
 
 ```bash
-kubectl get svc omnivec-web -n omnivec
+kubectl --kubeconfig "$HOME/.kube/omnivec-my-omnivec" get svc omnivec-web -n omnivec
 ```
+
+Replace `my-omnivec` with your environment name. Deployment hooks keep this
+kubeconfig separate and do not switch your default Kubernetes context.
 
 **Deployment is complete.** OmniVec is running. The next part walks through creating your first pipeline.
 
@@ -296,7 +306,7 @@ This removes the resource group, all Azure services, and local environment confi
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AZURE_LOCATION` | Yes | — | Azure region (e.g., `eastus2`, `westus3`) |
-| `OMNIVEC_SYSTEM_NODE_VM_SIZE` | Yes | prompted | VM SKU for system nodes (e.g., `Standard_B4ms`) |
+| `OMNIVEC_SYSTEM_NODE_VM_SIZE` | Yes | prompted | Non-burstable AKS system-pool SKU with at least 4 vCPUs (default `Standard_D4s_v5`) |
 | `OMNIVEC_SYSTEM_NODE_COUNT` | Yes | `2` | Number of system nodes |
 | `OMNIVEC_GPU_NODE_VM_SIZE` | No | `""` | GPU VM SKU (empty = no GPU pool) |
 | `OMNIVEC_GPU_NODE_COUNT` | No | `0` | GPU nodes (0 = external models only) |
@@ -304,6 +314,9 @@ This removes the resource group, all Azure services, and local environment confi
 | `OMNIVEC_SHARED_REGISTRY_TOKEN` | No | prompted | Token for pre-built images (skip = build from source) |
 | `OMNIVEC_BUILD_MODE` | No | auto-detect | `acr` (cloud build) or `docker` (local build) |
 | `OMNIVEC_BUILD` | No | `false` | `true` = force building from source |
+| `OMNIVEC_SKIP_IMPORT` | No | `false` | Preserve all required local ACR images; missing images fail instead of being imported |
+| `OMNIVEC_FORCE_IMPORT` | No | `false` | Set in the shell environment to overwrite local tags from the selected channel |
+| `OMNIVEC_SHAREPOINT_ENABLED` | No | `false` | Deploy the SharePoint watcher alongside the required .NET worker and Service Bus |
 | `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
 
 ### What gets deployed
@@ -354,13 +367,29 @@ External models (Azure OpenAI) are the easiest starting point — no GPU nodes n
 
 ### Updating a deployment
 
-Running `azd up` on an existing environment is safe and idempotent:
+Running `azd up` reconciles an existing environment; review configuration changes
+before running it. Do not run concurrent deployments against the same environment.
 
-1. Preprovision detects the existing resource group, imports config from RG tags, skips prompts.
+1. Preprovision detects the existing resource group and skips setup prompts.
 2. Bicep runs — unchanged resources are not modified.
-3. Postprovision re-imports only images with updated digests.
-4. Updated images trigger automatic `kubectl rollout restart`.
-5. Config is saved as RG tags — another developer can `azd env refresh` + `azd up` from a different machine.
+3. By default, existing local ACR `:latest` images are preserved, **not** compared with the shared registry. Set `OMNIVEC_FORCE_IMPORT=true` in your shell to refresh them, or explicitly request a source build.
+4. Updated images trigger `kubectl rollout restart`. Every deployment, including ingestion workers, must complete its rollout before the hook reports success. Kubernetes readiness is not an end-to-end pipeline test.
+5. Interrupted image updates leave a local recovery marker so the next hook run still restarts workloads. Partial import failures stop deployment instead of silently using a mixture of old and new images.
+
+Hooks fail closed on a Helm `pending-*` release; they never automatically
+uninstall it or take ownership of unrelated resources. Inspect `helm status` and
+`helm history` with the environment's kubeconfig, confirm no deployment is still
+running, and explicitly choose recovery before retrying. Windows hook locks are
+released by the OS; a POSIX lock directory left after a hard crash must be removed
+only after verifying its owner has stopped. These are local hook locks, not a
+distributed lock covering the entire Bicep deployment.
+
+Image imports have a 15-minute deadline (POSIX imports may retry once); ACR source
+builds have a one-hour server-side limit. A timeout stops the hook but does not
+prove Azure has cancelled a remote operation—inspect its status before retrying.
+Helm readiness deadlines stop automatic retries; diagnose the workloads instead
+of repeatedly applying the same stalled release.
+The application is not proven production-ready by a successful deployment alone.
 
 Force a source build:
 ```bash

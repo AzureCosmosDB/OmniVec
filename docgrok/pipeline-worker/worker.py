@@ -17,6 +17,7 @@ import asyncio
 import gc
 import re
 import json
+import math
 import base64
 import io
 import logging
@@ -30,7 +31,7 @@ import httpx
 import numpy as np
 from PIL import Image
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Iterator, Any, Dict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [pipeline-worker] %(levelname)s %(message)s")
@@ -69,6 +70,9 @@ DOCGROK_ROUTER_URL = os.environ.get("DOCGROK_ROUTER_URL", "http://docgrok:80")
 CLIP_ENDPOINT_URL = os.environ.get("CLIP_ENDPOINT_URL", "")
 CLIP_API_KEY = os.environ.get("CLIP_API_KEY", "")
 DEFAULT_MODEL_ID = os.environ.get("DEFAULT_MODEL_ID", "")
+EMBED_BATCH_SIZE = int(os.environ.get("DOCGROK_EMBED_BATCH_SIZE", "16"))
+if not 1 <= EMBED_BATCH_SIZE <= 128:
+    raise ValueError("DOCGROK_EMBED_BATCH_SIZE must be between 1 and 128")
 
 # Memory-frugal PDF knobs
 PDF_DPI = int(os.environ.get("DOCGROK_PDF_DPI", "150"))
@@ -603,7 +607,7 @@ class ProcessRequest(BaseModel):
     blob_container: Optional[str] = None
     blob_account_url: Optional[str] = None
     blob_connection_string: Optional[str] = None
-    chunk_size: int = 2000           # characters per chunk for blob/PDF processing
+    chunk_size: int = Field(default=2000, gt=0)
     # Optional inline transform pipeline definition. When present, this
     # transform is executed instead of picking a built-in by file type.
     transform: Optional[Dict[str, Any]] = None
@@ -789,6 +793,8 @@ def _download_blob_to_file(container: str, blob_name: str,
 # ── Text Chunking ─────────────────────────────────────────────────────
 def _chunk_text(text: str, chunk_size: int = 2000) -> List[str]:
     """Split text into chunks, breaking at paragraph or sentence boundaries."""
+    if chunk_size <= 0:
+        raise HTTPException(status_code=400, detail="chunk_size must be greater than zero")
     if not text.strip():
         return []
     if len(text) <= chunk_size:
@@ -879,29 +885,30 @@ def _is_text_blob(blob_name: Optional[str], pipeline_hint: Optional[str]) -> boo
 
 # ── Embedding via DocGrok Router ───────────────────────────────────────
 async def embed_via_router(texts: list[str], model_id: str, router_url: str) -> list[list[float]]:
-    """Send texts to the DocGrok router's /embed endpoint for embedding."""
-    url = f"{router_url.rstrip('/')}/embed"
+    """Embed bounded batches instead of making one network round trip per chunk."""
+    url = f"{router_url.rstrip('/')}/embed/batch"
     vectors = []
 
     async with httpx.AsyncClient(timeout=120) as client:
-        for i, text in enumerate(texts):
-            if not text.strip():
-                text = "[empty page]"
-            payload = {"text": text, "model_id": model_id}
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = [text if text.strip() else "[empty page]" for text in texts[start:start + EMBED_BATCH_SIZE]]
+            payload = {"texts": batch, "model_id": model_id}
             resp = await client.post(url, json=payload)
             if resp.status_code != 200:
-                logger.error("Router embed error for page %d: %d %s", i, resp.status_code, resp.text[:300])
-                raise HTTPException(status_code=502, detail=f"Embedding error for page {i}: {resp.status_code}")
-            result = resp.json()
-            # Router returns {"embeddings": [[...]], ...} or {"pages": [[...]], ...}
-            embedding = None
-            if "embeddings" in result and result["embeddings"]:
-                embedding = result["embeddings"][0]
-            elif "pages" in result and result["pages"]:
-                embedding = result["pages"][0]
-            if embedding is None:
-                raise HTTPException(status_code=502, detail=f"No embedding returned for page {i}")
-            vectors.append(embedding)
+                logger.error("Router embed error for chunk batch %d: %d", start, resp.status_code)
+                status = resp.status_code if 400 <= resp.status_code <= 599 else 502
+                raise HTTPException(status_code=status, detail=f"Embedding error for chunk batch {start}: {resp.status_code}")
+            try:
+                result = resp.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=502, detail="Invalid JSON from embedding router") from exc
+            outputs = result.get("outputs") if isinstance(result, dict) else None
+            if not isinstance(outputs, list) or len(outputs) != len(batch):
+                raise HTTPException(status_code=502, detail="Embedding batch result count does not match input")
+            for output in outputs:
+                if not isinstance(output, list) or len(output) != 1 or not isinstance(output[0], list) or not output[0]:
+                    raise HTTPException(status_code=502, detail="Missing vector in embedding batch result")
+                vectors.append(output[0])
 
     return vectors
 
@@ -1056,6 +1063,12 @@ def chunk_with_strategy(
     min_chars: int = 0,
 ) -> List[str]:
     """Apply a named chunking strategy with optional overlap and min size."""
+    if max_chars <= 0:
+        raise HTTPException(status_code=400, detail="max_chars must be greater than zero")
+    if overlap_chars < 0 or overlap_chars >= max_chars:
+        raise HTTPException(status_code=400, detail="overlap_chars must be nonnegative and less than max_chars")
+    if min_chars < 0:
+        raise HTTPException(status_code=400, detail="min_chars must be nonnegative")
     if not text:
         return []
     if strategy == "fixed":
@@ -1291,17 +1304,23 @@ async def _stage_chunk(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, Any
     ctx["full_text"] = full_text
 
     strategy = (cfg.get("strategy") or "recursive").lower()
-    max_chars = int(cfg.get("max_chars", 2000))
-    overlap = int(cfg.get("overlap_chars", 0))
-    min_chars = int(cfg.get("min_chars", 0))
+    try:
+        max_chars = int(cfg.get("max_chars", 2000))
+        overlap = int(cfg.get("overlap_chars", 0))
+        min_chars = int(cfg.get("min_chars", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=400, detail="Chunk sizes must be finite integers") from exc
 
     chunks = chunk_with_strategy(
         full_text, strategy=strategy, max_chars=max_chars,
         overlap_chars=overlap, min_chars=min_chars,
     )
     if not chunks:
-        chunks = [full_text] if full_text.strip() else ["[empty document]"]
-        srec.notes.append("no chunks produced — emitted single fallback chunk")
+        ctx["_skip_pipeline"] = True
+        ctx["_skip_reason"] = "empty_document" if not full_text.strip() else "all_chunks_filtered"
+        ctx["chunks"] = []
+        srec.output.update(chunk_count=0, source_chars=len(full_text))
+        return
 
     ctx["chunks"] = chunks
     srec.output["chunk_count"] = len(chunks)
@@ -1797,6 +1816,8 @@ async def _execute_pipeline(
 
         chunks = ctx.get("chunks") or []
         embeddings = ctx.get("embeddings") or []
+        if len(chunks) != len(embeddings) or not chunks:
+            raise HTTPException(status_code=502, detail="Pipeline produced no complete chunk/embedding set")
 
         # Dimension enforcement.
         # 1. The transform definition may declare `output_dimensions` (e.g.
@@ -1828,6 +1849,9 @@ async def _execute_pipeline(
             ctx["chunks"] = chunks
             ctx["embeddings"] = embeddings
 
+        if skipped_count or any(not emb or any(not math.isfinite(v) for v in emb) for emb in embeddings):
+            raise HTTPException(status_code=502, detail="Pipeline produced invalid or incomplete embeddings")
+
         return {
             "chunks": [
                 {"text": text, "embedding": emb}
@@ -1841,6 +1865,8 @@ async def _execute_pipeline(
             "embedding_dim": (len(embeddings[0]) if embeddings else None),
         }
     finally:
+        # Extraction can allocate a file and then fail before the stage returns.
+        pdf_path_to_clean = ctx.get("pdf_path") or pdf_path_to_clean
         if pdf_path_to_clean:
             # Containment check — only unlink files that resolve to a
             # path inside the system temp dir (mitigates py/path-injection).
@@ -1851,8 +1877,8 @@ async def _execute_pipeline(
                 tmp_root = _os.path.realpath(_tempfile.gettempdir())
                 if _os.path.commonpath([resolved, tmp_root]) == tmp_root:
                     _os.unlink(resolved)  # lgtm[py/path-injection]
-            except Exception:  # lgtm[py/empty-except]
-                pass
+            except (OSError, ValueError):
+                logger.warning("Could not remove pipeline scratch PDF", exc_info=True)
 
 
 # ── Convenience entry point used by both endpoints ────────────────────
@@ -1922,7 +1948,9 @@ async def _run_default_pipeline(
         pdef = json.loads(json.dumps(pdef))  # deep copy
         for stage in pdef.get("stages", []):
             if stage.get("type") == "chunk":
-                stage.setdefault("config", {})["max_chars"] = chunk_size
+                config = stage.setdefault("config", {})
+                config["max_chars"] = chunk_size
+                config["overlap_chars"] = min(config.get("overlap_chars", 0), chunk_size - 1)
                 break
 
     return await _execute_pipeline(pr, pdef, ctx)
@@ -2026,7 +2054,7 @@ class BlobProcessRequest(BaseModel):
     model_id: Optional[str] = None
     pipeline: Optional[str] = None
     router_url: Optional[str] = None
-    chunk_size: int = 2000  # characters per chunk
+    chunk_size: int = Field(default=2000, gt=0)
     transform: Optional[Dict[str, Any]] = None
     transform_name: Optional[str] = None
 

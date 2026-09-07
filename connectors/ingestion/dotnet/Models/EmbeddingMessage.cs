@@ -100,6 +100,12 @@ public class EmbeddingMessage
     [JsonPropertyName("sharepoint_item_id")]
     public string? SharePointItemId { get; set; }
 
+    [JsonPropertyName("sharepoint_revision")]
+    public long SharePointRevision { get; set; }
+
+    [JsonPropertyName("sharepoint_etag")]
+    public string? SharePointETag { get; set; }
+
     [JsonPropertyName("sharepoint_file_name")]
     public string? SharePointFileName { get; set; }
 

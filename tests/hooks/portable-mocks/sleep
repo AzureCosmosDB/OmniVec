@@ -1,0 +1,4 @@
+#!/bin/sh
+# Keep PATH free of timeout/gtimeout while providing only POSIX sleep.
+if [ "${OMNIVEC_TEST_SLEEP_FAIL:-}" = "true" ]; then exit 1; fi
+exec "$OMNIVEC_TEST_SLEEP_BIN" "$@"

@@ -2,6 +2,7 @@
 # Validates prerequisites, checks for existing installations, and collects config choices
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot\lib\deployment.ps1"
 
 Write-Host "`n`e[32m+==========================================+`e[0m"
 Write-Host "`e[32m|     OmniVec - Pre-provision Checks       |`e[0m"
@@ -73,50 +74,17 @@ if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Fo
 $lockFile = Join-Path $lockDir "$env:AZURE_ENV_NAME.lock"
 
 function Acquire-Lock {
-    if (Test-Path $lockFile) {
-        $lockContent = Get-Content $lockFile -ErrorAction SilentlyContinue
-        $lockPid = $lockContent | Select-Object -First 1
-        $lockHost = $lockContent | Select-Object -Last 1
-
-        # Check if the locking process is still alive
-        $alive = $false
-        if ($lockPid) {
-            try {
-                $proc = Get-Process -Id ([int]$lockPid) -ErrorAction Stop
-                $alive = $true
-            } catch {
-                $alive = $false
-            }
-        }
-
-        if ($alive) {
-            Write-Host "`n`e[31mERROR: Another deployment for '$env:AZURE_ENV_NAME' is already running (PID $lockPid).`e[0m"
-            Write-Host "  If that process is stuck, you can force-take the lock."
-            $forceLock = Read-InputSafely -Prompt "  Take over lock and continue? [y/N]" -Default 'n'
-            if ($forceLock -match "^[yY]") {
-                Write-Host "  `e[33mKilling PID $lockPid and taking lock...`e[0m"
-                try { Stop-Process -Id ([int]$lockPid) -Force -ErrorAction SilentlyContinue } catch {}
-                Start-Sleep -Seconds 2
-            } else {
-                Write-Host "  `e[31mAborting. Wait for the other deployment to finish or take over the lock.`e[0m"
-                exit 1
-            }
-        } else {
-            Write-Host "  `e[33mStale lock found (PID $lockPid is dead). Cleaning up.`e[0m"
-        }
-    }
-
-    # Write lock: PID on line 1, hostname on line 2
-    @($PID, (hostname)) | Set-Content $lockFile
+    $script:preLockHandle = Open-DeploymentLock $lockFile
 }
 
 function Release-Lock {
-    if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue }
+    if ($script:preLockHandle) { $script:preLockHandle.Dispose() }
 }
 
 # -- a1/a3: Interactive-safety helpers (mirror of hooks/preprovision.sh) ----
 function Test-CanPrompt {
     if ($env:OMNIVEC_FORCE_NO_TTY) { return $false }
+    if (Test-IsNonInteractive) { return $false }
     try {
         if ([Console]::IsInputRedirected) { return $false }
     } catch {}
@@ -180,7 +148,7 @@ function Read-InputSafely {
 function Use-QuickstartDefaults {
     Write-Host "  `e[32mApplying Quick-start defaults (non-interactive mode).`e[0m"
     $defaults = @{
-        'OMNIVEC_SYSTEM_NODE_VM_SIZE' = 'Standard_B4ms'
+        'OMNIVEC_SYSTEM_NODE_VM_SIZE' = 'Standard_D4s_v5'
         'OMNIVEC_SYSTEM_NODE_COUNT'   = '2'
         'OMNIVEC_GPU_NODE_VM_SIZE'    = ''
         'OMNIVEC_GPU_NODE_COUNT'      = '0'
@@ -188,6 +156,7 @@ function Use-QuickstartDefaults {
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value 2>$null
+        Assert-NativeSuccess "Saving $($kv.Key)"
     }
 }
 
@@ -207,7 +176,7 @@ function Require-InteractiveOrPreset {
     Write-Host "    1) Run from a real terminal:  azd up"
     Write-Host "    2) Accept defaults:           `$env:OMNIVEC_NONINTERACTIVE=1; azd up"
     Write-Host "    3) Pre-set config, e.g.:"
-    Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms"
+    Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_D4s_v5"
     Write-Host "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2"
     Write-Host "         azd env set OMNIVEC_GPU_NODE_COUNT 0"
     Write-Host "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless"
@@ -222,6 +191,7 @@ try {
 
 # -- Validate required tools --
 Write-Host "`n`e[33mChecking prerequisites...`e[0m"
+$env:Path = "$HOME\.azure-kubectl;$HOME\.azure-kubelogin;$env:Path"
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     Write-Host "`e[31mMissing required tool: az (Azure CLI). Install from https://aka.ms/install-azure-cli`e[0m"
@@ -232,6 +202,7 @@ Write-Host "  `e[32maz CLI found.`e[0m"
 if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
     Write-Host "  `e[33mkubectl not found - installing via az aks install-cli...`e[0m"
     az aks install-cli 2>$null
+    Assert-NativeSuccess 'Installing kubectl and kubelogin'
     if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
         Write-Host "  `e[31mFailed to install kubectl. Install manually: https://aka.ms/install-kubectl`e[0m"
         exit 1
@@ -245,8 +216,9 @@ if (-not (Get-Command helm -ErrorAction SilentlyContinue)) {
     Write-Host "  `e[33mhelm not found - installing via winget...`e[0m"
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         winget install Helm.Helm --silent --accept-package-agreements --accept-source-agreements 2>$null
+        Assert-NativeSuccess 'Installing Helm'
         # Refresh PATH
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        $env:Path += ";" + [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
     }
     if (-not (Get-Command helm -ErrorAction SilentlyContinue)) {
         Write-Host "  `e[31mFailed to install helm. Install manually: https://helm.sh/docs/intro/install/`e[0m"
@@ -287,11 +259,18 @@ if ("$rgExists".Trim() -eq "true") {
         foreach ($tag in $tagMap.GetEnumerator()) {
             $val = $tags.PSObject.Properties[$tag.Key].Value
             if ($val) {
+                $configured = azd env get-value $tag.Value 2>$null
+                if ($LASTEXITCODE -eq 0 -and "$configured" -notmatch '^ERROR') { continue }
                 azd env set $tag.Value "$val" 2>$null
+                Assert-NativeSuccess "Importing $($tag.Value)"
                 Write-Host "  $($tag.Value) = $val"
             }
         }
     }
+    $systemVm = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
+    $systemCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+    if ("$systemCount" -match '^ERROR') { $systemCount = '' }
+    Assert-SystemPoolConfiguration "$systemVm" "$systemCount"
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
 }
@@ -302,6 +281,9 @@ $_existingVm = azd env get-value OMNIVEC_SYSTEM_NODE_VM_SIZE 2>$null
 $_vmExit = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 if ($_vmExit -eq 0 -and $_existingVm -and "$_existingVm" -notmatch "ERROR") {
+    $systemCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
+    if ("$systemCount" -match '^ERROR') { $systemCount = '' }
+    Assert-SystemPoolConfiguration "$_existingVm" "$systemCount"
     Write-Host "`n`e[32mConfig already set. Skipping prompts.`e[0m"
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
@@ -321,7 +303,7 @@ $setupMode = Read-InputSafely -Prompt "Choice [1]" -Default "1"
 if ($setupMode -eq "1") {
     Write-Host "`n`e[32mApplying recommended defaults:`e[0m"
     $defaults = [ordered]@{
-        "OMNIVEC_SYSTEM_NODE_VM_SIZE" = "Standard_B4ms"
+        "OMNIVEC_SYSTEM_NODE_VM_SIZE" = "Standard_D4s_v5"
         "OMNIVEC_SYSTEM_NODE_COUNT"   = "2"
         "OMNIVEC_GPU_NODE_VM_SIZE"    = ""
         "OMNIVEC_GPU_NODE_COUNT"      = "0"
@@ -329,9 +311,10 @@ if ($setupMode -eq "1") {
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value
+        Assert-NativeSuccess "Saving $($kv.Key)"
         Write-Host "  $($kv.Key) = $($kv.Value)"
     }
-    Write-Host "`n  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
+    Write-Host "`n  System pool: 2x Standard_D4s_v5 (4 vCPU, 16 GB each)"
     Write-Host "  GPU pool: none (use Azure OpenAI for embeddings)"
     Write-Host "  Metadata: CosmosDB Serverless"
     Write-Host "  Blob storage source: enabled"
@@ -366,10 +349,12 @@ if ($curMeta) {
         "2" {
             Write-Host "`e[32mUsing CosmosDB Provisioned for metadata storage.`e[0m"
             azd env set OMNIVEC_METADATA_STORE "cosmosdb-provisioned"
+            Assert-NativeSuccess 'Saving metadata store'
         }
         default {
             Write-Host "`e[32mUsing CosmosDB Serverless for metadata storage.`e[0m"
             azd env set OMNIVEC_METADATA_STORE "cosmosdb-serverless"
+            Assert-NativeSuccess 'Saving metadata store'
         }
     }
 }
@@ -403,8 +388,8 @@ $sysCandidates = @(
     @{ name = "Standard_D4s_v3";  desc = "4 vCPU, 16 GB" },
     @{ name = "Standard_D4ds_v5"; desc = "4 vCPU, 16 GB (v5)" },
     @{ name = "Standard_D8s_v3";  desc = "8 vCPU, 32 GB" },
-    @{ name = "Standard_B4ms";    desc = "4 vCPU, 16 GB (burstable)" },
-    @{ name = "Standard_D2s_v3";  desc = "2 vCPU, 8 GB (dev)" }
+    @{ name = "Standard_D4s_v5"; desc = "4 vCPU, 16 GB (v5)" },
+    @{ name = "Standard_D8s_v5"; desc = "8 vCPU, 32 GB (v5)" }
 )
 $defIdx = 0
 for ($i = 0; $i -lt $sysCandidates.Count; $i++) {
@@ -567,10 +552,15 @@ $sysCount = Clean-EnvValue $sysCount
 $gpuCount = Clean-EnvValue $gpuCount
 
 # Store in azd env
+Assert-SystemPoolConfiguration $SYS_SKU $sysCount
 azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE $SYS_SKU
+Assert-NativeSuccess 'Saving system VM size'
 azd env set OMNIVEC_SYSTEM_NODE_COUNT $sysCount
+Assert-NativeSuccess 'Saving system node count'
 azd env set OMNIVEC_GPU_NODE_VM_SIZE $GPU_SKU
+Assert-NativeSuccess 'Saving GPU VM size'
 azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
+Assert-NativeSuccess 'Saving GPU node count'
 
 # -- Sanitize env values: strip BOM, tabs, carriage returns --
 Write-Host "`n`e[36mSanitizing environment values...`e[0m"
@@ -585,6 +575,7 @@ foreach ($key in $envKeys) {
     $clean = $raw -replace '[\t\r\n]','' -replace '^\xEF\xBB\xBF','' -replace '^"|"$','' -replace '^\s+|\s+$',''
     if ($clean -ne $raw) {
         azd env set $key $clean
+        Assert-NativeSuccess "Saving $key"
         Write-Host "  `e[33mCleaned ${key}: removed hidden characters`e[0m"
     }
 }

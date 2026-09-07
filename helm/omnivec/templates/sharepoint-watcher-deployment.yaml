@@ -1,4 +1,10 @@
 {{- if .Values.sharepointWatcher.enabled -}}
+{{- if not .Values.dotnetWorker.enabled -}}
+{{- fail "sharepointWatcher.enabled requires dotnetWorker.enabled" -}}
+{{- end -}}
+{{- if not .Values.azure.serviceBus.namespace -}}
+{{- fail "sharepointWatcher.enabled requires azure.serviceBus.namespace" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,14 +50,12 @@ spec:
               value: {{ .Values.sharepointWatcher.discoveryPollIntervalSeconds | default 30 | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
-            {{- if .Values.azure.serviceBus.namespace }}
             - name: ChangeFeed__ServiceBusEnabled
               value: "true"
             - name: ChangeFeed__ServiceBusNamespace
               value: {{ .Values.azure.serviceBus.namespace | quote }}
             - name: ChangeFeed__ServiceBusTopicName
               value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
-            {{- end }}
           resources:
             {{- toYaml .Values.sharepointWatcher.resources | nindent 12 }}
 {{- end }}
