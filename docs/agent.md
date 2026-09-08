@@ -124,6 +124,11 @@ Workload identity requires a federated credential whose subject is
 `system:serviceaccount:<namespace>:omnivec-agent`, whose issuer is the approved
 AKS OIDC issuer and whose audience is `api://AzureADTokenExchange`. An API or
 DocGrok service-account federation does not cover the dedicated agent account.
+The normal `azd` installer provisions `omnivec-agent-federation` through
+`infra/modules/federation.bicep`, using the issuer output from that installation's
+AKS module and the existing managed identity. This adds no Azure data-plane roles.
+Older installations need the same exact subject/issuer/audience binding reconciled
+by their authorized operator; existing API and DocGrok credentials are preserved.
 `AADSTS700213` is reported as an **agent observation/configuration blocker**,
 not an invented pipeline fault. The identity owner must add the appropriate
 trust and confirm the existing data-plane permissions; the agent never changes
