@@ -18,13 +18,42 @@ From the PR183 worktree:
 
 ```powershell
 python scripts\recovery-chaos.py
-python -m pytest tests\unit\test_recovery_chaos.py -q
+python -m pytest tests\unit\test_recovery_chaos.py tests\unit\test_recovery_chaos_probes.py -q
 ```
 
 Tests mock all external execution. Cases include unavailable dependencies,
 timeouts/redacted errors, a competing lock, unready watchdog, lost host/arm
 response, transient watchdog failure, failed restoration, assertion-failure
 cleanup, invalid vectors and duplicate identities.
+
+### Repeatable offline suite matrix
+
+The expanded suites currently contain **104 passing offline cases**. These are
+fault-injection/contract tests, **not 104 live outages** or evidence that an agent
+repaired anything. They use the existing pytest runner, fake Azure/Kubernetes/HTTP
+objects, and deterministic clocks; no cluster or network mutations are performed.
+
+| Suite | Cases | Specific verification |
+| --- | ---: | --- |
+| `test_recovery_chaos.py` | 50 | Default zero-call plan, explicit authorization/report bounds, AKS/FQDN/TLS allowlist, HPA/unhealthy/stale-signal rejection, atomic concurrent lock, watchdog arm-before-outage ordering, exact scoped restarts only after owned queue evidence, timeout/finally restoration, actual replica/generation convergence, watchdog acknowledgement before deletion, host loss/transient or persistent dependency outage, missing EventGrid cleanup retaining lock, manual/watchdog attribution, resourceVersion-protected owned annotation cleanup |
+| `test_recovery_chaos_probes.py` | 54 | Dimension/nonfinite/zero/Boolean embedding rejection, lost/foreign/duplicate documents, original ID/content/vector drift, delayed duplicate detection, two persisted recovery observations, overwrite refusal and run ownership, ETag/ownership cleanup races, missing deletion events, peek-only source/pipeline/reference matching, malformed/non-object foreign messages, bounded 1,000-message scanning without consuming/purging, unavailable Service Bus, model/route/source/destination drift, real embedding invocation, wrong/empty semantic results, loopback-only admin auth, redacted HTTP/timeout errors |
+
+Repeat both suites together to catch accidental cross-suite interactions. For
+focused investigation, use the existing pytest selectors (still offline):
+
+```powershell
+# Outage orchestration and independent restoration
+python -m pytest tests\unit\test_recovery_chaos.py -q -k "watchdog or restore or injection"
+# Processing/data correctness beyond pod readiness
+python -m pytest tests\unit\test_recovery_chaos_probes.py -q -k "embedding or recovery or registry or semantic"
+# Only owned messages/Blobs, unavailable dependencies and deletion delivery
+python -m pytest tests\unit\test_recovery_chaos_probes.py -q -k "queue or servicebus or cleanup or upload"
+```
+
+The tests exposed and fixed two harness-probe validation gaps: JSON Boolean
+arrays are not real embedding vectors, and valid non-object JSON messages in an
+unrelated backlog must be skipped rather than mistaken for owned message objects.
+No shared ingestion, API or agent behavior was changed by those fixes.
 
 ## Live prerequisites and authorization
 

@@ -54,6 +54,17 @@ def test_live_execution_requires_confirmation_before_commands(monkeypatch):
         chaos.main(["--execute"])
 
 
+@pytest.mark.parametrize("report_args,message", [
+    ([], "--report required"),
+    (["--report", str(Path("..") / "outside-chaos-report.json")], "inside current working directory"),
+    (["--report", "."], "Report must be new"),
+])
+def test_live_report_preflight_fails_before_any_cluster_call(monkeypatch, report_args, message):
+    monkeypatch.setattr(chaos.subprocess, "run", Mock(side_effect=AssertionError("external call")))
+    with pytest.raises(chaos.Blocked, match=message):
+        chaos.main(["--execute", "--confirm", chaos.CONFIRMATION, *report_args])
+
+
 @pytest.mark.parametrize("error", [
     subprocess.TimeoutExpired(["kubectl", "secret"], 1, output="Bearer private"),
     FileNotFoundError("private-credential"),
@@ -103,6 +114,46 @@ def test_actual_restoration_not_merely_desired_replicas(field, value):
     assert not chaos.healthy(value_deployment, 2)
     assert chaos.healthy(deployment(), 2)
     assert chaos.healthy(deployment(0), 0)
+
+
+@pytest.mark.parametrize("fault", [
+    "cluster_identity", "foreign_server", "insecure_tls", "hpa",
+    "unhealthy_worker", "stale_signal",
+])
+def test_readonly_preflight_blocks_wrong_cluster_or_unhealthy_baseline(config, monkeypatch, fault):
+    harness = chaos.Harness(config)
+    cluster = {
+        "id": "/subscriptions/" + config["subscription"] + "/resourceGroups/" +
+              config["resource_group"] + "/providers/Microsoft.ContainerService/managedClusters/" +
+              config["cluster"],
+        "fqdn": "isolated.aks.invalid",
+    }
+    context = {"clusters": [{"cluster": {"server": "https://isolated.aks.invalid"}}]}
+    hpas = {"items": []}
+    worker = deployment()
+    if fault == "cluster_identity":
+        cluster["id"] = "/subscriptions/foreign/resourceGroups/customer"
+    elif fault == "foreign_server":
+        context["clusters"][0]["cluster"]["server"] = "https://customer.aks.invalid"
+    elif fault == "insecure_tls":
+        context["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
+    elif fault == "hpa":
+        hpas["items"] = [{"spec": {"scaleTargetRef": {"name": chaos.WORKER}}}]
+    elif fault == "unhealthy_worker":
+        worker["status"]["readyReplicas"] = 1
+    else:
+        worker["metadata"]["annotations"] = {chaos.SIGNAL_RUN: "previous-run"}
+    monkeypatch.setattr(chaos.Path, "is_file", lambda _: True)
+    monkeypatch.setattr(harness, "command", Mock(return_value=json.dumps(cluster)))
+    kube = Mock(side_effect=lambda *args, **kwargs: json.dumps(context if args[0] == "config" else hpas))
+    monkeypatch.setattr(harness, "kube", kube)
+    monkeypatch.setattr(harness, "get", Mock(return_value=worker))
+    baseline_probe = Mock(side_effect=AssertionError("baseline must not run"))
+    monkeypatch.setattr(harness, "probe", baseline_probe)
+    with pytest.raises(chaos.Blocked):
+        harness.preflight()
+    assert all(call.args[0] in ("config", "get") for call in kube.call_args_list)
+    baseline_probe.assert_not_called()
 
 
 def simulated_harness(config, monkeypatch):
@@ -208,6 +259,86 @@ def test_processing_assertion_still_cleans_owned_fixture(config, monkeypatch):
     assert report["result"] == "failed" and report["cleanup"] == {"passed": True}
     harness.restore.assert_called_once()
 
+
+def test_eventgrid_cleanup_failure_retains_lock_and_reports_failed(config, monkeypatch):
+    harness = simulated_harness(config, monkeypatch)
+    original = harness.probe.side_effect
+
+    def missing_deletion(action):
+        if action == "cleanup":
+            raise TimeoutError("EventGrid unavailable")
+        return original(action)
+
+    harness.probe.side_effect = missing_deletion
+    report = harness.execute()
+    assert report["result"] == "failed"
+    assert report["processing_recovery"].startswith("passed")
+    assert report["cleanup"] == "failed_owned_fixture_only; lock_retained"
+    harness.release_lock.assert_not_called()
+
+
+def test_injection_orders_watchdog_arm_outage_owned_queue_then_restarts(config, monkeypatch):
+    harness = chaos.Harness(config)
+    events = []
+    monkeypatch.setattr(harness, "phase", lambda phase: events.append("phase:" + phase))
+    monkeypatch.setattr(harness, "get", lambda *args: deployment(0))
+    monkeypatch.setattr(harness, "kube", lambda *args, **kwargs: events.append("kube:" + " ".join(args)))
+    monkeypatch.setattr(harness, "probe", lambda action: events.append("probe:" + action) or {"owned": True})
+    harness.inject()
+    assert events[:4] == [
+        "phase:armed", "kube:scale deployment/" + chaos.WORKER + " --replicas=0",
+        "probe:upload", "probe:queued",
+    ]
+    assert events[4:] == ["kube:rollout restart deployment/" + name for name in chaos.RESTARTS]
+    assert harness.report["observed_failure"][0]["failure"] == "owned_work_queued_without_processing"
+    assert harness.report["repair_actor"] == []
+
+
+def test_watchdog_recovery_before_observation_blocks_restart_claim(config, monkeypatch):
+    harness = chaos.Harness(config)
+    monkeypatch.setattr(harness, "phase", lambda _: None)
+    monkeypatch.setattr(harness, "get", Mock(side_effect=[deployment(0), deployment(2)]))
+    kube = Mock()
+    monkeypatch.setattr(harness, "kube", kube)
+    monkeypatch.setattr(harness, "probe", Mock(return_value={"owned": True}))
+    with pytest.raises(chaos.Blocked, match="restored before queue observation"):
+        harness.inject()
+    assert [call.args[0] for call in kube.call_args_list] == ["scale"]
+    assert harness.report["observed_failure"] == []
+
+
+def test_release_never_deletes_other_runs_lock_or_annotations(config, monkeypatch):
+    harness = chaos.Harness(config)
+    harness.locked = harness.signal_possible = True
+    monkeypatch.setattr(harness, "get", Mock(return_value={"data": {"run_id": "someone-else"}}))
+    kube = Mock()
+    monkeypatch.setattr(harness, "kube", kube)
+    with pytest.raises(chaos.Blocked, match="another run"):
+        harness.release_lock()
+    kube.assert_not_called()
+    assert harness.locked
+
+
+def test_release_uses_resource_version_and_only_own_signal_keys(config, monkeypatch):
+    harness = chaos.Harness(config)
+    harness.locked = harness.signal_possible = True
+    monkeypatch.setattr(harness, "get", Mock(side_effect=[
+        {"data": {"run_id": harness.run_id}},
+        {"metadata": {"resourceVersion": "captured-revision", "annotations": {
+            chaos.SIGNAL_RUN: harness.run_id, chaos.SIGNAL_PHASE: "restored", "unrelated": "keep",
+        }}},
+    ]))
+    kube = Mock()
+    monkeypatch.setattr(harness, "kube", kube)
+    harness.release_lock()
+    args = kube.call_args_list[0].args
+    assert args[:3] == ("patch", "deployment", chaos.WORKER)
+    assert json.loads(args[-1]) == {"metadata": {
+        "resourceVersion": "captured-revision",
+        "annotations": {chaos.SIGNAL_RUN: None, chaos.SIGNAL_PHASE: None},
+    }}
+    assert kube.call_args_list[1].args[:3] == ("delete", "configmap", chaos.LOCK)
+    assert not harness.locked
 
 def test_watchdog_not_ready_never_injects(config, monkeypatch):
     harness = simulated_harness(config, monkeypatch)

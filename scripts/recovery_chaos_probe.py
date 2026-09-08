@@ -20,7 +20,7 @@ def valid_vector(vector):
     return (
         isinstance(vector, list)
         and len(vector) == 1536
-        and all(isinstance(v, (int, float)) and math.isfinite(v) for v in vector)
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in vector)
         and any(vector)
     )
 
@@ -169,6 +169,8 @@ class Probe:
                             try:
                                 body = json.loads(str(message))
                             except (ValueError, TypeError):
+                                continue
+                            if not isinstance(body, dict):
                                 continue
                             if (body.get("source_ref") == self.name and
                                     body.get("pipeline_id") == self.c["pipeline_id"] and
