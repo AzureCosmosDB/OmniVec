@@ -57,8 +57,14 @@ async def test_azure_registered_chat_forwards_tools_and_parses_standard_response
 
 
 @pytest.mark.asyncio
-async def test_azure_workload_identity_authentication(backend, monkeypatch):
-    llm, _, requests, _, _ = backend
+@pytest.mark.parametrize("endpoint", [
+    "https://approved.openai.azure.com",
+    "https://approved.cognitiveservices.azure.com",
+    "https://approved.services.ai.azure.com",
+])
+async def test_azure_workload_identity_authentication(backend, monkeypatch, endpoint):
+    llm, model, requests, _, _ = backend
+    model["endpoint"] = endpoint
     monkeypatch.setenv("AGENT_CHAT_AUTH_MODE", "managed-identity")
     async def token():
         return "test-workload-token"

@@ -69,7 +69,7 @@ class _LLMBackend:
                 return LLMResponse(content="agent: API-key chat requires a Kubernetes secret and AGENT_CHAT_API_KEY_MODEL_ID matching the selected model; override refused.")
             headers = {"api-key": key} if provider == "azure-openai" else {"Authorization": f"Bearer {key}"}
         elif auth_mode == "managed-identity" and provider == "azure-openai":
-            if not parsed.hostname.endswith((".openai.azure.com", ".cognitiveservices.azure.com")):
+            if not parsed.hostname.endswith((".openai.azure.com", ".cognitiveservices.azure.com", ".services.ai.azure.com")):
                 return LLMResponse(content="agent: workload-identity chat requires an Azure public-cloud OpenAI account endpoint; no bearer token was sent.")
             try:
                 headers = {"Authorization": f"Bearer {await _azure_chat_token()}"}

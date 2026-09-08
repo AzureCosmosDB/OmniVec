@@ -518,6 +518,8 @@ def test_inline_pipeline_does_not_require_unrelated_servicebus_observations(diag
     result = diag.evaluate(snapshot)
     assert result["status"] == "READY_IDLE"
     assert not result["processing_verified"]
+    assert result["evidence"]["queues"]["required_for_scope"] is False
+    assert "ClientAuthenticationError" not in json.dumps(result)
 
 
 @pytest.mark.asyncio

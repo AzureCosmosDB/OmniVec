@@ -428,7 +428,10 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
         "baseline_at": (baseline or {}).get("observed_at"),
         "processing_verified": status == "HEALTHY" and any(r["processing_verified"] for r in results),
         "pipelines": results, "findings": findings, "unknown": sorted(set(unknown)),
-        "evidence": {"queues": queues, "deployments": list(deployments.values()),
+        "evidence": {"queues": queues if bus_required else {
+                         "required_for_scope": False,
+                         "interpretation": "This inline pipeline does not use Service Bus; unrelated queue observations are excluded.",
+                     }, "deployments": list(deployments.values()),
                      "pod_signals": cluster.get("signals", [])},
         "interpretation": "READY_IDLE means configured dependencies are ready with no observed work, not verified processing. Shared queues and sampled logs cannot prove a pipeline-specific root cause.",
     }

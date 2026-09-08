@@ -87,8 +87,8 @@ embeddings; it does not expose the old assumed registry chat route.** Configure 
 Embedding models, including `text-embedding-3-small`, are rejected for chat.
 Azure OpenAI defaults to the agent's workload identity, which needs Cognitive
 Services OpenAI User access on the **approved** account. The registry's stored
-endpoint must be an Azure public-cloud `*.openai.azure.com` or
-`*.cognitiveservices.azure.com` account endpoint for workload-identity mode;
+endpoint must be an Azure public-cloud `*.openai.azure.com`,
+`*.cognitiveservices.azure.com` or `*.services.ai.azure.com` account endpoint for workload-identity mode;
 the agent will not send that bearer to an arbitrary compatible host. The stored
 API key is not exposed to the agent through model-list responses. For key-based
 providers, explicitly select `api-key` mode and provide a Kubernetes secret
