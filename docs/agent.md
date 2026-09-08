@@ -120,6 +120,17 @@ deployments. Kubernetes repair remains blocked until the operator enables its
 RBAC. No arbitrary shell, code execution, secret reads or cross-namespace
 actions are exposed as tools.
 
+Workload identity requires a federated credential whose subject is
+`system:serviceaccount:<namespace>:omnivec-agent`, whose issuer is the approved
+AKS OIDC issuer and whose audience is `api://AzureADTokenExchange`. An API or
+DocGrok service-account federation does not cover the dedicated agent account.
+`AADSTS700213` is reported as an **agent observation/configuration blocker**,
+not an invented pipeline fault. The identity owner must add the appropriate
+trust and confirm the existing data-plane permissions; the agent never changes
+federation or switches to a more privileged service account itself.
+Named inline-pipeline health does not depend on unrelated Service Bus counters;
+system diagnostics still report unavailable shared-infrastructure observations.
+
 ### Deterministic diagnostics without an LLM
 
 Authenticated internal endpoints (same `INTERNAL_API_TOKEN` plus validated

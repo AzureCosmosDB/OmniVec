@@ -510,3 +510,25 @@ def test_mutation_scope_cannot_escape_pipeline_endpoint(agent_app, identifier):
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         _PipelineId(pipeline_id=identifier)
+
+
+def test_inline_pipeline_does_not_require_unrelated_servicebus_observations(diag, snapshot):
+    snapshot["pipelines"][0]["processing_mode"] = "inline"
+    snapshot["queues"] = {"ok": False, "queues": {"blob-events": {"ok": False, "reason": "ClientAuthenticationError"}}}
+    result = diag.evaluate(snapshot)
+    assert result["status"] == "READY_IDLE"
+    assert not result["processing_verified"]
+
+
+@pytest.mark.asyncio
+async def test_missing_agent_federation_is_explicit_without_leaking_auth_details(diag, snapshot):
+    async def failed():
+        raise RuntimeError("AADSTS700213 No matching federated identity record: DO-NOT-EXPOSE")
+    observation = await diag._observe(failed())
+    assert observation["error_code"] == "AADSTS700213"
+    assert "DO-NOT-EXPOSE" not in json.dumps(observation)
+    snapshot["queues"] = {"ok": False, "queues": {"blob-events": observation}}
+    result = diag.evaluate(snapshot)
+    assert result["status"] == "UNKNOWN"
+    assert "agent_identity_federation" in _codes(result)
+    assert "identity owner" in next(f["next_action"] for f in result["findings"] if f["code"] == "agent_identity_federation")

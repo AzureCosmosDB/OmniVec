@@ -30,6 +30,7 @@ RUNBOOKS = {
     "bad_chunk_config": "Correct chunk size/overlap/unit in the existing pipeline edit workflow. Preserve source/destination/model IDs and checkpoints; verify newly processed chunks, not just saved configuration.",
     "no_progress": "Compare job backlog, source/embedded counts and poller/worker evidence over a suitable source-specific window. A short quiet window is not proof of a dead poller. Fix the observed dependency first; allow one targeted restart only with evidence, otherwise escalate.",
     "paused": "If not intentional maintenance, approve resume_pipeline for this pipeline only. Verify downstream writes; active status alone is not success.",
+    "agent_identity_federation": "The identity owner must configure federation for the dedicated agent service account using the approved AKS issuer and api://AzureADTokenExchange audience. Do not reuse a more privileged service account or bypass authentication; pipeline health remains unknown until required observations are available.",
 }
 
 _SIGNALS = {
@@ -76,7 +77,10 @@ async def _observe(call) -> dict:
     except Exception as exc:
         # Exception text can contain signed URLs, tokens or connection strings.
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        return {"ok": False, "reason": type(exc).__name__, "http_status": status}
+        error = {"ok": False, "reason": type(exc).__name__, "http_status": status}
+        if "AADSTS700213" in str(exc):
+            error["error_code"] = "AADSTS700213"
+        return error
 
 
 def _rows(value, key: str) -> list[dict]:
@@ -281,10 +285,19 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
     deployments = {d["name"]: d for d in cluster.get("deployments", {}).get("value", [])}
     queues = snapshot.get("queues", {})
     queue_depths = []
-    for name, observation in queues.get("queues", {}).items():
+    bus_required = snapshot.get("scope") == "system" or any(
+        p.get("processing_mode") != "inline" for p in snapshot.get("pipelines", [])
+    )
+    for name, observation in (queues.get("queues", {}) if bus_required else {}).items():
         value = observation.get("value", {})
         if not observation.get("ok") or any(_number(value.get(k)) is None for k in ("active_message_count", "dead_letter_message_count")):
             unknown.append(f"Queue {name} counters unavailable")
+            if observation.get("error_code") == "AADSTS700213":
+                findings.append(_finding(
+                    "agent_identity_federation",
+                    f"Agent cannot observe {name}: Azure returned AADSTS700213 (no matching federated identity record); this does not prove the pipeline itself is broken.",
+                    severity="unknown",
+                ))
             continue
         queue_depths.append(value["active_message_count"])
         if value["dead_letter_message_count"] or value.get("transfer_dead_letter_message_count", 0):
