@@ -44,6 +44,17 @@ spec:
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: AGENT_DEFAULT_MODEL_ID
               value: {{ .Values.agent.defaultModelId | default "" | quote }}
+            - name: AGENT_CHAT_AUTH_MODE
+              value: {{ .Values.agent.chatAuthMode | default "managed-identity" | quote }}
+            {{- with .Values.agent.chatApiKeySecret }}
+            - name: AGENT_CHAT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "api-key" | quote }}
+            - name: AGENT_CHAT_API_KEY_MODEL_ID
+              value: {{ required "agent.chatApiKeySecret.modelId must bind the secret to one registered chat model" .modelId | quote }}
+            {{- end }}
             - name: DOCGROK_URL
               value: {{ .Values.agent.docgrokUrl | default "http://omnivec-docgrok-router" | quote }}
             - name: OMNIVEC_API_URL

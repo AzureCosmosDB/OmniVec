@@ -79,10 +79,22 @@ retry/cancel use the real control-plane endpoints.
 
 ## Runtime configuration
 
-The agent uses the existing DocGrok chat-completion route. Configure a
+The agent reads model metadata from OmniVec's `/api/models` registry and invokes
+the registered provider's HTTPS chat-completion endpoint. **DocGrok handles
+embeddings; it does not expose the old assumed registry chat route.** Configure a
 **registered chat-capable model** using `agent.defaultModelId` /
 `AGENT_DEFAULT_MODEL_ID`, or select a chat model override in the UI/request.
 Embedding models, including `text-embedding-3-small`, are rejected for chat.
+Azure OpenAI defaults to the agent's workload identity, which needs Cognitive
+Services OpenAI User access on the **approved** account. The registry's stored
+endpoint must be an Azure public-cloud `*.openai.azure.com` or
+`*.cognitiveservices.azure.com` account endpoint for workload-identity mode;
+the agent will not send that bearer to an arbitrary compatible host. The stored
+API key is not exposed to the agent through model-list responses. For key-based
+providers, explicitly select `api-key` mode and provide a Kubernetes secret
+bound to the selected registered model ID; a different model override cannot
+receive that key. Supported providers are `azure-openai`, `openai` and
+`openai-compatible`, with an HTTPS base endpoint and deployment/model name.
 No chat model is provisioned automatically. Provider errors and missing model
 configuration are reported explicitly, not presented as successful LLM tests.
 Liveness/readiness only describe agent service availability.
@@ -91,6 +103,8 @@ Liveness/readiness only describe agent service availability.
 |---|---|
 | `INTERNAL_API_TOKEN` | Existing API-to-agent bearer secret; never expose it to browsers or logs. |
 | `OMNIVEC_API_URL`, `DOCGROK_URL` | Existing in-cluster service URLs. No forged Host header. |
+| `agent.chatAuthMode` | `managed-identity` (default, Azure OpenAI) or explicit `api-key`; sets `AGENT_CHAT_AUTH_MODE`. |
+| `agent.chatApiKeySecret: {name, key, modelId}` | Optional secret reference for `AGENT_CHAT_API_KEY`; required `modelId` binds it to `AGENT_CHAT_API_KEY_MODEL_ID`. Do not put plaintext keys in Helm. |
 | `agent.apiTokenSecret: {name, key}` | Optional Kubernetes secret reference for outbound `OMNIVEC_API_TOKEN`; use when control-plane service auth requires a bearer. No plaintext token values in Helm. |
 | `OMNIVEC_NAMESPACE` | Hard namespace boundary for Kubernetes operations. |
 | `agent.servicebusFqns` | Service Bus FQNS; defaults to `azure.serviceBus.namespace`. |
@@ -120,6 +134,36 @@ the internal token or create a public ingress for them. The existing API proxy
 is unchanged; conversational use discovers the same functions as agent tools.
 `verify_recovery` also works as a read-only tool with optional pipeline ID.
 
+### Supplying a permitted chat deployment
+
+First obtain an approved **existing chat-capable deployment** and its HTTPS
+account endpoint, deployment name and supported API version. Register its
+metadata in the existing Models UI or authenticated `POST /api/models`:
+
+```json
+{
+  "name": "operations-chat",
+  "model_category": "chat",
+  "type": "azure-openai",
+  "endpoint": "https://<approved-account>.openai.azure.com",
+  "deployment": "<existing-chat-deployment>",
+  "api_version": "2024-06-01",
+  "auth_type": "managed-identity"
+}
+```
+
+Set `agent.defaultModelId` to the returned ID (not the deployment name). Keep
+all embedding model IDs/routes unchanged. Registration only stores metadata;
+it does **not** provision a model, validate quota, grant identity permissions or
+prove tool-calling capability. After configuration, test an ordinary read-only
+chat question through the existing authenticated agent proxy, then verify a
+diagnostic tool call before considering conversational runtime ready.
+
+If no permitted deployment exists, report the missing account/region,
+chat model/version, deployment SKU/capacity, quota and identity configuration.
+Do not create a billable Azure deployment or substitute an embedding model to
+make the configuration appear complete.
+
 ### Current limitations
 
 * Sessions, approval records and audit storage currently use the existing
@@ -139,7 +183,7 @@ is unchanged; conversational use discovers the same functions as agent tools.
 Run the existing pytest suite with mocks (no network by default):
 
 ```powershell
-python -m pytest tests\unit\test_agent_diagnostics.py tests\unit\test_agent_phase2.py tests\unit\test_agent_session_audit.py tests\unit\test_agent_tools.py tests\unit\test_agent_loop.py tests\unit\test_agent_auth.py -q
+python -m pytest tests\unit\test_agent_diagnostics.py tests\unit\test_agent_llm.py tests\unit\test_agent_phase2.py tests\unit\test_agent_session_audit.py tests\unit\test_agent_tools.py tests\unit\test_agent_loop.py tests\unit\test_agent_auth.py -q
 ```
 
 Regressions cover role/approval isolation, single-use approvals, destructive
