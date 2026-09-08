@@ -10,6 +10,7 @@ import logging
 import hashlib
 import secrets
 import httpx
+from azure.core.exceptions import AzureError
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -5121,43 +5122,39 @@ async def list_models():
     """List all models â€” proxied from DocGrok model registry, enriched with model_category."""
     try:
         resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry")
+        resp.raise_for_status()
         data = resp.json()
-        models = data.get("models", [])
+        models = data.get("models")
+        if not isinstance(models, list):
+            raise HTTPException(status_code=503, detail="DocGrok returned an invalid model registry")
 
         # Load stored model metadata from CosmosDB to get model_category
         store = get_store()
         stored = {}
-        try:
-            for doc in store.query(
-                "SELECT c.id, c.model_category FROM c WHERE c.doc_type = 'docgrok_model'",
-                partition_key="docgrok_model",
-            ):
-                stored[doc["id"]] = doc.get("model_category", "embedding")
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for doc in store.query(
+            "SELECT c.id, c.model_category FROM c WHERE c.doc_type = 'docgrok_model'",
+            partition_key="docgrok_model",
+        ):
+            stored[doc["id"]] = doc.get("model_category", "embedding")
 
         # Add chat-only models from CosmosDB that aren't in DocGrok
         docgrok_ids = {m.get("id") for m in models}
-        try:
-            for doc in store.query(
-                "SELECT * FROM c WHERE c.doc_type = 'docgrok_model' AND c.model_category = 'chat'",
-                partition_key="docgrok_model",
-            ):
-                if doc["id"] not in docgrok_ids:
-                    models.append({
-                        "id": doc["id"],
-                        "name": doc.get("name", ""),
-                        "kind": "external",
-                        "type": doc.get("type", "azure-openai"),
-                        "endpoint": doc.get("endpoint", ""),
-                        "deployment": doc.get("deployment", ""),
-                        "embedding_dim": doc.get("embedding_dim", 0),
-                        "api_version": doc.get("api_version", ""),
-                        "model_category": "chat",
-                    })
-
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for doc in store.query(
+            "SELECT * FROM c WHERE c.doc_type = 'docgrok_model' AND c.model_category = 'chat'",
+            partition_key="docgrok_model",
+        ):
+            if doc["id"] not in docgrok_ids:
+                models.append({
+                    "id": doc["id"],
+                    "name": doc.get("name", ""),
+                    "kind": "external",
+                    "type": doc.get("type", "azure-openai"),
+                    "endpoint": doc.get("endpoint", ""),
+                    "deployment": doc.get("deployment", ""),
+                    "embedding_dim": doc.get("embedding_dim", 0),
+                    "api_version": doc.get("api_version", ""),
+                    "model_category": "chat",
+                })
 
         # Enrich all models with model_category (default to "embedding" for existing)
         # Mask sensitive fields (api_key, secret) from responses
@@ -5170,8 +5167,19 @@ async def list_models():
 
         data["models"] = models
         return data
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"DocGrok error: {str(e)}")
+    except (AzureError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.error("Model listing failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Model registry or metadata storage is unavailable") from exc
+
+
+def _replace_model_metadata(store, doc: dict):
+    """Preserve concurrent credential changes when writing API-owned metadata."""
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+
+    try:
+        return store.replace_with_etag(doc, doc["_etag"])
+    except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError) as exc:
+        raise HTTPException(status_code=409, detail="Model changed during the operation; reload and retry") from exc
 
 
 @app.post("/api/models")
@@ -5199,17 +5207,16 @@ async def create_model(payload: dict):
         # Preserve stored ID â€” look up by name in CosmosDB so DocGrok always
         # gets the same ID even after restart (prevents ID drift).
         store = get_store()
-        try:
-            existing = store.query(
-                "SELECT c.id FROM c WHERE c.doc_type = 'docgrok_model' AND c.name = @name",
-                partition_key="docgrok_model",
-                parameters=[{"name": "@name", "value": model_name}],
-            )
-            for doc in existing:
-                reg_payload["id"] = doc["id"]
-                break
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        existing_model = None
+        existing = store.query(
+            "SELECT * FROM c WHERE c.doc_type = 'docgrok_model' AND c.name = @name",
+            partition_key="docgrok_model",
+            parameters=[{"name": "@name", "value": model_name}],
+        )
+        for doc in existing:
+            existing_model = doc
+            reg_payload["id"] = doc["id"]
+            break
 
         # Store API key in Key Vault (if configured), strip from CosmosDB doc
         from keyvault_client import set_model_api_key
@@ -5219,20 +5226,30 @@ async def create_model(payload: dict):
         if model_category == "chat":
             model_id = reg_payload.get("id") or f"mdl-ext-{str(uuid.uuid4())[:8]}"
             # Store key in Key Vault, remove from CosmosDB doc
-            persist_doc = {k: v for k, v in reg_payload.items() if k != "api_key"}
-            if api_key_value and set_model_api_key(model_id, api_key_value):
-                persist_doc["api_key_source"] = "keyvault"
-            else:
-                persist_doc["api_key"] = api_key_value  # Fallback: store in CosmosDB
-            store.upsert({
+            persist_doc = {
+                **(existing_model or {}),
+                **{k: v for k, v in reg_payload.items() if k != "api_key"},
+            }
+            if api_key_value:
+                if set_model_api_key(model_id, api_key_value):
+                    persist_doc["api_key_source"] = "keyvault"
+                    persist_doc.pop("api_key", None)
+                else:
+                    persist_doc["api_key"] = api_key_value
+                    persist_doc.pop("api_key_source", None)
+            persist_doc.update({
                 "id": model_id,
                 "doc_type": "docgrok_model",
                 **persist_doc,
                 "model_category": model_category,
                 "stored_at": datetime.utcnow().isoformat(),
             })
-            result = {"id": model_id, "name": model_name, "kind": "external",
-                      "model_category": model_category, **persist_doc}
+            if existing_model:
+                _replace_model_metadata(store, persist_doc)
+            else:
+                store.create(persist_doc)
+            result = {**{k: v for k, v in reg_payload.items() if k != "api_key"},
+                      "id": model_id, "kind": "external", "model_category": model_category}
         else:
             # Send full payload (including api_key) to DocGrok for in-memory use.
             # DocGrok handles CosmosDB persistence with envelope-encrypted api_key,
@@ -5246,13 +5263,11 @@ async def create_model(payload: dict):
             # onto the existing doc without disturbing api_key_envelope.
             model_id = result.get("id", "")
             if model_id.startswith("mdl-ext-"):
-                try:
-                    existing = store.get(model_id, "docgrok_model")
-                    if existing and existing.get("model_category") != model_category:
-                        existing["model_category"] = model_category
-                        store.upsert(existing)
-                except Exception:  # lgtm[py/empty-except]
-                    pass
+                existing = store.get(model_id, "docgrok_model")
+                if not existing:
+                    raise HTTPException(status_code=503, detail="Registered model metadata is unavailable; retry registration")
+                if existing.get("model_category") != model_category:
+                    _replace_model_metadata(store, {**existing, "model_category": model_category})
             result["model_category"] = model_category
 
         return result
@@ -5268,14 +5283,20 @@ async def update_model(model_id: str, payload: dict):
     if not model_id.startswith("mdl-ext-"):
         raise HTTPException(status_code=400, detail="Only external models can be updated")
 
-    store = get_store()
-    doc = None
     try:
+        store = get_store()
         doc = store.get(model_id, "docgrok_model")
-    except Exception:  # lgtm[py/empty-except]
-        pass
+    except (AzureError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail="Model metadata storage is unavailable") from exc
     if not doc:
+        try:
+            resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry/{safe_url_segment(model_id)}")
+            if resp.status_code != 404:
+                raise HTTPException(status_code=503, detail="Model registry and metadata are unavailable or inconsistent; retry after recovery")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="Model registry is unavailable") from exc
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    doc = dict(doc)
 
     # Merge updatable fields
     updatable = ("api_key", "endpoint", "deployment", "api_version", "embedding_dim", "auth_type", "client_id")
@@ -5323,14 +5344,19 @@ async def update_model(model_id: str, payload: dict):
                 "embedding_dim": int(doc.get("embedding_dim", 1536)),
                 "api_version": doc.get("api_version", "2024-06-01"),
             }
+            if doc.get("client_id"):
+                reg_payload["client_id"] = doc["client_id"]
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
-                logger.warning(f"DocGrok re-register failed: {resp.text}")
-        except Exception as e:
-            logger.warning(f"DocGrok re-register error: {e}")
+                raise HTTPException(status_code=resp.status_code, detail="DocGrok model update failed")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="DocGrok model update is unavailable") from exc
     else:
         # Chat-only path: api.py owns the persisted doc
-        store.upsert(doc)
+        try:
+            _replace_model_metadata(store, doc)
+        except AzureError as exc:
+            raise HTTPException(status_code=503, detail="Model metadata update failed") from exc
 
     return {"status": "updated", "id": model_id, "fields_updated": changed}
 
@@ -5338,30 +5364,31 @@ async def update_model(model_id: str, payload: dict):
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: str):
     """Delete an external model — proxied to DocGrok, removed from CosmosDB."""
+    if not model_id.startswith("mdl-ext-"):
+        raise HTTPException(status_code=400, detail="Only external models can be deleted")
     try:
         store = get_store()
 
         # Guard: refuse delete if any pipeline or assistant references this model.
-        # Pipelines reference models via the `docgrok_pipeline` field (which can
-        # also be a transform pipeline id; direct equality is fine as a match).
-        # Assistants reference chat models via `model_id`.
+        # Include routing pipelines: ingestion pipelines usually reference a
+        # routing id rather than the embedding model directly.
         pipeline_users: list[str] = []
-        try:
-            for d in store.list("pipeline"):
-                if d.get("docgrok_pipeline") == model_id:
-                    pipeline_users.append(d.get("name") or d.get("id") or "<unnamed>")
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for d in store.list("pipeline"):
+            if d.get("docgrok_pipeline") == model_id:
+                pipeline_users.append(d.get("name") or d.get("id") or "<unnamed>")
 
         assistant_users: list[str] = []
-        try:
-            for d in store.list("assistant"):
-                if d.get("model_id") == model_id:
-                    assistant_users.append(d.get("name") or d.get("id") or "<unnamed>")
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for d in store.list("assistant"):
+            if d.get("model_id") == model_id:
+                assistant_users.append(d.get("name") or d.get("id") or "<unnamed>")
 
-        if pipeline_users or assistant_users:
+        routing_users = []
+        for d in store.list("docgrok_pipeline"):
+            configs = [d, *(d.get("steps") or [])]
+            if any(c.get("model_id") == model_id or c.get("model") == model_id for c in configs):
+                routing_users.append(d.get("name") or d.get("id") or "<unnamed>")
+
+        if pipeline_users or assistant_users or routing_users:
             parts: list[str] = []
             if pipeline_users:
                 names = ", ".join(f"'{n}'" for n in pipeline_users)
@@ -5369,6 +5396,9 @@ async def delete_model(model_id: str):
             if assistant_users:
                 names = ", ".join(f"'{n}'" for n in assistant_users)
                 parts.append(f"{len(assistant_users)} assistant(s): {names}")
+            if routing_users:
+                names = ", ".join(f"'{n}'" for n in routing_users)
+                parts.append(f"{len(routing_users)} routing pipeline(s): {names}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot delete — model is used by {' and '.join(parts)}. "
@@ -5378,10 +5408,7 @@ async def delete_model(model_id: str):
         # Check if it's a chat-only model (only in CosmosDB, not in DocGrok)
         doc = None
         if model_id.startswith("mdl-ext-"):
-            try:
-                doc = store.get(model_id, "docgrok_model")
-            except Exception:  # lgtm[py/empty-except]
-                pass
+            doc = store.get(model_id, "docgrok_model")
 
         if doc and doc.get("model_category") == "chat":
             # Chat model — only delete from CosmosDB
@@ -5389,14 +5416,16 @@ async def delete_model(model_id: str):
             return {"status": "deleted", "id": model_id}
 
         resp = await http_client.delete(f"{DOCGROK_URL}/admin/models/registry/{safe_url_segment(model_id)}")
-        if resp.status_code >= 400:
+        if resp.status_code >= 400 and resp.status_code != 404:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
         # Remove from CosmosDB persistence and Key Vault
         if model_id.startswith("mdl-ext-"):
+            from azure.cosmos.exceptions import CosmosResourceNotFoundError
             try:
                 store.delete(model_id, "docgrok_model")
-            except Exception:  # lgtm[py/empty-except]
+            except CosmosResourceNotFoundError:
+                # DocGrok may already have deleted the shared metadata record.
                 pass
             try:
                 from keyvault_client import delete_model_api_key
@@ -5404,7 +5433,7 @@ async def delete_model(model_id: str):
             except Exception:  # lgtm[py/empty-except]
                 pass
 
-        return resp.json()
+        return {"status": "deleted", "id": model_id} if resp.status_code == 404 else resp.json()
     except HTTPException:
         raise
     except Exception as e:

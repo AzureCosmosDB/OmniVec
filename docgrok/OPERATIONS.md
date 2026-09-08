@@ -85,6 +85,14 @@ Registry-list failures are surfaced to callers instead of returning an empty
 list. Cache misses reload persisted registrations so a request routed to another
 replica can resolve a newly registered model or routing pipeline.
 
+The API also fails explicitly when model metadata cannot be read or updated;
+an incomplete model list or failed update is not reported as success. Metadata
+updates use ETags so they cannot overwrite a concurrent credential change.
+An omitted or empty API key on re-registration preserves the existing credential.
+Deletion checks ingestion pipelines, routing pipelines, and assistants, and
+fails closed if those references cannot be read. Retrying deletion can finish
+metadata cleanup when the router has already removed the registration.
+
 File and transform requests resolve the model from their routing pipeline before
 forwarding to the document processor. An explicit request `model_id` takes
 precedence; model-free image/video transforms remain supported. If a request was
