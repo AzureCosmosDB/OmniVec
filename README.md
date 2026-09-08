@@ -301,8 +301,23 @@ out-of-order updates can race; this is distinct from SharePoint's revision-fence
 replacement, which is unchanged. Strategy and text-storage field/opt-in cannot be
 changed in-place; create a new pipeline for those changes.
 
+In the UI, select **Chunk** under creation options to configure size, overlap
+(including zero), unit, text storage/field and the chunk ID template. The
+pipeline's Chunking detail tab preserves those settings; Cosmos size, overlap,
+unit and template are editable for future processing, while strategy and text
+storage remain locked. Search results show the distinct vector ID below the
+source reference when they differ.
+
+The CLI exposes `--chunk-size`, `--chunk-overlap`, `--chunk-unit`,
+`--store-text`, `--text-field` and `--chunk-doc-id-pattern` on pipeline create
+and update. `--doc-id-pattern` also targets the chunk template when the pipeline
+uses chunk strategy; the explicit `--chunk-doc-id-pattern` takes precedence.
+Updates preserve omitted chunk settings and send explicit zero/false values.
+
 Offline regression coverage runs with `dotnet run --project tests/sharepoint -c Release`
-and `python -m pytest tests/unit/test_cosmos_chunking.py -q`. The opt-in
+and `python -m pytest tests/unit/test_cosmos_chunking.py tests/unit/test_pipeline_ui_flows.py -q`
+(UI JavaScript tests require Node, use DOM stubs, and are not browser coverage).
+CLI payload tests run with `go test ./...` from `cli`. The opt-in
 `scripts/e2e-cosmos-chunking.py` live probe runs inside an API pod, keeps admin
 credentials on loopback, and creates only explicitly named synthetic fixtures.
 Its `--chunk-size`, `--chunk-overlap`, `--chunk-unit` and `--doc-id-pattern`

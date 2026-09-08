@@ -2677,13 +2677,20 @@
                                 <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 10px; font-weight: 600; letter-spacing: 0.5px;">Chunk Settings</div>
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                                     <div class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">Chunk Size (chars)</label>
+                                        <label class="form-label">Chunk Size (selected unit)</label>
                                         <input type="number" class="form-input" name="chunk_size" value="1000" min="100" max="10000">
                                     </div>
                                     <div class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">Chunk Overlap (chars)</label>
+                                        <label class="form-label">Chunk Overlap (selected unit)</label>
                                         <input type="number" class="form-input" name="chunk_overlap" value="200" min="0" max="2000">
                                     </div>
+                                </div>
+                                <div class="form-group" style="margin-top: 12px;">
+                                    <label class="form-label">Chunk Unit</label>
+                                    <select class="form-input" name="chunk_unit">
+                                        <option value="chars">Characters</option>
+                                        <option value="tokens">Whitespace words (tokens, not BPE)</option>
+                                    </select>
                                 </div>
                                 <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
                                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -2693,12 +2700,14 @@
                                     <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
                                         Each chunk document will include the chunk text alongside the embedding vector
                                     </small>
+                                    <label class="form-label">Chunk Text Field</label>
+                                    <input type="text" class="form-input" name="chunk_text_field" value="text">
                                 </div>
                                 <div class="form-group" style="margin-top: 12px; margin-bottom: 0;">
                                     <label class="form-label">Chunk Doc ID Pattern</label>
                                     <input type="text" class="form-input" name="chunk_doc_id_pattern" value="{source}-chunk-{chunk}" placeholder="{source}-chunk-{chunk}">
                                     <small style="color: var(--text-tertiary); font-size: 12px; margin-top: 4px; display: block;">
-                                        Variables: <code>{source}</code> (filename), <code>{chunk}</code> (index), <code>{source_hash}</code>, <code>{pipeline}</code>
+                                        Cosmos: requires <code>{chunk}</code>; also supports <code>{source}</code>, <code>{source_ref}</code>, <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{pipeline_hash}</code>. Stored Cosmos IDs add a mandatory pipeline/source namespace; the template is not the entire ID.
                                     </small>
                                 </div>
                             </div>
@@ -5954,8 +5963,10 @@
                 }
             } else if (currentPipelineTab === 'chunking') {
                 const cs = pipeline.content_strategy || 'truncate';
-                const cc = pipeline.chunk_config || {};
+                const cc = editedPipelineData.chunk_config || pipeline.chunk_config || {};
                 const isChunk = cs === 'chunk';
+                const cosmosChunk = pipeline.sources?.some(ps => sources.find(s => s.id === ps.source_id)?.type === 'cosmosdb');
+                const chunkEditAttrs = cosmosChunk ? 'oninput="markPipelineDetailDirty()"' : 'disabled';
 
                 // Check if source and destination are the same container
                 const pipSrc = pipeline.sources?.[0];
@@ -5978,17 +5989,25 @@
                     </div>
                     ${isChunk ? `
                     <div style="padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px;">
-                        <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Chunk Configuration (read-only)</div>
+                        <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Chunk Configuration</div>
+                        <small>Cosmos size, overlap, unit and template may be edited for future processing. Strategy, text storage and text field require a new pipeline.</small>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                             <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label">Chunk Size (characters)</label>
-                                <input type="number" class="form-input" id="pip-detail-chunk-size" value="${cc.chunk_size || 1000}" disabled style="opacity: 0.7; cursor: not-allowed;">
-                                <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">Max characters per chunk</small>
+                                <label class="form-label">Chunk Size (selected unit)</label>
+                                <input type="number" class="form-input" id="pip-detail-chunk-size" value="${cc.chunk_size ?? 1000}" min="100" ${chunkEditAttrs}>
                             </div>
                             <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label">Chunk Overlap (characters)</label>
-                                <input type="number" class="form-input" id="pip-detail-chunk-overlap" value="${cc.chunk_overlap || 200}" disabled style="opacity: 0.7; cursor: not-allowed;">
-                                <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">Overlapping characters between adjacent chunks</small>
+                                <label class="form-label">Chunk Overlap (selected unit)</label>
+                                <input type="number" class="form-input" id="pip-detail-chunk-overlap" value="${cc.chunk_overlap ?? 200}" min="0" ${chunkEditAttrs}>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Chunk Unit</label>
+                                <select class="form-input" id="pip-detail-chunk-unit" ${chunkEditAttrs}>
+                                    <option value="chars" ${(cc.chunk_unit || 'chars') === 'chars' ? 'selected' : ''}>Characters</option>
+                                    <option value="tokens" ${cc.chunk_unit === 'tokens' ? 'selected' : ''}>Whitespace words (tokens, not BPE)</option>
+                                </select>
+                                <label class="form-label">Chunk Text Field (immutable)</label>
+                                <input type="text" class="form-input" id="pip-detail-chunk-text-field" value="${escapeHtml(cc.text_field || 'text').replace(/"/g, '&quot;')}" disabled>
                             </div>
                         </div>
                         <div class="form-group" style="margin-top: 16px; margin-bottom: 0;">
@@ -6002,9 +6021,9 @@
                         </div>
                         <div class="form-group" style="margin-top: 16px; margin-bottom: 0;">
                             <label class="form-label">Chunk Doc ID Pattern</label>
-                            <input type="text" class="form-input" id="pip-detail-chunk-doc-id-pattern" value="${cc.doc_id_pattern || '{source}-chunk-{chunk}'}" disabled style="opacity: 0.7; cursor: not-allowed;">
+                            <input type="text" class="form-input" id="pip-detail-chunk-doc-id-pattern" value="${escapeHtml(cc.doc_id_pattern || '{source}-chunk-{chunk}').replace(/"/g, '&quot;')}" ${chunkEditAttrs}>
                             <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
-                                Variables: <code>{source}</code> (filename), <code>{chunk}</code> (index), <code>{source_hash}</code>, <code>{pipeline}</code>
+                                Cosmos requires <code>{chunk}</code>; supports <code>{source}</code>, <code>{source_ref}</code>, <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{pipeline_hash}</code>. Stored IDs add a mandatory pipeline/source namespace to this template.
                             </small>
                         </div>
                     </div>
@@ -6013,10 +6032,10 @@
                         Full document text is embedded as a single vector. No chunking configuration needed.
                     </div>
                     `}
-                    ${!sameContainer ? `
+                    ${!sameContainer && !isChunk ? `
                     <div class="form-group" style="margin-top: 16px;">
                         <label class="form-label">Document ID Pattern</label>
-                        <input type="text" class="form-input" id="pip-detail-doc-id-pattern" value="${pipeline.doc_id_pattern || '{source}'}" placeholder="{source}" oninput="markPipelineDetailDirty()">
+                        <input type="text" class="form-input" id="pip-detail-doc-id-pattern" value="${escapeHtml(editedPipelineData.doc_id_pattern ?? pipeline.doc_id_pattern ?? '{source}').replace(/"/g, '&quot;')}" placeholder="{source}" oninput="markPipelineDetailDirty()">
                         <small style="color: var(--text-tertiary); font-size: 11px; margin-top: 4px; display: block;">
                             Target document name in destination. Variables: <code>{source}</code>, <code>{source_hash}</code>, <code>{pipeline}</code>, <code>{job}</code>
                         </small>
@@ -6871,10 +6890,11 @@
             if (csEl && csEl.value === 'chunk') {
                 const chunkDocIdEl = document.getElementById('pip-detail-chunk-doc-id-pattern');
                 editedPipelineData.chunk_config = {
-                    chunk_size: parseInt(chunkSizeEl?.value) || 1000,
-                    chunk_overlap: parseInt(chunkOverlapEl?.value) || 200,
-                    chunk_unit: 'chars',
+                    chunk_size: Number(chunkSizeEl?.value ?? 1000),
+                    chunk_overlap: Number(chunkOverlapEl?.value ?? 200),
+                    chunk_unit: document.getElementById('pip-detail-chunk-unit')?.value || 'chars',
                     store_text: storeTextEl?.checked || false,
+                    text_field: document.getElementById('pip-detail-chunk-text-field')?.value || 'text',
                     doc_id_pattern: chunkDocIdEl?.value || '{source}-chunk-{chunk}',
                 };
             }
@@ -6929,6 +6949,7 @@
                         metadata_mapping: pipeline.metadata_mapping || {},
                         content_strategy: editedPipelineData.content_strategy || pipeline.content_strategy || 'truncate',
                         chunk_config: editedPipelineData.chunk_config || pipeline.chunk_config || null,
+                        doc_id_pattern: editedPipelineData.doc_id_pattern ?? pipeline.doc_id_pattern ?? '{source}',
                         processing_mode: editedPipelineData.processing_mode || pipeline.processing_mode || 'inline',
                         store_content: editedPipelineData.store_content !== undefined ? editedPipelineData.store_content : pipeline.store_content,
                         content_field: editedPipelineData.content_field !== undefined ? editedPipelineData.content_field : (pipeline.content_field || 'content'),
@@ -6943,7 +6964,7 @@
                     closeModal('pipeline-detail-modal');
                 } else {
                     const err = await res.json();
-                    showPipelineDetailError(err.detail || 'Failed to save');
+                    showPipelineDetailError(formatPipelineError(err.detail || 'Failed to save'));
                 }
             } catch (err) {
                 showPipelineDetailError('Error: ' + err.message);
@@ -6961,6 +6982,11 @@
             }
             errorDiv.textContent = message;
             errorDiv.style.display = 'block';
+        }
+
+        function formatPipelineError(detail) {
+            if (Array.isArray(detail)) return detail.map(e => `${(e.loc || []).join('.')}: ${e.msg || JSON.stringify(e)}`).join('\n');
+            return typeof detail === 'string' ? detail : JSON.stringify(detail);
         }
 
         async function testPipelineDetailDest() {
@@ -7424,6 +7450,7 @@
                 srcObj.config?.table === destObj.config?.table;
 
             const sameContainer = sameCosmosContainer || samePgvectorTable;
+            const isChunk = document.querySelector('#pipeline-form [name="content_strategy"]')?.value === 'chunk';
 
             indicator.style.display = sameContainer ? 'block' : 'none';
 
@@ -7433,14 +7460,14 @@
                 if (!bothSelected) {
                     docIdGroup.style.display = 'none';  // Hide until both selected
                 } else {
-                    docIdGroup.style.display = sameContainer ? 'none' : 'block';
+                    docIdGroup.style.display = sameContainer || isChunk ? 'none' : 'block';
                 }
             }
 
             // Show store_content checkbox only when both are selected AND they are different stores
             const storeContentGroup = document.getElementById('pl-store-content-group');
             if (storeContentGroup) {
-                const visible = bothSelected && !sameContainer;
+                const visible = bothSelected && !sameContainer && !isChunk;
                 storeContentGroup.style.display = visible ? 'block' : 'none';
                 if (!visible) {
                     const cb = storeContentGroup.querySelector('input[name="store_content"]');
@@ -7784,6 +7811,7 @@
 
         function toggleChunkConfig(value) {
             document.getElementById('chunk-config-section').style.display = value === 'chunk' ? 'block' : 'none';
+            updateSameContainerIndicator();
         }
 
         function togglePipelineMetadataFields(enabled) {
@@ -8207,6 +8235,11 @@
             // --- Create Pipeline ---
             const contentStrategy = formData.get('content_strategy') || 'truncate';
             const processingMode = formData.get('processing_mode') || 'inline';
+            if (contentStrategy === 'chunk' && processingMode === 'inline') {
+                alert('Chunking requires queue processing and a separate destination. Inline + chunk is unsupported.');
+                showPipelineStep('options');
+                return;
+            }
 
             // Collect content_fields from pipeline source config
             const pipelineContentTags = document.getElementById('pipeline-content-field-tags');
@@ -8268,10 +8301,11 @@
             }
             if (contentStrategy === 'chunk') {
                 data.chunk_config = {
-                    chunk_size: parseInt(formData.get('chunk_size')) || 1000,
-                    chunk_overlap: parseInt(formData.get('chunk_overlap')) || 200,
-                    chunk_unit: 'chars',
+                    chunk_size: Number(formData.get('chunk_size') ?? 1000),
+                    chunk_overlap: Number(formData.get('chunk_overlap') ?? 200),
+                    chunk_unit: formData.get('chunk_unit') || 'chars',
                     store_text: form.querySelector('input[name="store_text"]')?.checked || false,
+                    text_field: formData.get('chunk_text_field') || 'text',
                     doc_id_pattern: formData.get('chunk_doc_id_pattern') || '{source}-chunk-{chunk}',
                 };
             }
@@ -8287,7 +8321,7 @@
                     refreshData();
                 } else {
                     const err = await res.json();
-                    alert(err.detail || 'Failed to create pipeline');
+                    alert(formatPipelineError(err.detail || 'Failed to create pipeline'));
                 }
             } catch (err) {
                 alert('Error: ' + err.message);
@@ -12165,6 +12199,7 @@
                                     <div style="width: 36px; height: 36px; border-radius: 50%; background: var(--accent-muted); display: flex; align-items: center; justify-content: center; font-weight: 600; color: var(--accent-primary);">${i + 1}</div>
                                     <div>
                                         <strong style="font-size: 15px;">${escapeHtml(r.source_ref || r.id)}</strong>
+                                        ${r.id && r.source_ref && r.id !== r.source_ref ? `<div style="font-size: 11px; overflow-wrap: anywhere; color: var(--text-tertiary);">Vector ID: <code>${escapeHtml(r.id)}</code></div>` : ''}
                                         <div style="font-size: 12px; color: var(--text-tertiary);">${escapeHtml(r.source || 'Unknown source')}</div>
                                     </div>
                                 </div>

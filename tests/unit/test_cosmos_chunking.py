@@ -104,6 +104,33 @@ async def test_create_persists_and_update_validates_chunk_config(setup):
         await setup.api.update_pipeline(created.id, setup.req)
 
 
+@pytest.mark.asyncio
+async def test_custom_chunk_fields_round_trip_and_template_edit(setup):
+    setup.req.chunk_config = {"chunk_size": 450, "chunk_overlap": 0, "chunk_unit": "tokens",
+                             "store_text": True, "text_field": "passage",
+                             "doc_id_pattern": "custom-{source_hash}-{chunk}"}
+    created = (await setup.api.create_pipeline(setup.req))["pipeline"]
+    setup.req.chunk_config.update(chunk_size=500, doc_id_pattern="edited-{pipeline_hash}-{chunk}")
+    await setup.api.update_pipeline(created.id, setup.req)
+    stored = setup.store.get(created.id, "pipeline")
+    assert stored["chunk_config"] == setup.req.chunk_config
+    setup.req.chunk_config["text_field"] = "other"
+    with pytest.raises(HTTPException) as error:
+        await setup.api.update_pipeline(created.id, setup.req)
+    assert "immutable" in error.value.detail
+    assert setup.store.get(created.id, "pipeline")["chunk_config"]["text_field"] == "passage"
+
+
+@pytest.mark.asyncio
+async def test_document_template_update_persists(setup):
+    setup.req.content_strategy = "truncate"
+    setup.req.doc_id_pattern = "original-{source}"
+    created = (await setup.api.create_pipeline(setup.req))["pipeline"]
+    setup.req.doc_id_pattern = "edited-{source_hash}"
+    await setup.api.update_pipeline(created.id, setup.req)
+    assert setup.store.get(created.id, "pipeline")["doc_id_pattern"] == "edited-{source_hash}"
+
+
 def test_source_modes_destination_and_partition_validated(setup):
     for mode in ("url", "auto"):
         setup.req.sources[0].content_mode = mode

@@ -3759,6 +3759,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
+    pipeline.doc_id_pattern = req.doc_id_pattern
     if cosmos_chunk_config is not None:
         pipeline.chunk_config = cosmos_chunk_config
     elif req.chunk_config and pipeline.content_strategy == "chunk":
