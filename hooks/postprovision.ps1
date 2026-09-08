@@ -244,9 +244,16 @@ function Build-Image {
             exit 1
         }
     } else {
-        az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --timeout 3600
-        if ($LASTEXITCODE -ne 0) {
-            throw "az acr build failed for ${Name}:${Tag}. Inspect the ACR build logs before retrying."
+        # Azure CLI otherwise uses the Windows code page when build logs are redirected.
+        $previousPythonEncoding = $env:PYTHONIOENCODING
+        try {
+            $env:PYTHONIOENCODING = 'utf-8'
+            az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --timeout 3600
+            if ($LASTEXITCODE -ne 0) {
+                throw "az acr build failed for ${Name}:${Tag}. Inspect the ACR build logs before retrying."
+            }
+        } finally {
+            $env:PYTHONIOENCODING = $previousPythonEncoding
         }
     }
     $script:imagesChanged = $true
