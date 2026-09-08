@@ -43,6 +43,9 @@ public class EmbeddingMessage
     [JsonPropertyName("content_strategy")]
     public string ContentStrategy { get; set; } = "truncate";
 
+    [JsonPropertyName("chunk_config")]
+    public Dictionary<string, object>? ChunkConfig { get; set; }
+
     [JsonPropertyName("doc_id_pattern")]
     public string DocIdPattern { get; set; } = "{source}";
 

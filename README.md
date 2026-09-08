@@ -252,6 +252,56 @@ A pipeline ties source → model → destination together.
 
 The pipeline starts processing immediately. You can watch progress on the pipeline detail page.
 
+#### Cosmos text chunking (queue mode)
+
+For Cosmos field-content sources writing to a **separate Cosmos vector container**,
+set `content_strategy: "chunk"` and, for example:
+
+```json
+{
+  "chunk_config": {
+    "chunk_size": 1000,
+    "chunk_overlap": 200,
+    "chunk_unit": "chars",
+    "store_text": true,
+    "text_field": "text",
+    "doc_id_pattern": "{source}-chunk-{chunk}"
+  }
+}
+```
+
+The .NET worker embeds each overlapping chunk without first truncating the source.
+`chars` counts Unicode codepoints and prefers paragraph/sentence boundaries, like
+the Python chunker. `tokens` uses **whitespace words**, not model/BPE tokens.
+Oversized chunks fail explicitly: reduce the configured size to fit the model and
+worker limits. `truncate` remains the default; `chunk` with inline mode, URL content,
+attachments, mixed source types or non-Cosmos destinations is rejected.
+
+Each vector includes `chunk_index`, `chunk_count`, `source_id`, `source_ref`,
+`pipeline_id` and `chunk_source_partition`, even when optional metadata is disabled.
+Only `store_text: true` stores chunk text at `text_field`; raw source fields are
+not copied onto every chunk. Chunk settings take precedence over the pipeline's
+single-document `store_content`/`content_field` options.
+
+All six pattern variables are supported: `source`, `source_ref`, `source_hash`,
+`chunk` (zero-padded), `pipeline`, `pipeline_hash`. A mandatory SHA-256 namespace
+prefix isolates pipeline, source registration, source partition and document.
+Patterns must contain `{chunk}` and render valid Cosmos IDs. `/id` and single
+top-level non-metadata partition keys are supported.
+
+After all replacement chunks are written, obsolete chunks for that exact source
+and pipeline are removed. Empty text removes the previous set. Failed embedding,
+write or cleanup is retried or explicitly dead-lettered, not acknowledged as success.
+Replacement across `/id` partitions is **not atomic or revision-fenced**: overlapping,
+out-of-order updates can race; this is distinct from SharePoint's revision-fenced
+replacement, which is unchanged. Strategy and text-storage field/opt-in cannot be
+changed in-place; create a new pipeline for those changes.
+
+Offline regression coverage runs with `dotnet run --project tests/sharepoint -c Release`
+and `python -m pytest tests/unit/test_cosmos_chunking.py -q`. The opt-in
+`scripts/e2e-cosmos-chunking.py` live probe runs inside an API pod, keeps admin
+credentials on loopback, and creates only explicitly named synthetic fixtures.
+
 ### Verify it worked
 
 Within a few minutes, check these signals:

@@ -14,7 +14,9 @@ public record EmbeddingResult(
     string SourceId = "",
     bool? StoreContent = null,
     List<string>? MetadataFields = null,
-    string? ContentField = null)
+    string? ContentField = null,
+    int? ChunkIndex = null,
+    int? ChunkCount = null)
 {
     /// <summary>
     /// Returns true when the named optional metadata field should be written.
@@ -28,6 +30,10 @@ public record EmbeddingResult(
 public interface IDestinationWriter
 {
     string DestinationType { get; }
+
+    Task ReplaceTextChunksAsync(Dictionary<string, object> config, DeleteRequest source,
+        List<EmbeddingResult> chunks, CancellationToken ct)
+        => throw new NotSupportedException("This destination does not support Cosmos text chunk replacement");
 
     Task<bool> ReplaceSharePointAsync(
         Dictionary<string, object> config,
@@ -56,7 +62,8 @@ public record DeleteRequest(
     string SourceId,
     string SourceRef,
     string PartitionKeyValue,
-    string PipelineId);
+    string PipelineId,
+    HashSet<string>? KeepIds = null);
 
 public record SharePointReplacement(
     string Identity,

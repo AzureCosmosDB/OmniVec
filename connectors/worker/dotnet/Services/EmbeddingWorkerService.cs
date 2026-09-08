@@ -270,6 +270,16 @@ public class EmbeddingWorkerService : BackgroundService
                     await Task.WhenAll(batchTasks);
                 }
 
+                // Chunk before the legacy truncation/token-packing path. One source
+                // message is settled only after all its chunks and cleanup succeed.
+                foreach (var item in textItems.Where(i => i.msg.ContentStrategy == "chunk"))
+                {
+                    await _textGate.WaitAsync(ct);
+                    try { await ProcessTextChunksAsync(receiver, item, ct); }
+                    finally { _textGate.Release(); }
+                }
+                textItems = textItems.Where(i => i.msg.ContentStrategy != "chunk").ToList();
+
                 // Group text messages by model for batch embedding
                 var byModel = textItems.GroupBy(i => i.msg.DocgrokPipeline).ToList();
 
@@ -285,6 +295,60 @@ public class EmbeddingWorkerService : BackgroundService
                         finally { _textGate.Release(); }
                     }
                 }
+    }
+
+    private async Task ProcessTextChunksAsync(ServiceBusReceiver receiver,
+        (EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg) item, CancellationToken ct)
+    {
+        var msg = item.msg;
+        try
+        {
+            if (msg.DestinationType != "cosmosdb-vector" || !_writers.TryGetValue(msg.DestinationType, out var writer))
+                throw new NotSupportedException("Text chunking requires a Cosmos vector destination");
+            var config = msg.ChunkConfig ?? new();
+            var texts = CosmosTextChunker.Split(msg.Content, config);
+            // Reject unsafe IDs and oversized chunks before making any model calls.
+            for (var i = 0; i < texts.Count; i++)
+            {
+                _ = CosmosTextChunker.DocId(msg, config, i);
+                if (TokenEstimator.Estimate(texts[i]) > Math.Min(_options.MaxSingleTextTokens, _options.MaxBatchTokens))
+                    throw new ArgumentException("Configured chunk exceeds worker token limits; reduce chunk_size");
+            }
+            var results = new List<EmbeddingResult>();
+            for (int start = 0; start < texts.Count;)
+            {
+                var inputs = new List<string>();
+                var budget = 0;
+                while (start + inputs.Count < texts.Count && inputs.Count < _options.EmbedBatchSize)
+                {
+                    var text = texts[start + inputs.Count];
+                    var tokens = TokenEstimator.Estimate(text);
+                    if (inputs.Count > 0 && budget + tokens > _options.MaxBatchTokens) break;
+                    inputs.Add(text);
+                    budget += tokens;
+                }
+                var vectors = await _docGrok.EmbedBatchAsync(msg.DocgrokPipeline, inputs, ct);
+                if (vectors.Count != inputs.Count)
+                    throw new InvalidOperationException("Chunk embedding count mismatch");
+                for (var i = 0; i < inputs.Count; i++)
+                    results.Add(CosmosTextChunker.Result(msg, config, inputs[i], vectors[i], start + i, texts.Count));
+                start += inputs.Count;
+            }
+            if (results.Select(r => r.Embedding.Length).Distinct().Count() > 1)
+                throw new InvalidOperationException("Chunk embedding dimensions are inconsistent");
+            await writer.ReplaceTextChunksAsync(msg.DestinationConfig,
+                new(msg.SourceId, msg.SourceRef, msg.PartitionKeyValue, msg.PipelineId), results, ct);
+            await receiver.CompleteMessageAsync(item.sbMsg, ct);
+            _logger.LogInformation("Cosmos text chunked source={SourceId}/{SourceRef} pipeline={Pipeline}: {Count} chunks",
+                msg.SourceId, msg.SourceRef, msg.PipelineId, results.Count);
+            _ = _metrics.ReportInlineMetricsAsync(msg.PipelineId, 1, 0, 0, $"chunk:{msg.MessageId}");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Cosmos text chunking failed for {SourceRef}", msg.SourceRef);
+            await SettleFailureAsync(receiver, item.sbMsg, ex, ct);
+        }
     }
 
     private async Task DeadLetterWithMetricsAsync(ServiceBusReceiver receiver,

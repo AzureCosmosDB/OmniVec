@@ -385,7 +385,8 @@ Console.WriteLine($"RESULT: {tests.Count - failed} passed, {failed} failed (loca
 var connectorFailures = await ConnectorReliabilityTests.RunAsync();
 var cosmosSourceFailures = await CosmosSourceContentTests.RunAsync();
 var blobPollingFailures = await BlobPollingTests.RunAsync();
-return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures == 0 ? 0 : 1;
+var cosmosChunkFailures = await CosmosChunkTests.RunAsync();
+return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures == 0 ? 0 : 1;
 
 sealed class MemorySyncStore : ISharePointSyncStore
 {

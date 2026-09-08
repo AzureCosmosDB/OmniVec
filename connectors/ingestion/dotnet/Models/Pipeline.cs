@@ -22,6 +22,12 @@ public class Pipeline
     [JsonPropertyName("processing_mode")]
     public string ProcessingMode { get; set; } = "queue";
 
+    [JsonPropertyName("content_strategy")]
+    public string ContentStrategy { get; set; } = "truncate";
+
+    [JsonPropertyName("chunk_config")]
+    public Dictionary<string, object>? ChunkConfig { get; set; }
+
     [JsonPropertyName("destination_id")]
     public string DestinationId { get; set; } = "";
 

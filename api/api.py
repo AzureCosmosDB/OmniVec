@@ -3441,6 +3441,65 @@ def _require_exclusive_inline_sources(store, pipeline_sources, pipeline_id=None)
             )
 
 
+def _validate_cosmos_chunking(store, req, destination):
+    """Validate the settings actually supported by the .NET Cosmos text path."""
+    from models import ChunkConfig
+    from string import Formatter
+    sources = [(entry, store.get(entry.source_id, "source") or {}) for entry in req.sources]
+    if not any(source.get("type") == "cosmosdb" for _, source in sources):
+        return None
+    if req.content_strategy not in ("truncate", "chunk"):
+        raise HTTPException(status_code=400, detail="content_strategy must be truncate or chunk")
+    if req.content_strategy != "chunk":
+        return None
+    if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
+        raise HTTPException(status_code=400, detail="Cosmos text chunking requires queue processing and a Cosmos vector destination; chunk+inline is unsupported")
+    for entry, source in sources:
+        if (source.get("type") != "cosmosdb" or entry.content_mode != "field"
+                or source.get("config", {}).get("attachments_field")):
+            raise HTTPException(status_code=400, detail="Cosmos text chunking supports only Cosmos field-content sources, not URL/attachment/mixed sources")
+    raw = req.chunk_config or {}
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+    allowed = {"chunk_size", "chunk_overlap", "chunk_unit", "store_text", "text_field", "doc_id_pattern"}
+    if set(raw) - allowed:
+        raise HTTPException(status_code=400, detail="Unknown Cosmos chunk_config options")
+    try:
+        config = ChunkConfig(**raw)
+        if (config.chunk_size < 100 or config.chunk_overlap < 0
+                or config.chunk_overlap >= config.chunk_size or config.chunk_unit not in ("chars", "tokens")):
+            raise ValueError("Require size >= 100, 0 <= overlap < size, unit chars/tokens")
+        variables = set()
+        for _, field, spec, conversion in Formatter().parse(config.doc_id_pattern):
+            if field is not None:
+                if spec or conversion:
+                    raise ValueError("Chunk ID format specifiers and conversions are unsupported")
+                variables.add(field)
+        if ("chunk" not in variables or variables - {
+                "source", "source_ref", "source_hash", "chunk", "pipeline", "pipeline_hash"}
+                or "{{" in config.doc_id_pattern or "}}" in config.doc_id_pattern
+                or any(c in config.doc_id_pattern for c in "/\\?#")
+                or len(config.doc_id_pattern.encode("utf-8")) > 900):
+            raise ValueError("doc_id_pattern requires {chunk}, supported variables and Cosmos-safe characters")
+        reserved = {
+            "id", "source_id", "source_ref", "pipeline_id", "pipeline_name", "pipeline_generation",
+            "embedded_at", "content_hash", "embedding_dims", "chunk_index", "chunk_count",
+            "chunk_source_partition", "ttl", "_omnivec_sync",
+        }
+        pk = (destination.get("config", {}).get("partition_key_path") or "").lstrip("/")
+        vector = req.vector_index_path.lstrip("/")
+        if not pk or "/" in pk or (pk != "id" and pk in reserved):
+            raise ValueError("Chunking requires a probed single top-level partition key, /id or a non-metadata field")
+        if not vector or "/" in vector or vector in reserved or vector == pk:
+            raise ValueError("Chunk vector field conflicts with partition/metadata fields")
+        if (not config.text_field.strip() or config.text_field in reserved | {pk, vector}
+                or "/" in config.text_field or config.text_field.startswith("_")):
+            raise ValueError("Chunk text_field conflicts with partition/vector/metadata fields")
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid Cosmos chunk_config: {exc}") from exc
+    return config
+
+
 def _require_sharepoint_compatible(store, req, destination):
     if not any(
         (store.get(source.source_id, "source") or {}).get("type") == "sharepoint"
@@ -3501,6 +3560,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             detail=f"Destination '{req.destination_id}' not found"
         )
     _require_sharepoint_compatible(store, req, dest_doc)
+    cosmos_chunk_config = _validate_cosmos_chunking(store, req, dest_doc)
 
     # Reject inline mode when source and destination are different stores.
     # Inline mode writes embeddings back to source docs in-place, so the source
@@ -3549,7 +3609,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             raise HTTPException(status_code=400, detail="chunk_size must be >= 100")
         if cc.get("chunk_overlap", 0) >= cc.get("chunk_size", 1000):
             raise HTTPException(status_code=400, detail="chunk_overlap must be less than chunk_size")
-        chunk_config = ChunkConfig(**cc)
+        chunk_config = cosmos_chunk_config or ChunkConfig(**cc)
 
     # store_content only makes sense when source and destination are different
     # stores. For same-store (inline) pipelines, the original content is
@@ -3627,6 +3687,20 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if not doc:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
+    chunk_destination = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    cosmos_chunk_config = _validate_cosmos_chunking(store, req, chunk_destination)
+    if any((store.get(s.source_id, "source") or {}).get("type") == "cosmosdb" for s in req.sources):
+        # A different strategy/text-storage contract requires migration of existing
+        # documents; do not leave raw vectors or previously stored text behind.
+        if req.content_strategy != doc.get("content_strategy", "truncate"):
+            raise HTTPException(status_code=400, detail="Cosmos content_strategy is immutable; create a new pipeline")
+        old_chunk = doc.get("chunk_config") or {}
+        if cosmos_chunk_config is not None and (
+            cosmos_chunk_config.store_text != old_chunk.get("store_text", False)
+            or cosmos_chunk_config.text_field != old_chunk.get("text_field", "text")
+        ):
+            raise HTTPException(status_code=400, detail="Cosmos chunk store_text/text_field are immutable; create a new pipeline")
+
     # Reject queue mode when Service Bus wasn't provisioned (blob source disabled)
     if str(req.processing_mode or "").lower() == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
@@ -3685,7 +3759,9 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
-    if req.chunk_config and pipeline.content_strategy == "chunk":
+    if cosmos_chunk_config is not None:
+        pipeline.chunk_config = cosmos_chunk_config
+    elif req.chunk_config and pipeline.content_strategy == "chunk":
         from models import ChunkConfig
         pipeline.chunk_config = ChunkConfig(**req.chunk_config)
     # store_content: same constraint as create — reject true on same-store pipelines.
@@ -3743,6 +3819,7 @@ def resume_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
     if pipeline.processing_mode == "inline":
         _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     pipeline.status = PipelineStatus.ACTIVE
@@ -3763,6 +3840,8 @@ def set_processing_mode(pipeline_id: str, mode: str):
     if mode == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
     pipeline = _pipeline_from_doc(doc)
+    proposed = pipeline.model_copy(update={"processing_mode": mode})
+    _validate_cosmos_chunking(store, proposed, store.get(pipeline.destination_id, "destination"))
     if mode == "inline":
         dest_doc_for_mode = store.get(pipeline.destination_id, "destination")
         _require_inline_compatible(store, pipeline.sources, dest_doc_for_mode)
@@ -3802,6 +3881,7 @@ async def run_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
     if pipeline.processing_mode == "inline":
         await asyncio.to_thread(_require_exclusive_inline_sources, store, pipeline.sources, pipeline_id)
 

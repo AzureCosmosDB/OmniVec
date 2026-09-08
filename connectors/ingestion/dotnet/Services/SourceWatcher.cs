@@ -200,6 +200,16 @@ public class SourceWatcher : ISourceWatcher
         // instead of extracting inline text from content_fields.
         var attachmentMode = !string.IsNullOrEmpty(_source.AttachmentsField);
 
+        foreach (var pipeline in pipelines.Where(p => p.ContentStrategy == "chunk"))
+        {
+            if (pipeline.ProcessingMode != "queue" || attachmentMode
+                || pipeline.Sources.Any(s => s.SourceId == _source.Id && s.ContentMode != "field")
+                || _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId)?.Type != "cosmosdb-vector")
+                throw new NotSupportedException("Cosmos text chunking requires queue mode, field content and a Cosmos vector destination");
+            if (_sbPublisher?.IsEnabled != true)
+                throw new NotSupportedException("Cosmos text chunking requires Service Bus; legacy jobs do not support it");
+        }
+
         foreach (var pipeline in pipelines)
         {
             var pipSrcOuter = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
@@ -232,13 +242,13 @@ public class SourceWatcher : ISourceWatcher
                         continue;
                     }
 
-                    if (!Source.HasContent(doc, cfFields))
+                    if (!Source.HasContent(doc, cfFields) && pipeline.ContentStrategy != "chunk")
                     {
                         skippedNoContent++;
                         continue;
                     }
                     var contentText = Source.ExtractContent(doc, cfFields);
-                    if (string.IsNullOrEmpty(contentText))
+                    if (string.IsNullOrEmpty(contentText) && pipeline.ContentStrategy != "chunk")
                     {
                         skippedNoContent++;
                         continue;
@@ -348,6 +358,8 @@ public class SourceWatcher : ISourceWatcher
                             DestinationConfig = destConfig,
                             Content = content,
                             ContentHash = contentHash,
+                            ContentStrategy = pipeline.ContentStrategy,
+                            ChunkConfig = pipeline.ChunkConfig,
                             PartitionKeyValue = pkValue,
                             PipelineGeneration = pipeline.Generation,
                             SourceContentFields = contentFields,

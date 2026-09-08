@@ -14,6 +14,33 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
 
     public string DestinationType => "cosmosdb-vector";
 
+    public async Task ReplaceTextChunksAsync(Dictionary<string, object> config, DeleteRequest source,
+        List<EmbeddingResult> chunks, CancellationToken ct)
+    {
+        var container = GetOrCreateClient(config["endpoint"].ToString()!)
+            .GetContainer(config["database"].ToString()!, config["container"].ToString()!);
+        var props = await container.ReadContainerAsync(cancellationToken: ct);
+        var pkField = props.Resource.PartitionKeyPath.TrimStart('/');
+        var vectorField = config.GetValueOrDefault("vector_field")?.ToString() ?? "embedding";
+        if (props.Resource.PartitionKeyPaths is { Count: > 1 } || pkField.Contains('/')
+            || (pkField != "id" && Services.CosmosTextChunker.Reserved.Contains(pkField))
+            || vectorField.Contains('/') || Services.CosmosTextChunker.Reserved.Contains(vectorField)
+            || vectorField == pkField
+            || chunks.Any(c => c.ContentField == pkField || c.ContentField == vectorField))
+            throw new NotSupportedException("Cosmos chunk fields conflict with partition/vector/metadata fields");
+        await ReplaceTextChunksInStoreAsync(chunks,
+            items => WriteBatchAsync(config, items, ct),
+            keep => DeleteByRefAsync(config, [source with { KeepIds = keep }], ct));
+    }
+
+    internal static async Task ReplaceTextChunksInStoreAsync(List<EmbeddingResult> chunks,
+        Func<List<EmbeddingResult>, Task> write, Func<HashSet<string>, Task> cleanup)
+    {
+        // Never erase the last good set until every new vector has been persisted.
+        await write(chunks);
+        await cleanup(chunks.Select(c => c.DocId).ToHashSet(StringComparer.Ordinal));
+    }
+
     public CosmosDbDestinationWriter(ILogger<CosmosDbDestinationWriter> logger)
     {
         _logger = logger;
@@ -210,6 +237,14 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
                 item[field] = value;
         if (!string.IsNullOrEmpty(doc.PipelineGeneration))
             item["pipeline_generation"] = doc.PipelineGeneration;
+        if (doc.ChunkIndex is not null)
+        {
+            item["source_ref"] = doc.SourceRef;
+            item["source_id"] = doc.SourceId;
+            item["chunk_index"] = doc.ChunkIndex.Value;
+            item["chunk_count"] = doc.ChunkCount!.Value;
+            item["chunk_source_partition"] = doc.PartitionKeyValue;
+        }
         item.Remove("id");
         if (!string.IsNullOrEmpty(pkField))
             item.Remove(pkField);
@@ -307,10 +342,12 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
             try
             {
                 var query = new QueryDefinition(
-                    "SELECT c.id FROM c WHERE c.source_id = @sid AND c.source_ref = @ref AND c.pipeline_id = @pid")
+                    "SELECT c.id FROM c WHERE c.source_id = @sid AND c.source_ref = @ref AND c.pipeline_id = @pid"
+                    + (req.KeepIds is null ? "" : " AND c.chunk_source_partition = @partition"))
                     .WithParameter("@sid", req.SourceId)
                     .WithParameter("@ref", req.SourceRef)
-                    .WithParameter("@pid", req.PipelineId);
+                    .WithParameter("@pid", req.PipelineId)
+                    .WithParameter("@partition", req.PartitionKeyValue);
                 // With /id, each chunk occupies its own logical partition.
                 // Keep source and pipeline filters even when the query fans out.
                 using var iter = container.GetItemQueryIterator<DeletedIdDoc>(
@@ -324,7 +361,9 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
                 while (iter.HasMoreResults)
                 {
                     var page = await iter.ReadNextAsync(ct);
-                    foreach (var d in page) if (!string.IsNullOrEmpty(d.Id)) ids.Add(d.Id);
+                    foreach (var d in page)
+                        if (!string.IsNullOrEmpty(d.Id) && req.KeepIds?.Contains(d.Id) != true)
+                            ids.Add(d.Id);
                 }
 
                 if (ids.Count == 0)
