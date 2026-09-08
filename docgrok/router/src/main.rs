@@ -10,8 +10,8 @@ use dashmap::DashMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, env, sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use std::{collections::{HashMap, HashSet}, env, sync::Arc, time::Duration};
+use tokio::sync::{Mutex, RwLock};
 use tower_http::{cors::CorsLayer, compression::CompressionLayer, limit::RequestBodyLimitLayer};
 use tracing::{error, info, warn};
 
@@ -58,6 +58,7 @@ struct AppState {
     model_health: Arc<DashMap<String, Value>>,
     /// Timestamp of last health check run
     last_health_check: Arc<RwLock<Option<std::time::Instant>>>,
+    metadata_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -218,6 +219,11 @@ async fn main() {
             info!("CosmosDB model store: {endpoint}/{database}/{container}");
             Some(CosmosConfig { endpoint, database, container, api_key })
         }
+        _ if ["COSMOS_ENDPOINT", "COSMOS_DATABASE", "COSMOS_CONTAINER"]
+            .iter().any(|key| env::var_os(key).is_some()) => {
+            error!("Incomplete Cosmos registry configuration: endpoint, database and container are all required");
+            std::process::exit(1);
+        }
         _ => {
             warn!("CosmosDB config not set, model persistence disabled");
             None
@@ -250,16 +256,26 @@ async fn main() {
         pipeline_worker_url,
         model_health,
         last_health_check,
+        metadata_lock: Arc::new(Mutex::new(())),
     };
 
-    // Load models from CosmosDB on startup
-    if let Err(e) = load_models_from_cosmos(&state).await {
-        warn!("Failed to load models from CosmosDB: {e}");
+    if let Err(e) = initialize_registry(&state).await {
+        error!("Cannot start with an unavailable model registry: {e}");
+        std::process::exit(1);
     }
-
-    // Load pipelines from CosmosDB
-    if let Err(e) = load_pipelines_from_cosmos(&state).await {
-        warn!("Failed to load pipelines from CosmosDB: {e}");
+    if state.cosmos.is_some() {
+        let registry_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                if let Err(e) = load_models_from_cosmos(&registry_state).await {
+                    error!("Model registry refresh failed; retaining last successful state: {e}");
+                }
+                if let Err(e) = load_pipelines_from_cosmos(&registry_state).await {
+                    error!("Pipeline registry refresh failed; retaining last successful state: {e}");
+                }
+            }
+        });
     }
 
     if mode == "controller" {
@@ -398,30 +414,43 @@ async fn cosmos_query(
     // Use AAD token (managed identity)
     let token = get_cosmos_token(state).await?;
 
-    let resp = state
-        .http
-        .post(&url)
-        .header("Authorization", format!("type=aad&ver=1.0&sig={token}"))
-        .header("Content-Type", "application/query+json")
-        .header("x-ms-version", "2020-07-15")
-        .header("x-ms-documentdb-isquery", "true")
-        .header("x-ms-documentdb-query-enablecrosspartition", "true")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("CosmosDB request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("CosmosDB query failed ({status}): {text}"));
+    let mut documents = Vec::new();
+    let mut continuation: Option<String> = None;
+    let mut seen = HashSet::new();
+    loop {
+        let mut request = state.http.post(&url)
+            .timeout(Duration::from_secs(30))
+            .header("Authorization", format!("type=aad&ver=1.0&sig={token}"))
+            .header("Content-Type", "application/query+json")
+            .header("x-ms-version", "2020-07-15")
+            .header("x-ms-documentdb-isquery", "true")
+            .header("x-ms-documentdb-query-enablecrosspartition", "true")
+            .json(&body);
+        if let Some(value) = &continuation {
+            request = request.header("x-ms-continuation", value);
+        }
+        let resp = request.send().await
+            .map_err(|e| format!("CosmosDB request failed: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("CosmosDB query failed ({status}): {text}"));
+        }
+        continuation = resp.headers().get("x-ms-continuation")
+            .map(|value| value.to_str().map(str::to_owned))
+            .transpose().map_err(|e| format!("Invalid Cosmos continuation header: {e}"))?
+            .filter(|value| !value.is_empty());
+        let data: Value = resp.json().await
+            .map_err(|e| format!("Failed to parse CosmosDB response: {e}"))?;
+        documents.extend(data["Documents"].as_array()
+            .ok_or("CosmosDB query response is missing Documents")?.iter().cloned());
+        match &continuation {
+            None => return Ok(documents),
+            Some(value) if !seen.insert(value.clone()) =>
+                return Err("CosmosDB query repeated a continuation token".into()),
+            _ => {}
+        }
     }
-
-    let data: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse CosmosDB response: {e}"))?;
-    Ok(data["Documents"].as_array().cloned().unwrap_or_default())
 }
 
 async fn cosmos_upsert(state: &AppState, doc: &Value) -> Result<(), String> {
@@ -437,6 +466,7 @@ async fn cosmos_upsert(state: &AppState, doc: &Value) -> Result<(), String> {
     let resp = state
         .http
         .post(&url)
+        .timeout(Duration::from_secs(30))
         .header("Authorization", format!("type=aad&ver=1.0&sig={token}"))
         .header("Content-Type", "application/json")
         .header("x-ms-version", "2020-07-15")
@@ -467,6 +497,7 @@ async fn cosmos_delete(state: &AppState, id: &str, doc_type: &str) -> Result<(),
     let resp = state
         .http
         .delete(&url)
+        .timeout(Duration::from_secs(30))
         .header("Authorization", format!("type=aad&ver=1.0&sig={token}"))
         .header("x-ms-version", "2020-07-15")
         .header("x-ms-documentdb-partitionkey", format!("[\"{doc_type}\"]"))
@@ -600,38 +631,81 @@ async fn fetch_aad_token(http: &Client, resource: &str) -> Result<String, String
 }
 
 async fn load_models_from_cosmos(state: &AppState) -> Result<(), String> {
-    if state.cosmos.is_none() {
-        return Ok(());
-    }
-    let docs =
-        cosmos_query(state, "SELECT * FROM c WHERE c.doc_type = 'docgrok_model'", &[]).await?;
-    let count = docs.len();
-    for doc in docs {
-        if let Some(id) = doc["id"].as_str() {
-            state.registry.insert(id.to_string(), doc);
-        }
-    }
-    info!("Loaded {count} external models from CosmosDB");
-    Ok(())
+    load_registry_from_cosmos(state, "docgrok_model", &state.registry).await
 }
 
 async fn load_pipelines_from_cosmos(state: &AppState) -> Result<(), String> {
+    load_registry_from_cosmos(state, "docgrok_pipeline", &state.pipelines).await
+}
+
+async fn load_registry_from_cosmos(
+    state: &AppState, doc_type: &str, cache: &DashMap<String, Value>,
+) -> Result<(), String> {
     if state.cosmos.is_none() {
         return Ok(());
     }
-    let docs = cosmos_query(
-        state,
-        "SELECT * FROM c WHERE c.doc_type = 'docgrok_pipeline'",
-        &[],
-    )
-    .await?;
-    let count = docs.len();
-    for doc in docs {
-        if let Some(id) = doc["id"].as_str() {
-            state.pipelines.insert(id.to_string(), doc);
-        }
+    let _guard = state.metadata_lock.lock().await;
+    let docs = cosmos_query(state, "SELECT * FROM c WHERE c.doc_type = @type", &[("@type", doc_type)]).await?;
+    let snapshot: HashMap<String, Value> = docs.into_iter().map(|doc| {
+        let id = doc["id"].as_str().filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("Invalid {doc_type} document: missing id"))?.to_owned();
+        Ok((id, doc))
+    }).collect::<Result<_, String>>()?;
+    let ids: HashSet<String> = snapshot.keys().cloned().collect();
+    for (id, doc) in snapshot {
+        cache.insert(id, doc);
     }
-    info!("Loaded {count} pipelines from CosmosDB");
+    // Publish only a complete successful snapshot; never clear a working cache
+    // before all pages have arrived or expose a transient empty registry.
+    cache.retain(|id, _| ids.contains(id));
+    Ok(())
+}
+
+async fn initialize_registry(state: &AppState) -> Result<(), String> {
+    for attempt in 1..=5 {
+        let result = async {
+            load_models_from_cosmos(state).await?;
+            load_pipelines_from_cosmos(state).await
+        }.await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt == 5 => return Err(e),
+            Err(e) => warn!("Registry startup load failed (attempt {attempt}/5): {e}"),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    unreachable!()
+}
+
+fn registry_unavailable(error: String) -> AppError {
+    error!("Registry operation failed: {error}");
+    AppError(StatusCode::SERVICE_UNAVAILABLE, "Model/pipeline registry storage is unavailable; retry the operation".into())
+}
+
+async fn save_registry_document(
+    state: &AppState, cache: &DashMap<String, Value>, doc: &Value,
+) -> Result<(), AppError> {
+    let id = doc["id"].as_str()
+        .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "Registry document requires an id".into()))?;
+    let _guard = state.metadata_lock.lock().await;
+    if state.cosmos.is_some() {
+        cosmos_upsert(state, doc).await.map_err(registry_unavailable)?;
+    }
+    cache.insert(id.to_owned(), doc.clone());
+    Ok(())
+}
+
+async fn remove_registry_document(
+    state: &AppState, cache: &DashMap<String, Value>, id: &str, doc_type: &str,
+) -> Result<(), AppError> {
+    let _guard = state.metadata_lock.lock().await;
+    if !cache.contains_key(id) {
+        return Err(AppError(StatusCode::NOT_FOUND, format!("Registry entry '{id}' not found")));
+    }
+    if state.cosmos.is_some() {
+        cosmos_delete(state, id, doc_type).await.map_err(registry_unavailable)?;
+    }
+    cache.remove(id);
     Ok(())
 }
 
@@ -716,6 +790,9 @@ async fn call_model(
             }
         }
     } else if model_id.starts_with("mdl-ext-") {
+        if !state.registry.contains_key(model_id) {
+            load_models_from_cosmos(state).await.map_err(registry_unavailable)?;
+        }
         let cfg = state
             .registry
             .get(model_id)
@@ -846,10 +923,40 @@ enum TextInput {
     Batch(Vec<String>),
 }
 
+fn pipeline_model_id(config: &Value) -> Option<&str> {
+    config["model_id"].as_str()
+        .or_else(|| config["model"].as_str())
+        .or_else(|| {
+            config["steps"].as_array().and_then(|steps| {
+                steps.iter().find_map(|step| {
+                    if step["type"].as_str() == Some("model") {
+                        step["model_id"].as_str().or_else(|| step["model"].as_str())
+                    } else {
+                        None
+                    }
+                })
+            })
+        })
+        .or_else(|| config["steps"][0]["model"].as_str())
+}
+
+fn request_model_id(req: &EmbedRequest, pipelines: &DashMap<String, Value>) -> Option<String> {
+    req.model_id.clone().or_else(|| {
+        req.pipeline.as_ref().and_then(|pipeline| {
+            pipelines.get(pipeline)
+                .and_then(|config| pipeline_model_id(&config).map(str::to_owned))
+        })
+    })
+}
+
 async fn handle_embed(
     State(state): State<AppState>,
     Json(req): Json<EmbedRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if req.model_id.is_none() && req.pipeline.as_ref().is_some_and(|id| !state.pipelines.contains_key(id)) {
+        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    }
+    let resolved_model_id = request_model_id(&req, &state.pipelines);
     // Blob/data requests always go through the pipeline-worker so that
     // its transform dispatcher can pick the right per-blob recipe (pdf,
     // text, image, video, ...) by extension. The model_id (if any) is
@@ -864,7 +971,7 @@ async fn handle_embed(
             "text": req.text,
             "pipeline": req.pipeline,
             "requestId": req.request_id,
-            "model_id": req.model_id,
+            "model_id": resolved_model_id,
             "blob_url": req.blob_url,
             "blob_name": req.blob_name,
             "blob_container": req.blob_container,
@@ -908,7 +1015,7 @@ async fn handle_embed(
             "text": req.text,
             "pipeline": req.pipeline,
             "requestId": req.request_id,
-            "model_id": req.model_id,
+            "model_id": resolved_model_id,
             "transform_name": req.transform_name,
             "transform": req.transform,
             "expected_dim": req.expected_dim,
@@ -980,19 +1087,7 @@ async fn handle_embed(
         let pipeline_cfg = state.pipelines.get(pipeline).map(|v| v.value().clone());
         if let Some(cfg) = pipeline_cfg {
             // Resolve the embedding model from pipeline config or steps
-            let pipeline_model_id = cfg["model_id"].as_str()
-                .or_else(|| cfg["model"].as_str())
-                .or_else(|| {
-                    cfg["steps"].as_array().and_then(|steps| {
-                        steps.iter().find_map(|s| {
-                            if s["type"].as_str() == Some("model") {
-                                s["model_id"].as_str().or_else(|| s["model"].as_str())
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                });
+            let pipeline_model_id = pipeline_model_id(&cfg);
 
             // Text-only request: call the embedding model directly (skip pipeline worker)
             if req.text.is_some() && req.data.is_none() && req.blob_url.is_none() {
@@ -1116,11 +1211,12 @@ async fn handle_embed_batch(
         }
 
         // Real pipeline — resolve model_id from pipeline config and batch embed via model
+        if !state.pipelines.contains_key(pipeline.as_str()) {
+            load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        }
         let pipeline_cfg = state.pipelines.get(pipeline.as_str()).map(|v| v.value().clone());
         if let Some(cfg) = pipeline_cfg {
-            let resolved_model = cfg["model_id"].as_str()
-                .or_else(|| cfg["model"].as_str())
-                .or_else(|| cfg["steps"][0]["model"].as_str());
+            let resolved_model = pipeline_model_id(&cfg);
             if let Some(model_id) = resolved_model {
                 let result =
                     call_model(&state, model_id, TextInput::Batch(req.texts.clone())).await?;
@@ -1240,7 +1336,8 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
 // Admin — Model Registry
 // ============================================================================
 
-async fn list_registry_models(State(state): State<AppState>) -> impl IntoResponse {
+async fn list_registry_models(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
     let mut models = Vec::new();
 
     // Native models from K8s — only deployments with omnivec/role=model label
@@ -1248,7 +1345,9 @@ async fn list_registry_models(State(state): State<AppState>) -> impl IntoRespons
         let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
             kube::Api::namespaced(k8s.clone(), &state.namespace);
         let lp = kube::api::ListParams::default().labels("omnivec/role=model");
-        if let Ok(list) = api.list(&lp).await {
+        let list = api.list(&lp).await
+            .map_err(|e| registry_unavailable(format!("Native model discovery failed: {e}")))?;
+        {
             for dep in list.items {
                 let name = dep.metadata.name.clone().unwrap_or_default();
 
@@ -1315,7 +1414,7 @@ async fn list_registry_models(State(state): State<AppState>) -> impl IntoRespons
         }));
     }
 
-    Json(json!({"models": models}))
+    Ok(Json(json!({"models": models})))
 }
 
 async fn register_model(
@@ -1339,12 +1438,7 @@ async fn register_model(
         "embedding_dim": req.embedding_dim,
     });
 
-    state.registry.insert(model_id.clone(), cfg.clone());
-
-    // Persist to CosmosDB
-    if let Err(e) = cosmos_upsert(&state, &cfg).await {
-        warn!("Failed to persist model to CosmosDB: {e}");
-    }
+    save_registry_document(&state, &state.registry, &cfg).await?;
 
     info!("Registered model: {model_id} ({})", req.name);
     Ok((
@@ -1358,6 +1452,9 @@ async fn get_registry_model(
     Path(model_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     // Check external registry
+    if !state.registry.contains_key(&model_id) && !model_id.starts_with("mdl-native-") {
+        load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    }
     if let Some(entry) = state.registry.get(&model_id) {
         return Ok(Json(entry.value().clone()));
     }
@@ -1398,16 +1495,8 @@ async fn delete_registry_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    if state.registry.remove(&model_id).is_none() {
-        return Err(AppError(
-            StatusCode::NOT_FOUND,
-            format!("Model '{model_id}' not found"),
-        ));
-    }
-
-    if let Err(e) = cosmos_delete(&state, &model_id, "docgrok_model").await {
-        warn!("Failed to delete model from CosmosDB: {e}");
-    }
+    load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    remove_registry_document(&state, &state.registry, &model_id, "docgrok_model").await?;
 
     info!("Deleted model: {model_id}");
     Ok(Json(json!({"deleted": model_id})))
@@ -1424,6 +1513,9 @@ async fn healthcheck_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    if !state.registry.contains_key(&model_id) {
+        load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    }
     let cfg = state
         .registry
         .get(&model_id)
@@ -1506,6 +1598,9 @@ async fn chat_via_model(
     Path(model_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, AppError> {
+    if !state.registry.contains_key(&model_id) {
+        load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    }
     let cfg = state
         .registry
         .get(&model_id)
@@ -1788,15 +1883,19 @@ async fn system_info(State(state): State<AppState>) -> impl IntoResponse {
 // Admin — Pipelines
 // ============================================================================
 
-async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse {
+async fn list_pipelines(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
     let pipelines: Vec<Value> = state.pipelines.iter().map(|e| e.value().clone()).collect();
-    Json(json!({"pipelines": pipelines}))
+    Ok(Json(json!({"pipelines": pipelines})))
 }
 
 async fn get_pipeline(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    if !state.pipelines.contains_key(&name) {
+        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    }
     state
         .pipelines
         .get(&name)
@@ -1830,11 +1929,7 @@ async fn create_pipeline(
     doc["name"] = json!(name);
     doc["doc_type"] = json!("docgrok_pipeline");
 
-    state.pipelines.insert(pipeline_id.clone(), doc.clone());
-
-    if let Err(e) = cosmos_upsert(&state, &doc).await {
-        warn!("Failed to persist pipeline: {e}");
-    }
+    save_registry_document(&state, &state.pipelines, &doc).await?;
 
     Ok((StatusCode::CREATED, Json(json!({"id": pipeline_id, "name": name}))))
 }
@@ -1844,6 +1939,9 @@ async fn update_pipeline(
     Path(id): Path<String>,
     Json(req): Json<PipelineRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if !state.pipelines.contains_key(&id) {
+        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    }
     if !state.pipelines.contains_key(&id) {
         return Err(AppError(
             StatusCode::NOT_FOUND,
@@ -1855,11 +1953,7 @@ async fn update_pipeline(
     doc["id"] = json!(id);
     doc["doc_type"] = json!("docgrok_pipeline");
 
-    state.pipelines.insert(id.clone(), doc.clone());
-
-    if let Err(e) = cosmos_upsert(&state, &doc).await {
-        warn!("Failed to persist pipeline: {e}");
-    }
+    save_registry_document(&state, &state.pipelines, &doc).await?;
 
     Ok(Json(json!({"id": id})))
 }
@@ -1868,16 +1962,8 @@ async fn delete_pipeline(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    if state.pipelines.remove(&name).is_none() {
-        return Err(AppError(
-            StatusCode::NOT_FOUND,
-            format!("Pipeline '{name}' not found"),
-        ));
-    }
-
-    if let Err(e) = cosmos_delete(&state, &name, "docgrok_pipeline").await {
-        warn!("Failed to delete pipeline from CosmosDB: {e}");
-    }
+    load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    remove_registry_document(&state, &state.pipelines, &name, "docgrok_pipeline").await?;
 
     Ok(Json(json!({"deleted": name})))
 }
@@ -1886,20 +1972,14 @@ async fn reset_pipeline(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    if let Some(mut entry) = state.pipelines.get_mut(&name) {
-        entry.value_mut()["reset_at"] = json!(chrono::Utc::now().to_rfc3339());
-        let doc = entry.value().clone();
-        drop(entry);
-        if let Err(e) = cosmos_upsert(&state, &doc).await {
-            warn!("Failed to persist pipeline reset: {e}");
-        }
-        Ok(Json(json!({"name": name, "reset": true})))
-    } else {
-        Err(AppError(
-            StatusCode::NOT_FOUND,
-            format!("Pipeline '{name}' not found"),
-        ))
+    if !state.pipelines.contains_key(&name) {
+        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
     }
+    let mut doc = state.pipelines.get(&name).map(|entry| entry.value().clone())
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Pipeline '{name}' not found")))?;
+    doc["reset_at"] = json!(chrono::Utc::now().to_rfc3339());
+    save_registry_document(&state, &state.pipelines, &doc).await?;
+    Ok(Json(json!({"name": name, "reset": true})))
 }
 
 async fn pipeline_options() -> impl IntoResponse {
@@ -1980,9 +2060,10 @@ async fn run_model_health_checks(state: &AppState) {
         }
     }
 
-    // Check external models from registry
-    for item in state.registry.iter() {
-        let (model_id, cfg) = item.pair();
+    // Never retain DashMap shard guards across remote health-probe awaits.
+    let external_models: Vec<(String, Value)> = state.registry.iter()
+        .map(|item| (item.key().clone(), item.value().clone())).collect();
+    for (model_id, cfg) in external_models {
         let name = cfg["name"].as_str().unwrap_or("").to_string();
         let model_type = cfg["type"].as_str().unwrap_or("").to_string();
         let endpoint = cfg["endpoint"].as_str().unwrap_or("").to_string();
@@ -2279,8 +2360,209 @@ async fn proxy_pipeline_worker(
 }
 
 #[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    async fn test_state(app: Router) -> (AppState, tokio::task::JoinHandle<()>) {
+        let cache = TOKEN_CACHE.get_or_init(|| RwLock::new((String::new(), std::time::Instant::now())));
+        *cache.write().await = ("local-test-token".into(), std::time::Instant::now());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (AppState {
+            registry: Arc::new(DashMap::new()),
+            pipelines: Arc::new(DashMap::new()),
+            native_urls: Arc::new(HashMap::new()),
+            http: Client::builder().timeout(Duration::from_secs(5)).build().unwrap(),
+            k8s: None,
+            namespace: "test".into(),
+            cosmos: Some(CosmosConfig {
+                endpoint: endpoint.clone(), database: "test".into(), container: "metadata".into(), api_key: String::new(),
+            }),
+            mock_1536_single: Arc::new(String::new()),
+            mock_128_single: Arc::new(String::new()),
+            controller_url: endpoint.clone(),
+            pipeline_worker_url: endpoint,
+            model_health: Arc::new(DashMap::new()),
+            last_health_check: Arc::new(RwLock::new(None)),
+            metadata_lock: Arc::new(Mutex::new(())),
+        }, server)
+    }
+
+    #[tokio::test]
+    async fn failed_registry_writes_and_deletes_do_not_change_memory_or_report_success() {
+        let app = Router::new()
+            .route("/dbs/test/colls/metadata/docs", post(|| async { StatusCode::SERVICE_UNAVAILABLE }))
+            .route("/dbs/test/colls/metadata/docs/{id}", delete(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let (state, server) = test_state(app).await;
+        let original = json!({"id":"trp-existing", "doc_type":"docgrok_pipeline", "model_id":"mdl-ext-old"});
+        state.pipelines.insert("trp-existing".into(), original.clone());
+        let changed = json!({"id":"trp-existing", "doc_type":"docgrok_pipeline", "model_id":"mdl-ext-new"});
+        assert_eq!(save_registry_document(&state, &state.pipelines, &changed).await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.pipelines.get("trp-existing").unwrap().value(), &original);
+        assert_eq!(remove_registry_document(&state, &state.pipelines, "trp-existing", "docgrok_pipeline").await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(state.pipelines.contains_key("trp-existing"));
+        let request: PipelineRequest = serde_json::from_value(json!({"name":"cannot-persist", "model_id":"mdl-ext-new"})).unwrap();
+        assert_eq!(create_pipeline(State(state.clone()), Json(request)).await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.pipelines.len(), 1);
+        assert_eq!(list_registry_models(State(state.clone())).await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn registry_load_reads_every_page_and_retains_last_good_snapshot_on_failure() {
+        let fail_second = Arc::new(AtomicBool::new(false));
+        let failure = fail_second.clone();
+        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(move |headers: axum::http::HeaderMap| {
+            let failure = failure.clone();
+            async move {
+                if headers.contains_key("x-ms-continuation") {
+                    if failure.load(Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    Json(json!({"Documents":[{"id":"mdl-second","doc_type":"docgrok_model"}]})).into_response()
+                } else {
+                    ([("x-ms-continuation", "second")], Json(json!({
+                        "Documents":[{"id":"mdl-first","doc_type":"docgrok_model"}]
+                    }))).into_response()
+                }
+            }
+        }));
+        let (state, server) = test_state(app).await;
+        load_models_from_cosmos(&state).await.unwrap();
+        assert!(state.registry.contains_key("mdl-first") && state.registry.contains_key("mdl-second"));
+        fail_second.store(true, Ordering::SeqCst);
+        state.registry.insert("mdl-retained".into(), json!({"id":"mdl-retained"}));
+        assert!(load_models_from_cosmos(&state).await.is_err());
+        assert_eq!(state.registry.len(), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_registry_response_cannot_clear_a_working_cache() {
+        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(|| async {
+            Json(json!({"unexpected":"response"}))
+        }));
+        let (state, server) = test_state(app).await;
+        state.registry.insert("mdl-existing".into(), json!({"id":"mdl-existing"}));
+        assert!(load_models_from_cosmos(&state).await.is_err());
+        assert!(state.registry.contains_key("mdl-existing"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn repeated_continuation_fails_without_losing_cached_models() {
+        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(|| async {
+            ([("x-ms-continuation", "repeated")], Json(json!({"Documents":[]})))
+        }));
+        let (state, server) = test_state(app).await;
+        state.registry.insert("mdl-existing".into(), json!({"id":"mdl-existing"}));
+        assert!(load_models_from_cosmos(&state).await.is_err());
+        assert!(state.registry.contains_key("mdl-existing"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn durable_models_and_pipelines_reload_and_reach_the_file_worker_on_a_fresh_replica() {
+        let stored = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+        let posted = stored.clone();
+        let deleted = stored.clone();
+        let app = Router::new()
+            .route("/dbs/test/colls/metadata/docs", post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let stored = posted.clone();
+                async move {
+                    let mut docs = stored.lock().await;
+                    if headers.contains_key("x-ms-documentdb-isquery") {
+                        let kind = body["parameters"][0]["value"].as_str().unwrap();
+                        Json(json!({"Documents":docs.values().filter(|doc| doc["doc_type"] == kind).cloned().collect::<Vec<_>>()})).into_response()
+                    } else {
+                        docs.insert(body["id"].as_str().unwrap().to_owned(), body);
+                        StatusCode::CREATED.into_response()
+                    }
+                }
+            }))
+            .route("/dbs/test/colls/metadata/docs/{id}", delete(move |Path(id): Path<String>| {
+                let stored = deleted.clone();
+                async move {
+                    stored.lock().await.remove(&id);
+                    StatusCode::NO_CONTENT
+                }
+            }))
+            .route("/process", post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["model_id"], "mdl-ext-durable");
+                Json(json!({"model_id":body["model_id"], "chunks":[]}))
+            }));
+        let (state, server) = test_state(app).await;
+        let model = json!({"id":"mdl-ext-durable","doc_type":"docgrok_model","name":"durable"});
+        let pipeline = json!({"id":"trp-durable","doc_type":"docgrok_pipeline","name":"files","model_id":"mdl-ext-durable"});
+        save_registry_document(&state, &state.registry, &model).await.unwrap_or_else(|_| panic!("Model persistence failed"));
+        save_registry_document(&state, &state.pipelines, &pipeline).await.unwrap_or_else(|_| panic!("Pipeline persistence failed"));
+
+        let mut replica = state.clone();
+        replica.registry = Arc::new(DashMap::new());
+        replica.pipelines = Arc::new(DashMap::new());
+        replica.metadata_lock = Arc::new(Mutex::new(()));
+        let request = serde_json::from_value(json!({"pipeline":"trp-durable","blob_name":"demo.txt"})).unwrap();
+        let response = handle_embed(State(replica.clone()), Json(request)).await
+            .unwrap_or_else(|_| panic!("File request did not recover persisted model routing")).into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        initialize_registry(&replica).await.unwrap();
+        assert_eq!(replica.registry.get("mdl-ext-durable").unwrap().value(), &model);
+        assert_eq!(replica.pipelines.get("trp-durable").unwrap().value(), &pipeline);
+
+        remove_registry_document(&state, &state.registry, "mdl-ext-durable", "docgrok_model").await
+            .unwrap_or_else(|_| panic!("Model deletion failed"));
+        load_models_from_cosmos(&replica).await.unwrap();
+        assert!(!replica.registry.contains_key("mdl-ext-durable"));
+        assert!(stored.lock().await.contains_key("trp-durable"));
+        server.abort();
+    }
+}
+
+#[cfg(test)]
 mod request_body_tests {
     use super::*;
+
+    #[test]
+    fn file_and_transform_requests_resolve_the_pipeline_embedding_model() {
+        let pipelines = DashMap::new();
+        pipelines.insert("trp-demo".to_owned(), json!({"model_id": "mdl-ext-demo"}));
+        for field in ["blob_name", "blobUrl", "data", "transform_name"] {
+            let mut input = json!({"pipeline": "trp-demo"});
+            input[field] = json!("demo.txt");
+            let req: EmbedRequest = serde_json::from_value(input).unwrap();
+            assert_eq!(request_model_id(&req, &pipelines).as_deref(), Some("mdl-ext-demo"));
+        }
+    }
+
+    #[test]
+    fn explicit_model_overrides_pipeline_and_model_free_transforms_remain_valid() {
+        let pipelines = DashMap::new();
+        pipelines.insert("trp-demo".to_owned(), json!({"model_id": "mdl-ext-default"}));
+        let req: EmbedRequest = serde_json::from_value(json!({
+            "pipeline": "trp-demo", "model_id": "mdl-ext-override", "blob_name": "demo.txt"
+        })).unwrap();
+        assert_eq!(request_model_id(&req, &pipelines).as_deref(), Some("mdl-ext-override"));
+        let req: EmbedRequest = serde_json::from_value(json!({
+            "blob_name": "image.png", "transform_name": "image"
+        })).unwrap();
+        assert!(request_model_id(&req, &pipelines).is_none());
+    }
+
+    #[test]
+    fn pipeline_model_aliases_and_model_steps_resolve_consistently() {
+        for config in [
+            json!({"model_id": "mdl-ext-demo"}),
+            json!({"model": "mdl-ext-demo"}),
+            json!({"steps": [{"type": "extract"}, {"type": "model", "model_id": "mdl-ext-demo"}]}),
+            json!({"steps": [{"type": "model", "model": "mdl-ext-demo"}]}),
+            json!({"steps": [{"model": "mdl-ext-demo"}]}),
+        ] {
+            assert_eq!(pipeline_model_id(&config), Some("mdl-ext-demo"));
+        }
+        assert!(pipeline_model_id(&json!({"steps": [{"type": "image_embed"}]})).is_none());
+    }
 
     #[tokio::test]
     async fn request_body_limits_allow_base64_maximum_and_reject_overflow() {
