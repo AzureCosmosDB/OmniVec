@@ -132,7 +132,7 @@ def main():
             call("POST", f"pipelines/{pid}/run")
         initial = []
         for pid in pids:
-            found = wait_rows(pid, lambda r: len(r) > 2 and all(x.get("chunk_count") == len(r) for x in r), "long document")
+            found = wait_rows(pid, lambda r: len(r) == len(expected_chunks) and all(x.get("chunk_count") == len(r) for x in r), "long document")
             validate(found)
             assert [x["text"] for x in sorted(found, key=lambda x: x["chunk_index"])] == [
                 part for part, _ in expected_chunks], "Worker differs from existing Python chunk strategy"
