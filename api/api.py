@@ -1864,32 +1864,35 @@ async def create_source(req: CreateSourceRequest):
             from connectors.blob_connector import test_blob_connection
             ok, result = await test_blob_connection(clean_config)
             if not ok:
-                warnings.append(f"Blob source validation failed: {result}. "
+                warnings.append("Blob source validation failed. "
                     "Check account_url, container name, and that the OmniVec managed identity has "
                     "Storage Blob Data Reader role on the storage account.")
         except Exception as e:
-            warnings.append(f"Could not connect to blob source: {str(e)}")
+            logger.warning("Blob source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to blob source. Check the account, container and managed identity access.")
     elif req.type == SourceType.COSMOSDB:
         try:
             from connectors.cosmosdb_connector import test_cosmosdb_connection
             ok, result = await test_cosmosdb_connection(clean_config)
             if not ok:
-                warnings.append(f"CosmosDB source validation failed: {result}. "
+                warnings.append("CosmosDB source validation failed. "
                     "Check endpoint, database, container, and that the OmniVec managed identity has "
                     "Cosmos DB Built-in Data Reader role on the account.")
         except Exception as e:
-            warnings.append(f"Could not connect to CosmosDB source: {str(e)}")
+            logger.warning("CosmosDB source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to CosmosDB source. Check the endpoint, database, container and managed identity access.")
     elif req.type == SourceType.SHAREPOINT:
         try:
             ok, result = await _test_sharepoint_connection(clean_config)
             if not ok:
                 warnings.append(
-                    f"SharePoint source validation failed: {result}. "
+                    "SharePoint source validation failed. "
                     "Grant the OmniVec managed identity Microsoft Graph application access "
                     "(Sites.Selected or Files.Read.All) to the configured site."
                 )
         except Exception as e:
-            warnings.append(f"Could not connect to SharePoint source: {str(e)}")
+            logger.warning("SharePoint source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to SharePoint source. Check the site, library and Microsoft Graph application permissions.")
 
     source = Source(
         id=source_id,
@@ -2356,8 +2359,8 @@ class TestConnectionRequest(BaseModel):
 async def _test_sharepoint_connection(config: dict) -> tuple[bool, dict | str]:
     try:
         sharepoint = SharePointSourceConfig(**config)
-    except ValidationError as exc:
-        return False, f"Invalid SharePoint configuration: {exc}"
+    except ValidationError:
+        return False, "Invalid SharePoint configuration. Check the site, library, folder and polling settings."
 
     from azure.identity.aio import DefaultAzureCredential
 

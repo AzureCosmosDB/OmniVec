@@ -154,6 +154,21 @@
           'title': 'PendingApprovalSummary',
           'type': 'object',
         }),
+        'PipelineRef': dict({
+          'properties': dict({
+            'pipeline_id': dict({
+              'maxLength': 160,
+              'pattern': '^[A-Za-z0-9][A-Za-z0-9_.-]*$',
+              'title': 'Pipeline Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'pipeline_id',
+          ]),
+          'title': 'PipelineRef',
+          'type': 'object',
+        }),
         'SessionSummary': dict({
           'properties': dict({
             'created_at': dict({
@@ -355,7 +370,7 @@
       }),
     }),
     'info': dict({
-      'description': 'In-cluster AI ops agent — Phase 1 (read-only diagnostics).',
+      'description': 'In-cluster diagnosis and approval-gated, verified operational recovery.',
       'title': 'OmniVec Agent',
     }),
     'openapi': '3.1.0',
@@ -540,6 +555,177 @@
             }),
           }),
           'summary': 'Chat Approve',
+        }),
+      }),
+      '/v1/diagnostics/pipeline': dict({
+        'post': dict({
+          'operationId': 'pipeline_diagnostics_v1_diagnostics_pipeline_post',
+          'parameters': list([
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/PipelineRef',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'additionalProperties': True,
+                    'title': 'Response Pipeline Diagnostics V1 Diagnostics Pipeline Post',
+                    'type': 'object',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Pipeline Diagnostics',
+        }),
+      }),
+      '/v1/diagnostics/system': dict({
+        'get': dict({
+          'description': 'Deterministic, read-only diagnostics; no LLM or new model deployment required.',
+          'operationId': 'system_diagnostics_v1_diagnostics_system_get',
+          'parameters': list([
+            dict({
+              'in': 'header',
+              'name': 'authorization',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Authorization',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Id',
+              }),
+            }),
+            dict({
+              'in': 'header',
+              'name': 'x-caller-role',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'X-Caller-Role',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    'additionalProperties': True,
+                    'title': 'Response System Diagnostics V1 Diagnostics System Get',
+                    'type': 'object',
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'System Diagnostics',
         }),
       }),
       '/v1/health': dict({
@@ -1065,6 +1251,32 @@
     tuple(
       'post',
       '/v1/chat/approve',
+      list([
+        'authorization',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/v1/diagnostics/pipeline',
+      list([
+        'authorization',
+        'x-caller-id',
+        'x-caller-role',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/v1/diagnostics/system',
       list([
         'authorization',
         'x-caller-id',

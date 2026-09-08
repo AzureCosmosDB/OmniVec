@@ -137,6 +137,40 @@ class TestArgValidation:
 # ---------------------------------------------------------------------------
 class TestOmnivecApiTools:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name,field,route", [
+        ("get_source", "source_id", "sources"),
+        ("get_destination", "destination_id", "destinations"),
+        ("get_pipeline", "pipeline_id", "pipelines"),
+        ("get_pipeline_status", "pipeline_id", "pipelines"),
+        ("get_pipeline_metrics", "pipeline_id", "pipelines"),
+        ("get_job", "job_id", "jobs"),
+    ])
+    @pytest.mark.parametrize("identifier,encoded", [
+        ("../settings?token=example#fragment", "..%2Fsettings%3Ftoken%3Dexample%23fragment"),
+        ("https://example.invalid/path", "https%3A%2F%2Fexample.invalid%2Fpath"),
+        ("//example.invalid/path", "%2F%2Fexample.invalid%2Fpath"),
+        ("..\\settings", "..%5Csettings"),
+        ("%2e%2e%2fsettings", "%252e%252e%252fsettings"),
+    ])
+    async def test_resource_id_cannot_change_request_path(self, omnivec_api_mod, tools_mod, monkeypatch, tool_name, field, route, identifier, encoded):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        monkeypatch.setattr(omnivec_api_mod, "OMNIVEC_API_URL", "http://omnivec-api")
+        t = tools_mod.get_tool(tool_name)
+        await t.callable(t.params(**{field: identifier}))
+        assert fake.requests[0][1] == f"http://omnivec-api/api/{route}/{encoded}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", [".", ".."])
+    async def test_relative_resource_id_is_rejected_before_request(self, omnivec_api_mod, tools_mod, monkeypatch, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        t = tools_mod.get_tool("get_source")
+        with pytest.raises(ValueError, match="relative path"):
+            await t.callable(t.params(source_id=identifier))
+        assert not fake.requests
+
+    @pytest.mark.asyncio
     async def test_list_pipelines_hits_expected_url(self, omnivec_api_mod, tools_mod, monkeypatch):
         fake = FakeClient()
         fake.next_response = {"pipelines": []}
