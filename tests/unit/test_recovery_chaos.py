@@ -195,7 +195,8 @@ def test_success_reports_harness_not_conversational_repair(config, monkeypatch):
     harness = simulated_harness(config, monkeypatch)
     report = harness.execute()
     assert report["result"] == "passed"
-    assert report["autonomous_conversational_repair"].startswith("blocked")
+    assert report["autonomous_conversational_repair"] == "not_exercised_by_base_harness"
+    assert report["diagnostic_recovery_tools"] == "not_integrated_by_base_harness"
     assert report["processing_recovery"].startswith("passed")
     harness.restore.assert_called_once()
     assert "cleanup" in [call.args[0] for call in harness.probe.call_args_list]
@@ -501,3 +502,235 @@ def test_watchdog_disarms_only_when_actual_replicas_restored():
     }, clock=clock, sleep=clock.sleep, emit=lambda value, **_: output.append(value))
     assert output == ["WATCHDOG_READY", "WATCHDOG_DISARMED"]
     assert apps.patch_namespaced_deployment.call_count == 1
+
+
+def test_command_failure_keeps_returncode_and_safe_stderr_cause(monkeypatch):
+    monkeypatch.setattr(chaos.subprocess, "run", Mock(return_value=SimpleNamespace(
+        returncode=27, stdout="credential=private",
+        stderr='Unable to connect to the server: Get "https://private.invalid?sig=private": '
+               'dial tcp 192.0.2.10:443: i/o timeout\nAuthorization: Bearer private\n',
+    )))
+    with pytest.raises(chaos.CommandFailure) as raised:
+        chaos.Commands().run(["kubectl"], label="kubectl get")
+    evidence = raised.value.evidence
+    assert evidence["returncode"] == 27 and evidence["classification"] == "timeout"
+    assert "i/o timeout" in evidence["stderr_excerpt"]
+    assert "unable to connect" in evidence["stderr_excerpt"]
+    for secret in ("private", "192.0.2.10", "Authorization", "sig="):
+        assert secret not in json.dumps(evidence)
+
+
+@pytest.mark.parametrize("stderr,classification,excerpt", [
+    ("Error from server (Forbidden): secret", "authorization", "forbidden"),
+    ("You must be logged in to the server (Unauthorized) token=private", "authentication", "unauthorized"),
+    ("x509: certificate signed by unknown authority private", "tls_certificate", "certificate"),
+    ('Error from server (NotFound): pods "private" not found', "not_found", "not found"),
+    ('Error from server (AlreadyExists): private already exists', "already_exists", "already exists"),
+    ("Error from server (Too Many Requests): private", "throttled", "throttling"),
+    ("connection reset by peer https://private", "transport", "connection refused/reset/aborted"),
+    ("lookup private: no such host", "transport", "DNS"),
+    ("http2: server sent GOAWAY private", "transport", "transport closed"),
+    ("ServiceUnavailable private", "service_unavailable", "service unavailable"),
+])
+def test_limited_stderr_classification_never_copies_arbitrary_values(stderr, classification, excerpt):
+    evidence = chaos.CommandFailure("kubectl get", returncode=1, stderr=stderr).evidence
+    assert evidence["classification"] == classification
+    assert excerpt in evidence["stderr_excerpt"]
+    assert "private" not in json.dumps(evidence)
+
+
+def test_unknown_stderr_and_stdout_never_escape_into_report():
+    error = chaos.CommandFailure("pod probe verify", returncode=3,
+                                 stderr="opaque-unlabelled-credential\n" * 10000,
+                                 stdout='{"api_key":"private"}')
+    assert error.evidence["stderr_excerpt"] == "[unrecognized stderr omitted]"
+    assert len(json.dumps(error.evidence)) < 500
+    assert "credential" not in json.dumps(error.evidence)
+
+
+def test_safe_pod_error_type_survives_without_logging_stdout(monkeypatch):
+    monkeypatch.setattr(chaos.subprocess, "run", Mock(return_value=SimpleNamespace(
+        returncode=1, stderr="command terminated with exit code 1",
+        stdout="private response\nCHAOS_ERROR=ClientAuthenticationError\n",
+    )))
+    with pytest.raises(chaos.CommandFailure) as raised:
+        chaos.Commands().run(["kubectl"], label="pod probe verify")
+    assert raised.value.evidence["probe_error_type"] == "ClientAuthenticationError"
+    assert raised.value.evidence["classification"] == "pod_probe_error"
+    assert "private" not in json.dumps(raised.value.evidence)
+
+
+def test_timeout_has_null_returncode_and_redacts_partial_output(monkeypatch):
+    monkeypatch.setattr(chaos.subprocess, "run", Mock(side_effect=subprocess.TimeoutExpired(
+        ["kubectl"], 10, output=b"private", stderr=b"TLS handshake timeout https://private",
+    )))
+    with pytest.raises(chaos.CommandFailure) as raised:
+        chaos.Commands().run(["kubectl"], label="kubectl get")
+    assert raised.value.evidence["returncode"] is None
+    assert raised.value.evidence["classification"] == "timeout"
+    assert raised.value.evidence["process_timed_out"] is True
+    assert raised.value.evidence["stderr_excerpt"] == "TLS handshake timeout"
+    assert "private" not in json.dumps(raised.value.evidence)
+
+
+def test_get_retries_only_transport_failures_then_records_recovery(config):
+    clock = Clock()
+    commands = Mock()
+    commands.run.side_effect = [
+        chaos.CommandFailure("kubectl get", classification="timeout"),
+        chaos.CommandFailure("kubectl get", returncode=1, stderr="connection reset by peer private"),
+        '{"items":[]}',
+    ]
+    harness = chaos.Harness(config, commands=commands, clock=clock, sleep=clock.sleep)
+    harness.stage = "processing_verification"
+    assert harness.kube("get", "pods", "-o", "json") == '{"items":[]}'
+    assert commands.run.call_count == 3 and clock.now == 3
+    failures = harness.report["read_attempt_failures"]
+    assert [e["attempt"] for e in failures] == [1, 2]
+    assert all(e["will_retry"] and e["stage"] == "processing_verification" for e in failures)
+    assert "primary_failure" not in harness.report
+
+
+@pytest.mark.parametrize("stderr", [
+    "Forbidden", "Unauthorized", "x509: bad certificate", "NotFound", "AlreadyExists",
+    "Too Many Requests", "ServiceUnavailable", "unrecognized semantic error",
+])
+def test_get_nontransport_errors_never_retry(config, stderr):
+    commands = Mock()
+    commands.run.side_effect = chaos.CommandFailure("kubectl get", returncode=1, stderr=stderr)
+    harness = chaos.Harness(config, commands=commands, sleep=Mock(side_effect=AssertionError("retry")))
+    with pytest.raises(chaos.CommandFailure):
+        harness.kube("get", "pods", "-o", "json")
+    commands.run.assert_called_once()
+    assert harness.report["read_attempt_failures"][0]["will_retry"] is False
+
+
+def test_authentication_evidence_prevents_retry_even_if_process_also_timed_out(config):
+    commands = Mock()
+    commands.run.side_effect = chaos.CommandFailure(
+        "kubectl get", stderr="Unauthorized private", classification="timeout",
+    )
+    harness = chaos.Harness(config, commands=commands, sleep=Mock(side_effect=AssertionError("retry")))
+    with pytest.raises(chaos.CommandFailure):
+        harness.kube("get", "pods", "-o", "json")
+    commands.run.assert_called_once()
+    evidence = harness.report["read_attempt_failures"][0]
+    assert evidence["classification"] == "authentication" and evidence["process_timed_out"] is True
+
+
+@pytest.mark.parametrize("args", [
+    ("scale", "deployment/worker", "--replicas=2"), ("rollout", "restart", "deployment/api"),
+    ("create", "-f", "-"), ("patch", "deployment", "worker"), ("replace", "-f", "-"),
+    ("delete", "job", "watchdog"), ("apply", "-f", "-"),
+    ("exec", "api-pod", "--", "python3", "-"), ("logs", "pod/api"),
+    ("wait", "--for=condition=Ready", "pod/api"), ("config", "view"),
+    ("list", "pods"), ("get", "pods", "--raw=/api/v1"), ("get", "pods", "--watch"),
+    ("get", "pods", "-w=true"), ("get", "unknown-extension"), ("get", "pods/api/log"),
+])
+def test_ambiguous_writes_exec_and_other_operations_never_retry(config, args):
+    commands = Mock()
+    commands.run.side_effect = chaos.CommandFailure("kubectl " + args[0], classification="timeout")
+    harness = chaos.Harness(config, commands=commands, sleep=Mock(side_effect=AssertionError("retry")))
+    with pytest.raises(chaos.CommandFailure):
+        harness.kube(*args)
+    commands.run.assert_called_once()
+    assert "read_attempt_failures" not in harness.report
+
+
+def test_get_with_stdin_document_is_not_assumed_retryable(config):
+    commands = Mock()
+    commands.run.side_effect = chaos.CommandFailure("kubectl get", classification="timeout")
+    harness = chaos.Harness(config, commands=commands, sleep=Mock(side_effect=AssertionError("retry")))
+    with pytest.raises(chaos.CommandFailure):
+        harness.kube("get", "pods", document={"unsafe": "do_not_assume"})
+    commands.run.assert_called_once()
+
+
+def test_get_retry_budget_includes_backoff_and_all_attempts(config):
+    clock = Clock()
+    commands = Mock()
+
+    def timeout(_args, **kwargs):
+        clock.sleep(kwargs["timeout"])
+        raise chaos.CommandFailure("kubectl get", classification="timeout")
+
+    commands.run.side_effect = timeout
+    harness = chaos.Harness(config, commands=commands, clock=clock, sleep=clock.sleep)
+    with pytest.raises(chaos.CommandFailure):
+        harness.kube("get", "deployments", "-o", "json", timeout=30)
+    assert clock.now == 30 and commands.run.call_count == 3
+    assert [call.kwargs["timeout"] for call in commands.run.call_args_list] == [10, 10, 7]
+    assert [e["will_retry"] for e in harness.report["read_attempt_failures"]] == [True, True, False]
+
+
+def test_get_retry_budget_never_exceeds_remaining_harness_deadline(config):
+    clock = Clock()
+    commands = Mock()
+
+    def timeout(_args, **kwargs):
+        clock.sleep(kwargs["timeout"])
+        raise chaos.CommandFailure("kubectl get", classification="timeout")
+
+    commands.run.side_effect = timeout
+    harness = chaos.Harness(config, commands=commands, clock=clock, sleep=clock.sleep)
+    harness.deadline = 15
+    with pytest.raises(chaos.CommandFailure):
+        harness.kube("get", "pods", timeout=30)
+    assert clock.now == 15 and commands.run.call_count == 2
+
+
+def test_get_json_parse_failure_is_not_retried(config):
+    commands = Mock()
+    commands.run.return_value = "{invalid"
+    harness = chaos.Harness(config, commands=commands)
+    with pytest.raises(json.JSONDecodeError):
+        harness.get("deployment", "worker")
+    commands.run.assert_called_once()
+
+
+def test_primary_and_cleanup_failures_preserve_distinct_stages_and_returncodes(config, monkeypatch):
+    harness = simulated_harness(config, monkeypatch)
+    original = harness.probe.side_effect
+
+    def fail(action):
+        if action == "verify":
+            harness.report["last_operation"] = "pod probe verify"
+            raise chaos.CommandFailure("pod probe verify", returncode=17,
+                                       stderr="connection reset by peer private")
+        if action == "cleanup":
+            harness.report["last_operation"] = "kubectl get"
+            raise chaos.CommandFailure("kubectl get", classification="timeout",
+                                       stderr="TLS handshake timeout private")
+        return original(action)
+
+    harness.probe.side_effect = fail
+    report = harness.execute()
+    assert report["result"] == "failed"
+    primary, cleanup = report["primary_failure"], report["cleanup_failure"]
+    assert primary["stage"] == "processing_verification" and primary["operation"] == "pod probe verify"
+    assert primary["returncode"] == 17 and primary["classification"] == "transport"
+    assert cleanup["stage"] == "fixture_cleanup" and cleanup["operation"] == "kubectl get"
+    assert cleanup["returncode"] is None and cleanup["classification"] == "timeout"
+    assert "private" not in json.dumps(report)
+    harness.release_lock.assert_not_called()
+
+
+def test_restoration_failure_does_not_overwrite_primary_injection_failure(config, monkeypatch):
+    harness = simulated_harness(config, monkeypatch)
+    harness.inject.side_effect = chaos.CommandFailure("kubectl rollout", returncode=4, stderr="Forbidden")
+    harness.restore.side_effect = chaos.CommandFailure("kubectl scale", classification="timeout")
+    report = harness.execute()
+    assert report["primary_failure"]["stage"] == "fault_injection"
+    assert report["primary_failure"]["returncode"] == 4
+    assert report["restoration_failure"]["stage"] == "restoration"
+    assert report["restoration_failure"]["classification"] == "timeout"
+
+
+def test_lock_cleanup_failure_has_its_own_stage(config, monkeypatch):
+    harness = simulated_harness(config, monkeypatch)
+    harness.release_lock.side_effect = chaos.CommandFailure("kubectl delete", returncode=9, stderr="Forbidden")
+    report = harness.execute()
+    assert report["result"] == "failed" and report["processing_recovery"].startswith("passed")
+    assert report["lock_cleanup_failure"]["stage"] == "lock_cleanup"
+    assert report["lock_cleanup_failure"]["returncode"] == 9
+    assert "primary_failure" not in report

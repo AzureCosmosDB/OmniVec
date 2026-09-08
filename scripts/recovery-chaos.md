@@ -28,14 +28,14 @@ cleanup, invalid vectors and duplicate identities.
 
 ### Repeatable offline suite matrix
 
-The expanded suites currently contain **104 passing offline cases**. These are
-fault-injection/contract tests, **not 104 live outages** or evidence that an agent
+The expanded suites currently contain **152 passing offline cases**. These are
+fault-injection/contract tests, **not 152 live outages** or evidence that an agent
 repaired anything. They use the existing pytest runner, fake Azure/Kubernetes/HTTP
 objects, and deterministic clocks; no cluster or network mutations are performed.
 
 | Suite | Cases | Specific verification |
 | --- | ---: | --- |
-| `test_recovery_chaos.py` | 50 | Default zero-call plan, explicit authorization/report bounds, AKS/FQDN/TLS allowlist, HPA/unhealthy/stale-signal rejection, atomic concurrent lock, watchdog arm-before-outage ordering, exact scoped restarts only after owned queue evidence, timeout/finally restoration, actual replica/generation convergence, watchdog acknowledgement before deletion, host loss/transient or persistent dependency outage, missing EventGrid cleanup retaining lock, manual/watchdog attribution, resourceVersion-protected owned annotation cleanup |
+| `test_recovery_chaos.py` | 98 | Default zero-call plan, explicit authorization/report bounds, AKS/FQDN/TLS allowlist, HPA/unhealthy/stale-signal rejection, atomic concurrent lock, watchdog arm-before-outage ordering, exact scoped restarts only after owned queue evidence, timeout/finally restoration, actual replica/generation convergence, watchdog acknowledgement before deletion, host loss/transient or persistent dependency outage, missing EventGrid cleanup retaining lock, manual/watchdog attribution, resourceVersion-protected owned annotation cleanup, separate primary/restoration/cleanup stages and return codes, credential-safe limited diagnostics, strictly bounded read-only transport retries and no mutation/exec retry |
 | `test_recovery_chaos_probes.py` | 54 | Dimension/nonfinite/zero/Boolean embedding rejection, lost/foreign/duplicate documents, original ID/content/vector drift, delayed duplicate detection, two persisted recovery observations, overwrite refusal and run ownership, ETag/ownership cleanup races, missing deletion events, peek-only source/pipeline/reference matching, malformed/non-object foreign messages, bounded 1,000-message scanning without consuming/purging, unavailable Service Bus, model/route/source/destination drift, real embedding invocation, wrong/empty semantic results, loopback-only admin auth, redacted HTTP/timeout errors |
 
 Repeat both suites together to catch accidental cross-suite interactions. For
@@ -152,15 +152,52 @@ Reports separate `fault_injected`, `observed_failure`, `repair_actor`,
 `readiness`, `processing_recovery`, `data_model_identity_and_duplicates`,
 `cleanup`, and `result` (`blocked`/`failed`/`passed`). A manual harness restore is
 **not** autonomous-agent repair. The watchdog is reported separately when its
-restore attempt is observed. No chat model is configured; an embedding deployment
-cannot provide conversational autonomous troubleshooting.
+restore attempt is observed. The base report labels conversational repair
+`not_exercised_by_base_harness` and diagnostics
+`not_integrated_by_base_harness`. These describe **this suite's coverage**, not
+the deployment's available chat model or implemented diagnostic contracts. Use
+the separately authorized agent-recovery scenario for actual approved-agent proof.
+
+### Failure evidence and bounded read-only retries
+
+The report preserves `primary_failure`, `restoration_failure`, `cleanup_failure`
+and `lock_cleanup_failure` independently when applicable. Each retains its
+original stage/operation, exception type, return code (null when unavailable)
+and error classification; a later cleanup operation cannot overwrite the primary
+cause. `last_operation` remains informational, not the only failure evidence.
+
+Command diagnostics retain a **limited safe projection of stderr**: at most four
+recognized fixed phrases / 384 characters, derived from at most its final 32 KiB.
+Examples include `i/o timeout`, `unauthorized`, `TLS certificate validation failed`
+and `Kubernetes backend transport failure`. Arbitrary stderr text, URLs, addresses,
+quoted values, credentials and raw stdout are never copied. Unknown stderr is
+explicitly marked omitted, rather than treated as a known root cause. The pod's
+allowlisted `CHAOS_ERROR=<exception type>` marker is retained separately if present.
+Process timeouts preserve `process_timed_out=true` and any safe diagnostic phrases.
+
+Only explicitly allowlisted **built-in `kubectl get` resource reads/lists** may
+retry, and only for classified transport failures/timeouts. There are at most
+three attempts, each at most ten seconds, with one-/two-second backoffs included
+in the original operation timeout and remaining harness deadline. Failed attempts
+are recorded in `read_attempt_failures`, including whether another attempt was
+actually scheduled. Successful recovery does not erase the earlier read evidence.
+
+There is **no automatic retry** for exec (even a read-only pod probe), scale,
+restart, create, patch, replace, delete, apply, arbitrary plugins, raw URLs, watch
+streams, commands with stdin documents, JSON parse errors, authorization/TLS
+validation failures, missing resources, throttling or unknown failures. In
+particular, an ambiguous write/approval/exec response is never automatically
+reissued. Authentication/authorization evidence also prevents retries when a
+process subsequently times out. These refinements do not authorize a live rerun
+or transfer retained-fixture cleanup ownership away from the coordinator.
 
 ## Explicitly excluded / optional follow-up
 
 No network denial, model deletion, production/DLQ replay or queue purge is
 implemented. Duplicate/replay injection is not claimed; only persisted duplicate
-detection is covered. Deterministic diagnostics/recovery-tool integration remains
-blocked until the owning ops agent supplies an actual supported contract.
+detection is covered. Deterministic diagnostics/recovery tools are not invoked
+by this base harness; their deployed availability must not be inferred from its
+coverage labels.
 
 Multi-chunk update/obsolete-vector cleanup is a **separate, serialized opt-in** follow-up using
 the maintained `scripts\e2e-cosmos-chunking.py`, not silently part of this

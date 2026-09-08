@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -51,6 +52,82 @@ class Blocked(RuntimeError):
     pass
 
 
+_STDERR_SIGNALS = [
+    (r"\bforbidden\b", "forbidden", "authorization"),
+    (r"\bunauthorized\b|you must be logged in", "unauthorized", "authentication"),
+    (r"x509:|certificate signed by unknown authority|certificate has expired", "TLS certificate validation failed", "tls_certificate"),
+    (r"\bnotfound\b|\bnot found\b", "resource not found", "not_found"),
+    (r"\balreadyexists\b|\balready exists\b", "resource already exists", "already_exists"),
+    (r"\btoo many requests\b|\b429\b", "server throttling", "throttled"),
+    (r"\bi/o timeout\b", "i/o timeout", "timeout"),
+    (r"tls handshake timeout", "TLS handshake timeout", "timeout"),
+    (r"context deadline exceeded|client\.timeout exceeded|request timed out|timed out|timeout expired",
+     "request deadline exceeded", "timeout"),
+    (r"unable to connect to the server", "unable to connect to the server", "transport"),
+    (r"connection refused|connection reset|connection aborted", "connection refused/reset/aborted", "transport"),
+    (r"\bno such host\b|temporary failure in name resolution", "DNS resolution failure", "transport"),
+    (r"unexpected eof|connection closed|http2.*goaway", "transport closed unexpectedly", "transport"),
+    (r"error dialing backend|error sending request|unable to upgrade connection", "Kubernetes backend transport failure", "transport"),
+    (r"\bserviceunavailable\b|\bservice unavailable\b|\b503\b", "service unavailable", "service_unavailable"),
+    (r"executable .* not found|executable file not found", "credential executable unavailable", "executable_unavailable"),
+]
+_PROBE_ERROR_TYPES = {
+    "AssertionError", "RuntimeError", "TimeoutError", "ConnectionError", "HTTPError",
+    "HttpResponseError", "ClientAuthenticationError", "CredentialUnavailableError",
+    "ServiceRequestError", "ServiceResponseError", "ResourceNotFoundError",
+    "PermissionError", "ValueError", "KeyError", "ModuleNotFoundError", "ImportError",
+}
+_READ_RESOURCES = {"deployment", "deployments", "pod", "pods", "job", "jobs",
+                   "configmap", "configmaps", "hpa"}
+
+
+def diagnostic_excerpt(stderr):
+    """Project stderr onto fixed diagnostic phrases; never copy arbitrary text."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    text = (stderr or "")[-32768:]
+    matches = [(phrase, category) for pattern, phrase, category in _STDERR_SIGNALS
+               if re.search(pattern, text, re.I)]
+    return {
+        "classification": matches[0][1] if matches else "nonzero_exit",
+        "stderr_excerpt": ("; ".join(phrase for phrase, _ in matches[:4])[:384]
+                           if matches else "[unrecognized stderr omitted]" if text else ""),
+        "stderr_redaction": "fixed_diagnostic_phrases_only",
+    }
+
+
+class CommandFailure(RuntimeError):
+    def __init__(self, operation, *, returncode=None, stderr=None, stdout=None, classification=None):
+        evidence = diagnostic_excerpt(stderr)
+        if classification:
+            if classification == "timeout":
+                evidence["process_timed_out"] = True
+            if classification != "timeout" or evidence["classification"] not in {
+                "authentication", "authorization", "tls_certificate", "not_found", "already_exists", "throttled",
+            }:
+                evidence["classification"] = classification
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        for line in (stdout or "")[-8192:].splitlines():
+            if line.startswith("CHAOS_ERROR=") and line[12:] in _PROBE_ERROR_TYPES:
+                evidence["probe_error_type"] = line[12:]
+                if classification is None and evidence["classification"] == "nonzero_exit":
+                    evidence["classification"] = "pod_probe_error"
+                break
+        self.evidence = {"operation": operation, "returncode": returncode, **evidence}
+        super().__init__(operation + ": " + evidence["classification"] + " (raw output suppressed)")
+
+
+def retryable_get(args, document):
+    # kubectl lists through its built-in get verb; never retry arbitrary plugins,
+    # raw URLs, streams, execs or writes even if their stderr looks transient.
+    return (
+        document is None and len(args) >= 2 and args[0] == "get"
+        and args[1].split("/", 1)[0] in _READ_RESOURCES and args[1].count("/") <= 1
+        and not any(arg == "-w" or arg.startswith(("-w=", "--watch", "--raw")) for arg in args[2:])
+    )
+
+
 def require(condition, message):
     if not condition:
         raise Blocked(message)
@@ -81,14 +158,15 @@ class Commands:
             result = subprocess.run(
                 [shutil.which(args[0]) or args[0], *args[1:]],
                 input=stdin, capture_output=True, text=True, timeout=timeout, check=False,
-                encoding="utf-8",
+                encoding="utf-8", errors="replace",
             )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(label + ": timeout (output suppressed)") from None
+        except subprocess.TimeoutExpired as error:
+            raise CommandFailure(label, stderr=error.stderr, stdout=error.stdout,
+                                 classification="timeout") from None
         except OSError:
-            raise RuntimeError(label + ": executable unavailable") from None
+            raise CommandFailure(label, classification="executable_unavailable") from None
         if result.returncode:
-            raise RuntimeError(label + ": nonzero exit (output suppressed)")
+            raise CommandFailure(label, returncode=result.returncode, stderr=result.stderr, stdout=result.stdout)
         return result.stdout
 
 
@@ -107,13 +185,14 @@ class Harness:
         self.signal_possible = False
         self.originals = {}
         self.baseline = None
+        self.stage = "initialization"
         self.report = {
             "run_id": self.run_id, "result": "blocked", "fault_injected": [],
             "observed_failure": [], "repair_actor": [], "readiness": "not_checked",
             "processing_recovery": "not_checked", "data_model_identity_and_duplicates": "not_checked",
             "cleanup": "not_needed", "watchdog": self.job, "lock": LOCK,
-            "autonomous_conversational_repair": "blocked: no configured chat deployment",
-            "diagnostic_recovery_tools": "not_integrated: awaiting verified entrypoint contract",
+            "autonomous_conversational_repair": "not_exercised_by_base_harness",
+            "diagnostic_recovery_tools": "not_integrated_by_base_harness",
             "not_covered": ["production message replay", "out-of-order Cosmos chunk race",
                             "network denial", "model deletion", "multi-chunk update/deletion"],
         }
@@ -125,13 +204,46 @@ class Harness:
         return self.commands.run(args, timeout=min(timeout, remaining), stdin=stdin, label=label)
 
     def kube(self, *args, timeout=30, document=None):
-        return self.command(
-            ["kubectl", "--kubeconfig", self.c["kubeconfig"],
-             "--request-timeout=" + str(max(1, int(timeout))) + "s",
-             "-n", self.c["namespace"], *args],
-            timeout=timeout, stdin=None if document is None else json.dumps(document),
-            label="kubectl " + args[0],
-        )
+        read_only = retryable_get(args, document)
+        operation = "kubectl " + args[0] + (" " + args[1].split("/", 1)[0] if read_only else "")
+
+        def invoke(budget):
+            return self.command(
+                ["kubectl", "--kubeconfig", self.c["kubeconfig"],
+                 "--request-timeout=" + str(max(1, int(budget))) + "s",
+                 "-n", self.c["namespace"], *args],
+                timeout=budget, stdin=None if document is None else json.dumps(document),
+                label=operation,
+            )
+        if not read_only:
+            return invoke(timeout)
+        deadline = min(self.deadline, self.clock() + timeout)
+        for attempt in range(1, 4):
+            remaining = deadline - self.clock()
+            require(remaining > 0, "Read-only command deadline exceeded")
+            try:
+                return invoke(min(10, remaining))
+            except CommandFailure as error:
+                retry = (error.evidence["classification"] in ("timeout", "transport")
+                         and attempt < 3 and self.clock() + attempt < deadline)
+                self.report.setdefault("read_attempt_failures", []).append({
+                    "stage": self.stage, "attempt": attempt, "will_retry": retry, **error.evidence,
+                })
+                if not retry:
+                    raise
+                self.sleep(attempt)
+
+    def record_failure(self, field, error):
+        details = {
+            "stage": self.stage, "operation": self.report.get("last_operation", "not_started"),
+            "error_type": type(error).__name__, "returncode": None,
+            "classification": ("precondition_failed" if isinstance(error, Blocked) else
+                               "timeout" if isinstance(error, TimeoutError) else "non_command_error"),
+        }
+        if isinstance(error, CommandFailure):
+            details.update(error.evidence)
+        # Keep the original stage even when cleanup subsequently changes last_operation.
+        self.report.setdefault(field, details)
 
     def get(self, kind, name):
         return json.loads(self.kube("get", kind, name, "-o", "json"))
@@ -317,22 +429,30 @@ class Harness:
         restored = False
         try:
             # Identity and baseline reads precede any writes.
+            self.stage = "preflight"
             self.preflight()
+            self.stage = "lock_acquisition"
             self.acquire()
             # Recheck after acquiring the lock; never rely on an unlocked stale baseline.
+            self.stage = "baseline_recheck"
             require(self.all_healthy(), "Baseline changed while acquiring lock")
             self.baseline = self.probe("baseline")
             self.phase("preflight")
+            self.stage = "watchdog_setup"
             self.establish_watchdog()
+            self.stage = "fault_injection"
             self.inject()
         except Exception as exc:
             error = exc
+            self.record_failure("primary_failure", exc)
         finally:
             if self.watchdog_possible:
                 try:
+                    self.stage = "restoration"
                     self.restore()
                     restored = True
                 except Exception as exc:
+                    self.record_failure("restoration_failure", exc)
                     self.report["restoration_error"] = type(exc).__name__
                     self.report["readiness"] = "restoration_unverified_watchdog_and_lock_retained"
                     error = error or exc
@@ -342,24 +462,33 @@ class Harness:
             self.deadline = self.clock() + 480
             try:
                 if error is None:
+                    self.stage = "processing_verification"
                     data = self.probe("verify")
+                    self.stage = "model_identity_verification"
                     identity = self.probe("registry")
                     require(identity == self.baseline["identity"], "Model or route identities changed")
+                    self.stage = "search_verification"
                     self.probe("search")
                     self.report["processing_recovery"] = "passed_real_persisted_embedding_and_search"
                     self.report["data_model_identity_and_duplicates"] = data
             except Exception as exc:
+                self.record_failure("primary_failure", exc)
                 error = error or exc
             finally:
                 try:
+                    self.stage = "fixture_cleanup"
                     self.report["cleanup"] = self.probe("cleanup")
                 except Exception as exc:
+                    self.record_failure("cleanup_failure", exc)
                     self.report["cleanup"] = "failed_owned_fixture_only; lock_retained"
                     error = error or exc
-        if self.locked and restored and not isinstance(self.report["cleanup"], str):
-            self.release_lock()
-        elif self.locked and restored and not self.fixture_possible:
-            self.release_lock()
+        if self.locked and restored and (not isinstance(self.report["cleanup"], str) or not self.fixture_possible):
+            try:
+                self.stage = "lock_cleanup"
+                self.release_lock()
+            except Exception as exc:
+                self.record_failure("lock_cleanup_failure", exc)
+                error = error or exc
         if error:
             self.report["error_type"] = type(error).__name__
             # Never stringify dependency exceptions: they can contain credentials.
@@ -427,6 +556,7 @@ def main(argv=None):
     try:
         report = harness.execute()
     except BaseException as error:
+        harness.record_failure("primary_failure", error)
         report = harness.report
         report["result"] = "failed" if harness.outage_possible else "blocked"
         report["error_type"] = type(error).__name__
