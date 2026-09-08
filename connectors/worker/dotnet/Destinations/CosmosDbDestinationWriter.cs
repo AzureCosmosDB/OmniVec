@@ -36,16 +36,11 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
 
         // Resolve partition key path
         var cacheKey = $"{endpoint}/{database}/{containerName}";
-        if (!_pkPathCache.TryGetValue(cacheKey, out var pkPath))
-        {
-            var props = await container.ReadContainerAsync(cancellationToken: ct);
-            pkPath = props.Resource.PartitionKeyPath;
-            _pkPathCache[cacheKey] = pkPath;
-        }
+        var pkPath = await GetPartitionKeyPathAsync(container, cacheKey, ct);
         var pkField = pkPath.TrimStart('/');
 
         // Group by partition key value
-        var groups = results.GroupBy(r => r.PartitionKeyValue);
+        var groups = results.GroupBy(r => DestinationPartitionKey(r, pkField));
         var tasks = new List<Task>();
 
         foreach (var group in groups)
@@ -57,6 +52,22 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
 
         await Task.WhenAll(tasks);
     }
+
+    private static async Task<string> GetPartitionKeyPathAsync(Container container, string cacheKey, CancellationToken ct)
+    {
+        if (_pkPathCache.TryGetValue(cacheKey, out var path)) return path;
+        var properties = await container.ReadContainerAsync(cancellationToken: ct);
+        path = properties.Resource.PartitionKeyPath;
+        _pkPathCache[cacheKey] = path;
+        return path;
+    }
+
+    internal static string DestinationPartitionKey(EmbeddingResult document, string pkField)
+        => pkField == "id" ? document.DocId : document.PartitionKeyValue;
+
+    internal static IEnumerable<IGrouping<string, string>> GroupDeletionIds(
+        IEnumerable<string> ids, string pkPath, string sourcePartition)
+        => ids.GroupBy(id => pkPath == "/id" ? id : sourcePartition);
 
     private Task WriteBatchWithRetryAsync(
         Container container,
@@ -205,7 +216,7 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         if (forCreate)
         {
             item["id"] = doc.DocId;
-            if (!string.IsNullOrEmpty(pkField))
+            if (!string.IsNullOrEmpty(pkField) && pkField != "id")
                 item[pkField] = doc.PartitionKeyValue;
         }
         return item;
@@ -289,6 +300,7 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         var containerName = config["container"]?.ToString() ?? "";
         var client = GetOrCreateClient(endpoint);
         var container = client.GetDatabase(database).GetContainer(containerName);
+        var pkPath = await GetPartitionKeyPathAsync(container, $"{endpoint}/{database}/{containerName}", ct);
 
         foreach (var req in requests)
         {
@@ -299,10 +311,14 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
                     .WithParameter("@sid", req.SourceId)
                     .WithParameter("@ref", req.SourceRef)
                     .WithParameter("@pid", req.PipelineId);
-                var pk = new PartitionKey(req.PartitionKeyValue);
+                // With /id, each chunk occupies its own logical partition.
+                // Keep source and pipeline filters even when the query fans out.
                 using var iter = container.GetItemQueryIterator<DeletedIdDoc>(
                     query,
-                    requestOptions: new QueryRequestOptions { PartitionKey = pk });
+                    requestOptions: new QueryRequestOptions
+                    {
+                        PartitionKey = pkPath == "/id" ? null : new PartitionKey(req.PartitionKeyValue),
+                    });
 
                 var ids = new List<string>();
                 while (iter.HasMoreResults)
@@ -319,18 +335,21 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
                     continue;
                 }
 
-                for (int i = 0; i < ids.Count; i += 100)
+                foreach (var partition in GroupDeletionIds(ids, pkPath, req.PartitionKeyValue))
                 {
-                    var chunk = ids.Skip(i).Take(100).ToList();
-                    var batch = container.CreateTransactionalBatch(pk);
-                    foreach (var id in chunk) batch.DeleteItem(id);
-                    using var resp = await batch.ExecuteAsync(ct);
-                    if (!resp.IsSuccessStatusCode)
+                    var partitionIds = partition.ToList();
+                    for (int i = 0; i < partitionIds.Count; i += 100)
                     {
-                        _logger.LogWarning(
-                            "Cosmos delete batch status={Status} for src={SrcId} ref={Ref}",
-                            resp.StatusCode, req.SourceId, req.SourceRef);
-                        throw new InvalidOperationException($"Cosmos delete batch failed: {resp.StatusCode}");
+                        var batch = container.CreateTransactionalBatch(new PartitionKey(partition.Key));
+                        foreach (var id in partitionIds.Skip(i).Take(100)) batch.DeleteItem(id);
+                        using var resp = await batch.ExecuteAsync(ct);
+                        if (!resp.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning(
+                                "Cosmos delete batch status={Status} for src={SrcId} ref={Ref}",
+                                resp.StatusCode, req.SourceId, req.SourceRef);
+                            throw new InvalidOperationException($"Cosmos delete batch failed: {resp.StatusCode}");
+                        }
                     }
                 }
                 _logger.LogInformation(

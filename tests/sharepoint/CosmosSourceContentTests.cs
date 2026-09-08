@@ -165,6 +165,35 @@ internal static class CosmosSourceContentTests
                 && item["unrelated"]!.Value<int>() == 42));
         });
 
+        Test("Cosmos id partitions preserve every chunk identity", () =>
+        {
+            var chunks = Enumerable.Range(0, 16).Select(i => Document($"blob.txt#chunk{i}") with
+            {
+                SourceRef = "blob.txt", PartitionKeyValue = "blob.txt",
+            }).ToList();
+            var ids = chunks.Select(doc =>
+            {
+                var created = BuildDocumentFields(doc, "id", "embedding", Now, true);
+                Check((string)created["id"] == doc.DocId);
+                Check(DestinationPartitionKey(doc, "id") == doc.DocId);
+                Check(DestinationPartitionKey(doc, "tenant") == "blob.txt");
+                return (string)created["id"];
+            }).ToList();
+            Check(ids.Distinct().Count() == 16, "Chunks must not overwrite one another");
+            Check(GroupDeletionIds(ids, "/id", "blob.txt").All(group =>
+                group.Count() == 1 && group.Key == group.Single()));
+            var sharedPartition = GroupDeletionIds(ids, "/tenant", "blob.txt").Single();
+            Check(sharedPartition.Key == "blob.txt" && sharedPartition.Count() == 16);
+        });
+
+        Test("Cosmos id-partition deletion includes legacy collapsed document and all chunks", () =>
+        {
+            string[] ids = ["blob.txt", "blob.txt#chunk0", "blob.txt#chunk1"];
+            var groups = GroupDeletionIds(ids, "/id", "blob.txt").ToList();
+            Check(groups.Select(group => group.Key).SequenceEqual(ids));
+            Check(!GroupDeletionIds([], "/id", "blob.txt").Any());
+        });
+
         Test("Cosmos handles exact patch limits and fails oversized atomic plans before returning batches", () =>
         {
             Check(Plan(Document(sourceFieldCount: 6)).Single().Single().Operations.Single().Length == 10);
