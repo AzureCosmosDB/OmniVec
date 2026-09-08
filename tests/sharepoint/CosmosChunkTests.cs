@@ -80,6 +80,28 @@ internal static class CosmosChunkTests
             config.DocIdPattern = "{source}-{source_ref}-{source_hash}-{chunk}-{pipeline}-{pipeline_hash}";
             Check(CosmosTextChunker.DocId(Message(), config, 7).Contains("-007-pipeline-"));
         });
+        Test("Configured chunk-name suffixes retain source references and cannot collide", () =>
+        {
+            var config = new TextChunkConfig { Size = 100, Overlap = 20, DocIdPattern = "custom-{source}-{chunk}" };
+            var msg = Message();
+            var ids = new HashSet<string>();
+            foreach (var source in new[] { "source-a", "source-b" })
+                foreach (var pipeline in new[] { "pipeline-a", "pipeline-b" })
+                    foreach (var partition in new[] { "tenant-a", "tenant-b" })
+                        foreach (var reference in new[] { "folder-a/document.txt", "folder-b/document.txt" })
+                        {
+                            msg.SourceId = source; msg.PipelineId = pipeline;
+                            msg.PartitionKeyValue = partition; msg.SourceRef = reference;
+                            for (var index = 0; index < 12; index++)
+                            {
+                                var result = CosmosTextChunker.Result(msg, config, "text", [1, 2], index, 12);
+                                Check(ids.Add(result.DocId));
+                                Check(result.DocId.EndsWith($"-custom-document-{index:D3}"));
+                                Check(result.SourceRef == reference && result.DocId != result.SourceRef);
+                            }
+                        }
+            Check(ids.Count == 192);
+        });
         foreach (var invalid in new TextChunkConfig[] {
             new() { Size = 99 }, new() { Overlap = -1 }, new() { Overlap = 1000 },
             new() { Unit = "bpe" }, new() { DocIdPattern = "{source}" },

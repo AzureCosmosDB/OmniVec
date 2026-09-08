@@ -288,6 +288,10 @@ All six pattern variables are supported: `source`, `source_ref`, `source_hash`,
 prefix isolates pipeline, source registration, source partition and document.
 Patterns must contain `{chunk}` and render valid Cosmos IDs. `/id` and single
 top-level non-metadata partition keys are supported.
+For example, `custom-{pipeline_hash}-{source_hash}-{chunk}` produces IDs ending
+in that rendered name, after the mandatory isolation prefix. A constant template
+or `{source}-{pipeline}` is rejected because it would name every chunk alike.
+The generated ID never replaces the original `source_ref`.
 
 After all replacement chunks are written, obsolete chunks for that exact source
 and pipeline are removed. Empty text removes the previous set. Failed embedding,
@@ -301,6 +305,9 @@ Offline regression coverage runs with `dotnet run --project tests/sharepoint -c 
 and `python -m pytest tests/unit/test_cosmos_chunking.py -q`. The opt-in
 `scripts/e2e-cosmos-chunking.py` live probe runs inside an API pod, keeps admin
 credentials on loopback, and creates only explicitly named synthetic fixtures.
+Its `--chunk-size`, `--chunk-overlap`, `--chunk-unit` and `--doc-id-pattern`
+arguments populate the existing `chunk_config`; the probe compares every chunk
+with the existing Python chunker and verifies the rendered template in every ID.
 
 ### Verify it worked
 

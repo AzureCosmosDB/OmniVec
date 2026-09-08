@@ -36,6 +36,8 @@ def setup(api_app, monkeypatch):
     {"doc_id_pattern": "{unknown}-{chunk}"}, {"doc_id_pattern": "{chunk:03d}"},
     {"text_field": "source_ref"}, {"text_field": "embedding"},
     {"text_field": "id"}, {"doc_id_pattern": "bad/path-{chunk}"},
+    {"doc_id_pattern": "same-name-for-every-chunk"},
+    {"doc_id_pattern": "{source}-{pipeline}"},
 ])
 def test_invalid_config_rejected(setup, config):
     setup.req.chunk_config = config
@@ -50,6 +52,14 @@ def test_valid_config_and_defaults(setup, unit):
     config = setup.api._validate_cosmos_chunking(setup.store, setup.req, setup.dest)
     assert config.chunk_size == 500 and config.chunk_overlap == 50
     assert config.chunk_unit == unit and not config.store_text and config.text_field == "text"
+
+
+def test_custom_template_is_preserved_not_replaced_with_default(setup):
+    template = "custom-{pipeline_hash}-{source_hash}-{source_ref}-{chunk}"
+    setup.req.chunk_config = {"chunk_size": 450, "chunk_overlap": 90, "doc_id_pattern": template}
+    config = setup.api._validate_cosmos_chunking(setup.store, setup.req, setup.dest)
+    assert config.doc_id_pattern == template
+    assert config.chunk_size == 450 and config.chunk_overlap == 90
 
 
 @pytest.mark.asyncio

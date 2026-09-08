@@ -15,6 +15,7 @@ import time
 import requests
 from azure.cosmos import CosmosClient, PartitionKey
 from azure.identity import DefaultAzureCredential
+from chunker import chunk_text, make_chunk_doc_id
 
 
 def main():
@@ -23,6 +24,10 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--database", default="testdb")
+    parser.add_argument("--chunk-size", type=int, default=600)
+    parser.add_argument("--chunk-overlap", type=int, default=80)
+    parser.add_argument("--chunk-unit", choices=["chars", "tokens"], default="chars")
+    parser.add_argument("--doc-id-pattern", default="{source}-chunk-{chunk}")
     args = parser.parse_args()
     assert args.prefix.startswith("pr183-chunks-"), "Use an isolated synthetic pr183-chunks-* prefix"
     assert args.database == "testdb", "This probe is limited to the synthetic test database"
@@ -63,13 +68,18 @@ def main():
     sid = register("sources", source_name, {"type": "cosmosdb", "config": {**connection, "container": source_name}})
     did = register("destinations", dest_name, {"type": "cosmosdb-vector",
         "config": {**connection, "container": dest_name, "vector_dimensions": 1536}})
-    chunk = {"chunk_size": 600, "chunk_overlap": 80, "chunk_unit": "chars", "store_text": True,
-             "text_field": "text", "doc_id_pattern": "{source}-chunk-{chunk}"}
+    chunk = {"chunk_size": args.chunk_size, "chunk_overlap": args.chunk_overlap,
+             "chunk_unit": args.chunk_unit, "store_text": True,
+             "text_field": "text", "doc_id_pattern": args.doc_id_pattern}
     body = {"sources": [{"source_id": sid, "content_fields": ["content"], "content_mode": "field"}],
             "destination_id": did, "docgrok_pipeline": args.model, "vector_index_path": "embedding",
             "processing_mode": "queue", "process_existing": True, "content_strategy": "chunk",
             "chunk_config": chunk, "metadata_fields": []}
     call("POST", "pipelines", {"name": args.prefix + "-reject-inline", **body, "processing_mode": "inline"}, expected=400)
+    for invalid_pattern in ("same-name-for-every-chunk", "{source}-{pipeline}", "{unknown}-{chunk}"):
+        rejected = call("POST", "pipelines", {"name": args.prefix + "-reject-pattern", **body,
+            "chunk_config": {**chunk, "doc_id_pattern": invalid_pattern}}, expected=400)
+        assert "doc_id_pattern" in rejected.get("detail", ""), "Template rejection must explain the invalid setting"
     pids = [register("pipelines", args.prefix + suffix, body) for suffix in ("-primary", "-isolation")]
     print(json.dumps({"fixtures": {"source": sid, "destination": did, "pipelines": pids,
                                   "source_container": source_name, "vector_container": dest_name}}), flush=True)
@@ -96,6 +106,11 @@ def main():
         assert all(len(x["embedding"]) == 1536 and all(math.isfinite(v) for v in x["embedding"])
                    and any(x["embedding"]) for x in found)
         assert all("content" not in x and x["chunk_source_partition"] == "synthetic-long" for x in found)
+        assert all(x["source_ref"] == "synthetic-long" and x["id"] != x["source_ref"] for x in found)
+        for document in found:
+            rendered = make_chunk_doc_id(document["pipeline_id"], document["source_ref"],
+                document["chunk_index"], args.doc_id_pattern)
+            assert document["id"].endswith("-" + rendered), "Configured chunk-name template was not honored"
 
     topics = [
         "The cobalt otter observatory measures the aurora above polar ice. Its unique instrument is a violet spectrometer.",
@@ -106,6 +121,7 @@ def main():
         "Classical orchestras rehearse symphonies with violin, clarinet, cello and precise musical dynamics.",
     ]
     text = "\n\n".join(" ".join(f"{topic} Observation {i}." for i in range(8)) for topic in topics)
+    expected_chunks = chunk_text(text, args.chunk_size, args.chunk_overlap, args.chunk_unit)
     original = {"id": "synthetic-long", "content": text, "marker": args.prefix}
     try:
         for pid in pids:
@@ -118,6 +134,8 @@ def main():
         for pid in pids:
             found = wait_rows(pid, lambda r: len(r) > 2 and all(x.get("chunk_count") == len(r) for x in r), "long document")
             validate(found)
+            assert [x["text"] for x in sorted(found, key=lambda x: x["chunk_index"])] == [
+                part for part, _ in expected_chunks], "Worker differs from existing Python chunk strategy"
             assert len({tuple(x["embedding"]) for x in found}) == len(found), "Expected distinct chunk vectors"
             initial.append(found)
         assert set(x["id"] for x in initial[0]).isdisjoint(x["id"] for x in initial[1])
@@ -132,6 +150,8 @@ def main():
         print(json.dumps({"long_verified": True, "source_chars": len(text),
             "chunks_per_pipeline": [len(r) for r in initial], "dimensions": 1536,
             "distinct_finite_vectors": True, "source_unchanged": True,
+            "chunk_config": chunk, "python_chunk_strategy_matches": True,
+            "configured_template_verified": True, "invalid_templates_rejected": True,
             "search_top_id": results[0]["id"]}), flush=True)
 
         # Pause the independent pipeline: primary cleanup must leave its vectors unchanged.
