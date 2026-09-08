@@ -5344,7 +5344,7 @@ async def update_model(model_id: str, payload: dict):
                 "embedding_dim": int(doc.get("embedding_dim", 1536)),
                 "api_version": doc.get("api_version", "2024-06-01"),
             }
-            if doc.get("client_id"):
+            if "client_id" in doc:
                 reg_payload["client_id"] = doc["client_id"]
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:

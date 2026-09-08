@@ -151,14 +151,15 @@ def test_update_distinguishes_missing_metadata_from_missing_model(registry, upst
     registry.client.post.assert_not_awaited()
 
 
-def test_successful_update_keeps_identity_and_forwards_client_id(registry):
+@pytest.mark.parametrize("client_id", ["fixture-client", ""])
+def test_successful_update_keeps_identity_and_forwards_client_id(registry, client_id):
     result = asyncio.run(registry.api.update_model(
-        MODEL_ID, {"deployment": "new", "client_id": "fixture-client"},
+        MODEL_ID, {"deployment": "new", "client_id": client_id},
     ))
     sent = registry.client.post.call_args.kwargs["json"]
     assert sent["id"] == MODEL_ID
     assert sent["api_key"] == ""
-    assert sent["client_id"] == "fixture-client"
+    assert sent["client_id"] == client_id
     assert result["status"] == "updated"
 
 

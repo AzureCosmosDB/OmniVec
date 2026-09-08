@@ -114,6 +114,10 @@ struct RegisterModelRequest {
     #[serde(default)]
     api_key: String,
     #[serde(default)]
+    auth_type: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
     api_version: String,
     #[serde(default)]
     embedding_dim: u32,
@@ -454,6 +458,16 @@ async fn cosmos_query(
 }
 
 async fn cosmos_upsert(state: &AppState, doc: &Value) -> Result<(), String> {
+    cosmos_write(state, doc, RegistryWrite::Upsert).await
+}
+
+enum RegistryWrite {
+    Upsert,
+    Create,
+    Replace(String),
+}
+
+async fn cosmos_write(state: &AppState, doc: &Value, mode: RegistryWrite) -> Result<(), String> {
     let cosmos = state.cosmos.as_ref().ok_or("No CosmosDB config")?;
     let url = format!(
         "{}/dbs/{}/colls/{}/docs",
@@ -463,24 +477,31 @@ async fn cosmos_upsert(state: &AppState, doc: &Value) -> Result<(), String> {
     let token = get_cosmos_token(state).await?;
     let doc_type = doc["doc_type"].as_str().unwrap_or("unknown");
 
-    let resp = state
-        .http
-        .post(&url)
+    let request = match mode {
+        RegistryWrite::Upsert => state.http.post(&url).header("x-ms-documentdb-is-upsert", "true"),
+        RegistryWrite::Create => state.http.post(&url),
+        RegistryWrite::Replace(etag) => {
+            let id = doc["id"].as_str().ok_or("Registry document requires an id")?;
+            let mut item_url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+            item_url.path_segments_mut().map_err(|_| "Invalid CosmosDB URL")?.push(id);
+            state.http.put(item_url).header("If-Match", etag)
+        }
+    };
+    let resp = request
         .timeout(Duration::from_secs(30))
         .header("Authorization", format!("type=aad&ver=1.0&sig={token}"))
         .header("Content-Type", "application/json")
         .header("x-ms-version", "2020-07-15")
-        .header("x-ms-documentdb-is-upsert", "true")
         .header("x-ms-documentdb-partitionkey", format!("[\"{doc_type}\"]"))
         .json(doc)
         .send()
         .await
-        .map_err(|e| format!("CosmosDB upsert failed: {e}"))?;
+        .map_err(|e| format!("CosmosDB write failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("CosmosDB upsert failed ({status}): {text}"));
+        return Err(format!("CosmosDB write failed ({status}): {text}"));
     }
     Ok(())
 }
@@ -1426,19 +1447,59 @@ async fn register_model(
         format!("mdl-ext-{}", &hash[..8])
     });
 
-    let cfg = json!({
+    let _guard = state.metadata_lock.lock().await;
+    let mut cfg = if state.cosmos.is_some() {
+        let mut docs = cosmos_query(
+            &state,
+            "SELECT * FROM c WHERE c.doc_type = @type AND c.id = @id",
+            &[("@type", "docgrok_model"), ("@id", &model_id)],
+        ).await.map_err(registry_unavailable)?;
+        if docs.len() > 1 || docs.first().is_some_and(|doc|
+            doc["id"].as_str() != Some(model_id.as_str()) || doc["doc_type"] != "docgrok_model")
+        {
+            return Err(registry_unavailable("Invalid model registry lookup response".into()));
+        }
+        docs.pop().unwrap_or_else(|| json!({}))
+    } else {
+        state.registry.get(&model_id).map(|entry| entry.value().clone())
+            .unwrap_or_else(|| json!({}))
+    };
+    let write_mode = if state.cosmos.is_some() && cfg.get("id").is_some() {
+        RegistryWrite::Replace(cfg["_etag"].as_str()
+            .ok_or_else(|| registry_unavailable("Stored model is missing its ETag".into()))?.to_owned())
+    } else {
+        RegistryWrite::Create
+    };
+    let updates = json!({
         "id": model_id,
         "doc_type": "docgrok_model",
         "name": req.name,
         "type": req.model_type,
         "endpoint": req.endpoint,
         "deployment": if req.deployment.is_empty() { req.name.clone() } else { req.deployment },
-        "api_key": req.api_key,
         "api_version": if req.api_version.is_empty() { "2024-06-01".to_string() } else { req.api_version },
         "embedding_dim": req.embedding_dim,
     });
+    let fields = cfg.as_object_mut()
+        .ok_or_else(|| registry_unavailable("Invalid stored model document".into()))?;
+    fields.extend(updates.as_object().unwrap().clone());
+    // Empty/omitted keys are non-credential edits, not credential deletion.
+    if !req.api_key.is_empty() || !fields.contains_key("api_key") {
+        fields.insert("api_key".into(), json!(req.api_key));
+    }
+    if let Some(auth_type) = req.auth_type {
+        fields.insert("auth_type".into(), json!(auth_type));
+    }
+    if let Some(client_id) = req.client_id {
+        fields.insert("client_id".into(), json!(client_id));
+    }
 
-    save_registry_document(&state, &state.registry, &cfg).await?;
+    // Keep lookup/merge/persist/cache under one lock without recursively calling
+    // the locking load/save helpers. Never publish an unpersisted cache update.
+    if state.cosmos.is_some() {
+        cosmos_write(&state, &cfg, write_mode).await.map_err(registry_unavailable)?;
+    }
+    state.registry.insert(model_id.clone(), cfg);
 
     info!("Registered model: {model_id} ({})", req.name);
     Ok((
@@ -2362,7 +2423,215 @@ async fn proxy_pipeline_worker(
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn registration_request(key: Option<&str>) -> RegisterModelRequest {
+        let mut request = json!({
+            "id": "mdl-ext-existing", "name": "edited name", "type": "azure-openai",
+            "endpoint": "https://edited.invalid", "embedding_dim": 1536
+        });
+        if let Some(key) = key {
+            request["api_key"] = json!(key);
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    fn registration_store(
+        stored: Arc<Mutex<Value>>, fail_read: Arc<AtomicBool>,
+        fail_write: Arc<AtomicBool>, writes: Arc<AtomicUsize>,
+    ) -> Router {
+        let handler = move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let (stored, fail_read, fail_write, writes) =
+                    (stored.clone(), fail_read.clone(), fail_write.clone(), writes.clone());
+                async move {
+                    if headers.contains_key("x-ms-documentdb-isquery") {
+                        if fail_read.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        assert_eq!(body["parameters"], json!([
+                            {"name":"@type", "value":"docgrok_model"},
+                            {"name":"@id", "value":"mdl-ext-existing"}
+                        ]));
+                        Json(json!({"Documents":[stored.lock().await.clone()]})).into_response()
+                    } else {
+                        writes.fetch_add(1, Ordering::SeqCst);
+                        assert!(!headers.contains_key("x-ms-documentdb-is-upsert"));
+                        assert_eq!(headers.get("if-match").unwrap(), "version-1");
+                        if fail_write.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        *stored.lock().await = body;
+                        StatusCode::CREATED.into_response()
+                    }
+                }
+            };
+        Router::new()
+            .route("/dbs/test/colls/metadata/docs", post(handler.clone()))
+            .route("/dbs/test/colls/metadata/docs/mdl-ext-existing", put(handler))
+    }
+
+    #[tokio::test]
+    async fn model_edits_merge_authoritative_credentials_and_metadata_and_allow_rotation() {
+        let original = json!({
+            "id":"mdl-ext-existing", "doc_type":"docgrok_model", "name":"old", "_etag":"version-1",
+            "api_key":"persisted-test-key", "model_category":"embedding",
+            "auth_type":"api_key", "client_id":"existing-client",
+            "api_key_envelope":{"version":1, "ciphertext":"test-envelope"}, "custom":{"keep":true}
+        });
+        let stored = Arc::new(Mutex::new(original.clone()));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let app = registration_store(stored.clone(), Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)), writes.clone());
+        let (state, server) = test_state(app).await;
+        for key in [None, Some(""), Some("rotated-test-key")] {
+            // Even a populated but stale cache must not be used as the merge base.
+            state.registry.insert("mdl-ext-existing".into(), json!({
+                "id":"mdl-ext-existing", "api_key":"stale-test-key", "model_category":"stale"
+            }));
+            let response = register_model(State(state.clone()), Json(registration_request(key))).await
+                .unwrap_or_else(|_| panic!("Model edit failed")).into_response();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let doc = stored.lock().await.clone();
+            assert_eq!(doc["id"], "mdl-ext-existing");
+            assert_eq!(doc["name"], "edited name");
+            assert_eq!(doc["endpoint"], "https://edited.invalid");
+            assert_eq!(doc["api_key"], key.filter(|key| !key.is_empty()).unwrap_or("persisted-test-key"));
+            for field in ["model_category", "api_key_envelope", "custom", "auth_type", "client_id"] {
+                assert_eq!(doc[field], original[field]);
+            }
+            assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &doc);
+        }
+        assert_eq!(writes.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn model_registration_honors_explicit_auth_metadata_and_preserves_omitted_fields() {
+        let stored = Arc::new(Mutex::new(json!({
+            "id":"mdl-ext-existing", "doc_type":"docgrok_model", "_etag":"version-1",
+            "api_key":"persisted-test-key", "auth_type":"api_key", "client_id":"old-client"
+        })));
+        let app = registration_store(stored.clone(), Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+        let (state, server) = test_state(app).await;
+        for update in [
+            json!({"auth_type":"managed_identity", "client_id":"new-client"}),
+            json!({}),
+            json!({"auth_type":"api_key", "client_id":""}),
+        ] {
+            let mut request = json!({
+                "id":"mdl-ext-existing", "name":"edited", "type":"azure-openai",
+                "endpoint":"https://edited.invalid", "api_key":""
+            });
+            request.as_object_mut().unwrap().extend(update.as_object().unwrap().clone());
+            register_model(State(state.clone()), Json(serde_json::from_value(request).unwrap())).await
+                .unwrap_or_else(|_| panic!("Auth metadata edit failed"));
+            let doc = stored.lock().await.clone();
+            assert_eq!(doc["auth_type"], update.get("auth_type").cloned().unwrap_or(json!("managed_identity")));
+            assert_eq!(doc["client_id"], update.get("client_id").cloned().unwrap_or(json!("new-client")));
+            assert_eq!(doc["api_key"], "persisted-test-key");
+            assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &doc);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn model_registration_read_or_persist_failure_preserves_last_good_state() {
+        let original = json!({
+            "id":"mdl-ext-existing", "doc_type":"docgrok_model", "api_key":"persisted-test-key", "_etag":"version-1",
+            "model_category":"embedding", "api_key_envelope":{"ciphertext":"test-envelope"}
+        });
+        let stored = Arc::new(Mutex::new(original.clone()));
+        let fail_read = Arc::new(AtomicBool::new(true));
+        let fail_write = Arc::new(AtomicBool::new(false));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let app = registration_store(stored.clone(), fail_read.clone(), fail_write.clone(), writes.clone());
+        let (state, server) = test_state(app).await;
+        let cached = json!({"id":"mdl-ext-existing", "api_key":"last-good-cache-key", "name":"cached"});
+        state.registry.insert("mdl-ext-existing".into(), cached.clone());
+        for lookup_failure in [true, false] {
+            fail_read.store(lookup_failure, Ordering::SeqCst);
+            fail_write.store(!lookup_failure, Ordering::SeqCst);
+            let failure = register_model(State(state.clone()), Json(registration_request(Some("replacement"))))
+                .await.err().unwrap();
+            assert_eq!(failure.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(writes.load(Ordering::SeqCst), if lookup_failure { 0 } else { 1 });
+            assert_eq!(*stored.lock().await, original);
+            assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &cached);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_model_edit_cannot_overwrite_a_newer_credential() {
+        let app = Router::new()
+            .route("/dbs/test/colls/metadata/docs", post(|| async {
+                Json(json!({"Documents":[{
+                    "id":"mdl-ext-existing", "doc_type":"docgrok_model",
+                    "_etag":"old-version", "api_key":"old-test-key"
+                }]}))
+            }))
+            .route("/dbs/test/colls/metadata/docs/mdl-ext-existing", put(
+                |headers: axum::http::HeaderMap| async move {
+                    assert_eq!(headers.get("if-match").unwrap(), "old-version");
+                    // Another replica rotated the credential after the lookup.
+                    StatusCode::PRECONDITION_FAILED
+                },
+            ));
+        let (state, server) = test_state(app).await;
+        let cached = json!({"id":"mdl-ext-existing", "api_key":"last-good-test-key"});
+        state.registry.insert("mdl-ext-existing".into(), cached.clone());
+        let error = register_model(State(state.clone()), Json(registration_request(None)))
+            .await.err().unwrap();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &cached);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn new_model_registration_does_not_upsert_over_a_concurrent_creator() {
+        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(
+            |headers: axum::http::HeaderMap| async move {
+                if headers.contains_key("x-ms-documentdb-isquery") {
+                    Json(json!({"Documents":[]})).into_response()
+                } else {
+                    assert!(!headers.contains_key("x-ms-documentdb-is-upsert"));
+                    assert!(!headers.contains_key("if-match"));
+                    StatusCode::CONFLICT.into_response()
+                }
+            },
+        ));
+        let (state, server) = test_state(app).await;
+        let error = register_model(State(state.clone()), Json(registration_request(Some("test-key"))))
+            .await.err().unwrap();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(state.registry.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn standalone_model_registration_keeps_stable_ids_and_preserves_credentials() {
+        let (mut state, server) = test_state(Router::new()).await;
+        state.cosmos = None;
+        for key in [Some("initial-test-key"), None, Some(""), Some("rotated-test-key")] {
+            let mut request = registration_request(key);
+            request.id = None;
+            register_model(State(state.clone()), Json(request)).await
+                .unwrap_or_else(|_| panic!("Standalone registration failed"));
+            assert_eq!(state.registry.len(), 1);
+            let mut entry = state.registry.iter_mut().next().unwrap();
+            assert_eq!(entry["api_key"], if key == Some("rotated-test-key") {
+                "rotated-test-key"
+            } else {
+                "initial-test-key"
+            });
+            if key != Some("initial-test-key") {
+                assert_eq!(entry["custom"], "retained");
+            }
+            entry["custom"] = json!("retained");
+        }
+        server.abort();
+    }
 
     async fn test_state(app: Router) -> (AppState, tokio::task::JoinHandle<()>) {
         let cache = TOKEN_CACHE.get_or_init(|| RwLock::new((String::new(), std::time::Instant::now())));
