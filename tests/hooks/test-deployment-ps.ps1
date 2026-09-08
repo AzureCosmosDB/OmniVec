@@ -124,24 +124,20 @@ $script:dockerCalls = @()
 Build-Image 'test' 'Dockerfile' '.'
 Check ($script:dockerCalls.Count -eq 0) 'ordinary deployment preserves an existing image'
 
-$previousPythonEncoding = $env:PYTHONIOENCODING
 try {
-    $env:PYTHONIOENCODING = 'cp1252'
     $DO_BUILD = $true
     $BUILD_MODE = 'acr'
     $script:acrExit = 0
     function az {
-        $script:acrEncoding = $env:PYTHONIOENCODING
+        $script:acrArguments = @($args)
         $global:LASTEXITCODE = $script:acrExit
     }
     Build-Image 'test' 'Dockerfile' '.'
-    Check ($script:acrEncoding -eq 'utf-8') 'ACR build logs use UTF-8 even with a legacy Windows encoding'
-    Check ($env:PYTHONIOENCODING -eq 'cp1252') 'successful ACR build restores the caller encoding'
+    Check ($script:acrArguments -contains '--no-logs') 'ACR builds avoid Windows Unicode log-stream failures'
+    Check ($script:acrArguments -notcontains '--no-wait') 'ACR builds still wait for the remote build result'
     $script:acrExit = 9
-    Must-Throw { Build-Image 'test' 'Dockerfile' '.' } 'ACR build failure remains fatal with UTF-8 logging'
-    Check ($env:PYTHONIOENCODING -eq 'cp1252') 'failed ACR build restores the caller encoding'
+    Must-Throw { Build-Image 'test' 'Dockerfile' '.' } 'ACR build failure remains fatal without streamed logs'
 } finally {
-    $env:PYTHONIOENCODING = $previousPythonEncoding
     $DO_BUILD = $false
     function az { $global:LASTEXITCODE = 0 }
 }
