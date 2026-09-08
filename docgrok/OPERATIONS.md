@@ -68,6 +68,30 @@ a client disconnect cannot terminate the shared scheduler and strand later
 requests. Model inference, OCR, memory consumption, queue lock renewal, and
 cluster health still need to be monitored separately.
 
+## Model and routing-pipeline persistence
+
+With `COSMOS_ENDPOINT`, `COSMOS_DATABASE`, and `COSMOS_CONTAINER` configured,
+registry mutations must reach Cosmos DB before they change the local cache or
+return success. Storage failures return HTTP 503 rather than acknowledging an
+in-memory-only registration. A partial Cosmos configuration is a startup error.
+Standalone runs with none of these settings still use an in-memory registry;
+those registrations do not survive restarts.
+
+Startup loads every Cosmos query page and retries failed loads before exiting
+unsuccessfully. It does not start serving a successful empty registry after a
+storage failure. Router and controller processes refresh their registry caches
+every 15 seconds, retaining the last complete snapshot if a refresh fails.
+Registry-list failures are surfaced to callers instead of returning an empty
+list. Cache misses reload persisted registrations so a request routed to another
+replica can resolve a newly registered model or routing pipeline.
+
+File and transform requests resolve the model from their routing pipeline before
+forwarding to the document processor. An explicit request `model_id` takes
+precedence; model-free image/video transforms remain supported. If a request was
+already dead-lettered because its model was missing, fixing the registry does
+not replay it: selectively redrive the affected Service Bus messages after
+confirming the model can generate an embedding.
+
 ## Exercise the router
 
 Forward the router service in a separate terminal:

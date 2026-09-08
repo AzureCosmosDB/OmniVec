@@ -41,6 +41,10 @@ public class BlobSourceWatcher : ISourceWatcher
     // Track which blobs we've already processed (by name+etag hash) to avoid re-publishing
     private readonly HashSet<string> _processedBlobs = new();
 
+    internal Func<BlobServiceClient>? BlobClientFactory { get; set; }
+    internal Func<DateTimeOffset> UtcNow { get; set; } = () => DateTimeOffset.UtcNow;
+    internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } = Task.Delay;
+
     public string SourceId => _source.Id;
     public string Generation { get; }
     public bool SkipContentHash { get; set; }
@@ -102,6 +106,8 @@ public class BlobSourceWatcher : ISourceWatcher
 
     private BlobServiceClient CreateBlobServiceClient()
     {
+        if (BlobClientFactory is not null)
+            return BlobClientFactory();
         if (!string.IsNullOrEmpty(_source.BlobConnectionString))
             return new BlobServiceClient(_source.BlobConnectionString);
         if (!string.IsNullOrEmpty(_source.BlobAccountUrl))
@@ -111,7 +117,7 @@ public class BlobSourceWatcher : ISourceWatcher
 
     private async Task RunAsync(CancellationToken ct)
     {
-        _lastPollTime = DateTimeOffset.UtcNow;
+        _lastPollTime = UtcNow();
         // Phase 1: Prefill — enumerate all existing blobs with backpressure
         while (!ct.IsCancellationRequested && !_prefillDone)
         {
@@ -122,17 +128,18 @@ public class BlobSourceWatcher : ISourceWatcher
                 {
                     _logger.LogInformation("Blob prefill paused (backpressure), waiting {Seconds}s",
                         _options.BackpressurePauseSeconds);
-                    await Task.Delay(_options.BackpressurePauseSeconds * 1000, ct);
+                    await DelayAsync(TimeSpan.FromSeconds(_options.BackpressurePauseSeconds), ct);
                     continue;
                 }
 
                 await EnumeratePageAsync(ct);
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Blob prefill error for {Source}, backing off", _source.Name);
-                try { await Task.Delay(_options.ErrorBackoffSeconds * 1000, ct); } catch { break; }
+                try { await DelayAsync(TimeSpan.FromSeconds(_options.ErrorBackoffSeconds), ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             }
         }
 
@@ -154,15 +161,15 @@ public class BlobSourceWatcher : ISourceWatcher
             try
             {
                 await PollForNewBlobsAsync(ct);
+                await DelayAsync(TimeSpan.FromSeconds(_options.FeedPollIntervalSeconds), ct);
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Blob live poll error for {Source}, backing off", _source.Name);
-                try { await Task.Delay(_options.ErrorBackoffSeconds * 1000, ct); } catch { break; }
+                try { await DelayAsync(TimeSpan.FromSeconds(_options.ErrorBackoffSeconds), ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             }
-
-            await Task.Delay(_options.FeedPollIntervalSeconds * 1000, ct);
         }
     }
 
@@ -226,13 +233,20 @@ public class BlobSourceWatcher : ISourceWatcher
 
     private async Task PollForNewBlobsAsync(CancellationToken ct)
     {
-        var pollStartedAt = DateTimeOffset.UtcNow;
+        var pollStartedAt = UtcNow();
+        // Storage LastModified is rounded to whole seconds. Include the entire
+        // previous scan-start second, including versions created after it began.
+        var watermark = _lastPollTime.HasValue
+            ? DateTimeOffset.FromUnixTimeSeconds(_lastPollTime.Value.ToUnixTimeSeconds())
+            : (DateTimeOffset?)null;
+        var nextWatermark = DateTimeOffset.FromUnixTimeSeconds(pollStartedAt.ToUnixTimeSeconds());
         var client = CreateBlobServiceClient();
         var container = client.GetBlobContainerClient(_source.BlobContainer);
         var prefix = _source.BlobPrefix ?? "";
         var fileExt = "." + (_source.BlobFileType ?? "pdf").TrimStart('.');
 
         var newBlobs = new List<BlobItem>();
+        var overlapVersions = new HashSet<string>();
 
         await foreach (var blob in container.GetBlobsAsync(prefix: prefix, cancellationToken: ct))
         {
@@ -241,14 +255,16 @@ public class BlobSourceWatcher : ISourceWatcher
 
             // Check if this blob is new or modified since last poll
             if (blob.Properties.LastModified.HasValue &&
-                _lastPollTime.HasValue &&
-                blob.Properties.LastModified.Value <= _lastPollTime.Value)
+                watermark.HasValue &&
+                blob.Properties.LastModified.Value < watermark.Value)
             {
                 continue;
             }
 
             // Check if we've already processed this exact version
             var blobKey = $"{blob.Name}:{blob.Properties.ETag}";
+            if (!blob.Properties.LastModified.HasValue || blob.Properties.LastModified.Value >= nextWatermark)
+                overlapVersions.Add(blobKey);
             if (_processedBlobs.Contains(blobKey))
                 continue;
 
@@ -271,7 +287,9 @@ public class BlobSourceWatcher : ISourceWatcher
         }
 
         _lastPollTime = pollStartedAt;
-        _processedBlobs.Clear();
+        // Retain only versions that the next overlapping scan can encounter.
+        // Commit/prune after publication succeeds, never on failure/backpressure.
+        _processedBlobs.IntersectWith(overlapVersions);
     }
 
     /// <summary>
