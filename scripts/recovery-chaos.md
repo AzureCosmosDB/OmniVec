@@ -28,14 +28,14 @@ cleanup, invalid vectors and duplicate identities.
 
 ### Repeatable offline suite matrix
 
-The expanded suites currently contain **152 passing offline cases**. These are
-fault-injection/contract tests, **not 152 live outages** or evidence that an agent
+The expanded suites currently contain **161 passing offline cases**. These are
+fault-injection/contract tests, **not 161 live outages** or evidence that an agent
 repaired anything. They use the existing pytest runner, fake Azure/Kubernetes/HTTP
 objects, and deterministic clocks; no cluster or network mutations are performed.
 
 | Suite | Cases | Specific verification |
 | --- | ---: | --- |
-| `test_recovery_chaos.py` | 98 | Default zero-call plan, explicit authorization/report bounds, AKS/FQDN/TLS allowlist, HPA/unhealthy/stale-signal rejection, atomic concurrent lock, watchdog arm-before-outage ordering, exact scoped restarts only after owned queue evidence, timeout/finally restoration, actual replica/generation convergence, watchdog acknowledgement before deletion, host loss/transient or persistent dependency outage, missing EventGrid cleanup retaining lock, manual/watchdog attribution, resourceVersion-protected owned annotation cleanup, separate primary/restoration/cleanup stages and return codes, credential-safe limited diagnostics, strictly bounded read-only transport retries and no mutation/exec retry |
+| `test_recovery_chaos.py` | 107 | Default zero-call plan, explicit authorization/report bounds, AKS/FQDN/TLS allowlist, HPA/unhealthy/stale-signal rejection, atomic concurrent lock, watchdog arm-before-outage ordering, exact scoped restarts only after owned queue evidence, timeout/finally restoration, actual replica/generation convergence, watchdog acknowledgement before deletion, host loss/transient or persistent dependency outage, missing EventGrid cleanup retaining lock, manual/watchdog attribution, resourceVersion-protected owned annotation cleanup, separate primary/restoration/cleanup stages and return codes, credential-safe limited diagnostics, strictly bounded read-only transport retries, stdin script delivery and no mutation/exec retry |
 | `test_recovery_chaos_probes.py` | 54 | Dimension/nonfinite/zero/Boolean embedding rejection, lost/foreign/duplicate documents, original ID/content/vector drift, delayed duplicate detection, two persisted recovery observations, overwrite refusal and run ownership, ETag/ownership cleanup races, missing deletion events, peek-only source/pipeline/reference matching, malformed/non-object foreign messages, bounded 1,000-message scanning without consuming/purging, unavailable Service Bus, model/route/source/destination drift, real embedding invocation, wrong/empty semantic results, loopback-only admin auth, redacted HTTP/timeout errors |
 
 Repeat both suites together to catch accidental cross-suite interactions. For
@@ -190,6 +190,14 @@ particular, an ambiguous write/approval/exec response is never automatically
 reissued. Authentication/authorization evidence also prevents retries when a
 process subsequently times out. These refinements do not authorize a live rerun
 or transfer retained-fixture cleanup ownership away from the coordinator.
+
+Pod scripts are now sent through `kubectl exec -i ... -- python3 -` stdin;
+the Python file is **not** embedded in a Windows `-c` command-line argument.
+Only the action and bounded credential-free configuration/baseline payload remain
+in argv. All seven probe actions retain the same protocol and deadline, with no
+exec retry. This reduces command-line size/quoting exposure; it is not proof that
+argument length caused the original failed run. Coordinator-confirmed targeted
+cleanup of that run remains a separate manual follow-up, not a retroactive pass.
 
 ## Explicitly excluded / optional follow-up
 

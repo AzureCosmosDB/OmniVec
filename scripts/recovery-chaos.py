@@ -334,13 +334,13 @@ class Harness:
                  any(c["type"] == "Ready" and c["status"] == "True"
                      for c in p.get("status", {}).get("conditions", []))]
         require(bool(ready), "No ready API pod for pod-local probe")
-        # Do not retry mutating probes: an exec transport timeout is ambiguous.
+        # Exec transport failures are ambiguous; never retry any pod probe.
         code = (ROOT / "recovery_chaos_probe.py").read_text(encoding="utf-8")
         output = self.command([
             "kubectl", "--kubeconfig", self.c["kubeconfig"], "--request-timeout=150s",
             "-n", self.c["namespace"], "exec", "-i", ready[0], "--",
-            "python3", "-c", code, action, payload,
-        ], timeout=155, label="pod probe " + action)
+            "python3", "-", action, payload,
+        ], timeout=155, stdin=code, label="pod probe " + action)
         results = [line[len("CHAOS_PROBE="):] for line in output.splitlines() if line.startswith("CHAOS_PROBE=")]
         require(len(results) == 1, "Missing structured probe result")
         return json.loads(results[0])

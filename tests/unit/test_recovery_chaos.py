@@ -734,3 +734,42 @@ def test_lock_cleanup_failure_has_its_own_stage(config, monkeypatch):
     assert report["lock_cleanup_failure"]["stage"] == "lock_cleanup"
     assert report["lock_cleanup_failure"]["returncode"] == 9
     assert "primary_failure" not in report
+
+
+@pytest.mark.parametrize("action", ["baseline", "registry", "upload", "queued", "verify", "cleanup", "search"])
+def test_pod_probe_transfers_script_over_stdin_not_large_command_argument(config, monkeypatch, action):
+    commands = Mock()
+    commands.run.return_value = 'CHAOS_PROBE={"fixture":"offline"}\n'
+    harness = chaos.Harness(config, commands=commands)
+    monkeypatch.setattr(harness, "kube", Mock(return_value=json.dumps({"items": [{
+        "metadata": {"name": "ready-api"},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+    }]})))
+    assert harness.probe(action) == {"fixture": "offline"}
+    commands.run.assert_called_once()
+    args = commands.run.call_args.args[0]
+    options = commands.run.call_args.kwargs
+    assert args[-4:-1] == ["python3", "-", action]
+    payload = json.loads(chaos.base64.b64decode(args[-1]))
+    assert payload == {"config": config, "run_id": harness.run_id, "baseline": None}
+    code = (SCRIPTS / "recovery_chaos_probe.py").read_text(encoding="utf-8")
+    assert options["stdin"] == code
+    assert code not in args and "-c" not in args
+    assert options["timeout"] == 155 and options["label"] == "pod probe " + action
+    assert len(" ".join(args)) < len(code)
+
+
+@pytest.mark.parametrize("action", ["registry", "cleanup"])
+def test_stdin_exec_failure_is_not_retried_even_for_readonly_probe(config, monkeypatch, action):
+    commands = Mock()
+    commands.run.side_effect = chaos.CommandFailure("pod probe " + action, classification="timeout")
+    harness = chaos.Harness(config, commands=commands)
+    monkeypatch.setattr(harness, "kube", Mock(return_value=json.dumps({"items": [{
+        "metadata": {"name": "ready-api"},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+    }]})))
+    with pytest.raises(chaos.CommandFailure):
+        harness.probe(action)
+    commands.run.assert_called_once()
+    assert commands.run.call_args.kwargs["stdin"]
+    assert "read_attempt_failures" not in harness.report
