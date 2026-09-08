@@ -1,4 +1,4 @@
-# OmniVec Agent — Phase 1 (read-only diagnostics)
+# OmniVec Agent — diagnostics and approved, verified recovery
 # Multi-stage build: build deps in stage 1, slim runtime in stage 2.
 FROM python:3.12-slim AS builder
 WORKDIR /build
@@ -11,6 +11,8 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY agent /app/agent
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8000
+# Catch missing async SDK transports and application import failures without network/auth.
+RUN python -c "from agent.api import app; from azure.core.pipeline.transport import AioHttpTransport; AioHttpTransport(); assert app.title == 'OmniVec Agent'"
 USER 10001
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
