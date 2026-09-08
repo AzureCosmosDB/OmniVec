@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import re
-from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 
@@ -171,7 +170,7 @@ def _dependency_health(health: dict, section: str, identifier: str) -> dict:
 
 
 async def _pipeline_snapshot(pid: str, health: dict, models: dict) -> dict:
-    obs = await _observe(omnivec_api._get(f"/api/pipelines/{quote(pid, safe='')}"))
+    obs = await _observe(omnivec_api._get_resource("pipelines", pid))
     if not obs["ok"]:
         return {"id": pid, "unknown": ["Pipeline could not be read"], "observation": obs}
     p = obs["value"]
@@ -197,7 +196,7 @@ async def _pipeline_snapshot(pid: str, health: dict, models: dict) -> dict:
         out["unknown"].append("Missing sources or source inspection limit exceeded")
     for ref in sources[:MAX_SOURCES]:
         sid = ref.get("source_id", "")
-        src = await _observe(omnivec_api._get(f"/api/sources/{quote(sid, safe='')}"))
+        src = await _observe(omnivec_api._get_resource("sources", sid))
         dep = _dependency_health(health, "sources", sid)
         if src["ok"] and isinstance(src["value"], dict) and src["value"].get("id") == sid:
             s = src["value"]
@@ -208,7 +207,7 @@ async def _pipeline_snapshot(pid: str, health: dict, models: dict) -> dict:
             dep["exists"] = False if src.get("http_status") == 404 else None
         out["dependencies"].append(dep)
     did = p.get("destination_id") or ""
-    dest = await _observe(omnivec_api._get(f"/api/destinations/{quote(did, safe='')}"))
+    dest = await _observe(omnivec_api._get_resource("destinations", did))
     dep = _dependency_health(health, "destinations", did)
     valid_dest = dest["ok"] and isinstance(dest["value"], dict) and dest["value"].get("id") == did
     dep["exists"] = True if valid_dest else (False if dest.get("http_status") == 404 else None)
@@ -219,7 +218,7 @@ async def _pipeline_snapshot(pid: str, health: dict, models: dict) -> dict:
     route = p.get("docgrok_pipeline") or ""
     mids = {route} if route.startswith("mdl-") else set()
     if route and not mids:
-        routed = await _observe(omnivec_api._get(f"/api/docgrok/pipelines/{quote(route, safe='')}"))
+        routed = await _observe(omnivec_api._get_resource("docgrok_pipelines", route))
         if routed["ok"]:
             mids = _model_refs(routed["value"])
             if not mids:

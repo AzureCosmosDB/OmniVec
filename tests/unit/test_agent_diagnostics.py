@@ -18,6 +18,22 @@ def diag(agent_app):
     return diagnostics
 
 
+@pytest.mark.asyncio
+async def test_pipeline_snapshot_rejects_unsafe_identifier_before_http(diag, monkeypatch):
+    requests = []
+
+    async def get(path, params=None):
+        requests.append(path)
+        raise AssertionError("Invalid identifiers must not reach HTTP")
+
+    monkeypatch.setattr(diag.omnivec_api, "_get", get)
+    result = await diag._pipeline_snapshot("../settings", {}, {})
+    assert not requests
+    assert result["observation"]["ok"] is False
+    assert result["observation"]["reason"] == "ValueError"
+    assert result["unknown"]
+
+
 @pytest.fixture
 def snapshot():
     return {
