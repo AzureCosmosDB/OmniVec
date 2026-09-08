@@ -61,9 +61,7 @@ def tool(name: str, description: str, params: Type[BaseModel], *, role: str = "r
 def list_tools(role: str = "admin") -> list[Tool]:
     """Return tools visible to the given role.
 
-    Phase 1: ``reader`` and ``admin`` see the same list (all tools are
-    read-only). The role plumbing exists so Phase 2 can add mutating tools
-    that only ``admin`` may invoke.
+    Readers see diagnostics; admins also see approval-gated mutations.
     """
     if role == "admin":
         return sorted(_REGISTRY.values(), key=lambda t: t.name)
@@ -88,7 +86,7 @@ def _reset_registry_for_tests() -> None:
 
 def _load_builtin_tools() -> None:
     """Eager-import the built-in tool modules so they self-register on import."""
-    from . import omnivec_api, k8s, cosmos, servicebus, metrics, mutations  # noqa: F401
+    from . import omnivec_api, k8s, cosmos, servicebus, metrics, mutations, diagnostics  # noqa: F401
 
 
 _load_builtin_tools()

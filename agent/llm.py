@@ -41,6 +41,15 @@ class _LLMBackend:
                 content="agent: no chat model configured. Register one in DocGrok and set agent.defaultModelId or pass model_id in the request.",
                 finish_reason="stop",
             )
+        from .tools.omnivec_api import get_model, _ModelId
+        try:
+            model = await get_model(_ModelId(model_id=mid))
+        except Exception:
+            return LLMResponse(content="agent: cannot verify the configured chat model; model registry is unavailable.")
+        if model.get("error") or model.get("model_category") != "chat":
+            return LLMResponse(
+                content="agent: selected model is not a registered chat model. Embedding deployments (including text-embedding-3-small) cannot run troubleshooting chat. Deterministic diagnostics remain available."
+            )
 
         docgrok_url = os.environ.get("DOCGROK_URL", "http://omnivec-docgrok-router").rstrip("/")
         url = f"{docgrok_url}/admin/models/registry/{mid}/chat"
@@ -54,7 +63,7 @@ class _LLMBackend:
             resp = await client.post(url, json=body)
             if resp.status_code >= 400:
                 return LLMResponse(
-                    content=f"agent: chat call to model '{mid}' failed: HTTP {resp.status_code} {resp.text[:300]}",
+                    content=f"agent: chat call to model '{mid}' failed: HTTP {resp.status_code}. Check the registered chat deployment and provider permissions.",
                     finish_reason="stop",
                 )
             data = resp.json()

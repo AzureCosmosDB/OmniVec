@@ -26,13 +26,18 @@ async def _get(path: str, params: dict | None = None) -> Any:
     """GET ``{OMNIVEC_API_URL}{path}`` and return parsed JSON."""
     client = _get_client()
     url = OMNIVEC_API_URL.rstrip("/") + path
-    # Host header matches api.py's internal-call allowlist (no auth needed).
-    headers = {"Host": "omnivec-api"}
+    headers = api_headers()
     resp = await client.get(url, params=params or None, headers=headers)
     resp.raise_for_status()
     if resp.headers.get("content-type", "").startswith("application/json"):
         return resp.json()
     return {"text": resp.text}
+
+
+def api_headers() -> dict:
+    """Use configured service authentication, never forge an internal Host."""
+    token = os.getenv("OMNIVEC_API_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 class _Empty(BaseModel):
@@ -127,7 +132,11 @@ async def list_models(_p: _Empty, **_ctx) -> Any:
 
 @tool("get_model", "Return a single model by id.", _ModelId)
 async def get_model(p: _ModelId, **_ctx) -> Any:
-    return await _get(f"/api/models/{p.model_id}")
+    # The public control plane only exposes the registry list, not a GET by ID.
+    data = await _get("/api/models")
+    models = data.get("models", []) if isinstance(data, dict) else data
+    return next((m for m in models if m.get("id") == p.model_id),
+                {"error": "Model not found in the current registry", "id": p.model_id})
 
 
 @tool("list_jobs", "List recent ingestion jobs.", _Empty)

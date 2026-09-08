@@ -12,7 +12,7 @@ metadata:
     app: omnivec-agent
     azure.workload.identity/use: "true"
 ---
-# Phase 1: read-only pod inspection in the release namespace ONLY.
+# Read-only diagnostics in the release namespace ONLY.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -22,6 +22,29 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  {{- if .Values.agent.allowKubernetesRemediation }}
+  # Explicit operator opt-in; API approval and runtime allowlists still apply.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames:
+      - omnivec-api
+      - omnivec-controller
+      - omnivec-dotnet-worker
+      - omnivec-blob-ingestor
+      - omnivec-cosmos-changefeed
+      - omnivec-sharepoint-watcher
+      - omnivec-search
+      - docgrok
+      - docgrok-controller
+      - docgrok-pipeline-worker
+    verbs: ["get", "patch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

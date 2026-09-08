@@ -51,23 +51,32 @@ class PendingApproval:
     tool_call: dict = field(default_factory=dict)
     model_id: str | None = None
     created_at: float = field(default_factory=_now)
+    recovery_state: dict = field(default_factory=dict)
 
 
 class _InMemoryApprovalStore:
     def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS):
         self._data: dict[tuple[str, str], PendingApproval] = {}
+        self._used: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
         self._ttl = ttl_seconds
 
     async def put(self, p: PendingApproval) -> None:
         async with self._lock:
             self._prune_locked()
-            self._data[(p.session_id, p.call_id)] = p
+            key = (p.session_id, p.call_id)
+            if key in self._data or key in self._used:
+                raise ValueError("Approval call ID already pending or consumed; propose a new call ID")
+            self._data[key] = p
 
     async def pop(self, session_id: str, call_id: str) -> PendingApproval | None:
         async with self._lock:
             self._prune_locked()
-            return self._data.pop((session_id, call_id), None)
+            key = (session_id, call_id)
+            pending = self._data.pop(key, None)
+            if pending is not None:
+                self._used[key] = _now()
+            return pending
 
     async def get(self, session_id: str, call_id: str) -> PendingApproval | None:
         async with self._lock:
@@ -84,6 +93,8 @@ class _InMemoryApprovalStore:
         stale = [k for k, v in self._data.items() if v.created_at < cutoff]
         for k in stale:
             self._data.pop(k, None)
+        for key in [key for key, ts in self._used.items() if ts < cutoff]:
+            self._used.pop(key, None)
 
 
 _APPROVALS: _InMemoryApprovalStore = _InMemoryApprovalStore()

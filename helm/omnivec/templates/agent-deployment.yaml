@@ -51,7 +51,26 @@ spec:
             - name: OMNIVEC_NAMESPACE
               value: {{ .Values.global.namespace | quote }}
             - name: SERVICEBUS_FQNS
-              value: {{ .Values.agent.servicebusFqns | default "" | quote }}
+              value: {{ .Values.agent.servicebusFqns | default .Values.azure.serviceBus.namespace | quote }}
+            - name: AGENT_QUEUE_NAMES
+              {{- if hasKey .Values.agent "queueNames" }}
+              value: {{ .Values.agent.queueNames | quote }}
+              {{- else }}
+              value: {{ .Values.agent.queueNames | default "blob-events" | quote }}
+              {{- end }}
+            - name: AGENT_SB_SUBSCRIPTIONS
+              {{- if hasKey .Values.agent "servicebusSubscriptions" }}
+              value: {{ .Values.agent.servicebusSubscriptions | quote }}
+              {{- else }}
+              value: {{ .Values.agent.servicebusSubscriptions | default (printf "%s/worker" (.Values.azure.serviceBus.embeddingsTopic | default "embeddings")) | quote }}
+              {{- end }}
+            {{- with .Values.agent.apiTokenSecret }}
+            - name: OMNIVEC_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "token" | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.agent.logLevel | default "INFO" | quote }}
             - name: INTERNAL_API_TOKEN

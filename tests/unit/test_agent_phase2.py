@@ -18,6 +18,17 @@ import sys
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def offline_recovery(agent_app, monkeypatch):
+    from agent.tools import diagnostics
+
+    async def unavailable(_scope=None):
+        return {"scope": _scope or "system", "pipelines": [], "unknown": ["offline fixture"]}
+
+    monkeypatch.setattr(diagnostics, "collect_snapshot", unavailable)
+    monkeypatch.setattr(diagnostics, "SAMPLE_SECONDS", 0)
+
+
 @pytest.fixture
 def agent_loop(agent_app):
     return sys.modules["agent.agent_loop"]
