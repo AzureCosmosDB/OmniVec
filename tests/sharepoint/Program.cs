@@ -383,7 +383,8 @@ foreach (var (name, run) in tests)
 }
 Console.WriteLine($"RESULT: {tests.Count - failed} passed, {failed} failed (local doubles; no Azure writes)");
 var connectorFailures = await ConnectorReliabilityTests.RunAsync();
-return failed + connectorFailures == 0 ? 0 : 1;
+var cosmosSourceFailures = await CosmosSourceContentTests.RunAsync();
+return failed + connectorFailures + cosmosSourceFailures == 0 ? 0 : 1;
 
 sealed class MemorySyncStore : ISharePointSyncStore
 {
