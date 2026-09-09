@@ -59,6 +59,8 @@ def main() -> None:
     staged_input = spark.read.json(args.staging_path)
     if "is_deleted" not in staged_input.columns:
         staged_input = staged_input.withColumn("is_deleted", F.lit(False))
+    if "source_content_fields" not in staged_input.columns:
+        staged_input = staged_input.withColumn("source_content_fields", F.create_map())
     if "source_sequence_number" not in staged_input.columns:
         staged_input = staged_input.withColumn("source_sequence_number", F.lit(0))
     if "pipeline_revision" not in staged_input.columns:
