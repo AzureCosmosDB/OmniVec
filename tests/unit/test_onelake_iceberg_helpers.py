@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "connectors" / "ingestion" / "onelake_iceberg"))
 from helpers import (  # noqa: E402
-    checkpoint_key, content_from_row, content_hash, message_id,
+    checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
     pipeline_fingerprint, row_has_current_omnivec_embedding,
 )
 
@@ -27,6 +27,7 @@ def test_idempotency_identifies_pipeline_source_ref_and_content():
     first = message_id("p1", "s1", "r1", "a" * 64)
     assert first == message_id("p1", "s1", "r1", "a" * 64)
     assert first != message_id("p2", "s1", "r1", "a" * 64)
+    assert first != message_id("p1", "s1", "r1", "a" * 64, 2)
     assert checkpoint_key("p1", "revision", "r1") == "p1:revision:r1"
 
 
@@ -51,3 +52,18 @@ def test_pipeline_fingerprint_changes_with_writeback_or_mirror_configuration():
     initial = pipeline_fingerprint(pipeline, destination)
     destination["config"]["mirror"] = {"type": "redis", "config": {"endpoint": "cache:10000"}}
     assert pipeline_fingerprint(pipeline, destination) != initial
+
+
+def test_checkpoint_persists_known_refs_for_delete_detection():
+    payload = checkpoint_json(
+        "snapshot",
+        {},
+        {"pipeline": "fingerprint"},
+        {},
+        {"pipeline": ["row-1", "row-2"]},
+        {"pipeline": 3},
+        {"pipeline": ["row-3"]},
+    )
+    assert b'"known_refs":{"pipeline":["row-1","row-2"]}' in payload
+    assert b'"pipeline_revisions":{"pipeline":3}' in payload
+    assert b'"pending_empty_refs":{"pipeline":["row-3"]}' in payload

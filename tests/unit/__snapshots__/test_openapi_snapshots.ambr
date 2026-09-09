@@ -1784,6 +1784,7 @@
             'cosmosdb-vector',
             'pgvector',
             'mssql',
+            'onelake-iceberg',
           ]),
           'title': 'DestinationType',
           'type': 'string',
@@ -1942,6 +1943,7 @@
             's3',
             'http',
             'databricks',
+            'onelake-iceberg',
             'sharepoint',
           ]),
           'title': 'SourceType',
@@ -9232,6 +9234,76 @@
           'title': 'CosmosStore',
           'type': 'object',
         }),
+        'GarnetStore': dict({
+          'properties': dict({
+            'auth': dict({
+              'anyOf': list([
+                dict({
+                  '$ref': '#/components/schemas/ManagedIdentityAuth',
+                }),
+                dict({
+                  '$ref': '#/components/schemas/KeyAuth',
+                }),
+              ]),
+              'title': 'Auth',
+            }),
+            'endpoint': dict({
+              'title': 'Endpoint',
+              'type': 'string',
+            }),
+            'filter_ef': dict({
+              'default': 16,
+              'maximum': 256.0,
+              'minimum': 4.0,
+              'title': 'Filter Ef',
+              'type': 'integer',
+            }),
+            'search_ef': dict({
+              'default': 100,
+              'maximum': 1000000.0,
+              'minimum': 1.0,
+              'title': 'Search Ef',
+              'type': 'integer',
+            }),
+            'tls': dict({
+              'default': True,
+              'title': 'Tls',
+              'type': 'boolean',
+            }),
+            'type': dict({
+              'const': 'garnet',
+              'default': 'garnet',
+              'title': 'Type',
+              'type': 'string',
+            }),
+            'use_entra_auth': dict({
+              'default': False,
+              'title': 'Use Entra Auth',
+              'type': 'boolean',
+            }),
+            'username': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Username',
+            }),
+            'vector_set': dict({
+              'default': 'omnivec-vectors',
+              'title': 'Vector Set',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'endpoint',
+          ]),
+          'title': 'GarnetStore',
+          'type': 'object',
+        }),
         'HTTPValidationError': dict({
           'properties': dict({
             'detail': dict({
@@ -9275,6 +9347,8 @@
               Example: `c.tenant = @tenant AND c.status = 'published'`
             pgvector: `where` is a SQL fragment with $N positional params; N starts
               at $3 because $1=vector, $2=top_k are reserved.
+            Garnet: `where` is a native Vector Set FILTER expression over the JSON
+              attributes stored with each element. Parameter substitution is unsupported.
           ''',
           'properties': dict({
             'params': dict({
@@ -9401,6 +9475,7 @@
               'discriminator': dict({
                 'mapping': dict({
                   'cosmosdb': '#/components/schemas/CosmosStore',
+                  'garnet': '#/components/schemas/GarnetStore',
                   'pgvector': '#/components/schemas/PgVectorStore',
                 }),
                 'propertyName': 'type',
@@ -9411,6 +9486,9 @@
                 }),
                 dict({
                   '$ref': '#/components/schemas/PgVectorStore',
+                }),
+                dict({
+                  '$ref': '#/components/schemas/GarnetStore',
                 }),
               ]),
               'title': 'Store',

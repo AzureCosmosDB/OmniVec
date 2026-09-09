@@ -202,6 +202,12 @@ case "$SHAREPOINT_ENABLED" in
   true|false) ;;
   *) printf 'OMNIVEC_SHAREPOINT_ENABLED must be true or false.\n' >&2; exit 1 ;;
 esac
+ONELAKE_ICEBERG_ENABLED=$(get_azd_value "OMNIVEC_ONELAKE_ICEBERG_ENABLED")
+ONELAKE_ICEBERG_ENABLED=${ONELAKE_ICEBERG_ENABLED:-false}
+case "$ONELAKE_ICEBERG_ENABLED" in
+  true|false) ;;
+  *) printf 'OMNIVEC_ONELAKE_ICEBERG_ENABLED must be true or false.\n' >&2; exit 1 ;;
+esac
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -828,6 +834,8 @@ dotnetWorker:
   enabled: true
 sharepointWatcher:
   enabled: ${SHAREPOINT_ENABLED}
+onelakeIcebergWatcher:
+  enabled: ${ONELAKE_ICEBERG_ENABLED}
 docgrok:
   global:
     imageRegistry: "${ACR_LOGIN_SERVER}"

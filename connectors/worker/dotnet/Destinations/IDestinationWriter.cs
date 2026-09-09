@@ -17,7 +17,9 @@ public record EmbeddingResult(
     string? ContentField = null,
     int? ChunkIndex = null,
     int? ChunkCount = null,
-    string ModelName = "")
+    string ModelName = "",
+    long SourceVersion = 0,
+    long PipelineRevision = 0)
 {
     /// <summary>
     /// Returns true when the named optional metadata field should be written.
@@ -64,7 +66,9 @@ public record DeleteRequest(
     string SourceRef,
     string PartitionKeyValue,
     string PipelineId,
-    HashSet<string>? KeepIds = null);
+    HashSet<string>? KeepIds = null,
+    long SourceVersion = 0,
+    long PipelineRevision = 0);
 
 public record SharePointReplacement(
     string Identity,

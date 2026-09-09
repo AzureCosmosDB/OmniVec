@@ -413,7 +413,9 @@ public class EmbeddingWorkerService : BackgroundService
                 SourceId: i.msg.SourceId,
                 SourceRef: i.msg.SourceRef,
                 PartitionKeyValue: string.IsNullOrEmpty(i.msg.PartitionKeyValue) ? i.msg.SourceRef : i.msg.PartitionKeyValue,
-                PipelineId: i.msg.PipelineId)).ToList();
+                PipelineId: i.msg.PipelineId,
+                SourceVersion: i.msg.SourceVersion,
+                PipelineRevision: i.msg.PipelineRevision)).ToList();
 
             try
             {
@@ -489,7 +491,9 @@ public class EmbeddingWorkerService : BackgroundService
                     SourceId: msg.SourceId,
                     StoreContent: msg.StoreContent,
                     MetadataFields: msg.MetadataFields,
-                    ContentField: msg.ContentField));
+                    ContentField: msg.ContentField,
+                    SourceVersion: msg.SourceVersion,
+                    PipelineRevision: msg.PipelineRevision));
             }
 
             // Write to destination
@@ -563,7 +567,9 @@ public class EmbeddingWorkerService : BackgroundService
                 SourceId: msg.SourceId,
                 StoreContent: msg.StoreContent,
                 MetadataFields: msg.MetadataFields,
-                ContentField: msg.ContentField)).ToList();
+                ContentField: msg.ContentField,
+                SourceVersion: msg.SourceVersion,
+                PipelineRevision: msg.PipelineRevision)).ToList();
 
             var applied = await writer.ReplaceSharePointAsync(msg.DestinationConfig,
                 new SharePointReplacement(identity, msg.SharePointRevision, msg.SourceId,
@@ -653,7 +659,9 @@ public class EmbeddingWorkerService : BackgroundService
                 StoreContent: msg.StoreContent,
                 MetadataFields: msg.MetadataFields,
                 ContentField: msg.ContentField,
-                ModelName: msg.DocgrokPipeline);
+                ModelName: msg.DocgrokPipeline,
+                SourceVersion: msg.SourceVersion,
+                PipelineRevision: msg.PipelineRevision);
             var key = $"{msg.DestinationType}|{msg.DestinationId}";
             if (!resultsByDest.TryGetValue(key, out var bucket))
             {
@@ -762,7 +770,9 @@ public class EmbeddingWorkerService : BackgroundService
                     StoreContent: msg.StoreContent,
                     MetadataFields: msg.MetadataFields,
                     ContentField: msg.ContentField,
-                    ModelName: msg.DocgrokPipeline);
+                    ModelName: msg.DocgrokPipeline,
+                    SourceVersion: msg.SourceVersion,
+                    PipelineRevision: msg.PipelineRevision);
 
                 var destKey = msg.DestinationId;
                 if (!resultsByDest.ContainsKey(destKey))

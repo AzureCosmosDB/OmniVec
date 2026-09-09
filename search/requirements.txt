@@ -6,3 +6,5 @@ azure-cosmos>=4.5.0
 azure-identity>=1.15.0
 azure-keyvault-secrets>=4.7.0
 asyncpg>=0.29.0
+redis>=5.2.0
+redis-entraid>=1.0.0

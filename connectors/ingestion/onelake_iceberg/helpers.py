@@ -40,9 +40,15 @@ def checkpoint_key(pipeline_id: str, pipeline_revision: str, source_ref: str) ->
     return f"{pipeline_id}:{pipeline_revision}:{source_ref}"
 
 
-def message_id(pipeline_id: str, source_id: str, source_ref: str, digest: str) -> str:
+def message_id(
+    pipeline_id: str,
+    source_id: str,
+    source_ref: str,
+    digest: str,
+    source_version: int = 0,
+) -> str:
     """Stable idempotency id for retries of the same source revision."""
-    material = "\x1f".join((pipeline_id, source_id, source_ref, digest))
+    material = "\x1f".join((pipeline_id, source_id, source_ref, digest, str(source_version)))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -67,6 +73,9 @@ def checkpoint_json(
     processed: dict[str, str],
     pipelines: dict[str, str] | None = None,
     submitted_at: dict[str, float] | None = None,
+    known_refs: dict[str, list[str]] | None = None,
+    pipeline_revisions: dict[str, int] | None = None,
+    pending_empty_refs: dict[str, list[str]] | None = None,
 ) -> bytes:
     return json.dumps(
         {
@@ -74,6 +83,9 @@ def checkpoint_json(
             "processed": processed,
             "pipelines": pipelines or {},
             "submitted_at": submitted_at or {},
+            "known_refs": known_refs or {},
+            "pipeline_revisions": pipeline_revisions or {},
+            "pending_empty_refs": pending_empty_refs or {},
         },
         separators=(",", ":"),
         sort_keys=True,

@@ -54,6 +54,9 @@ class Checkpoint:
     processed: dict[str, str]
     pipelines: dict[str, str]
     submitted_at: dict[str, float]
+    known_refs: dict[str, list[str]]
+    pipeline_revisions: dict[str, int]
+    pending_empty_refs: dict[str, list[str]]
 
 
 class OneLakeIcebergWatcher:
@@ -121,20 +124,32 @@ class OneLakeIcebergWatcher:
             },
         )
         table = catalog.load_table((*namespace_tuple, config["table"]))
-        snapshot_id = str(table.current_snapshot().snapshot_id) if table.current_snapshot() else None
+        current_snapshot = table.current_snapshot()
+        snapshot_id = str(current_snapshot.snapshot_id) if current_snapshot else None
+        source_version = int(current_snapshot.sequence_number) if current_snapshot else 0
         pipeline_state = {
             pipeline["id"]: pipeline_fingerprint(pipeline, destinations[pipeline["destination_id"]])
             for pipeline in pipelines
         }
+        for pipeline_id, fingerprint in pipeline_state.items():
+            if checkpoint.pipelines.get(pipeline_id) != fingerprint:
+                checkpoint.pipeline_revisions[pipeline_id] = (
+                    checkpoint.pipeline_revisions.get(pipeline_id, 0) + 1
+                )
         retry_after = int(config.get("fabric_retry_interval_seconds", 900))
         now_epoch = time.time()
         has_expired_submission = any(
             now_epoch - submitted_at >= retry_after
             for submitted_at in checkpoint.submitted_at.values()
         )
+        has_ref_baseline = all(
+            pipeline["id"] in checkpoint.known_refs
+            for pipeline in pipelines
+        )
         if (
             snapshot_id == checkpoint.snapshot_id
             and pipeline_state == checkpoint.pipelines
+            and has_ref_baseline
             and not has_expired_submission
         ):
             return
@@ -156,15 +171,25 @@ class OneLakeIcebergWatcher:
                 )
             )
         rows = table.scan(selected_fields=tuple(projection)).to_arrow().to_pylist()
+        id_field = config.get("id_field", "id")
+        rows_by_ref = {
+            str(row.get(id_field)): row
+            for row in rows
+            if row.get(id_field) is not None and str(row.get(id_field))
+        }
+        all_refs = set(rows_by_ref)
         batch_size = int(config.get("batch_size", 200))
         source_fields = config.get("content_fields", ["content"])
         messages: list[tuple[dict[str, Any], str, str]] = []
+        checkpoint_keys_to_remove: set[str] = set()
         writeback_signatures: set[tuple[str, ...]] = set()
         for pipeline in pipelines:
             pipeline_source = next(ps for ps in pipeline["sources"] if ps.get("source_id") == source["id"])
             fields = pipeline_source.get("content_fields") or source_fields
             fields = [field for field in fields if field in source_fields]
             generation = str(pipeline.get("generation", "1"))
+            pipeline_revision = checkpoint.pipeline_revisions[pipeline["id"]]
+            pipeline_changed = checkpoint.pipelines.get(pipeline["id"]) != pipeline_state[pipeline["id"]]
             destination = destinations[pipeline["destination_id"]]
             writeback = {
                 **DEFAULT_WRITEBACK_COLUMNS,
@@ -182,18 +207,20 @@ class OneLakeIcebergWatcher:
                     "configure distinct write-back columns to prevent an embedding loop"
                 )
             writeback_signatures.add(signature)
+            current_refs: set[str] = set()
             for row in rows:
-                source_ref = str(row.get(config.get("id_field", "id"), ""))
+                source_ref = str(row.get(id_field, ""))
                 if not source_ref:
                     continue
                 content = content_from_row(row, fields)
                 if not content:
                     continue
+                current_refs.add(source_ref)
                 digest = content_hash(content)
                 key = checkpoint_key(pipeline["id"], pipeline_state[pipeline["id"]], source_ref)
                 if row_has_current_omnivec_embedding(
                     row, digest, pipeline["id"], pipeline["docgrok_pipeline"], generation, writeback
-                ):
+                ) and not pipeline_changed:
                     checkpoint.processed.pop(key, None)
                     checkpoint.submitted_at.pop(key, None)
                     continue
@@ -203,7 +230,9 @@ class OneLakeIcebergWatcher:
                 ):
                     continue
                 message = {
-                    "message_id": message_id(pipeline["id"], source["id"], source_ref, digest),
+                    "message_id": message_id(
+                        pipeline["id"], source["id"], source_ref, digest, source_version
+                    ),
                     "pipeline_id": pipeline["id"],
                     "pipeline_name": pipeline["name"],
                     "docgrok_pipeline": pipeline["docgrok_pipeline"],
@@ -214,6 +243,8 @@ class OneLakeIcebergWatcher:
                     "destination_config": destination["config"],
                     "content": content,
                     "content_hash": digest,
+                    "source_version": source_version,
+                    "pipeline_revision": pipeline_revision,
                     "partition_key_value": source_ref,
                     "pipeline_generation": generation,
                     "source_content_fields": {
@@ -221,6 +252,59 @@ class OneLakeIcebergWatcher:
                     },
                 }
                 messages.append((message, key, digest))
+
+            previous_refs = set(checkpoint.known_refs.get(pipeline["id"], []))
+            deleted_refs = previous_refs - all_refs
+            pending_empty_refs = set(checkpoint.pending_empty_refs.get(pipeline["id"], []))
+            pending_empty_refs.difference_update(current_refs)
+            pending_empty_refs.update((previous_refs - current_refs) & all_refs)
+            cleared_empty_refs = {
+                source_ref
+                for source_ref in pending_empty_refs
+                if rows_by_ref[source_ref].get(writeback["content_hash_field"]) is None
+                and rows_by_ref[source_ref].get(writeback["pipeline_id_field"]) is None
+            }
+            pending_empty_refs.difference_update(cleared_empty_refs)
+            checkpoint_keys_to_remove.update(
+                checkpoint_key(
+                    pipeline["id"], pipeline_state[pipeline["id"]], source_ref
+                )
+                for source_ref in cleared_empty_refs
+            )
+            for source_ref in sorted(deleted_refs | pending_empty_refs):
+                delete_digest = content_hash(f"delete:{source_ref}")
+                key = checkpoint_key(pipeline["id"], pipeline_state[pipeline["id"]], source_ref)
+                if source_ref in deleted_refs:
+                    checkpoint_keys_to_remove.add(key)
+                if (
+                    source_ref in pending_empty_refs
+                    and checkpoint.processed.get(key) == delete_digest
+                    and now_epoch - checkpoint.submitted_at.get(key, 0) < retry_after
+                ):
+                    continue
+                messages.append(({
+                    "message_id": message_id(
+                        pipeline["id"], source["id"], source_ref, delete_digest, source_version
+                    ),
+                    "pipeline_id": pipeline["id"],
+                    "pipeline_name": pipeline["name"],
+                    "docgrok_pipeline": pipeline["docgrok_pipeline"],
+                    "source_id": source["id"],
+                    "source_ref": source_ref,
+                    "destination_id": destination["id"],
+                    "destination_type": destination["type"],
+                    "destination_config": destination["config"],
+                    "content": "",
+                    "content_hash": delete_digest,
+                    "source_version": source_version,
+                    "pipeline_revision": pipeline_revision,
+                    "partition_key_value": source_ref,
+                    "pipeline_generation": generation,
+                    "source_content_fields": {},
+                    "message_type": "delete",
+                }, key, delete_digest))
+            checkpoint.known_refs[pipeline["id"]] = sorted(current_refs)
+            checkpoint.pending_empty_refs[pipeline["id"]] = sorted(pending_empty_refs)
 
         async with ServiceBusClient(self.service_bus_namespace, self.credential) as service_bus:
             sender = service_bus.get_topic_sender(self.topic_name)
@@ -244,6 +328,9 @@ class OneLakeIcebergWatcher:
                         checkpoint.processed[key] = digest
                         checkpoint.submitted_at[key] = now_epoch
 
+        for key in checkpoint_keys_to_remove:
+            checkpoint.processed.pop(key, None)
+            checkpoint.submitted_at.pop(key, None)
         checkpoint.snapshot_id = snapshot_id
         checkpoint.pipelines = pipeline_state
         await self.save_checkpoint(source["id"], config, checkpoint)
@@ -270,11 +357,14 @@ class OneLakeIcebergWatcher:
                     raw.get("processed", {}),
                     raw.get("pipelines", {}),
                     raw.get("submitted_at", {}),
+                    raw.get("known_refs", {}),
+                    raw.get("pipeline_revisions", {}),
+                    raw.get("pending_empty_refs", {}),
                 )
             except Exception as exc:
                 # A missing first checkpoint is expected; auth and service errors must be visible.
                 if getattr(exc, "status_code", None) == 404:
-                    return Checkpoint(None, {}, {}, {})
+                    return Checkpoint(None, {}, {}, {}, {}, {}, {})
                 raise
 
     async def save_checkpoint(self, source_id: str, config: dict[str, Any], checkpoint: Checkpoint) -> None:
@@ -300,6 +390,9 @@ class OneLakeIcebergWatcher:
                     checkpoint.processed,
                     checkpoint.pipelines,
                     checkpoint.submitted_at,
+                    checkpoint.known_refs,
+                    checkpoint.pipeline_revisions,
+                    checkpoint.pending_empty_refs,
                 ),
                 overwrite=True,
             )

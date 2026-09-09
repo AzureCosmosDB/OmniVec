@@ -70,7 +70,27 @@ class PgVectorStore(BaseModel):
         return self
 
 
-StoreConfig = Union[CosmosStore, PgVectorStore]
+class GarnetStore(BaseModel):
+    type: Literal["garnet"] = "garnet"
+    endpoint: str
+    vector_set: str = "omnivec-vectors"
+    tls: bool = True
+    use_entra_auth: bool = False
+    username: Optional[str] = None
+    auth: StoreAuth = Field(default_factory=ManagedIdentityAuth)
+    search_ef: int = Field(default=100, ge=1, le=1_000_000)
+    filter_ef: int = Field(default=16, ge=4, le=256)
+
+    @model_validator(mode="after")
+    def _validate_garnet(self):
+        if not self.endpoint.strip():
+            raise ValueError("garnet store requires endpoint")
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", self.vector_set):
+            raise ValueError("garnet vector_set contains unsupported characters")
+        return self
+
+
+StoreConfig = Union[CosmosStore, PgVectorStore, GarnetStore]
 
 
 # -----------------------------------------------------------------------------
@@ -120,6 +140,8 @@ class IndexFilter(BaseModel):
       Example: `c.tenant = @tenant AND c.status = 'published'`
     pgvector: `where` is a SQL fragment with $N positional params; N starts
       at $3 because $1=vector, $2=top_k are reserved.
+    Garnet: `where` is a native Vector Set FILTER expression over the JSON
+      attributes stored with each element. Parameter substitution is unsupported.
     """
     where: str
     params: Union[Dict[str, Any], List[Any]] = Field(default_factory=dict)

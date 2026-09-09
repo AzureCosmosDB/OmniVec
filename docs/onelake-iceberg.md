@@ -61,15 +61,20 @@ Create a destination with `type: "onelake-iceberg"`:
     "embedded_at_field": "embedded_at"
   },
   "mirror": {
-    "type": "redis",
+    "type": "garnet",
     "destination_id": "optional-serving-destination-id",
     "best_effort": false,
     "config": {
-      "endpoint": "<managed-redis-host>:10000",
-      "use_entra_auth": true,
+      "endpoint": "<garnet-host>:6380",
+      "use_entra_auth": false,
       "tls": true,
-      "key_prefix": "omnivec",
-      "ttl_seconds": 86400
+      "username": "omnivec",
+      "password_secret_ref": "kv://<vault>/<secret>",
+      "vector_set": "omnivec-vectors",
+      "distance_metric": "COSINE",
+      "quantization": "NOQUANT",
+      "m": 16,
+      "ef": 200
     }
   }
 }
@@ -79,14 +84,25 @@ Staged JSONL names are deterministic from the target table and
 pipeline/source/ref/content hashes. The worker first proves the file durable,
 then accepts HTTP 200/201/202 from the Fabric Jobs API as asynchronous success.
 The Spark job refuses to insert a missing source row: it updates only the
-configured `id_field` in the existing target/source table. When configured, the
-Redis/Garnet mirror uses deterministic keys
-`<prefix>:<pipelineId>:<sourceId>:<sourceRef>`. It defaults to TLS and
-Microsoft Entra authentication. Mirror failures fail the Service Bus batch
-unless `mirror.best_effort` is true. To mirror to Cosmos DB vector instead,
-set `mirror.type` to `cosmosdb-vector` and provide the usual existing
-Cosmos destination `endpoint`, `database`, `container`, and `vector_field`
-configuration in `mirror.config`; it reuses the worker's Cosmos writer.
+configured `id_field` in the existing target/source table. Each update carries
+the monotonic Iceberg snapshot sequence in `omnivec_run_id`, so a late older
+Spark job cannot overwrite or resurrect data after a newer update or delete.
+Rows deleted from the source or changed to empty configured content clear the
+managed write-back columns and are removed from the serving mirror. When configured, the
+Garnet mirror stores vectors in a native DiskANN-backed Vector Set using
+`VADD`, JSON attributes, and deterministic element IDs derived from
+`pipelineId`, `sourceId`, and `sourceRef`. The Garnet server must be started
+with `--enable-vector-set-preview`. The client uses RESP2 because `VSIM` does
+not yet support RESP3. TLS defaults on. Self-hosted Garnet can use an ACL
+username with a Key Vault-backed `password_secret_ref`; anonymous access is
+also possible when the deployment permits it. `use_entra_auth` is only for
+endpoints that explicitly implement the Azure Redis Entra token flow. Azure
+Managed Redis runs Redis Enterprise rather than Garnet and is not a substitute
+for a Garnet server with Vector Sets enabled. Mirror failures fail the Service
+Bus batch unless `mirror.best_effort` is true.
+The legacy `redis` mirror type remains available for existing string-mirror
+configurations, but it is not vector-searchable. New serving mirrors should
+use Garnet.
 
 ## Fabric Spark Job Definition
 
@@ -138,11 +154,12 @@ differs. The watcher hashes only configured source text columns and skips rows
 whose stored OmniVec hash/model/generation match, preventing circular
 write-back loops. Grant the workload identity OneLake read/write access
 (including the source table, checkpoint, and staging paths), Service Bus
-Send/Receive, Fabric job execution permission, and Azure Managed Redis data
-access when mirroring is enabled. Enable the watcher only after assigning these
-permissions:
+Send/Receive, Fabric job execution permission, Key Vault secret access when
+ACL authentication is configured, and network access to Garnet. Enable the
+watcher only after assigning these permissions:
 
-```bash
-helm upgrade --install omnivec helm/omnivec \
-  --set onelakeIcebergWatcher.enabled=true
+```powershell
+azd env set OMNIVEC_ONELAKE_ICEBERG_ENABLED true
+azd env set OMNIVEC_BUILD true
+azd up
 ```

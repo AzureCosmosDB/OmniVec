@@ -75,6 +75,11 @@ if (-not $SHAREPOINT_ENABLED) { $SHAREPOINT_ENABLED = "false" }
 if ($SHAREPOINT_ENABLED -notin @("true", "false")) {
     throw 'OMNIVEC_SHAREPOINT_ENABLED must be true or false.'
 }
+$ONELAKE_ICEBERG_ENABLED = Get-AzdValue "OMNIVEC_ONELAKE_ICEBERG_ENABLED"
+if (-not $ONELAKE_ICEBERG_ENABLED) { $ONELAKE_ICEBERG_ENABLED = "false" }
+if ($ONELAKE_ICEBERG_ENABLED -notin @("true", "false")) {
+    throw 'OMNIVEC_ONELAKE_ICEBERG_ENABLED must be true or false.'
+}
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -645,6 +650,7 @@ $helmArgs = @(
     "--set", "search.internalToken=$SEARCH_INTERNAL_TOKEN",
     "--set", "dotnetWorker.enabled=true",
     "--set", "sharepointWatcher.enabled=$SHAREPOINT_ENABLED",
+    "--set", "onelakeIcebergWatcher.enabled=$ONELAKE_ICEBERG_ENABLED",
     "--set", "web.service.dnsLabel=$WEB_DNS_LABEL"
 )
 

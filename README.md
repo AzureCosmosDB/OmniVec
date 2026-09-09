@@ -389,6 +389,7 @@ This removes the resource group, all Azure services, and local environment confi
 | `OMNIVEC_SKIP_IMPORT` | No | `false` | Preserve all required local ACR images; missing images fail instead of being imported |
 | `OMNIVEC_FORCE_IMPORT` | No | `false` | Set in the shell environment to overwrite local tags from the selected channel |
 | `OMNIVEC_SHAREPOINT_ENABLED` | No | `false` | Deploy the SharePoint watcher alongside the required .NET worker and Service Bus |
+| `OMNIVEC_ONELAKE_ICEBERG_ENABLED` | No | `false` | Deploy the OneLake Iceberg watcher; requires Fabric, OneLake, and Service Bus permissions |
 | `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
 
 ### What gets deployed

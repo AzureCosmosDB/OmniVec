@@ -2101,6 +2101,7 @@
                                 <select class="form-input" name="type" onchange="updateSourceConfig(this.value)">
                                     <option value="azure-blob">Azure Blob Storage</option>
                                     <option value="sharepoint">SharePoint Online</option>
+                                    <option value="onelake-iceberg">OneLake Apache Iceberg</option>
                                     <option value="cosmosdb">CosmosDB</option>
                                     <option value="postgresql">PostgreSQL</option>
                                 </select>
@@ -2214,6 +2215,7 @@
                                 <select class="form-input" name="type" onchange="updateDestinationConfig(this.value)">
                                     <option value="cosmosdb-vector">Azure CosmosDB (Vector)</option>
                                     <option value="pgvector">PostgreSQL + pgvector</option>
+                                    <option value="onelake-iceberg">OneLake Iceberg + Garnet</option>
                                 </select>
                             </div>
                             <div id="destination-config-fields">
@@ -2434,6 +2436,7 @@
                                             <select class="form-input" id="pl-src-type" onchange="updateSourceConfigInline(this.value, 'pl-src')">
                                                 <option value="azure-blob">Azure Blob Storage</option>
                                                 <option value="sharepoint">SharePoint Online</option>
+                                                <option value="onelake-iceberg">OneLake Apache Iceberg</option>
                                                 <option value="cosmosdb">CosmosDB</option>
                                                 <option value="postgresql">PostgreSQL</option>
                                             </select>
@@ -4206,6 +4209,14 @@
                             <label class="form-label">Prefix (optional)</label>
                             <input type="text" class="form-input" id="detail-prefix" value="${config.prefix || ''}" placeholder="folder/subfolder/" oninput="markSourceDetailDirty()">
                         </div>
+                    ` : source.type === 'onelake-iceberg' ? `
+                        <div class="form-group"><label class="form-label">Warehouse</label>
+                            <input type="text" class="form-input" value="${config.warehouse || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Namespace</label>
+                            <input type="text" class="form-input" value="${Array.isArray(config.namespace) ? config.namespace.join('.') : (config.namespace || '')}" disabled></div>
+                        <div class="form-group"><label class="form-label">Table</label>
+                            <input type="text" class="form-input" value="${config.table || ''}" disabled></div>
+                        <p style="font-size:12px;color:var(--text-tertiary);">Edit OneLake catalog and table settings by recreating the source. Name and enabled state can be changed here without altering the saved configuration.</p>
                     ` : source.type === 'postgresql' ? `
                         <div class="form-group">
                             <label class="form-label">Host</label>
@@ -4500,6 +4511,8 @@
                 config.user = editedSourceData.user || source.config?.user || '';
                 config.password = editedSourceData.password || source.config?.password || '';
                 config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
+            } else if (source.type === 'onelake-iceberg') {
+                config = { ...source.config };
             }
 
             try {
@@ -4610,6 +4623,8 @@
                 config.user = editedSourceData.user || source.config?.user || '';
                 config.password = editedSourceData.password || source.config?.password || '';
                 config.ssl_mode = editedSourceData.ssl_mode || source.config?.ssl_mode || 'require';
+            } else if (source.type === 'onelake-iceberg') {
+                config = { ...source.config };
             }
 
             try {
@@ -4848,6 +4863,16 @@
                             <label class="form-label">Vector Dimensions</label>
                             <input type="number" class="form-input" id="dest-detail-pg-dimensions" value="${config.vector_dimensions || 1536}" oninput="markDestDetailDirty()">
                         </div>
+                    `;
+                } else if (dest.type === 'onelake-iceberg') {
+                    configFields = `
+                        <div class="form-group"><label class="form-label">Workspace ID</label>
+                            <input type="text" class="form-input" value="${config.workspace_id || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Lakehouse Item ID</label>
+                            <input type="text" class="form-input" value="${config.lakehouse_item_id || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Target Table</label>
+                            <input type="text" class="form-input" value="${config.target_table || ''}" disabled></div>
+                        <p style="font-size:12px;color:var(--text-tertiary);">Edit Fabric, staging, and Garnet settings by recreating the destination. Name and enabled state can be changed here without altering the saved configuration.</p>
                     `;
                 }
 
@@ -5172,6 +5197,8 @@
                 config.user = editedDestData.user || dest.config?.user || '';
                 config.password = editedDestData.password || dest.config?.password || '';
                 config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+            } else if (dest.type === 'onelake-iceberg') {
+                config = { ...dest.config };
             } else {
                 // CosmosDB and other types
                 const endpoint = document.getElementById('dest-detail-endpoint')?.value || dest.config?.endpoint || '';
@@ -5251,6 +5278,8 @@
                 config.index = editedDestData.index || dest.config?.index || '';
                 config.environment = editedDestData.environment || dest.config?.environment || '';
                 config.api_key = dest.config?.api_key || '';
+            } else if (dest.type === 'onelake-iceberg') {
+                config = { ...dest.config };
             } else {
                 config.host = editedDestData.host || dest.config?.host || '';
                 config.collection = editedDestData.collection || dest.config?.collection || '';
@@ -7605,6 +7634,20 @@
                     <div class="form-group"><label class="form-label">Maximum File Size (MiB)</label>
                         <input type="number" class="form-input" id="${prefix}-max-file-size-mib" value="50" min="1" max="50"></div>
                     <p style="font-size:12px;color:var(--text-tertiary);">Limit applies to raw bytes (50 MiB maximum; 70 MiB router JSON limit). Files are buffered in memory. Requires queue mode and a Cosmos vector destination with a dedicated partition key such as /document_id, not /id.</p>`;
+            } else if (type === 'onelake-iceberg') {
+                container.innerHTML = `
+                    <div class="form-group"><label class="form-label">Warehouse</label>
+                        <input type="text" class="form-input" id="${prefix}-warehouse" placeholder="workspaceId/lakehouseItemId"></div>
+                    <div class="form-group"><label class="form-label">Namespace</label>
+                        <input type="text" class="form-input" id="${prefix}-namespace" value="dbo"></div>
+                    <div class="form-group"><label class="form-label">Table</label>
+                        <input type="text" class="form-input" id="${prefix}-table" placeholder="documents"></div>
+                    <div class="form-group"><label class="form-label">Content Fields</label>
+                        <input type="text" class="form-input" id="${prefix}-content-fields" value="content" placeholder="title,body"></div>
+                    <div class="form-group"><label class="form-label">ID Field</label>
+                        <input type="text" class="form-input" id="${prefix}-id-field" value="id"></div>
+                    <div class="form-group"><label class="form-label">Poll Interval (sec)</label>
+                        <input type="number" class="form-input" id="${prefix}-poll-interval" value="60" min="10"></div>`;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Endpoint</label>
@@ -7713,6 +7756,15 @@
                     folder_path: document.getElementById(`${prefix}-folder-path`)?.value || '',
                 };
                 if (!config.site_id || !config.drive_id) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Site ID and Drive ID</div>'; return; }
+            } else if (type === 'onelake-iceberg') {
+                config = {
+                    warehouse: document.getElementById(`${prefix}-warehouse`)?.value || '',
+                    namespace: document.getElementById(`${prefix}-namespace`)?.value || 'dbo',
+                    table: document.getElementById(`${prefix}-table`)?.value || '',
+                    content_fields: (document.getElementById(`${prefix}-content-fields`)?.value || 'content').split(',').map(v => v.trim()).filter(Boolean),
+                    id_field: document.getElementById(`${prefix}-id-field`)?.value || 'id',
+                };
+                if (!config.warehouse || !config.table) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Warehouse and Table</div>'; return; }
             } else if (type === 'cosmosdb') {
                 config = { endpoint: document.getElementById(`${prefix}-endpoint`)?.value || '', database: document.getElementById(`${prefix}-database`)?.value || '', container: document.getElementById(`${prefix}-container`)?.value || '' };
                 if (!config.endpoint || !config.database || !config.container) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in all fields</div>'; return; }
@@ -7785,6 +7837,15 @@
                         (parseInt(document.getElementById(`${prefix}-max-file-size-mib`)?.value) || 50)
                         * 1024 * 1024,
                     auth_type: 'managed-identity',
+                };
+            } else if (sourceType === 'onelake-iceberg') {
+                config = {
+                    warehouse: document.getElementById(`${prefix}-warehouse`)?.value || '',
+                    namespace: document.getElementById(`${prefix}-namespace`)?.value || 'dbo',
+                    table: document.getElementById(`${prefix}-table`)?.value || '',
+                    content_fields: (document.getElementById(`${prefix}-content-fields`)?.value || 'content').split(',').map(v => v.trim()).filter(Boolean),
+                    id_field: document.getElementById(`${prefix}-id-field`)?.value || 'id',
+                    poll_interval_seconds: parseInt(document.getElementById(`${prefix}-poll-interval`)?.value) || 60,
                 };
             } else if (sourceType === 'cosmosdb') {
                 config = {
@@ -8021,6 +8082,15 @@
                     max_file_size_bytes: (parseInt(formData.get('max_file_size_mib')) || 50) * 1024 * 1024,
                     auth_type: 'managed-identity',
                 };
+            } else if (sourceType === 'onelake-iceberg') {
+                config = {
+                    warehouse: formData.get('warehouse'),
+                    namespace: formData.get('namespace') || 'dbo',
+                    table: formData.get('table'),
+                    content_fields: (formData.get('content_fields') || 'content').split(',').map(v => v.trim()).filter(Boolean),
+                    id_field: formData.get('id_field') || 'id',
+                    poll_interval_seconds: parseInt(formData.get('poll_interval_seconds')) || 60,
+                };
             } else if (sourceType === 'cosmosdb') {
                 config = {
                     endpoint: formData.get('endpoint'),
@@ -8093,6 +8163,31 @@
                     password: formData.get('password') || '',
                     ssl_mode: formData.get('ssl_mode') || 'require'
                 };
+            } else if (destType === 'onelake-iceberg') {
+                const garnetEndpoint = formData.get('garnet_endpoint');
+                const lakehouseItemId = formData.get('lakehouse_item_id');
+                config = {
+                    workspace_id: formData.get('workspace_id'),
+                    lakehouse_item_id: lakehouseItemId,
+                    spark_job_definition_item_id: formData.get('spark_job_definition_item_id'),
+                    staging_file_system: formData.get('staging_file_system'),
+                    staging_path: formData.get('staging_path') || `${lakehouseItemId}/Files/omnivec/staging`,
+                    target_table: formData.get('target_table'),
+                };
+                if (garnetEndpoint) {
+                    config.mirror = {
+                        type: 'garnet',
+                        best_effort: false,
+                        config: {
+                            endpoint: garnetEndpoint,
+                            vector_set: formData.get('garnet_vector_set') || 'omnivec-vectors',
+                            tls: formData.get('garnet_tls') === 'on',
+                            use_entra_auth: formData.get('garnet_entra') === 'on',
+                            username: formData.get('garnet_username') || undefined,
+                            password_secret_ref: formData.get('garnet_password_secret_ref') || undefined,
+                        },
+                    };
+                }
             }
 
             const data = {
@@ -8504,6 +8599,21 @@
                     </div>
                     <p style="font-size: 12px; color: var(--text-tertiary);">Uses workload identity with Microsoft Graph Sites.Selected or Files.Read.All. Maximum 50 MiB raw bytes (70 MiB router JSON limit); files are buffered in memory. Requires queue mode and a Cosmos vector destination partitioned by a dedicated field such as /document_id, not /id.</p>
                 `;
+            } else if (type === 'onelake-iceberg') {
+                container.innerHTML = `
+                    <div class="form-group"><label class="form-label">Warehouse</label>
+                        <input type="text" class="form-input" name="warehouse" placeholder="workspaceId/lakehouseItemId"></div>
+                    <div class="form-group"><label class="form-label">Namespace</label>
+                        <input type="text" class="form-input" name="namespace" value="dbo"></div>
+                    <div class="form-group"><label class="form-label">Table</label>
+                        <input type="text" class="form-input" name="table" placeholder="documents"></div>
+                    <div class="form-group"><label class="form-label">Content Fields</label>
+                        <input type="text" class="form-input" name="content_fields" value="content" placeholder="title,body"></div>
+                    <div class="form-group"><label class="form-label">ID Field</label>
+                        <input type="text" class="form-input" name="id_field" value="id"></div>
+                    <div class="form-group"><label class="form-label">Poll Interval (seconds)</label>
+                        <input type="number" class="form-input" name="poll_interval_seconds" value="60" min="10"></div>
+                    <p style="font-size:12px;color:var(--text-tertiary);">Uses workload identity with OneLake and Fabric permissions. The dedicated OneLake Iceberg watcher must be enabled.</p>`;
             } else if (type === 'cosmosdb') {
                 container.innerHTML = `
                     <div class="form-group">
@@ -8663,6 +8773,15 @@
                 config.poll_interval_seconds = parseInt(formData.get('poll_interval_seconds')) || 60;
                 config.file_types = formData.getAll('sharepoint_file_types');
                 config.max_file_size_bytes = (parseInt(formData.get('max_file_size_mib')) || 50) * 1024 * 1024;
+            } else if (type === 'onelake-iceberg') {
+                config = {
+                    warehouse: formData.get('warehouse'),
+                    namespace: formData.get('namespace') || 'dbo',
+                    table: formData.get('table'),
+                    content_fields: (formData.get('content_fields') || 'content').split(',').map(v => v.trim()).filter(Boolean),
+                    id_field: formData.get('id_field') || 'id',
+                    poll_interval_seconds: parseInt(formData.get('poll_interval_seconds')) || 60,
+                };
             } else if (type === 'cosmosdb') {
                 config.endpoint = formData.get('endpoint');
                 config.database = formData.get('database');
@@ -8689,6 +8808,11 @@
             }
             if (type === 'sharepoint' && (!config.site_id || !config.drive_id)) {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Site ID and Drive ID</div>`;
+                resultDiv.style.display = 'block';
+                return;
+            }
+            if (type === 'onelake-iceberg' && (!config.warehouse || !config.table)) {
+                resultDiv.innerHTML = `<div style="background:var(--warning-muted);border:1px solid var(--warning);padding:12px;border-radius:var(--radius-md);color:var(--warning);">Please fill in Warehouse and Table</div>`;
                 resultDiv.style.display = 'block';
                 return;
             }
@@ -9013,6 +9137,33 @@
                         </select>
                     </div>
                 `;
+            } else if (type === 'onelake-iceberg') {
+                container.innerHTML = `
+                    <div class="form-group"><label class="form-label">Workspace ID</label>
+                        <input type="text" class="form-input" name="workspace_id"></div>
+                    <div class="form-group"><label class="form-label">Lakehouse Item ID</label>
+                        <input type="text" class="form-input" name="lakehouse_item_id"></div>
+                    <div class="form-group"><label class="form-label">Spark Job Definition Item ID</label>
+                        <input type="text" class="form-input" name="spark_job_definition_item_id"></div>
+                    <div class="form-group"><label class="form-label">Target Table</label>
+                        <input type="text" class="form-input" name="target_table" value="dbo.documents"></div>
+                    <div class="form-group"><label class="form-label">Staging File System</label>
+                        <input type="text" class="form-input" name="staging_file_system" placeholder="Workspace ID"></div>
+                    <div class="form-group"><label class="form-label">Staging Path</label>
+                        <input type="text" class="form-input" name="staging_path" placeholder="Defaults to &lt;lakehouse item ID&gt;/Files/omnivec/staging"></div>
+                    <hr style="border:0;border-top:1px solid var(--border-primary);margin:16px 0;">
+                    <h5 style="margin:0 0 12px 0;font-size:14px;">Garnet Vector Mirror</h5>
+                    <div class="form-group"><label class="form-label">Garnet Endpoint</label>
+                        <input type="text" class="form-input" name="garnet_endpoint" placeholder="host:6380"></div>
+                    <div class="form-group"><label class="form-label">Vector Set</label>
+                        <input type="text" class="form-input" name="garnet_vector_set" value="omnivec-vectors"></div>
+                    <div class="form-group"><label class="form-label">ACL Username (optional)</label>
+                        <input type="text" class="form-input" name="garnet_username"></div>
+                    <div class="form-group"><label class="form-label">Password Secret Reference (optional)</label>
+                        <input type="text" class="form-input" name="garnet_password_secret_ref" placeholder="kv://vault/secret"></div>
+                    <label style="display:flex;gap:8px;align-items:center;margin-bottom:8px;"><input type="checkbox" name="garnet_tls" checked> TLS</label>
+                    <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="garnet_entra"> Microsoft Entra authentication (only when supported)</label>
+                    <p style="font-size:12px;color:var(--text-tertiary);">Garnet must run with --enable-vector-set-preview. Vectors use native VADD/VSIM/VREM commands over RESP2.</p>`;
             } else if (type === 'pinecone') {
                 container.innerHTML = `
                     <div class="form-group">
@@ -9082,6 +9233,35 @@
                 if (!config.host || !config.database) {
                     resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Host and Database</div>`;
                     return;
+                }
+            } else if (type === 'onelake-iceberg') {
+                const garnetEndpoint = formData.get('garnet_endpoint');
+                const lakehouseItemId = formData.get('lakehouse_item_id');
+                config = {
+                    workspace_id: formData.get('workspace_id'),
+                    lakehouse_item_id: lakehouseItemId,
+                    spark_job_definition_item_id: formData.get('spark_job_definition_item_id'),
+                    staging_file_system: formData.get('staging_file_system'),
+                    staging_path: formData.get('staging_path') || `${lakehouseItemId}/Files/omnivec/staging`,
+                    target_table: formData.get('target_table'),
+                };
+                if (!config.workspace_id || !config.lakehouse_item_id || !config.spark_job_definition_item_id || !config.staging_file_system || !config.target_table) {
+                    resultDiv.innerHTML = `<div style="background:var(--warning-muted);border:1px solid var(--warning);padding:12px;border-radius:var(--radius-md);color:var(--warning);">Please fill in all Fabric and OneLake fields</div>`;
+                    return;
+                }
+                if (garnetEndpoint) {
+                    config.mirror = {
+                        type: 'garnet',
+                        best_effort: false,
+                        config: {
+                            endpoint: garnetEndpoint,
+                            vector_set: formData.get('garnet_vector_set') || 'omnivec-vectors',
+                            tls: formData.get('garnet_tls') === 'on',
+                            use_entra_auth: formData.get('garnet_entra') === 'on',
+                            username: formData.get('garnet_username') || undefined,
+                            password_secret_ref: formData.get('garnet_password_secret_ref') || undefined,
+                        },
+                    };
                 }
             } else {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in all required fields</div>`;
@@ -11012,7 +11192,11 @@
             try {
                 const res = await apiFetch('/api/destinations');
                 const data = await res.json();
-                const dests = (data.destinations || []).filter(d => d.type === 'cosmosdb-vector' || d.type === 'pgvector');
+                const dests = (data.destinations || []).filter(d =>
+                    d.type === 'cosmosdb-vector' ||
+                    d.type === 'pgvector' ||
+                    (d.type === 'onelake-iceberg' && d.config?.mirror?.type === 'garnet')
+                );
                 let html = `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--border);margin-bottom:4px;font-weight:600;font-size:13px;color:var(--text-secondary);">
                     <input type="checkbox" id="playground-select-all" onchange="toggleAllIndexes(this.checked)" style="accent-color:var(--accent-primary);"> Select All
                 </label>`;

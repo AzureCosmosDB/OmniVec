@@ -10,8 +10,11 @@ import logging
 import math
 import os
 import re
+import json
+import struct
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -24,6 +27,8 @@ from schemas import (
     ModelEmbedding,
     PerIndexInfo,
     PgVectorStore,
+    GarnetStore,
+    KeyAuth,
     PipelineEmbedding,
     PrecomputedEmbedding,
     SearchRequest,
@@ -508,6 +513,107 @@ async def search_pgvector(
     return hits
 
 
+def _garnet_score(distance: float, metric: str) -> float:
+    metric = metric.lower()
+    if metric in ("dot", "inner_product", "ip"):
+        return distance
+    if metric in ("l2", "euclidean"):
+        return 1.0 / (1.0 + max(0.0, distance))
+    return 1.0 - distance
+
+
+def _parse_garnet_results(raw: List[Any], metric: str, include_vector: bool) -> List[dict]:
+    hits: List[dict] = []
+    if len(raw) % 3 != 0:
+        raise RuntimeError("Garnet VSIM returned an unexpected response shape")
+    for offset in range(0, len(raw), 3):
+        element_id, raw_distance, raw_attributes = raw[offset : offset + 3]
+        element_id = element_id.decode("utf-8") if isinstance(element_id, bytes) else str(element_id)
+        distance = float(raw_distance.decode("utf-8") if isinstance(raw_distance, bytes) else raw_distance)
+        if raw_attributes:
+            attributes = json.loads(
+                raw_attributes.decode("utf-8") if isinstance(raw_attributes, bytes) else raw_attributes
+            )
+        else:
+            attributes = {}
+        content_fields = attributes.get("source_content_fields") or {}
+        text = attributes.get("content") or "\n\n".join(
+            str(value) for value in content_fields.values() if value is not None
+        )
+        metadata = {
+            key: value
+            for key, value in attributes.items()
+            if key not in ("content", "source_content_fields")
+        }
+        hit = {
+            "id": attributes.get("id", element_id),
+            "score": _garnet_score(distance, metric),
+            "distance": distance,
+            "text": text,
+            "text_parts": content_fields or None,
+            "metadata": metadata,
+            "source": attributes.get("source_id"),
+            "source_ref": attributes.get("source_ref"),
+        }
+        if include_vector:
+            hit["vector"] = None
+        hits.append(hit)
+    return hits
+
+
+async def search_garnet(
+    store: GarnetStore,
+    embedding: List[float],
+    top_k: int,
+    index_filter: Optional[IndexFilter],
+    include_vector: bool,
+    metric: str = "cosine",
+) -> List[dict]:
+    from redis.asyncio import Redis
+
+    endpoint = store.endpoint.strip()
+    parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+    host = parsed.hostname or endpoint
+    port = parsed.port or (6380 if store.tls else 6379)
+    kwargs: Dict[str, Any] = {
+        "host": host,
+        "port": port,
+        "ssl": store.tls,
+        "decode_responses": False,
+        "protocol": 2,
+    }
+    if store.use_entra_auth:
+        from redis_entraid.cred_provider import create_from_default_azure_credential
+        kwargs["credential_provider"] = create_from_default_azure_credential(
+            ("https://redis.azure.com/.default",)
+        )
+    elif isinstance(store.auth, KeyAuth):
+        kwargs["username"] = store.username
+        kwargs["password"] = await resolve_secret_ref(store.auth.secret_ref)
+
+    client = Redis(**kwargs)
+    try:
+        args: List[Any] = [
+            store.vector_set,
+            "FP32",
+            struct.pack(f"<{len(embedding)}f", *embedding),
+            "WITHSCORES",
+            "WITHATTRIBS",
+            "COUNT",
+            int(top_k),
+            "EF",
+            store.search_ef,
+        ]
+        if index_filter and index_filter.where:
+            if index_filter.params:
+                raise ValueError("Garnet filters do not support separate filter parameters")
+            args.extend(["FILTER", index_filter.where, "FILTER-EF", store.filter_ef])
+        raw = await client.execute_command("VSIM", *args)
+        return _parse_garnet_results(list(raw or []), metric, include_vector)
+    finally:
+        await client.aclose()
+
+
 async def _search_one_index(
     http: httpx.AsyncClient,
     idx: IndexSpec,
@@ -600,6 +706,14 @@ async def _search_one_index(
                 search_pgvector(
                     idx.store, idx.vector.field, embedding, per_top_k,
                     idx.content_fields, idx.return_fields, idx.filter, include_vector,
+                    metric=idx.vector.metric,
+                ),
+                timeout=PER_INDEX_TIMEOUT_S,
+            )
+        elif isinstance(idx.store, GarnetStore):
+            hits = await asyncio.wait_for(
+                search_garnet(
+                    idx.store, embedding, per_top_k, idx.filter, include_vector,
                     metric=idx.vector.metric,
                 ),
                 timeout=PER_INDEX_TIMEOUT_S,

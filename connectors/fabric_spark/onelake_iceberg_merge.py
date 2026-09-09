@@ -56,8 +56,33 @@ def main() -> None:
     target_table = quoted_table(args.target_table)
 
     spark = SparkSession.builder.getOrCreate()
+    staged_input = spark.read.json(args.staging_path)
+    if "is_deleted" not in staged_input.columns:
+        staged_input = staged_input.withColumn("is_deleted", F.lit(False))
+    if "source_sequence_number" not in staged_input.columns:
+        staged_input = staged_input.withColumn("source_sequence_number", F.lit(0))
+    if "pipeline_revision" not in staged_input.columns:
+        staged_input = staged_input.withColumn("pipeline_revision", F.lit(0))
+    if "operation_order" not in staged_input.columns:
+        staged_input = staged_input.withColumn(
+            "operation_order",
+            F.concat(
+                F.lpad(F.col("source_sequence_number").cast("string"), 20, "0"),
+                F.lit(":"),
+                F.lpad(F.col("pipeline_revision").cast("string"), 20, "0"),
+            ),
+        )
+    if "operation_version" not in staged_input.columns:
+        staged_input = staged_input.withColumn(
+            "operation_version",
+            F.concat(
+                F.col("operation_order"),
+                F.lit(":"),
+                F.col("omnivec_run_id"),
+            ),
+        )
     staged = (
-        spark.read.json(args.staging_path)
+        staged_input
         .filter(F.col("omnivec_writer_marker") == F.lit(args.writer_marker))
         .filter(F.col("omnivec_run_id") == F.lit(args.run_id))
         .select(
@@ -73,11 +98,16 @@ def main() -> None:
             F.to_json("source_content_fields").alias("source_content_fields"),
             "omnivec_writer_marker",
             "omnivec_run_id",
+            "source_sequence_number",
+            "pipeline_revision",
+            "operation_order",
+            "operation_version",
+            "is_deleted",
         )
         .dropDuplicates(["pipeline_id", "source_id", "source_ref"])
     )
     target = spark.table(target_table)
-    source_ids = staged.select("id").distinct()
+    source_ids = staged.filter(~F.col("is_deleted")).select("id").distinct()
     missing = source_ids.join(
         target.select(F.col(columns["id_field"]).cast("string").alias("id")),
         "id",
@@ -98,6 +128,13 @@ def main() -> None:
     run_id_field = quoted(columns["run_id_field"])
     embedding_field = quoted(columns["embedding_field"])
     embedded_at_field = quoted(columns["embedded_at_field"])
+    target_order = (
+        f"CASE WHEN target.{run_id_field} RLIKE '^[0-9]{{20}}:[0-9]{{20}}:' "
+        f"THEN SUBSTRING(target.{run_id_field}, 1, 41) "
+        f"WHEN target.{run_id_field} RLIKE '^[0-9]{{20}}:' "
+        f"THEN CONCAT(SUBSTRING(target.{run_id_field}, 1, 20), ':00000000000000000000') "
+        f"ELSE '00000000000000000000:00000000000000000000' END"
+    )
 
     # Write back to the existing source row only. Replaying an accepted Fabric
     # job is harmless because the hash/model/generation predicate skips it.
@@ -107,10 +144,28 @@ def main() -> None:
         USING omnivec_staged_embeddings AS source
         ON CAST(target.{id_field} AS STRING) = source.id
         WHEN MATCHED AND (
-          NOT (target.{content_hash_field} <=> source.content_hash)
-          OR NOT (target.{model_field} <=> source.model)
-          OR NOT (target.{pipeline_generation_field} <=> source.pipeline_generation)
-          OR NOT (target.{pipeline_id_field} <=> source.pipeline_id)
+          source.is_deleted
+          AND source.operation_order >= ({target_order})
+        ) THEN UPDATE SET
+          {embedding_field} = NULL,
+          {content_hash_field} = NULL,
+          {pipeline_id_field} = NULL,
+          {pipeline_generation_field} = NULL,
+          {model_field} = NULL,
+          {source_id_field} = NULL,
+          {source_ref_field} = NULL,
+          {writer_marker_field} = source.omnivec_writer_marker,
+          {run_id_field} = source.operation_version,
+          {embedded_at_field} = current_timestamp()
+        WHEN MATCHED AND (
+          NOT source.is_deleted
+          AND source.operation_order >= ({target_order})
+          AND (
+            NOT (target.{content_hash_field} <=> source.content_hash)
+            OR NOT (target.{model_field} <=> source.model)
+            OR NOT (target.{pipeline_generation_field} <=> source.pipeline_generation)
+            OR NOT (target.{pipeline_id_field} <=> source.pipeline_id)
+          )
         ) THEN UPDATE SET
           {embedding_field} = source.embedding,
           {content_hash_field} = source.content_hash,
@@ -120,7 +175,7 @@ def main() -> None:
           {source_id_field} = source.source_id,
           {source_ref_field} = source.source_ref,
           {writer_marker_field} = source.omnivec_writer_marker,
-          {run_id_field} = source.omnivec_run_id,
+          {run_id_field} = source.operation_version,
           {embedded_at_field} = current_timestamp()
         """
     )

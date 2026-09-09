@@ -58,6 +58,47 @@ var cosmos = new CosmosDbDestinationWriter(NullLogger<CosmosDbDestinationWriter>
 Task<bool> Replace(MemorySyncStore store, SharePointReplacement replacement)
     => cosmos.ReplaceSharePointInStoreAsync(store, "/document_id", "embedding", replacement, default);
 
+Test("Garnet vector element IDs and FP32 payloads are deterministic", () =>
+{
+    var first = OneLakeIcebergDestinationWriter.BuildGarnetElementId("pipeline", "source", "row-1");
+    Assert(first == OneLakeIcebergDestinationWriter.BuildGarnetElementId("pipeline", "source", "row-1"));
+    Assert(first != OneLakeIcebergDestinationWriter.BuildGarnetElementId("pipeline", "source", "row-2"));
+    var bytes = OneLakeIcebergDestinationWriter.ToFloat32Bytes([0.25f, -2.5f]);
+    Assert(bytes.Length == 8);
+    Assert(BitConverter.ToSingle(bytes, 0) == 0.25f);
+    Assert(BitConverter.ToSingle(bytes, 4) == -2.5f);
+    return Task.CompletedTask;
+});
+
+Test("OneLake operation versions sort by Iceberg snapshot sequence", () =>
+{
+    var older = OneLakeIcebergDestinationWriter.BuildOperationVersion(9, 1, "run-a");
+    var newer = OneLakeIcebergDestinationWriter.BuildOperationVersion(10, 1, "run-b");
+    var newerPipeline = OneLakeIcebergDestinationWriter.BuildOperationVersion(10, 2, "run-c");
+    Assert(string.CompareOrdinal(older, newer) < 0);
+    Assert(string.CompareOrdinal(newer, newerPipeline) < 0);
+    Assert(newer.StartsWith("00000000000000000010:00000000000000000001:", StringComparison.Ordinal));
+    return Task.CompletedTask;
+});
+Test("OneLake delete run IDs are order-independent and distinct from upserts", () =>
+{
+    var requests = new[]
+    {
+        new DeleteRequest("source", "row-2", "row-2", "pipeline"),
+        new DeleteRequest("source", "row-1", "row-1", "pipeline"),
+    };
+    var reversed = requests.Reverse();
+    Assert(
+        OneLakeIcebergDestinationWriter.BuildDeleteRunId("dbo.documents", requests)
+        == OneLakeIcebergDestinationWriter.BuildDeleteRunId("dbo.documents", reversed));
+    Assert(
+        OneLakeIcebergDestinationWriter.BuildDeleteRunId("dbo.documents", requests)
+        != OneLakeIcebergDestinationWriter.BuildDeleteRunId(
+            "dbo.documents",
+            requests.Select(request => request with { SourceVersion = 2, PipelineRevision = 2 })));
+    return Task.CompletedTask;
+});
+
 Test("Stable, Cosmos-safe identity isolates source/site/drive/item/pipeline and ignores path", () =>
 {
     var baseline = SharePointIdentity.Create(Message());
