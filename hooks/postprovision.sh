@@ -25,7 +25,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Emit a slowest-step summary on any failure so the user sees where time went.
 _postprov_exit() {
   _rc=$?
-  [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary
+  [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary || true
   exit "$_rc"
 }
 trap '_postprov_exit' EXIT INT TERM
@@ -34,9 +34,13 @@ trap '_postprov_exit' EXIT INT TERM
 read_input() {
   prompt="$1"
   _ri_val=""
+  if [ -n "${OMNIVEC_NONINTERACTIVE:-}${AZD_NONINTERACTIVE:-}${CI:-}${GITHUB_ACTIONS:-}${OMNIVEC_FORCE_NO_TTY:-}" ]; then
+    echo ""
+    return
+  fi
   # Always prefer /dev/tty — azd hooks have stdin piped from azd, so stdin
   # may be consumed by child processes (az cli, etc.) causing hangs.
-  if [ -e /dev/tty ]; then
+  if [ -e /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
     printf "%s" "$prompt" > /dev/tty
     read -r _ri_val < /dev/tty || true
   elif [ -t 0 ]; then
@@ -52,10 +56,114 @@ read_input() {
 # -- Deployment lock: prevent concurrent postprovision runs --
 _lock_dir="$HOME/.omnivec/locks"
 mkdir -p "$_lock_dir"
-_post_lock="$_lock_dir/${AZURE_ENV_NAME:-omnivec}.post.lock"
-echo "$$" > "$_post_lock"
-cleanup_post_lock() { rm -f "$_post_lock"; }
+_post_lock="$_lock_dir/${AZURE_ENV_NAME:-omnivec}.post.lock.d"
+if ! mkdir "$_post_lock" 2>/dev/null; then
+  printf "${RED}Another postprovision hook owns %s. If interrupted, confirm its owner has stopped before removing this directory.${NC}\n" "$_post_lock" >&2
+  exit 1
+fi
+printf '%s\n' "$$" > "$_post_lock/pid"
+cleanup_post_lock() {
+  _rc=$?
+  rm -f "$_post_lock/helm-values.yaml"
+  if [ -d "$_post_lock/imports" ]; then
+    rm -f "$_post_lock/imports/"*
+    rmdir "$_post_lock/imports"
+  fi
+  rm -f "$_post_lock/pid"
+  rmdir "$_post_lock"
+  [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary || true
+  exit "$_rc"
+}
 trap cleanup_post_lock EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+IMAGE_UPDATE_MARKER="$_lock_dir/${AZURE_ENV_NAME:-omnivec}.images-pending"
+mark_image_update() {
+  : > "$IMAGE_UPDATE_MARKER"
+  IMAGES_CHANGED=true
+}
+
+run_bounded_import() {
+  (
+    _limit=${OMNIVEC_IMPORT_TIMEOUT_SEC:-900}
+    case "$_limit" in ''|*[!0-9]*) printf 'Invalid image import timeout.\n' >&2; exit 125;; esac
+    if [ "$_limit" -lt 1 ] || [ "$_limit" -gt 3600 ]; then
+      printf 'Image import timeout must be 1-3600 seconds.\n' >&2
+      exit 125
+    fi
+    _import_pid=""
+    _watchdog_pid=""
+    _cancel_import() {
+      if [ -n "$_import_pid" ]; then
+        kill -KILL "$_import_pid" 2>/dev/null || true
+        wait "$_import_pid" 2>/dev/null || true
+      fi
+      if [ -n "$_watchdog_pid" ]; then
+        kill -TERM "$_watchdog_pid" 2>/dev/null || true
+        wait "$_watchdog_pid" 2>/dev/null || true
+      fi
+    }
+    trap '_cancel_import' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    az acr import "$@" </dev/null &
+    _import_pid=$!
+    (
+      trap - EXIT
+      _sleep_pid=""
+      _expired=0
+      _stop_timer() {
+        if [ -n "$_sleep_pid" ]; then
+          kill -TERM "$_sleep_pid" 2>/dev/null || true
+          wait "$_sleep_pid" 2>/dev/null || true
+        fi
+        exit "$_expired"
+      }
+      trap '_stop_timer' INT TERM
+      sleep "$_limit" >/dev/null 2>&1 &
+      _sleep_pid=$!
+      if ! wait "$_sleep_pid"; then
+        kill -KILL "$_import_pid" 2>/dev/null || true
+        exit 125
+      fi
+      _sleep_pid=""
+      _expired=124
+      kill -TERM "$_import_pid" 2>/dev/null || true
+      sleep 10 >/dev/null 2>&1 &
+      _sleep_pid=$!
+      wait "$_sleep_pid" || true
+      _sleep_pid=""
+      kill -KILL "$_import_pid" 2>/dev/null || true
+      exit 124
+    ) &
+    _watchdog_pid=$!
+
+    _rc=0
+    wait "$_import_pid" || _rc=$?
+    _import_pid=""
+    kill -TERM "$_watchdog_pid" 2>/dev/null || true
+    _timer_rc=0
+    wait "$_watchdog_pid" || _timer_rc=$?
+    _watchdog_pid=""
+    case "$_timer_rc" in
+      124|125) exit "$_timer_rc" ;;
+    esac
+    exit "$_rc"
+  )
+}
+
+import_image() {
+  _import_rc=0
+  run_bounded_import "$@" || _import_rc=$?
+  case "$_import_rc" in
+    124|125|126|127)
+      printf 'Image import deadline or command execution failed (exit %s); stopping without authentication fallback or source builds.\n' "$_import_rc" >&2
+      exit "$_import_rc"
+      ;;
+  esac
+  return "$_import_rc"
+}
 
 printf "${GREEN}╔══════════════════════════════════════════╗${NC}\n"
 printf "${GREEN}║    OmniVec — Post-provision Setup        ║${NC}\n"
@@ -88,6 +196,12 @@ COSMOS_ENDPOINT=$(get_azd_value "AZURE_COSMOS_ENDPOINT")
 IDENTITY_CLIENT_ID=$(get_azd_value "AZURE_IDENTITY_CLIENT_ID")
 RESOURCE_GROUP=$(get_azd_value "AZURE_RESOURCE_GROUP")
 BUILD_MODE=$(get_azd_value "OMNIVEC_BUILD_MODE")
+SHAREPOINT_ENABLED=$(get_azd_value "OMNIVEC_SHAREPOINT_ENABLED")
+SHAREPOINT_ENABLED=${SHAREPOINT_ENABLED:-false}
+case "$SHAREPOINT_ENABLED" in
+  true|false) ;;
+  *) printf 'OMNIVEC_SHAREPOINT_ENABLED must be true or false.\n' >&2; exit 1 ;;
+esac
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -160,15 +274,18 @@ GPU_CNT=$(get_azd_value "OMNIVEC_GPU_NODE_COUNT")
 META=$(get_azd_value "OMNIVEC_METADATA_STORE")
 BUILD=$(get_azd_value "OMNIVEC_BUILD_MODE")
 _RG_ID=$(az group show --name "$RESOURCE_GROUP" --query "id" -o tsv < /dev/null 2>/dev/null)
-az tag update --resource-id "$_RG_ID" --operation merge --tags \
+if az tag update --resource-id "$_RG_ID" --operation merge --tags \
     "omnivec-sys-sku=$SYS_VM" \
     "omnivec-sys-count=$SYS_CNT" \
     "omnivec-gpu-sku=$GPU_VM" \
     "omnivec-gpu-count=$GPU_CNT" \
     "omnivec-metadata=$META" \
     "omnivec-build=$BUILD" \
-    "omnivec-instance=$INSTANCE_ID" >/dev/null 2>&1 || true
-printf "  ${GREEN}Config saved to RG tags.${NC}\n"
+    "omnivec-instance=$INSTANCE_ID" </dev/null >/dev/null 2>&1; then
+  printf "  ${GREEN}Config saved to RG tags.${NC}\n"
+else
+  printf "${YELLOW}Configuration was not saved to resource group tags; keep the local azd environment.${NC}\n" >&2
+fi
 
 # =============================================================================
 # PHASE 1: Import or Build images
@@ -198,7 +315,7 @@ IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet
 #   3. Fallback -> stable
 IMG_TAG=$(get_azd_value "OMNIVEC_IMAGE_TAG")
 if [ -z "$IMG_TAG" ]; then
-  _branch=$(git -C "$(dirname "$0")/.." rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  _branch=$(git -C "$(dirname "$0")/.." rev-parse --abbrev-ref HEAD </dev/null 2>/dev/null || echo "")
   case "$_branch" in
     dev)  IMG_TAG=dev ;;
     main) IMG_TAG=stable ;;
@@ -243,13 +360,18 @@ build_image() {
   context=$3
   tag=${4:-latest}
 
-  if [ "$FORCE_IMPORT" != "true" ] && image_exists "$name" "$tag"; then
+  if [ "$OMNIVEC_BUILD" != "true" ] && [ "$FORCE_IMPORT" != "true" ] && image_exists "$name" "$tag"; then
     printf "  ${GREEN}${name}:${tag} exists, skipping.${NC}\n"
     return 0
   fi
 
   printf "  ${CYAN}Building ${name}:${tag}...${NC}\n"
+  mark_image_update
   if [ "$BUILD_MODE" = "docker" ]; then
+    if [ "${DOCKER_LOGGED_IN:-false}" != "true" ]; then
+      az acr login --name "$ACR_NAME" </dev/null
+      DOCKER_LOGGED_IN=true
+    fi
     if ! docker build -t "${ACR_LOGIN_SERVER}/${name}:${tag}" -f "$dockerfile" "$context"; then
       printf "${RED}docker build failed for ${name}:${tag}${NC}\n"
       exit 1
@@ -259,11 +381,9 @@ build_image() {
       exit 1
     fi
   else
-    if ! az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --no-logs </dev/null 2>/dev/null; then
-      if ! az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" </dev/null; then
-        printf "${RED}az acr build failed for ${name}:${tag}${NC}\n"
-        exit 1
-      fi
+    if ! az acr build --registry "$ACR_NAME" --image "${name}:${tag}" --file "$dockerfile" "$context" --timeout 3600 </dev/null; then
+      printf "${RED}az acr build failed for ${name}:${tag}. Inspect the ACR build logs before retrying.${NC}\n"
+      exit 1
     fi
   fi
   printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
@@ -318,6 +438,7 @@ ANON_OK=false
 TOKEN_OK=false
 AUTH_IMPORTED=false
 IMAGES_CHANGED=false
+[ -f "$IMAGE_UPDATE_MARKER" ] && IMAGES_CHANGED=true
 FIRST_IMAGE=$(echo "$IMAGES" | awk '{print $1}')
 
 # Honour OMNIVEC_SKIP_IMPORT — set this when you have locally built (or
@@ -349,7 +470,8 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
   else
     # Try anonymous pull first
     printf "  ${CYAN}Testing anonymous pull (this may take 30-60s)...${NC}"
-    if timeout 90 az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
+    mark_image_update
+    if import_image --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --force >/dev/null 2>&1; then
       printf " ${GREEN}✓ anonymous pull works${NC}\n"
       ANON_OK=true
       AUTH_IMPORTED=true
@@ -358,7 +480,7 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
       # Try stored token
       if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
         printf "  ${CYAN}Trying stored token...${NC}"
-        if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
+        if import_image --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$SHARED_REGISTRY_TOKEN" --force >/dev/null 2>&1; then
           printf " ${GREEN}✓ token works${NC}\n"
           TOKEN_OK=true
           AUTH_IMPORTED=true
@@ -374,9 +496,9 @@ if [ "$OMNIVEC_BUILD" != "true" ] && [ "$SKIP_IMPORT" != "true" ] && [ "$SKIP_IM
         # Valid ACR tokens are base64-ish and contain no whitespace.
         _new_token=$(printf '%s' "$_new_token" | tr -d '[:space:]')
         if [ -n "$_new_token" ]; then
-          if az acr import --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
+          if import_image --name "$ACR_NAME" --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:${IMG_TAG}" --image "${FIRST_IMAGE}:latest" --username "$SHARED_REGISTRY_USER" --password "$_new_token" --force >/dev/null 2>&1; then
             SHARED_REGISTRY_TOKEN="$_new_token"
-            azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null 2>/dev/null || true
+            azd env set OMNIVEC_SHARED_REGISTRY_TOKEN "$_new_token" </dev/null
             printf "  ${GREEN}Token valid — saved for future use.${NC}\n"
             TOKEN_OK=true
             AUTH_IMPORTED=true
@@ -407,10 +529,19 @@ else
   # IMAGES_CHANGED stays false when nothing really changed.
   import_count=0
   skip_count=0
-  IMPORT_TMP=$(mktemp -d)
+  IMPORT_TMP="$_post_lock/imports"
+  mkdir "$IMPORT_TMP"
   import_pids=""
 
   for image in $IMAGES; do
+    if [ "$SKIP_IMPORT" = "true" ] || [ "$SKIP_IMPORT" = "1" ]; then
+      if ! image_exists "$image" "latest"; then
+        printf "${RED}OMNIVEC_SKIP_IMPORT is set but %s:latest is missing. Build/push it or disable skip-import.${NC}\n" "$image" >&2
+        exit 1
+      fi
+      skip_count=$((skip_count + 1))
+      continue
+    fi
     # First image — already handled by auth test (imported or preserved)
     if [ "$image" = "$FIRST_IMAGE" ]; then
       if [ "$AUTH_IMPORTED" = "true" ]; then
@@ -433,6 +564,7 @@ else
     fi
 
     printf "  ${CYAN}Importing ${image}:${IMG_TAG} as :latest...${NC}\n"
+    mark_image_update
 
     # Run import in background (parallel)
     (
@@ -442,7 +574,7 @@ else
         if [ -n "$SHARED_REGISTRY_TOKEN" ]; then
           AUTH_ARGS="--username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN"
         fi
-        import_error=$(az acr import \
+        import_error=$(import_image \
             --name "$ACR_NAME" \
             --source "${SHARED_REGISTRY}/${image}:${IMG_TAG}" \
             --image "${image}:latest" \
@@ -464,11 +596,17 @@ else
   done
 
   # Wait for all imports
+  failed_jobs=0
   for pid in $import_pids; do
-    wait "$pid"
+    if ! wait "$pid"; then failed_jobs=$((failed_jobs + 1)); fi
   done
+  if [ "$failed_jobs" -gt 0 ]; then
+    printf "${RED}An image import process failed; refusing to deploy an incomplete image set.${NC}\n" >&2
+    exit 1
+  fi
 
   # Report results
+  failed_imports=0
   for image in $IMAGES; do
     result_file="$IMPORT_TMP/$image"
     if [ ! -f "$result_file" ]; then continue; fi
@@ -479,9 +617,14 @@ else
     else
       printf "  ${RED}${image}:${IMG_TAG} import FAILED${NC}\n"
       printf "  ${RED}${result}${NC}\n"
+      failed_imports=$((failed_imports + 1))
     fi
   done
   rm -rf "$IMPORT_TMP"
+  if [ "$failed_imports" -gt 0 ]; then
+    printf "${RED}Refusing a partial image update. Retry imports or set OMNIVEC_BUILD=true.${NC}\n" >&2
+    exit 1
+  fi
 
   printf "${GREEN}Image import complete: $import_count imported, $skip_count skipped.${NC}\n"
   if [ "$import_count" -gt 0 ]; then IMAGES_CHANGED=true; fi
@@ -512,6 +655,7 @@ if [ -n "$MISSING_IMAGES" ]; then
   printf "\n${YELLOW}Building missing images from source...${NC}\n"
   # shellcheck disable=SC2086
   build_missing_images $MISSING_IMAGES
+  IMAGES_CHANGED=true
 
   STILL_MISSING=""
   for image in $MISSING_IMAGES; do
@@ -549,32 +693,25 @@ if ! az aks get-credentials \
   exit 1
 fi
 
-# Also materialize to the default kubeconfig path so kubectl finds the context
-# even if $KUBECONFIG is reset by the outer runner (azd / heartbeat wrappers).
+# Commands use the isolated kubeconfig; never replace the user's default.
 mkdir -p "$HOME/.kube"
-if [ -L "$HOME/.kube/config" ]; then rm -f "$HOME/.kube/config"; fi
-cp -f "$OMNIVEC_KUBECONFIG" "$HOME/.kube/config"
-chmod 600 "$HOME/.kube/config" "$OMNIVEC_KUBECONFIG" 2>/dev/null || true
-
-# WSL: az writes kubeconfig to Windows home — symlink to Linux home for helm/kubectl
-if [ ! -f "$HOME/.kube/config" ] && [ -f "/mnt/c/Users/$(whoami)/.kube/config" ] 2>/dev/null; then
-  mkdir -p "$HOME/.kube"
-  ln -sf "/mnt/c/Users/$(whoami)/.kube/config" "$HOME/.kube/config"
-elif [ ! -f "$HOME/.kube/config" ]; then
-  # Try to find Windows kubeconfig via USERPROFILE
-  WIN_HOME=$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | sed 's|\\|/|g; s|^\([A-Z]\):|/mnt/\L\1|') || true
-  if [ -n "$WIN_HOME" ] && [ -f "$WIN_HOME/.kube/config" ]; then
-    mkdir -p "$HOME/.kube"
-    ln -sf "$WIN_HOME/.kube/config" "$HOME/.kube/config"
-  fi
-fi
+chmod 600 "$OMNIVEC_KUBECONFIG" 2>/dev/null || true
 
 export KUBE_CONTEXT
 # Helper: always invoke kubectl against the freshly-fetched kubeconfig and context.
 # Some azd/heartbeat wrappers reset $KUBECONFIG between hook phases, so we cannot
 # rely solely on the env var.
 kubectl_omnivec() {
-  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" "$@"  # stdin-ok: callers supply </dev/null
+  kubectl --kubeconfig "$OMNIVEC_KUBECONFIG" --context "$KUBE_CONTEXT" --request-timeout=30s "$@"  # stdin-ok: callers supply </dev/null
+}
+
+apply_kubernetes_resource() {
+  _resource=$(kubectl_omnivec "$@" --dry-run=client -o yaml </dev/null) || return $?
+  if [ -z "$_resource" ]; then
+    printf 'kubectl produced an empty resource manifest.\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$_resource" | kubectl_omnivec apply -f -
 }
 
 # Sanity check before first kubectl call — surface config issues clearly.
@@ -594,17 +731,16 @@ printf "${GREEN}Connected to AKS cluster: ${AKS_CLUSTER} (context: ${KUBE_CONTEX
 printf "\n${YELLOW}Phase 3: Creating namespaces and secrets...${NC}\n"
 
 # Create namespaces and label for Helm ownership
-kubectl_omnivec create namespace omnivec </dev/null 2>/dev/null || true
-kubectl_omnivec create namespace docgrok </dev/null 2>/dev/null || true
+apply_kubernetes_resource create namespace omnivec
+apply_kubernetes_resource create namespace docgrok
 kubectl_omnivec label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite </dev/null
 kubectl_omnivec annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite </dev/null
 
 # Storage connection string secret (always created — blob infra always provisioned).
-kubectl_omnivec create secret generic omnivec-storage \
+apply_kubernetes_resource create secret generic omnivec-storage \
   --namespace omnivec \
   --from-literal=account-name="$STORAGE_ACCOUNT" \
-  --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" \
-  --dry-run=client -o yaml | kubectl_omnivec apply -f -
+  --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT"
 printf "  ${GREEN}omnivec-storage secret created.${NC}\n"
 
 # Agent internal token secret (used for agent <-> API service-to-service auth)
@@ -613,10 +749,9 @@ if [ -z "$AGENT_INTERNAL_TOKEN" ]; then
   AGENT_INTERNAL_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 44)
   azd env set OMNIVEC_AGENT_INTERNAL_TOKEN "$AGENT_INTERNAL_TOKEN" </dev/null
 fi
-kubectl_omnivec create secret generic omnivec-agent-internal \
+apply_kubernetes_resource create secret generic omnivec-agent-internal \
   --namespace omnivec \
-  --from-literal=token="$AGENT_INTERNAL_TOKEN" \
-  --dry-run=client -o yaml | kubectl_omnivec apply -f -
+  --from-literal=token="$AGENT_INTERNAL_TOKEN"
 printf "  ${GREEN}omnivec-agent-internal secret created.${NC}\n"
 
 printf "${GREEN}Namespaces and secrets created.${NC}\n"
@@ -627,30 +762,9 @@ printf "${GREEN}Namespaces and secrets created.${NC}\n"
 
 printf "\n${YELLOW}Phase 4: Deploying OmniVec via Helm...${NC}\n"
 
-# Resolve helm chart dependencies (docgrok subchart) — skip if already up to date
+# Chart.lock does not track edits to local subchart templates; repackage it.
 CHART_DIR="${ROOT_DIR}/helm/omnivec"
-LOCK_FILE="${CHART_DIR}/Chart.lock"
-LOCK_HASH_FILE="${CHART_DIR}/charts/.lock-hash"
-CURRENT_HASH=""
-if [ -f "$LOCK_FILE" ]; then
-  CURRENT_HASH=$(sha256sum "$LOCK_FILE" 2>/dev/null | cut -d' ' -f1)
-fi
-CACHED_HASH=""
-if [ -f "$LOCK_HASH_FILE" ]; then
-  CACHED_HASH=$(cat "$LOCK_HASH_FILE" 2>/dev/null)
-fi
-if [ -n "$CURRENT_HASH" ] && [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
-  printf "  ${GREEN}Helm dependencies up to date, skipping.${NC}\n"
-else
-  printf "  ${CYAN}Resolving helm dependencies...${NC}\n"
-  if ! helm dependency build "$CHART_DIR" </dev/null; then
-    printf "  ${RED}helm dependency build failed.${NC}\n"
-    exit 1
-  fi
-  if [ -n "$CURRENT_HASH" ]; then
-    echo "$CURRENT_HASH" > "$LOCK_HASH_FILE"
-  fi
-fi
+helm dependency build "$CHART_DIR" --skip-refresh </dev/null
 
 # Image tag used for all images built in Phase 1
 # Generate admin token if not already set
@@ -680,7 +794,8 @@ fi
 IMAGE_TAG="latest"
 
 # Write helm values to a temp file (avoids fragile eval + string concatenation)
-HELM_VALUES_FILE=$(mktemp /tmp/omnivec-helm-values.XXXXXX.yaml)
+umask 077
+HELM_VALUES_FILE="$_post_lock/helm-values.yaml"
 cat > "$HELM_VALUES_FILE" <<EOF
 global:
   imageRegistry: "${ACR_LOGIN_SERVER}"
@@ -711,6 +826,8 @@ changefeed:
     tag: "${IMAGE_TAG}"
 dotnetWorker:
   enabled: true
+sharepointWatcher:
+  enabled: ${SHAREPOINT_ENABLED}
 docgrok:
   global:
     imageRegistry: "${ACR_LOGIN_SERVER}"
@@ -783,35 +900,6 @@ run_helm_deploy() {
   "$@"
 }
 
-# Adopt orphaned resources when no helm release exists but the workload does.
-# Caused by a previous --atomic timeout that wiped the release secret while
-# the Deployments/Services persisted. We relabel them with Helm ownership so
-# the next `helm install` takes them over instead of erroring on AlreadyExists.
-adopt_orphaned_resources() {
-  _existing=$(kubectl_omnivec get deploy -n omnivec -o name </dev/null 2>/dev/null | head -1)
-  if [ -z "$_existing" ]; then
-    return 0
-  fi
-  printf "${YELLOW}No Helm release found but resources exist in omnivec ns — adopting them for Helm ownership...${NC}\n"
-  _adopt_kinds="deploy svc sa cm secret hpa ingress serviceaccount"
-  # NOTE: exclude the auto-generated storage secret (omnivec-storage) — it is
-  # created by postprovision itself and would conflict with helm-managed ones.
-  for _kind in $_adopt_kinds; do
-    kubectl_omnivec get "$_kind" -n omnivec -o name </dev/null 2>/dev/null | while read -r _res; do
-      [ -z "$_res" ] && continue
-      case "$_res" in
-        secret/omnivec-storage|secret/sh.helm.*|secret/default-token-*) continue ;;
-      esac
-      kubectl_omnivec annotate "$_res" -n omnivec --overwrite \
-        meta.helm.sh/release-name=omnivec \
-        meta.helm.sh/release-namespace=omnivec </dev/null >/dev/null 2>&1 || true
-      kubectl_omnivec label "$_res" -n omnivec --overwrite \
-        app.kubernetes.io/managed-by=Helm </dev/null >/dev/null 2>&1 || true
-    done
-  done
-  printf "${GREEN}Adoption annotations applied — helm install will take ownership.${NC}\n"
-}
-
 # Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
 set +e
 _helm_status=$(helm status omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" -o json </dev/null 2>/dev/null)
@@ -819,24 +907,11 @@ _helm_phase=$(echo "$_helm_status" | grep -o '"status":"pending-[^"]*"' | head -
 _helm_state=$(echo "$_helm_status" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
 set -e
 if [ -n "$_helm_phase" ]; then
-  printf "${YELLOW}Detected stuck Helm release (status: ${_helm_phase}). Rolling back...${NC}\n"
-  set +e
-  helm rollback omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" </dev/null 2>/dev/null
-  _rb_rc=$?
-  set -e
-  if [ "$_rb_rc" -ne 0 ]; then
-    printf "${YELLOW}Rollback failed — uninstalling stuck release...${NC}\n"
-    helm uninstall omnivec -n omnivec --kube-context "$KUBE_CONTEXT" --kubeconfig "$OMNIVEC_KUBECONFIG" </dev/null 2>/dev/null || true
-    _helm_state=""
-  fi
-  printf "${GREEN}Stuck release cleared. Proceeding with fresh deploy.${NC}\n"
+  printf "${RED}Helm release is %s. Another deployment may still be active. Inspect helm status/history with kubeconfig '%s' and recover explicitly before retrying.${NC}\n" "$_helm_phase" "$OMNIVEC_KUBECONFIG" >&2
+  exit 1
 fi
 
-# If no release exists but resources do (orphaned from a prior --atomic
-# uninstall), adopt them so `helm install` can take ownership cleanly.
-if [ -z "$_helm_state" ]; then
-  adopt_orphaned_resources
-fi
+# Leave ownership conflicts to Helm; never adopt unrelated namespace resources.
 
 # ── Skip helm upgrade if nothing has changed ────────────────────────────────
 # Rationale: helm upgrade --install --wait takes 1-2 minutes even
@@ -861,10 +936,9 @@ if [ -f "$HELM_VALUES_FILE" ] && [ -d "$CHART_DIR" ]; then
   CURRENT_FP=$(
     {
       sha256sum "$HELM_VALUES_FILE" 2>/dev/null | cut -d' ' -f1
+      printf '%s\n' "$KUBE_CONTEXT" "$OMNIVEC_KUBECONFIG" "$KEYVAULT_URI" "$APPINSIGHTS_CS" "$LOG_ANALYTICS_WS" "$SB_ENDPOINT" "$STORAGE_ACCOUNT" "$STORAGE_BLOB_ENDPOINT"
       find "$CHART_DIR" -type f ! -name '.last-deploy-fingerprint' 2>/dev/null \
-        | LC_ALL=C sort \
-        | xargs -r sha256sum 2>/dev/null \
-        | awk '{print $1}'
+        -exec sha256sum {} \; | LC_ALL=C sort
     } | sha256sum 2>/dev/null | cut -d' ' -f1
   )
 fi
@@ -878,10 +952,10 @@ if [ "${OMNIVEC_FORCE_HELM:-}" != "true" ] \
    && [ -n "$CURRENT_FP" ] \
    && [ "$CURRENT_FP" = "$CACHED_FP" ]; then
   set +e
-  _unavail=$(kubectl_omnivec get deploy -n omnivec -o jsonpath='{range .items[?(@.status.availableReplicas==0)]}{.metadata.name}{"\n"}{end}' </dev/null 2>/dev/null)
+  _deployment_rows=$(kubectl_omnivec get deploy -n omnivec -o 'jsonpath={range .items[*]}{.metadata.generation}{" "}{.status.observedGeneration}{" "}{.spec.replicas}{" "}{.status.updatedReplicas}{" "}{.status.availableReplicas}{" "}{.status.replicas}{"\n"}{end}' </dev/null 2>/dev/null)
   _deploy_rc=$?
   set -e
-  if [ "$_deploy_rc" -eq 0 ] && [ -z "$_unavail" ]; then
+  if [ "$_deploy_rc" -eq 0 ] && printf '%s\n' "$_deployment_rows" | awk 'NF != 6 || $2 < $1 || $3 != $4 || $3 != $5 || $3 != $6 {bad=1} END {exit (NR == 0 || bad)}'; then
     SKIP_HELM=true
   fi
 fi
@@ -939,10 +1013,6 @@ _events=$($KC get events --sort-by=.lastTimestamp -o "jsonpath={range .items[?(@
   # Clean up temp values file
   rm -f "$HELM_VALUES_FILE"
 
-  # Cache fingerprint only on success so a failed run doesn't poison future skips
-  if [ "$helm_rc" -eq 0 ] && [ -n "$CURRENT_FP" ]; then
-    echo "$CURRENT_FP" > "$FINGERPRINT_FILE"
-  fi
 fi
 
 if [ "$helm_rc" -ne 0 ]; then
@@ -969,9 +1039,7 @@ printf "${GREEN}Helm deployment complete.${NC}\n"
 # Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
 if [ "$IMAGES_CHANGED" = "true" ]; then
   printf "\n${YELLOW}Images updated — restarting pods to pull new images...${NC}\n"
-  kubectl_omnivec rollout restart deployment -n omnivec </dev/null 2>/dev/null || true
-  kubectl_omnivec rollout status deployment/omnivec-api -n omnivec --timeout=5m </dev/null 2>/dev/null || true
-  printf "${GREEN}Pods restarted with new images.${NC}\n"
+  kubectl_omnivec rollout restart deployment -n omnivec </dev/null
 fi
 
 # =============================================================================
@@ -1000,10 +1068,14 @@ while [ $i -lt 30 ]; do
   i=$((i + 1))
 done
 
-if ! kubectl_omnivec rollout status deployment/omnivec-api -n omnivec --timeout=5m >/dev/null; then
-  printf "${RED}API deployment did not become ready.${NC}\n"
+if ! kubectl_omnivec rollout status deployment -n omnivec --timeout=5m --request-timeout=5m </dev/null; then
+  printf "${RED}One or more deployments did not become ready.${NC}\n"
   exit 1
 fi
+if [ -n "$CURRENT_FP" ]; then
+  echo "$CURRENT_FP" > "$FINGERPRINT_FILE"
+fi
+rm -f "$IMAGE_UPDATE_MARKER"
 
 echo ""
 printf "${GREEN}╔══════════════════════════════════════════╗${NC}\n"

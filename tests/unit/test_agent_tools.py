@@ -137,6 +137,60 @@ class TestArgValidation:
 # ---------------------------------------------------------------------------
 class TestOmnivecApiTools:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name,field,route", [
+        ("get_source", "source_id", "sources"),
+        ("get_destination", "destination_id", "destinations"),
+        ("get_pipeline", "pipeline_id", "pipelines"),
+        ("get_pipeline_status", "pipeline_id", "pipelines"),
+        ("get_pipeline_metrics", "pipeline_id", "pipelines"),
+        ("get_job", "job_id", "jobs"),
+    ])
+    @pytest.mark.parametrize("identifier", [
+        "../settings?token=example#fragment",
+        "https://example.invalid/path",
+        "//example.invalid/path",
+        "..\\settings",
+        "%2e%2e%2fsettings",
+    ])
+    async def test_resource_id_cannot_change_request_path(self, omnivec_api_mod, tools_mod, monkeypatch, tool_name, field, route, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        monkeypatch.setattr(omnivec_api_mod, "OMNIVEC_API_URL", "http://omnivec-api")
+        t = tools_mod.get_tool(tool_name)
+        with pytest.raises(ValueError, match="Resource identifiers"):
+            await t.callable(t.params(**{field: identifier}))
+        assert not fake.requests
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", [".", ".."])
+    async def test_relative_resource_id_is_rejected_before_request(self, omnivec_api_mod, tools_mod, monkeypatch, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        t = tools_mod.get_tool("get_source")
+        with pytest.raises(ValueError, match="Resource identifiers"):
+            await t.callable(t.params(source_id=identifier))
+        assert not fake.requests
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resource", ["sources", "destinations", "pipelines", "jobs", "docgrok_pipelines"])
+    @pytest.mark.parametrize("identifier", ["", ".", "..", "src?x=1", "src#x", "src/name", "src\\name", "src%2f", "src\n", "src-\u00e9", "a" * 513])
+    async def test_shared_resource_reader_rejects_invalid_identifiers(self, omnivec_api_mod, monkeypatch, resource, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        with pytest.raises(ValueError, match="Resource identifiers"):
+            await omnivec_api_mod._get_resource(resource, identifier)
+        assert not fake.requests
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["src-123", "pip_123.v2", "a" * 512])
+    async def test_shared_resource_reader_preserves_valid_identifiers(self, omnivec_api_mod, monkeypatch, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        monkeypatch.setattr(omnivec_api_mod, "OMNIVEC_API_URL", "http://omnivec-api")
+        await omnivec_api_mod._get_resource("pipelines", identifier)
+        assert fake.requests[0][1] == f"http://omnivec-api/api/pipelines/{identifier}"
+
+    @pytest.mark.asyncio
     async def test_list_pipelines_hits_expected_url(self, omnivec_api_mod, tools_mod, monkeypatch):
         fake = FakeClient()
         fake.next_response = {"pipelines": []}

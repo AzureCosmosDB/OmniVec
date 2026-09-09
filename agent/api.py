@@ -1,4 +1,4 @@
-"""OmniVec Agent FastAPI app — Phase 1 (read-only diagnostics)."""
+"""OmniVec in-cluster agent: diagnosis, approved actions and verified recovery."""
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +19,7 @@ from .audit import get_audit_writer
 from .auth import CallerIdentity, require_internal_caller
 from .session_store import get_session_store
 from .tools import list_tools
+from .tools import diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ _DEBUG = os.getenv("OMNIVEC_DEBUG", "").lower() in ("true", "1")
 app = FastAPI(
     title="OmniVec Agent",
     version="0.1.0",
-    description="In-cluster AI ops agent — Phase 1 (read-only diagnostics).",
+    description="In-cluster diagnosis and approval-gated, verified operational recovery.",
     docs_url="/docs" if _DEBUG else None,
     redoc_url="/redoc" if _DEBUG else None,
     openapi_url="/openapi.json" if _DEBUG else None,
@@ -131,7 +132,9 @@ async def health() -> dict:
 
 @app.get("/v1/ready")
 async def ready() -> dict:
-    return {"status": "ready"}
+    return {"status": "ready", "diagnostics": "available",
+            "default_chat_model_configured": bool(os.getenv("AGENT_DEFAULT_MODEL_ID", "").strip()),
+            "note": "Readiness is service availability, not pipeline health or a chat-provider test."}
 
 
 @app.get("/v1/tools", response_model=ToolListResponse)
@@ -147,6 +150,27 @@ async def list_tools_endpoint(caller: CallerIdentity = Depends(require_internal_
             for t in tools
         ],
     )
+
+
+@app.get("/v1/diagnostics/system")
+async def system_diagnostics(caller: CallerIdentity = Depends(require_internal_caller)) -> dict:
+    """Deterministic, read-only diagnostics; no LLM or new model deployment required."""
+    result = await diagnostics.diagnose_system(diagnostics.Empty())
+    await get_audit_writer().record(
+        session_id="diagnostics", user=caller.caller_id, role=caller.role,
+        tool_name="diagnose_system", args={}, result_summary=json.dumps({"status": result["status"]}),
+    )
+    return result
+
+
+@app.post("/v1/diagnostics/pipeline")
+async def pipeline_diagnostics(req: diagnostics.PipelineRef, caller: CallerIdentity = Depends(require_internal_caller)) -> dict:
+    result = await diagnostics.diagnose_pipeline(req)
+    await get_audit_writer().record(
+        session_id="diagnostics", user=caller.caller_id, role=caller.role,
+        tool_name="diagnose_pipeline", args=req.model_dump(), result_summary=json.dumps({"status": result["status"]}),
+    )
+    return result
 
 
 def _sse(event: dict) -> bytes:
@@ -198,7 +222,8 @@ async def chat(req: ChatRequest, caller: CallerIdentity = Depends(require_intern
                 if evt.get("type") == "final":
                     await sessions.append_message(
                         caller.caller_id, session["id"],
-                        {"role": "assistant", "content": evt.get("text", "")},
+                        {"role": "assistant", "content": evt.get("text", ""),
+                         **({"recovery": evt["recovery"]} if "recovery" in evt else {})},
                     )
                 yield _sse(evt)
         finally:
@@ -221,13 +246,15 @@ async def chat_approve(req: ApproveRequest, caller: CallerIdentity = Depends(req
         raise HTTPException(status_code=403, detail="admin role required to approve mutating actions")
 
     approvals = get_approvals_store()
-    pending = await approvals.pop(req.session_id, req.call_id)
+    pending = await approvals.get(req.session_id, req.call_id)
     if pending is None:
         raise HTTPException(status_code=404, detail="no pending approval for that call_id")
 
-    if pending.user_id != caller.caller_id and not caller.is_admin:
-        # Should be unreachable given the is_admin guard above, but defence-in-depth.
+    if pending.user_id != caller.caller_id:
         raise HTTPException(status_code=403, detail="cannot approve another user's request")
+    pending = await approvals.pop(req.session_id, req.call_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="approval already consumed")
 
     sessions = get_session_store()
     audit = get_audit_writer()
@@ -254,7 +281,8 @@ async def chat_approve(req: ApproveRequest, caller: CallerIdentity = Depends(req
                 if evt.get("type") == "final":
                     await sessions.append_message(
                         pending.user_id, pending.session_id,
-                        {"role": "assistant", "content": evt.get("text", "")},
+                        {"role": "assistant", "content": evt.get("text", ""),
+                         **({"recovery": evt["recovery"]} if "recovery" in evt else {})},
                     )
                 yield _sse(evt)
         finally:

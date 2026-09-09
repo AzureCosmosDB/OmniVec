@@ -111,8 +111,8 @@ public class SourceWatcher : ISourceWatcher
                 ApplicationName = CosmosDataUserAgent,
                 ConnectionMode = ConnectionMode.Direct,
                 ConsistencyLevel = ConsistencyLevel.Eventual,
-                MaxRetryAttemptsOnRateLimitedRequests = int.MaxValue,
-                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(300),
+                MaxRetryAttemptsOnRateLimitedRequests = 5,
+                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
             });
         _sourceContainer = sourceClient
             .GetDatabase(_source.Database!)
@@ -200,6 +200,16 @@ public class SourceWatcher : ISourceWatcher
         // instead of extracting inline text from content_fields.
         var attachmentMode = !string.IsNullOrEmpty(_source.AttachmentsField);
 
+        foreach (var pipeline in pipelines.Where(p => p.ContentStrategy == "chunk"))
+        {
+            if (pipeline.ProcessingMode != "queue" || attachmentMode
+                || pipeline.Sources.Any(s => s.SourceId == _source.Id && s.ContentMode != "field")
+                || _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId)?.Type != "cosmosdb-vector")
+                throw new NotSupportedException("Cosmos text chunking requires queue mode, field content and a Cosmos vector destination");
+            if (_sbPublisher?.IsEnabled != true)
+                throw new NotSupportedException("Cosmos text chunking requires Service Bus; legacy jobs do not support it");
+        }
+
         foreach (var pipeline in pipelines)
         {
             var pipSrcOuter = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
@@ -232,96 +242,22 @@ public class SourceWatcher : ISourceWatcher
                         continue;
                     }
 
-                    if (!Source.HasContent(doc, cfFields))
+                    if (!Source.HasContent(doc, cfFields) && pipeline.ContentStrategy != "chunk")
                     {
                         skippedNoContent++;
                         continue;
                     }
                     var contentText = Source.ExtractContent(doc, cfFields);
-                    if (string.IsNullOrEmpty(contentText))
+                    if (string.IsNullOrEmpty(contentText) && pipeline.ContentStrategy != "chunk")
                     {
                         skippedNoContent++;
                         continue;
                     }
 
-                    // Idempotency guard: if this doc was already embedded for
-                    // THIS pipeline at or after the current reset_at, skip it.
-                    // This runs even when SkipContentHash=true (post-reset) so
-                    // we don't infinite-loop on the PATCH-feedback change feed.
+                    if (HasCurrentEmbedding(doc, pipeline, _hasher.ComputeHash(contentText)))
                     {
-                        var existingEmbeddedAt = doc["embedded_at"];
-                        var existingPipelineId = doc["pipeline_id"]?.Value<string>();
-                        if (existingEmbeddedAt is not null && existingEmbeddedAt.Type != JTokenType.Null
-                            && (string.IsNullOrEmpty(existingPipelineId) || existingPipelineId == pipeline.Id))
-                        {
-                            DateTime embeddedDt;
-                            bool parsedEmbedded = false;
-                            if (existingEmbeddedAt.Type == JTokenType.Date)
-                            {
-                                embeddedDt = existingEmbeddedAt.Value<DateTime>();
-                                parsedEmbedded = true;
-                            }
-                            else
-                            {
-                                parsedEmbedded = DateTime.TryParse(existingEmbeddedAt.Value<string>(),
-                                    null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                                    out embeddedDt);
-                            }
-                            if (parsedEmbedded)
-                            {
-                                bool afterReset = true;
-                                if (!string.IsNullOrEmpty(pipeline.ResetAt) &&
-                                    DateTime.TryParse(pipeline.ResetAt,
-                                        null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                                        out var resetDt))
-                                {
-                                    afterReset = embeddedDt >= resetDt;
-                                }
-                                if (afterReset)
-                                {
-                                    skippedUnchanged++;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    // Content hash dedup (respects reset_at)
-                    if (!SkipContentHash)
-                    {
-                        var existingHash = doc["content_hash"]?.Value<string>();
-                        if (!string.IsNullOrEmpty(existingHash))
-                        {
-                            var currentHash = _hasher.ComputeHash(contentText);
-                            if (currentHash == existingHash)
-                            {
-                                var embeddedAtToken = doc["embedded_at"];
-                                bool needsReprocess = false;
-                                if (embeddedAtToken is not null && embeddedAtToken.Type != JTokenType.Null)
-                                {
-                                    DateTime embeddedDt;
-                                    if (embeddedAtToken.Type == JTokenType.Date)
-                                        embeddedDt = embeddedAtToken.Value<DateTime>();
-                                    else if (!DateTime.TryParse(embeddedAtToken.Value<string>(), out embeddedDt))
-                                        needsReprocess = true;
-
-                                    if (!needsReprocess)
-                                    {
-                                        if (!string.IsNullOrEmpty(pipeline.ResetAt) &&
-                                            DateTime.TryParse(pipeline.ResetAt, out var resetDt) &&
-                                            resetDt > embeddedDt)
-                                        {
-                                            needsReprocess = true;
-                                        }
-                                    }
-                                }
-                                if (!needsReprocess)
-                                {
-                                    skippedUnchanged++;
-                                    continue;
-                                }
-                            }
-                        }
+                        skippedUnchanged++;
+                        continue;
                     }
 
                     var docId = doc["id"]?.Value<string>() ?? "";
@@ -383,15 +319,12 @@ public class SourceWatcher : ISourceWatcher
                 var messages = new List<EmbeddingMessage>();
                 foreach (var pipeline in queuePipelines)
                 {
-                    if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
+                    if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs) || pipelineDocs.Count == 0) continue;
                     var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
                     if (dest is null)
                     {
-                        _logger.LogWarning(
-                            "Skipping {Count} docs for pipeline {PipelineId}: destination {DestId} not found or disabled. " +
-                            "Enable the destination (e.g. `omnivec destination enable {DestId}`) and the change-feed will replay.",
-                            pipelineDocs.Count, pipeline.Id, pipeline.DestinationId);
-                        continue;
+                        throw new InvalidOperationException(
+                            $"Destination {pipeline.DestinationId} missing/disabled for pipeline {pipeline.Id}; retaining change-feed checkpoint");
                     }
 
                     foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att) in pipelineDocs)
@@ -425,6 +358,8 @@ public class SourceWatcher : ISourceWatcher
                             DestinationConfig = destConfig,
                             Content = content,
                             ContentHash = contentHash,
+                            ContentStrategy = pipeline.ContentStrategy,
+                            ChunkConfig = pipeline.ChunkConfig,
                             PartitionKeyValue = pkValue,
                             PipelineGeneration = pipeline.Generation,
                             SourceContentFields = contentFields,
@@ -509,6 +444,21 @@ public class SourceWatcher : ISourceWatcher
     /// Phase 1: Embed all docs in sub-batches of 100.
     /// Phase 2: Group by partition key and patch via TransactionalBatch with 429 retry.
     /// </summary>
+    internal static bool HasCurrentEmbedding(JObject document, Pipeline pipeline, string contentHash)
+    {
+        if (document["pipeline_id"]?.Value<string>() != pipeline.Id
+            || document["content_hash"]?.Value<string>() != contentHash)
+            return false;
+        var stamp = document["embedded_at"];
+        if (stamp is null || stamp.Type == JTokenType.Null) return false;
+        var styles = System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal;
+        DateTime embedded;
+        if (stamp.Type == JTokenType.Date) embedded = stamp.Value<DateTime>().ToUniversalTime();
+        else if (!DateTime.TryParse(stamp.Value<string>(), null, styles, out embedded)) return false;
+        return string.IsNullOrEmpty(pipeline.ResetAt)
+            || DateTime.TryParse(pipeline.ResetAt, null, styles, out var reset) && embedded >= reset;
+    }
+
     private async Task ProcessInlineAsync(
         List<Pipeline> inlinePipelines,
         List<(string docId, string content, string contentHash, string pkValue, JObject doc)> docs,
@@ -546,69 +496,13 @@ public class SourceWatcher : ISourceWatcher
                     {
                         try
                         {
-                            var chunkSw = System.Diagnostics.Stopwatch.StartNew();
-                            object embedReq;
-                            if (pipeline.DocgrokPipeline.StartsWith("mdl-"))
-                            {
-                                embedReq = new { model_id = pipeline.DocgrokPipeline, texts = chunkTexts };
-                            }
-                            else
-                            {
-                                embedReq = new { pipeline = pipeline.DocgrokPipeline, texts = chunkTexts };
-                            }
-
-                            const int MaxEmbedRetries = 20;
-                            HttpResponseMessage resp = null!;
-                            for (int embedAttempt = 1; embedAttempt <= MaxEmbedRetries; embedAttempt++)
-                            {
-                                try
-                                {
-                                    resp = await _docGrokClient.PostAsJsonAsync("/embed/batch", embedReq, ct);
-                                    if ((int)resp.StatusCode == 429)
-                                    {
-                                        var retryAfter = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                        _logger.LogWarning("Embed 429, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", embedAttempt, MaxEmbedRetries, retryAfter.TotalSeconds);
-                                        await Task.Delay(retryAfter, ct);
-                                        continue;
-                                    }
-                                    if ((int)resp.StatusCode >= 500)
-                                    {
-                                        var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                        _logger.LogWarning("Embed {Status}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", resp.StatusCode, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
-                                        await Task.Delay(delay, ct);
-                                        continue;
-                                    }
-                                    break;
-                                }
-                                catch (Exception ex) when (ex is not OperationCanceledException)
-                                {
-                                    if (embedAttempt >= MaxEmbedRetries)
-                                    {
-                                        _logger.LogError(ex, "CRITICAL: Embed failed after {MaxRetries} attempts — documents will NOT be embedded", MaxEmbedRetries);
-                                        throw;
-                                    }
-                                    var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, embedAttempt), 60));
-                                    _logger.LogWarning("Embed call failed: {Error}, attempt {Attempt}/{MaxRetries}, retry after {Delay}s", ex.Message, embedAttempt, MaxEmbedRetries, delay.TotalSeconds);
-                                    await Task.Delay(delay, ct);
-                                }
-                            }
-                            resp.EnsureSuccessStatusCode();
-
-                            var resultJson = await resp.Content.ReadAsStringAsync(ct);
-                            using var resultDoc = JsonDocument.Parse(resultJson);
-                            var outputs = resultDoc.RootElement.GetProperty("outputs");
-
-                            if (outputs.GetArrayLength() != chunk.Count)
-                            {
-                                _logger.LogError("CRITICAL: Inline embed mismatch: sent {Sent}, got {Got} — aborting batch to prevent data loss",
-                                    chunk.Count, outputs.GetArrayLength());
-                                throw new InvalidOperationException(
-                                    $"Embed returned {outputs.GetArrayLength()} results for {chunk.Count} inputs — batch will retry");
-                            }
+                            var outputs = await InlineEmbeddingClient.EmbedAsync(
+                                _docGrokClient, pipeline.DocgrokPipeline, chunkTexts, ct);
 
                             for (int i = 0; i < chunk.Count; i++)
                             {
-                                embeddedSlots[subOffset + i] = (chunk[i].docId, chunk[i].pkValue, outputs[i].Clone(), chunk[i].contentHash);
+                                embeddedSlots[subOffset + i] = (chunk[i].docId, chunk[i].pkValue,
+                                    JsonSerializer.SerializeToElement(outputs[i]), chunk[i].contentHash);
                             }
                             // (Streaming progress is reported AFTER PATCH succeeds — see below.
                             // Reporting pre-PATCH led to overcounts when lease takeover caused
@@ -618,7 +512,7 @@ public class SourceWatcher : ISourceWatcher
                         {
                             gate.Release();
                         }
-                    }, ct));
+                    }));
                 }
 
                 await Task.WhenAll(subBatchTasks);

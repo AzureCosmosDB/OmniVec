@@ -56,7 +56,11 @@ public class ServiceBusPublisher : IAsyncDisposable
         List<EmbeddingMessage> messages,
         CancellationToken ct)
     {
-        if (_sender is null || messages.Count == 0) return;
+        if (messages.Count == 0) return;
+        if (_sender is null)
+            throw new InvalidOperationException("Service Bus publisher is not configured");
+        if (!await HasCapacityAsync(ct))
+            throw new InvalidOperationException("Service Bus backpressure active; source checkpoint must be retained");
 
         var pending = new Queue<EmbeddingMessage>(messages);
         var published = 0;
@@ -108,7 +112,7 @@ public class ServiceBusPublisher : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogWarning("Could not get SB active message count: {Error}", ex.Message);
-            return 0;
+            throw;
         }
     }
 

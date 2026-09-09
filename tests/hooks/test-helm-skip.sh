@@ -18,7 +18,7 @@ PS="$ROOT_DIR/hooks/postprovision.ps1"
 
 if bash -n "$SH"; then _ok "postprovision.sh parses cleanly"; else _fail "postprovision.sh parses cleanly" "bash -n failed"; fi
 
-for needle in OMNIVEC_FORCE_HELM IMAGES_CHANGED _helm_state CURRENT_FP "availableReplicas==0"; do
+for needle in OMNIVEC_FORCE_HELM IMAGES_CHANGED _helm_state CURRENT_FP "status.availableReplicas"; do
     if grep -q "$needle" "$SH"; then
         _ok "sh: skip check references '"'"'$needle'"'"'"
     else
@@ -26,19 +26,19 @@ for needle in OMNIVEC_FORCE_HELM IMAGES_CHANGED _helm_state CURRENT_FP "availabl
     fi
 done
 
-if grep -q "find.*CHART_DIR.*" "$SH" && grep -q "xargs.*sha256sum" "$SH"; then
+if grep -q "find.*CHART_DIR.*" "$SH" && grep -q -- "-exec sha256sum" "$SH"; then
     _ok "sh: fingerprint covers chart directory contents"
 else
     _fail "sh: fingerprint covers chart directory contents" "chart hash not rolled in"
 fi
 
-if awk '"'"'/helm_rc.*-eq 0/ { seen=NR } /FINGERPRINT_FILE/ && seen && NR-seen<=3 { found=1 } END { exit(found?0:1) }'"'"' "$SH"; then
-    _ok "sh: fingerprint cached only after helm_rc=0"
+if awk '/if ! kubectl_omnivec rollout status deployment / { seen=NR } /echo.*CURRENT_FP.*FINGERPRINT_FILE/ && seen && NR>seen { found=1 } END { exit(found?0:1) }' "$SH"; then
+    _ok "sh: fingerprint cached only after all rollouts succeed"
 else
-    _fail "sh: fingerprint cached only after helm_rc=0" "not gated on success"
+    _fail "sh: fingerprint cached only after all rollouts succeed" "not gated on rollout success"
 fi
 
-for needle in OMNIVEC_FORCE_HELM imagesChanged helmState currentFp availableReplicas; do
+for needle in OMNIVEC_FORCE_HELM imagesChanged helmState currentFp Test-DeploymentsReady; do
     if grep -q "$needle" "$PS"; then
         _ok "ps1: references '"'"'$needle'"'"'"
     else

@@ -43,6 +43,14 @@ public class Source
     // Key Vault secret URI when auth_type=pat
     public string? DatabricksPatSecretRef => TryGetString("pat_secret_ref");
 
+    // SharePoint Online source config accessors
+    public string? SharePointSiteId => TryGetString("site_id");
+    public string? SharePointDriveId => TryGetString("drive_id");
+    public string SharePointFolderPath => TryGetString("folder_path") ?? "";
+    public List<string> SharePointFileTypes => TryGetStringList("file_types");
+    public int SharePointPollIntervalSeconds => TryGetInt("poll_interval_seconds") ?? 60;
+    public long SharePointMaxFileSizeBytes => TryGetLong("max_file_size_bytes") ?? 50L * 1024 * 1024;
+
     // Blob source config accessors
     public string? BlobAccountUrl => TryGetString("account_url");
     public string? BlobConnectionString => TryGetString("connection_string");
@@ -85,7 +93,8 @@ public class Source
             if (!string.IsNullOrEmpty(explicit_cs)) return explicit_cs;
 
             var host = TryGetString("host") ?? TryGetString("server") ?? "";
-            var port = TryGetString("port") ?? (Type?.ToLowerInvariant() == "mssql" ? "1433" : "5432");
+            var port = TryGetInt("port")?.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ?? (Type?.ToLowerInvariant() == "mssql" ? "1433" : "5432");
             var database = TryGetString("database") ?? "";
             var user = TryGetString("user") ?? "";
             var password = TryGetString("password") ?? "";
@@ -193,6 +202,22 @@ public class Source
                     result.Add(part.Trim());
         }
         return result;
+    }
+
+    private int? TryGetInt(string key)
+    {
+        if (!Config.TryGetValue(key, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var number)) return number;
+        if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out number)) return number;
+        return null;
+    }
+
+    private long? TryGetLong(string key)
+    {
+        if (!Config.TryGetValue(key, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var number)) return number;
+        if (v.ValueKind == JsonValueKind.String && long.TryParse(v.GetString(), out number)) return number;
+        return null;
     }
 
     /// <summary>

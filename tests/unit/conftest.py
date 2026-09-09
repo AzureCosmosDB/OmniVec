@@ -193,7 +193,7 @@ _AGENT_MODULES = [
     "agent.approvals", "agent.llm", "agent.session_store",
     "agent.tools", "agent.tools.omnivec_api", "agent.tools.k8s",
     "agent.tools.cosmos", "agent.tools.servicebus", "agent.tools.metrics",
-    "agent.tools.mutations",
+    "agent.tools.mutations", "agent.tools.diagnostics", "agent.recovery", "agent.redaction",
 ]
 
 

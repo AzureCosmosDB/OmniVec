@@ -20,13 +20,13 @@ class _CosmosClientFacade:
     """Module-level facade tests can monkey-patch."""
 
     async def count(self, database: str, container: str) -> int:  # pragma: no cover
-        return 0
+        raise RuntimeError("Cosmos diagnostic adapter is not configured; count is UNKNOWN")
 
     async def get(self, database: str, container: str, doc_id: str, partition_key: str) -> dict | None:  # pragma: no cover
-        return None
+        raise RuntimeError("Cosmos diagnostic adapter is not configured; document state is UNKNOWN")
 
     async def query(self, database: str, container: str, sql: str, parameters: list | None) -> list[dict]:  # pragma: no cover
-        return []
+        raise RuntimeError("Cosmos diagnostic adapter is not configured; query results are UNKNOWN")
 
 
 _COSMOS: _CosmosClientFacade = _CosmosClientFacade()

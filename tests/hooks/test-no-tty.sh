@@ -22,7 +22,8 @@ FAIL=0
 pass() { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
 fail() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 
-TMP=$(mktemp -d 2>/dev/null || mktemp -d -t omnivec-a2)
+TMP="$SCRIPT_DIR/.no-tty-test-$$"
+(umask 077 && mkdir "$TMP") || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
 printf '\n=== a2: no-TTY / non-interactive tests ===\n'
@@ -84,7 +85,7 @@ fi
     rc=$?
     if [ "$rc" -eq 0 ] \
        && ! printf '%s' "$out" | grep -q POSTCALL \
-       && grep -q 'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_B4ms' "$AZDENV_FILE"; then
+       && grep -q 'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_D4s_v5' "$AZDENV_FILE"; then
         exit 0
     fi
     printf 'rc=%s\nout=%s\nenv=%s\n' "$rc" "$out" "$(cat "$AZDENV_FILE")" >&2

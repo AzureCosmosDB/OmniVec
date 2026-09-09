@@ -48,6 +48,9 @@ public class EmbeddingMessage
     [JsonPropertyName("content_strategy")]
     public string ContentStrategy { get; set; } = "truncate";
 
+    [JsonPropertyName("chunk_config")]
+    public TextChunkConfig? ChunkConfig { get; set; }
+
     [JsonPropertyName("doc_id_pattern")]
     public string DocIdPattern { get; set; } = "{source}";
 
@@ -79,7 +82,7 @@ public class EmbeddingMessage
     [JsonPropertyName("enqueued_at")]
     public string EnqueuedAt { get; set; } = DateTime.UtcNow.ToString("O");
 
-    /// <summary>"text" (default) or "blob_ref" — when blob_ref, worker sends blob location to DocGrok for download + processing.</summary>
+    /// <summary>"text", "blob_ref", or "sharepoint_ref".</summary>
     [JsonPropertyName("content_type")]
     public string ContentType { get; set; } = "text";
 
@@ -98,6 +101,27 @@ public class EmbeddingMessage
     /// <summary>Blob name (path within container)</summary>
     [JsonPropertyName("blob_name")]
     public string? BlobName { get; set; }
+
+    [JsonPropertyName("sharepoint_site_id")]
+    public string? SharePointSiteId { get; set; }
+
+    [JsonPropertyName("sharepoint_drive_id")]
+    public string? SharePointDriveId { get; set; }
+
+    [JsonPropertyName("sharepoint_item_id")]
+    public string? SharePointItemId { get; set; }
+
+    [JsonPropertyName("sharepoint_revision")]
+    public long SharePointRevision { get; set; }
+
+    [JsonPropertyName("sharepoint_etag")]
+    public string? SharePointETag { get; set; }
+
+    [JsonPropertyName("sharepoint_file_name")]
+    public string? SharePointFileName { get; set; }
+
+    [JsonPropertyName("sharepoint_max_file_size_bytes")]
+    public long SharePointMaxFileSizeBytes { get; set; } = 50L * 1024 * 1024;
 
     /// <summary>"upsert" (default) or "delete". When "delete", the worker
     /// removes all destination documents matching source_id + source_ref.</summary>
