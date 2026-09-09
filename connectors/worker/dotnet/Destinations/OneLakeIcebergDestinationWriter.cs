@@ -135,12 +135,7 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         var executionData = new Dictionary<string, object>
         {
             ["commandLineArguments"] = arguments,
-            ["defaultLakehouseId"] = new
-            {
-                referenceType = "ById",
-                workspaceId,
-                itemId = lakehouseItemId,
-            },
+            ["defaultLakehouseId"] = lakehouseItemId,
         };
         var executableFile = Get(config, "spark_executable_file", "");
         if (!string.IsNullOrWhiteSpace(executableFile))
