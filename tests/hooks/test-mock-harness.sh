@@ -25,7 +25,8 @@ FAIL=0
 pass() { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
 fail() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 
-TMP=$(mktemp -d 2>/dev/null || mktemp -d -t omnivec-mock)
+TMP="$SCRIPT_DIR/.mock-test-$$"
+(umask 077 && mkdir "$TMP") || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
 printf '\n=== Mock harness: hooks/preprovision.sh end-to-end ===\n'
@@ -65,7 +66,7 @@ chmod +x "$MOCKS_DIR"/azd "$MOCKS_DIR"/az "$MOCKS_DIR"/kubectl "$MOCKS_DIR"/helm
     # Verify the six defaults were recorded. Accept the values either quoted or
     # unquoted (our recorder quotes whitespace-containing args only).
     for kv in \
-        'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_B4ms' \
+        'OMNIVEC_SYSTEM_NODE_VM_SIZE=Standard_D4s_v5' \
         'OMNIVEC_SYSTEM_NODE_COUNT=2' \
         'OMNIVEC_GPU_NODE_COUNT=0' \
         'OMNIVEC_METADATA_STORE=cosmosdb-serverless'; do
@@ -154,8 +155,8 @@ chmod +x "$MOCKS_DIR"/azd "$MOCKS_DIR"/az "$MOCKS_DIR"/kubectl "$MOCKS_DIR"/helm
     [ "$rc" -eq 0 ] || { printf 'rc=%s\n' "$rc" >&2; exit 1; }
 
     # Lock file should NOT remain after successful exit.
-    if [ -f "$HOME/.omnivec/locks/${AZURE_ENV_NAME}.lock" ]; then
-        printf 'lock file leaked: %s\n' "$HOME/.omnivec/locks/${AZURE_ENV_NAME}.lock" >&2
+    if [ -d "$HOME/.omnivec/locks/${AZURE_ENV_NAME}.lock.d" ]; then
+        printf 'lock directory leaked: %s\n' "$HOME/.omnivec/locks/${AZURE_ENV_NAME}.lock.d" >&2
         exit 1
     fi
     # But the locks dir should exist (acquire_lock mkdir -p).
@@ -165,7 +166,7 @@ chmod +x "$MOCKS_DIR"/azd "$MOCKS_DIR"/az "$MOCKS_DIR"/kubectl "$MOCKS_DIR"/helm
 ) && pass "lock file created and released on clean exit" \
   || fail "lock file lifecycle"
 
-# --- Case 4: Stale lock (dead PID) is cleaned up ---
+# --- Case 4: Existing lock is not taken over or deleted ---
 (
     LOG="$TMP/case4.log"
     AZDENV="$TMP/case4.env"
@@ -175,7 +176,8 @@ chmod +x "$MOCKS_DIR"/azd "$MOCKS_DIR"/az "$MOCKS_DIR"/kubectl "$MOCKS_DIR"/helm
     mkdir -p "$LOCK_DIR"
     # Seed with a lock for a PID that cannot exist (PID 1 is init and kill -0
     # would succeed; use a high unused pid for portability).
-    printf '999999\nsomehost\n' > "$LOCK_DIR/mock-case4.lock"
+    mkdir "$LOCK_DIR/mock-case4.lock.d"
+    printf '999999\nsomehost\n' > "$LOCK_DIR/mock-case4.lock.d/pid"
 
     export OMNIVEC_MOCK_LOG="$LOG"
     export OMNIVEC_MOCK_AZD_ENV="$AZDENV"
@@ -189,14 +191,15 @@ chmod +x "$MOCKS_DIR"/azd "$MOCKS_DIR"/az "$MOCKS_DIR"/kubectl "$MOCKS_DIR"/helm
 
     sh "$PREPROVISION" </dev/null >"$TMP/case4.out" 2>&1
     rc=$?
-    [ "$rc" -eq 0 ] || { printf 'rc=%s\nout=%s\n' "$rc" "$(cat "$TMP/case4.out")" >&2; exit 1; }
+    [ "$rc" -ne 0 ] || { printf 'expected failure for an existing lock\n' >&2; exit 1; }
+    [ -f "$LOCK_DIR/mock-case4.lock.d/pid" ] || { printf 'another owners lock was deleted\n' >&2; exit 1; }
     # Stale lock message should show up.
     grep -qi 'stale lock' "$TMP/case4.out" || {
         printf 'expected "Stale lock" notice:\n%s\n' "$(cat "$TMP/case4.out")" >&2
         exit 1
     }
     exit 0
-) && pass "stale lock (dead PID) is auto-cleaned" \
+) && pass "existing lock is preserved with recovery guidance" \
   || fail "stale lock recovery"
 
 # --- Case 5: Mocks themselves record correctly ---

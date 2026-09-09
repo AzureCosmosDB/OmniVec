@@ -1,0 +1,61 @@
+{{- if .Values.sharepointWatcher.enabled -}}
+{{- if not .Values.dotnetWorker.enabled -}}
+{{- fail "sharepointWatcher.enabled requires dotnetWorker.enabled" -}}
+{{- end -}}
+{{- if not .Values.azure.serviceBus.namespace -}}
+{{- fail "sharepointWatcher.enabled requires azure.serviceBus.namespace" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-sharepoint-watcher
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-sharepoint-watcher
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.sharepointWatcher.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: omnivec-sharepoint-watcher
+  template:
+    metadata:
+      labels:
+        app: omnivec-sharepoint-watcher
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      containers:
+        - name: sharepoint-watcher
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.changefeed.image.repository }}:{{ .Values.changefeed.image.tag }}
+          imagePullPolicy: {{ .Values.changefeed.image.pullPolicy }}
+          env:
+            - name: ChangeFeed__OmniVecCosmosEndpoint
+              value: {{ .Values.azure.cosmos.endpoint | quote }}
+            - name: ChangeFeed__OmniVecDatabase
+              value: {{ .Values.azure.cosmos.database | quote }}
+            - name: ChangeFeed__OmniVecApiBaseUrl
+              value: "http://omnivec-api:80"
+            - name: ChangeFeed__EnableCosmosSources
+              value: "false"
+            - name: ChangeFeed__EnableBlobSources
+              value: "false"
+            - name: ChangeFeed__EnableDatabricksSources
+              value: "false"
+            - name: ChangeFeed__EnableSharePointSources
+              value: "true"
+            - name: ChangeFeed__SourcePollIntervalSeconds
+              value: {{ .Values.sharepointWatcher.discoveryPollIntervalSeconds | default 30 | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            - name: ChangeFeed__ServiceBusEnabled
+              value: "true"
+            - name: ChangeFeed__ServiceBusNamespace
+              value: {{ .Values.azure.serviceBus.namespace | quote }}
+            - name: ChangeFeed__ServiceBusTopicName
+              value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+          resources:
+            {{- toYaml .Values.sharepointWatcher.resources | nindent 12 }}
+{{- end }}

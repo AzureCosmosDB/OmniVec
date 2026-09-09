@@ -54,7 +54,7 @@ public class SourceDiscoveryService : BackgroundService
             try
             {
                 var sources = await _apiClient.GetSourcesByTypesAsync(
-                    new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks" }, ct);
+                    new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks", "sharepoint" }, ct);
                 var pipelines = await _apiClient.GetActivePipelinesAsync(ct);
                 var destinations = await _apiClient.GetDestinationsAsync(ct);
 
@@ -72,7 +72,8 @@ public class SourceDiscoveryService : BackgroundService
                     .ToList();
 
                 // Detect pipeline resets — if reset_at changed, reset affected source watchers
-                var sourcesToReset = DetectResets(pipelines);
+                var blockedSourceIds = InlineSourceOwnership.FindBlockedSourceIds(relevantSources, pipelines);
+                var sourcesToReset = DetectResets(pipelines, blockedSourceIds);
                 if (sourcesToReset.Count > 0)
                 {
                     var sourceMap = relevantSources.ToDictionary(s => s.Id);
@@ -80,7 +81,7 @@ public class SourceDiscoveryService : BackgroundService
                     {
                         if (sourceMap.TryGetValue(sourceId, out var source))
                         {
-                            await _watcherManager.ResetWatcherAsync(sourceId, source, pipelines, ct);
+                            await _watcherManager.ResetWatcherAsync(sourceId, source, pipelines, ct, relevantSources);
                         }
                     }
                 }
@@ -108,12 +109,14 @@ public class SourceDiscoveryService : BackgroundService
     /// Returns the set of source IDs that need their watchers reset.
     /// On first poll after startup, just stores values without triggering resets.
     /// </summary>
-    private HashSet<string> DetectResets(List<Pipeline> pipelines)
+    private HashSet<string> DetectResets(List<Pipeline> pipelines, HashSet<string>? blockedSourceIds = null)
     {
         var sourcesToReset = new HashSet<string>();
 
         foreach (var pipeline in pipelines)
         {
+            // Do not consume a reset while ownership refusal prevents applying it.
+            if (pipeline.Sources.Any(s => blockedSourceIds?.Contains(s.SourceId) == true)) continue;
             var currentResetAt = pipeline.ResetAt ?? "";
 
             if (!_initialLoadDone)

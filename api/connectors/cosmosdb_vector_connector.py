@@ -5,7 +5,7 @@ import asyncio
 import logging
 from typing import Dict, Any, List
 from azure.cosmos import CosmosClient
-from azure.cosmos.exceptions import CosmosHttpResponseError
+from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 from azure.identity import ManagedIdentityCredential, DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
@@ -355,7 +355,7 @@ async def delete_chunks_by_prefix(
             pk_value = row.get(pk_field, row["id"])
             container.delete_item(row["id"], partition_key=pk_value)
             deleted += 1
-        except Exception:  # lgtm[py/empty-except]
+        except CosmosResourceNotFoundError:
             pass
     return deleted
 

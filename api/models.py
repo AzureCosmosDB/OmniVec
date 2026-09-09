@@ -1,7 +1,7 @@
 """OmniVec Data Models"""
 
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union  # lgtm[py/unused-import]
+from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
@@ -26,6 +26,7 @@ class SourceType(str, Enum):
     S3 = "s3"
     HTTP = "http"
     DATABRICKS = "databricks"
+    SHAREPOINT = "sharepoint"
 
 
 class DestinationType(str, Enum):
@@ -172,6 +173,45 @@ class DatabricksSourceConfig(BaseModel):
     batch_size: int = 200              # max rows per CDF page
 
     model_config = {"populate_by_name": True}
+
+
+class SharePointSourceConfig(BaseModel):
+    """SharePoint Online document library accessed through Microsoft Graph."""
+    site_id: str = Field(min_length=1, max_length=512)
+    drive_id: str = Field(min_length=1, max_length=256)
+    folder_path: str = Field(default="", max_length=1024)
+    file_types: List[str] = Field(
+        default_factory=lambda: ["txt", "json", "pdf", "docx", "md", "csv", "html", "xml"],
+        max_length=50,
+    )
+    poll_interval_seconds: int = Field(default=60, ge=10, le=86400)
+    max_file_size_bytes: int = Field(default=50 * 1024 * 1024, gt=0, le=50 * 1024 * 1024)
+    auth_type: Literal["managed-identity"] = "managed-identity"
+
+    @field_validator("site_id", "drive_id")
+    @classmethod
+    def strip_required_identifiers(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("folder_path")
+    @classmethod
+    def normalize_folder_path(cls, value: str) -> str:
+        return value.strip().strip("/")
+
+    @field_validator("file_types")
+    @classmethod
+    def normalize_file_types(cls, values: List[str]) -> List[str]:
+        normalized = []
+        for value in values:
+            extension = value.strip().lower().lstrip(".")
+            if not extension or "/" in extension or "\\" in extension:
+                raise ValueError("file_types entries must be file extensions")
+            if extension not in normalized:
+                normalized.append(extension)
+        return normalized
 
 
 # =============================================================================

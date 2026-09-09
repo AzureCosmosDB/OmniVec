@@ -24,8 +24,9 @@ import httpx
 from pydantic import BaseModel, Field
 
 from . import tool
-from .k8s import _KUBE, NAMESPACE
+from .k8s import _KUBE, NAMESPACE, check_namespace
 from .servicebus import _SB, _fqns
+from .omnivec_api import api_headers
 
 
 OMNIVEC_API_URL = os.environ.get("OMNIVEC_API_URL", "http://omnivec-api")
@@ -46,7 +47,7 @@ def _client() -> httpx.AsyncClient:
 
 async def _post(path: str, json_body: dict | None = None) -> Any:
     url = OMNIVEC_API_URL.rstrip("/") + path
-    headers = {"Host": "omnivec-api"}
+    headers = api_headers()
     r = await _client().post(url, json=(json_body or {}), headers=headers)
     r.raise_for_status()
     if r.headers.get("content-type", "").startswith("application/json"):
@@ -59,19 +60,21 @@ async def _post(path: str, json_body: dict | None = None) -> Any:
 # ---------------------------------------------------------------------------
 class _PodTarget(BaseModel):
     namespace: Optional[str] = Field(default=None, description="Override OMNIVEC_NAMESPACE.")
-    pod_name: str = Field(..., min_length=1)
+    pod_name: str = Field(..., max_length=253, pattern=r"^[a-z0-9][a-z0-9.-]*$")
+    pipeline_id: str | None = Field(default=None, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", description="Affected pipeline to verify after the restart; omit for bounded system verification.")
 
     def ns(self) -> str:
-        return (self.namespace or NAMESPACE).strip()
+        return check_namespace((self.namespace or NAMESPACE).strip())
 
 
 class _ScaleTarget(BaseModel):
     namespace: Optional[str] = None
-    deployment: str = Field(..., min_length=1)
+    deployment: str = Field(..., max_length=253, pattern=r"^[a-z0-9][a-z0-9.-]*$")
     replicas: int = Field(..., ge=0, le=20, description="Target replica count (0-20).")
+    pipeline_id: str | None = Field(default=None, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", description="Affected pipeline to verify; does not change pipeline configuration.")
 
     def ns(self) -> str:
-        return (self.namespace or NAMESPACE).strip()
+        return check_namespace((self.namespace or NAMESPACE).strip())
 
 
 @tool(
@@ -97,11 +100,11 @@ async def scale_deployment(p: _ScaleTarget, **_ctx) -> Any:
 # Pipeline / job control via omnivec api.
 # ---------------------------------------------------------------------------
 class _PipelineId(BaseModel):
-    pipeline_id: str = Field(..., min_length=1)
+    pipeline_id: str = Field(..., max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class _JobId(BaseModel):
-    job_id: str = Field(..., min_length=1)
+    job_id: str = Field(..., max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 @tool(

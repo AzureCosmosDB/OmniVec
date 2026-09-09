@@ -1,206 +1,152 @@
 # DocGrok Operations Guide
 
-> DocGrok is deployed as a Helm subchart of OmniVec. The canonical chart lives
-> at `helm/docgrok/` and is pulled in by `helm/omnivec/Chart.yaml`. The standard
-> deployment path is `helm install/upgrade omnivec ./helm/omnivec` from the
-> repository root — that brings up DocGrok along with the rest of the platform.
->
-> Service endpoints are environment-specific; resolve them at runtime with
-> `kubectl get svc -n docgrok` rather than hard-coded IPs.
+The standard installation entrypoint is **`azd up`** from the repository root.
+DocGrok is the `helm\docgrok` subchart of `helm\omnivec`, deployed in the
+**`omnivec` release and namespace**. It is not a separate `docgrok` release
+in an azd installation. Follow the repository `README.md` for prerequisites,
+image builds, installation settings, and recovery after interrupted deployment.
 
-## Test Request (replace `<DOCGROK_HOST>` with your service IP/DNS)
-```bash
-curl -X POST http://<DOCGROK_HOST>/embed \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requestId": "123",
-    "blobUrl": "https://example.com/document.pdf",
-    "expectedEtag": "123",
-    "contentTypeHint": "application/pdf"
-  }'
+## Select the environment
+
+Deployment hooks keep an environment-specific kubeconfig instead of replacing
+your default context. Use the path printed by deployment. PowerShell example:
+
+```powershell
+$Kubeconfig = Join-Path $HOME ".kube\omnivec-my-omnivec"
+helm --kubeconfig $Kubeconfig status omnivec -n omnivec
+kubectl --kubeconfig $Kubeconfig get services -n omnivec
+kubectl --kubeconfig $Kubeconfig get deployments -n omnivec
 ```
 
----
+Replace `my-omnivec` with the azd environment name. Standard services are:
 
-## Helm Commands
+| Service | In-cluster port | Deployment |
+|---|---|---|
+| `docgrok` | 80 | `docgrok` |
+| `docgrok-controller` | 8081 | `docgrok-controller` |
+| `pipeline-worker-svc` | 8080 | `docgrok-pipeline-worker` |
 
-```bash
-# Install
-helm install docgrok ../helm/docgrok
+Cross-namespace callers should use names such as
+`docgrok.omnivec.svc.cluster.local`. Model services depend on enabled models;
+discover them rather than assuming a GPU backend has been deployed.
 
-# Upgrade after changes
-helm upgrade docgrok ../helm/docgrok
+## Monitor and diagnose
 
-# Uninstall
-helm uninstall docgrok
-
-# View release status
-helm status docgrok
-
-# View what will be deployed (dry-run)
-helm template docgrok ../helm/docgrok
+```powershell
+kubectl --kubeconfig $Kubeconfig get pods -n omnivec
+kubectl --kubeconfig $Kubeconfig get events -n omnivec --sort-by=.lastTimestamp
+kubectl --kubeconfig $Kubeconfig logs deployment/docgrok -n omnivec --tail=100
+kubectl --kubeconfig $Kubeconfig logs deployment/docgrok-controller -n omnivec --tail=100
+kubectl --kubeconfig $Kubeconfig logs deployment/docgrok-pipeline-worker -n omnivec --tail=100
+kubectl --kubeconfig $Kubeconfig top pods -n omnivec
 ```
 
-## Scaling
+Check node readiness, scheduling events, image pulls, workload-identity
+availability, model availability, and memory pressure before restarting
+services. A deployment rollout or successful HTTP health response does not
+prove that an ingestion pipeline is making progress.
 
-```bash
-# Scale DocGrok orchestrator
-kubectl scale deployment docgrok -n docgrok --replicas=3
+### Processing that stops making progress
 
-# Scale DSE-Qwen2 (PDF embeddings)
-kubectl scale deployment dse-qwen2 -n docgrok --replicas=2
+The document processor sends chunks through `/embed/batch` rather than
+issuing one model request per chunk. `DOCGROK_EMBED_BATCH_SIZE` defaults to
+`16` and accepts values from `1` to `128`. Lower it for models with smaller
+batch/token budgets or limited GPU memory. Each batch retains the existing
+120-second HTTP timeout; this is not a whole-document execution deadline.
+Incomplete batch responses fail rather than silently dropping chunks.
+Backend client errors, throttling, and server errors retain their HTTP status
+so the queue worker can distinguish permanent failures from retryable ones.
 
-# Scale CLIP (image embeddings)
-kubectl scale deployment clip -n docgrok --replicas=2
+Chunk sizes must be positive; overlap must be nonnegative and smaller than
+the configured chunk size. Invalid settings fail explicitly instead of
+allowing a non-progressing chunking loop. The legacy `chunk_size` override
+reduces the built-in overlap when necessary. Failed or cancelled PDF
+extraction removes its scratch file to avoid filling disk on repeated retries.
 
-# Scale to zero (disable)
-kubectl scale deployment clip -n docgrok --replicas=0
+CLIP batching ignores cancelled request futures when publishing results, so
+a client disconnect cannot terminate the shared scheduler and strand later
+requests. Model inference, OCR, memory consumption, queue lock renewal, and
+cluster health still need to be monitored separately.
+
+## Model and routing-pipeline persistence
+
+With `COSMOS_ENDPOINT`, `COSMOS_DATABASE`, and `COSMOS_CONTAINER` configured,
+registry mutations must reach Cosmos DB before they change the local cache or
+return success. Storage failures return HTTP 503 rather than acknowledging an
+in-memory-only registration. A partial Cosmos configuration is a startup error.
+Standalone runs with none of these settings still use an in-memory registry;
+those registrations do not survive restarts.
+
+Startup loads every Cosmos query page and retries failed loads before exiting
+unsuccessfully. It does not start serving a successful empty registry after a
+storage failure. Router and controller processes refresh their registry caches
+every 15 seconds, retaining the last complete snapshot if a refresh fails.
+Registry-list failures are surfaced to callers instead of returning an empty
+list. Cache misses reload persisted registrations so a request routed to another
+replica can resolve a newly registered model or routing pipeline.
+
+The API also fails explicitly when model metadata cannot be read or updated;
+an incomplete model list or failed update is not reported as success. Metadata
+updates use ETags so they cannot overwrite a concurrent credential change.
+An omitted or empty API key on re-registration preserves the existing credential.
+Deletion checks ingestion pipelines, routing pipelines, and assistants, and
+fails closed if those references cannot be read. Retrying deletion can finish
+metadata cleanup when the router has already removed the registration.
+
+File and transform requests resolve the model from their routing pipeline before
+forwarding to the document processor. An explicit request `model_id` takes
+precedence; model-free image/video transforms remain supported. If a request was
+already dead-lettered because its model was missing, fixing the registry does
+not replay it: selectively redrive the affected Service Bus messages after
+confirming the model can generate an embedding.
+
+## Exercise the router
+
+Forward the router service in a separate terminal:
+
+```powershell
+kubectl --kubeconfig $Kubeconfig port-forward service/docgrok -n omnivec 8080:80
 ```
 
-## Enable/Disable Models
+Then use the API with an existing registered embedding model:
 
-```bash
-# Disable CLIP at deploy time
-helm upgrade docgrok ../helm/docgrok --set models.embedding.clip.enabled=false
-
-# Enable OCR model
-helm upgrade docgrok ../helm/docgrok --set models.ocr.doctr.enabled=true
-
-# Multiple changes
-helm upgrade docgrok ../helm/docgrok \
-  --set models.embedding.clip.replicaCount=1 \
-  --set models.embedding.dse-qwen2.replicaCount=2
+```powershell
+Invoke-RestMethod http://localhost:8080/health
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/embed/batch `
+  -ContentType "application/json" `
+  -Body '{"model_id":"mdl-ext-your-model","texts":["first document","second document"]}'
 ```
 
-## Monitoring
+The batch endpoint takes `texts` plus a `model_id` or `pipeline`, and returns
+one nested vector output per input. It does not accept the old `requests`
+array of blob URLs. The deployed router does not expose
+`/embed/batch/async` or a batch-status polling API.
 
-```bash
-# Check all pods
-kubectl get pods -n docgrok
+Document extraction uses `/process` or `/process/blob`, which the router
+forwards to the pipeline-worker. Do not send PDFs as text embedding batches.
+Use registered, healthy models rather than interpreting mock embeddings as
+an end-to-end ingestion test.
 
-# Check services
-kubectl get svc -n docgrok
+## Updates and recovery
 
-# View pod logs
-kubectl logs -n docgrok -l app=docgrok --tail=100
-kubectl logs -n docgrok -l app=dse-qwen2 --tail=100
-kubectl logs -n docgrok -l app=clip --tail=100
+For a source update, set `OMNIVEC_BUILD=true` in the azd environment and
+rerun `azd up`; this rebuilds images even if their tags already exist.
+Keep coupled watcher, worker, router, and pipeline-worker changes together.
+See `docs\sharepoint-source.md` for SharePoint protocol migration requirements.
 
-# Follow logs
-kubectl logs -n docgrok -l app=docgrok -f
+Manual parent-chart overrides require the `docgrok.` prefix and the existing
+environment values. Prefer the deployment hooks to a bare Helm upgrade that
+can drop settings. One-off scaling or value changes may be overwritten by
+the next azd run.
 
-# Describe pod (for troubleshooting)
-kubectl describe pod -n docgrok -l app=docgrok
+For a targeted restart after diagnosing the failure:
+
+```powershell
+kubectl --kubeconfig $Kubeconfig rollout restart deployment/docgrok -n omnivec
+kubectl --kubeconfig $Kubeconfig rollout status deployment/docgrok -n omnivec --timeout=180s
 ```
 
-## Restart Deployments
-
-```bash
-# Restart DocGrok
-kubectl rollout restart deployment docgrok -n docgrok
-
-# Restart all
-kubectl rollout restart deployment -n docgrok
-```
-
-## Docker Build & Push
-
-DocGrok images are built and pushed by the OmniVec CI pipeline
-(`.github/workflows/build-images.yml`). To build locally against your own
-registry, set `ACR=<your-registry>.azurecr.io` and run:
-
-```bash
-az acr login --name "${ACR%%.*}"
-
-# From repository root
-docker build -t $ACR/docgrok:$VERSION              -f docgrok/Dockerfile docgrok/
-docker build -t $ACR/docgrok-dse-qwen2:$VERSION    -f docgrok/services/embedding/dse-qwen2/Dockerfile docgrok/services/embedding/dse-qwen2/
-docker build -t $ACR/docgrok-clip:$VERSION         -f docgrok/services/embedding/clip/Dockerfile      docgrok/services/embedding/clip/
-
-docker push $ACR/docgrok:$VERSION
-docker push $ACR/docgrok-dse-qwen2:$VERSION
-docker push $ACR/docgrok-clip:$VERSION
-
-# Roll out via the OmniVec umbrella chart
-helm upgrade omnivec ./helm/omnivec --set docgrok.image.tag=$VERSION
-```
-
-## API Endpoints
-
-Resolve `<DOCGROK_HOST>` from `kubectl get svc -n docgrok` first, then:
-
-```bash
-# Health check
-curl http://<DOCGROK_HOST>/health
-
-# Stats
-curl http://<DOCGROK_HOST>/stats
-
-# Single embed request
-curl -X POST http://<DOCGROK_HOST>/embed \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requestId": "test-123",
-    "blobUrl": "https://example.com/document.pdf",
-    "expectedEtag": "abc123"
-  }'
-
-# Batch embed (sync)
-curl -X POST http://<DOCGROK_HOST>/embed/batch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requests": [
-      {"requestId": "1", "blobUrl": "https://example.com/doc1.pdf", "expectedEtag": ""},
-      {"requestId": "2", "blobUrl": "https://example.com/doc2.pdf", "expectedEtag": ""}
-    ]
-  }'
-
-# Batch embed (async)
-curl -X POST http://<DOCGROK_HOST>/embed/batch/async \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requests": [...]
-  }'
-
-# Check batch status
-curl http://<DOCGROK_HOST>/embed/batch/{batch_id}/status
-```
-
-## Troubleshooting
-
-```bash
-# Pod not starting - check events
-kubectl describe pod -n docgrok <pod-name>
-
-# OOM issues - check resource usage
-kubectl top pods -n docgrok
-
-# Image pull errors - verify ACR login
-az acr login --name "<your-acr-name>"
-
-# Network issues - exec into pod
-kubectl exec -it -n docgrok <pod-name> -- /bin/bash
-
-# Check if backends reachable from docgrok
-kubectl exec -it -n docgrok -l app=docgrok -- curl http://dse-qwen2-svc:8000/health
-```
-
-## Directory Structure
-
-```
-<repo-root>/
-├── docgrok/
-│   ├── api.py                          # Orchestrator
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── OPERATIONS.md                   # This file
-│   └── services/embedding/
-│       ├── dse-qwen2/                  # PDF embeddings
-│       └── clip/                       # Image embeddings
-└── helm/
-    ├── omnivec/                        # Umbrella chart (entry point)
-    └── docgrok/                        # Canonical DocGrok subchart
-        ├── Chart.yaml
-        ├── values.yaml                 # Model registry
-        └── templates/
-```
+Do not uninstall a release or adopt namespace resources to clear a pending
+Helm operation automatically. Inspect release history and establish whether
+another deployment is active first. Uninstalling `omnivec` removes the entire
+application release, not just DocGrok.

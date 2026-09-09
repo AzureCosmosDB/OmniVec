@@ -8,6 +8,27 @@
 
 ## Target architecture
 
+### Current deletion requirements
+
+Blob deletion requires a `Microsoft.Storage.BlobDeleted` subscription delivering
+to the Service Bus `blob-events` queue and
+`blobIngestor.eventGrid.consumerEnabled: true` in the Helm release. Grant the
+system topic's delivery identity **Azure Service Bus Data Sender** on that queue.
+Polling may remain enabled for creates/updates; polling alone does not detect
+deletes. Provision subscriptions for each source storage account, not just the
+installation's default account.
+
+The Cosmos writer scopes deletion by `source_id`, `source_ref`, and `pipeline_id`.
+For a destination partitioned by `/id`, every chunk uses its own document ID as
+its partition key; deletion queries across partitions and deletes each matched
+chunk in its actual partition. Other supported partition keys retain grouped
+deletion within the source document's partition.
+
+Older worker versions could collapse a multi-chunk blob into one row in `/id`
+containers. Upgrading cannot recover those overwritten vectors: affected files
+need scoped cleanup and re-ingestion. Rename handling and delayed upserts racing
+with deletes are separate lifecycle cases, not covered by an ordinary delete test.
+
 ```
 Storage Account
    |- Event Grid system topic
@@ -20,7 +41,7 @@ Storage Account
 ## Phase A - infra + provisioning (~2h)
 1. **bicep**: `infra/modules/servicebus.bicep` - add `blob-events` queue (alongside `jobs`).
    - `maxDeliveryCount: 10`, `lockDuration: PT5M`, DLQ on expiration.
-2. **bicep**: assign **EventGrid Data Sender** role on `blob-events` queue to the Event Grid identity.
+2. **bicep**: assign **Azure Service Bus Data Sender** role on `blob-events` queue to the Event Grid identity.
 3. **bicep / helm**: assign **EventGrid Contributor** + **Storage Account Contributor** on each source storage account to omnivec MI - per-source provisioning at runtime. Document the RBAC requirement.
 4. **api/api.py**:
    - Modify `create_eventgrid_subscription`: replace `endpointType: "WebHook"` with `endpointType: "ServiceBusQueue"`, target the `blob-events` queue (env `OMNIVEC_BLOB_EVENT_QUEUE_RESOURCE_ID`).

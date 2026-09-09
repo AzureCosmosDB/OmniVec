@@ -80,47 +80,33 @@ if repaired != raw:
 PYEOF
 fi
 
-# ── Deployment lock: prevent concurrent azd up/down for the same env ────────
+# Local hook lock; this does not span azd's infrastructure deployment.
 LOCK_DIR="${HOME}/.omnivec/locks"
 mkdir -p "$LOCK_DIR"
-LOCK_FILE="${LOCK_DIR}/${AZURE_ENV_NAME}.lock"
+LOCK_FILE="${LOCK_DIR}/${AZURE_ENV_NAME}.lock.d"
+LOCK_HELD=false
 
 acquire_lock() {
-  if [ -f "$LOCK_FILE" ]; then
-    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null | head -1)
-    LOCK_HOST=$(cat "$LOCK_FILE" 2>/dev/null | tail -1)
-
-    # Check if the locking process is still alive
-    if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-      printf "\n${RED}ERROR: Another deployment for '${AZURE_ENV_NAME}' is already running (PID ${LOCK_PID}).${NC}\n"
-      printf "  If that process is stuck, you can force-take the lock.\n"
-      force_lock=$(read_input "  ${YELLOW}Take over lock and continue? [y/N]: ${NC}")
-      case "$force_lock" in
-        [yY]*)
-          printf "  ${YELLOW}Killing PID ${LOCK_PID} and taking lock...${NC}\n"
-          kill "$LOCK_PID" 2>/dev/null || true
-          sleep 2
-          ;;
-        *)
-          printf "  ${RED}Aborting. Wait for the other deployment to finish or take over the lock.${NC}\n"
-          exit 1
-          ;;
-      esac
-    else
-      printf "  ${YELLOW}Stale lock found (PID ${LOCK_PID} is dead). Cleaning up.${NC}\n"
-    fi
+  if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+    printf 'Another hook owns %s. For a stale lock, confirm the owner has stopped before removing this directory.\n' "$LOCK_FILE" >&2
+    exit 1
   fi
-
-  # Write lock: PID on line 1, hostname on line 2
-  printf "%s\n%s\n" "$$" "$(hostname 2>/dev/null || echo unknown)" > "$LOCK_FILE"
+  LOCK_HELD=true
+  printf "%s\n%s\n" "$$" "$(hostname 2>/dev/null || echo unknown)" > "$LOCK_FILE/pid"
 }
 
 release_lock() {
-  rm -f "$LOCK_FILE"
+  if [ "$LOCK_HELD" = "true" ]; then
+    rm -f "$LOCK_FILE/pid"
+    rmdir "$LOCK_FILE"
+    LOCK_HELD=false
+  fi
 }
 
 # Release lock on exit (success or failure)
-trap 'release_lock' EXIT INT TERM
+trap 'release_lock' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 acquire_lock
 
@@ -181,7 +167,7 @@ is_noninteractive() {
 # accepting empty/garbage input.
 apply_quickstart_defaults() {
   printf "  ${GREEN}Applying Quick-start defaults (non-interactive mode).${NC}\n"
-  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4s_v5" < /dev/null
   azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
@@ -206,7 +192,7 @@ require_tty_or_preset() {
   printf "    1) Run interactively:  azd up  (from a real terminal)\n" >&2
   printf "    2) Accept defaults:    OMNIVEC_NONINTERACTIVE=1 azd up\n" >&2
   printf "    3) Pre-set config, e.g.:\n" >&2
-  printf "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_B4ms\n" >&2
+  printf "         azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_D4s_v5\n" >&2
   printf "         azd env set OMNIVEC_SYSTEM_NODE_COUNT 2\n" >&2
   printf "         azd env set OMNIVEC_GPU_NODE_COUNT 0\n" >&2
   printf "         azd env set OMNIVEC_METADATA_STORE cosmosdb-serverless\n" >&2
@@ -312,6 +298,26 @@ fi
 
 # ── Check for existing deployment (RG exists + config present = update in-place) ─
 RG_NAME="rg-omnivec-${AZURE_ENV_NAME}"
+validate_system_pool() {
+  _vm=$1
+  _count=${2:-2}
+  _cores=$(printf '%s' "$_vm" | sed -n 's/^Standard_[A-Za-z]*\([0-9][0-9]*\).*/\1/p')
+  case "$_vm" in
+    Standard_B*|standard_b*)
+      printf 'AKS system pools do not support B-series VMs. Set OMNIVEC_SYSTEM_NODE_VM_SIZE (for example Standard_D4s_v5); existing pools may require migration.\n' >&2
+      return 1 ;;
+  esac
+  if [ -n "$_cores" ] && [ "$_cores" -lt 4 ]; then
+    printf 'AKS system pools require a VM with at least 4 vCPUs.\n' >&2
+    return 1
+  fi
+  case "$_count" in ''|*[!0-9]*) printf 'System node count must be an integer >= 2.\n' >&2; return 1;; esac
+  if [ "$_count" -lt 2 ]; then
+    printf 'AKS system pools require at least 2 nodes.\n' >&2
+    return 1
+  fi
+}
+
 RG_EXISTS=$(az group exists --name "$RG_NAME" < /dev/null 2>/dev/null || echo "false")
 RG_EXISTS=$(printf '%s' "$RG_EXISTS" | tr -d '\r\n ')
 
@@ -327,6 +333,8 @@ if [ "$RG_EXISTS" = "true" ]; then
     "omnivec-build:OMNIVEC_BUILD_MODE"; do
     _tag=$(echo "$_pair" | cut -d: -f1)
     _env=$(echo "$_pair" | cut -d: -f2)
+    _configured=$(azd_get "$_env")
+    [ -n "$_configured" ] && continue
     _val=$(az group show --name "$RG_NAME" --query "tags.\"$_tag\"" -o tsv < /dev/null 2>/dev/null || true)
     _val=$(printf '%s' "$_val" | tr -d '\r\n')
     if [ -n "$_val" ]; then
@@ -334,6 +342,7 @@ if [ "$RG_EXISTS" = "true" ]; then
       printf "  ${_env} = ${_val}\n"
     fi
   done
+  validate_system_pool "$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)" "$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)"
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
 fi
@@ -341,6 +350,7 @@ fi
 # ── Config already set (e.g. via azd env set before azd up) — skip prompts ──
 _existing_vm=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
 if [ -n "$_existing_vm" ]; then
+  validate_system_pool "$_existing_vm" "$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)"
   printf "\n${GREEN}Config already set. Skipping prompts.${NC}\n"
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
@@ -362,18 +372,18 @@ setup_mode=${setup_mode:-1}
 
 if [ "$setup_mode" = "1" ]; then
   printf "\n${GREEN}Applying recommended defaults:${NC}\n"
-  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_B4ms" < /dev/null
+  azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "Standard_D4s_v5" < /dev/null
   azd env set OMNIVEC_SYSTEM_NODE_COUNT   "2" < /dev/null
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
-  echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_B4ms"
+  echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_D4s_v5"
   echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
   echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
   echo "  OMNIVEC_GPU_NODE_COUNT      = 0"
   echo "  OMNIVEC_METADATA_STORE      = cosmosdb-serverless"
   echo ""
-  echo "  System pool: 2x Standard_B4ms (4 vCPU, 16 GB each)"
+  echo "  System pool: 2x Standard_D4s_v5 (4 vCPU, 16 GB each)"
   echo "  GPU pool: none (use Azure OpenAI for embeddings)"
   echo "  Metadata: CosmosDB Serverless"
   echo "  Blob storage source: enabled"
@@ -438,8 +448,8 @@ else
     printf "    1) Standard_D4s_v3 - 4 vCPU, 16 GB\n"
     printf "    2) Standard_D4ds_v5 - 4 vCPU, 16 GB (v5)\n"
     printf "    3) Standard_D8s_v3 - 8 vCPU, 32 GB\n"
-    printf "    4) Standard_B4ms - 4 vCPU, 16 GB (burstable)\n"
-    printf "    5) Standard_D2s_v3 - 2 vCPU, 8 GB (dev)\n"
+    printf "    4) Standard_D4s_v5 - 4 vCPU, 16 GB (v5)\n"
+    printf "    5) Standard_D8s_v5 - 8 vCPU, 32 GB (v5)\n"
     printf "    6) Enter custom SKU\n"
     echo ""
     sys_pick=$(read_input "  System VM SKU [4]: ")
@@ -449,14 +459,14 @@ else
       1) _candidate="Standard_D4s_v3" ;;
       2) _candidate="Standard_D4ds_v5" ;;
       3) _candidate="Standard_D8s_v3" ;;
-      4) _candidate="Standard_B4ms" ;;
-      5) _candidate="Standard_D2s_v3" ;;
+      4) _candidate="Standard_D4s_v5" ;;
+      5) _candidate="Standard_D8s_v5" ;;
       6)
-        def_manual=${cur_sys_sku:-Standard_B4ms}
+        def_manual=${cur_sys_sku:-Standard_D4s_v5}
         custom_sku=$(read_input "  Enter SKU name [${def_manual}]: ")
         _candidate=$(printf '%s' "${custom_sku:-$def_manual}" | tr -d ' \r\n')
         ;;
-      *) _candidate="Standard_B4ms" ;;
+      *) _candidate="Standard_D4s_v5" ;;
     esac
 
     printf "  ${CYAN}Validating ${_candidate} in ${LOCATION}...${NC}"
@@ -541,6 +551,7 @@ if [ -z "$SYS_SKU" ]; then
 fi
 
 # Store in azd env for Bicep parameter substitution
+validate_system_pool "$SYS_SKU" "$sys_count"
 azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "$SYS_SKU" < /dev/null
 azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count" < /dev/null
 azd env set OMNIVEC_GPU_NODE_VM_SIZE "$GPU_SKU" < /dev/null

@@ -66,10 +66,7 @@ preflight_require_providers() {
                 ;;
             *)
                 printf "    %s: ${YELLOW}%s → registering${NC}\n" "$_ns" "$_state"
-                if ! az provider register --namespace "$_ns" --wait false </dev/null >/dev/null 2>&1; then
-                    # --wait false was added in 2.62; fall back to plain register.
-                    az provider register --namespace "$_ns" </dev/null >/dev/null 2>&1 || _failed="$_failed $_ns"
-                fi
+                az provider register --namespace "$_ns" </dev/null >/dev/null 2>&1 || _failed="$_failed $_ns"
                 ;;
         esac
     done
@@ -150,8 +147,8 @@ preflight_sku_vcpus() {
         Standard_B4ms)                echo 4 ;;
         Standard_B8ms)                echo 8 ;;
         Standard_D2s_v3|Standard_D2ds_v5) echo 2 ;;
-        Standard_D4s_v3|Standard_D4ds_v5) echo 4 ;;
-        Standard_D8s_v3|Standard_D8ds_v5) echo 8 ;;
+        Standard_D4s_v3|Standard_D4ds_v5|Standard_D4s_v5) echo 4 ;;
+        Standard_D8s_v3|Standard_D8ds_v5|Standard_D8s_v5) echo 8 ;;
         Standard_D16s_v3)             echo 16 ;;
         Standard_NC4as_T4_v3)         echo 4 ;;
         Standard_NC6s_v3)             echo 6 ;;
@@ -167,6 +164,7 @@ preflight_sku_family() {
     case "$1" in
         Standard_B*)                  echo "standardBSFamily" ;;
         Standard_D*ds_v5)             echo "standardDDSv5Family" ;;
+        Standard_D*s_v5)              echo "standardDSv5Family" ;;
         Standard_D*s_v3)              echo "standardDSv3Family" ;;
         Standard_NC*T4*)              echo "standardNCASv3_T4Family" ;;
         Standard_NC*s_v3)             echo "standardNCSv3Family" ;;

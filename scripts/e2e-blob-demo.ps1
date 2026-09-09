@@ -15,6 +15,9 @@
 [CmdletBinding()]
 param(
     [string]$Env,
+    [string]$ServerUrl,
+    [string]$KubeConfig,
+    [string]$ModelId,
     [ValidateSet("txt","pdf")] [string]$FileType = "txt",
     [string]$AdminToken,
     [string]$AoaiEndpoint,
@@ -30,6 +33,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false  # handle az/kubectl errors explicitly
+$kubeConfigArgs = @()
+if ($KubeConfig) {
+    $env:KUBECONFIG = $KubeConfig
+    $kubeConfigArgs = @('--file', $KubeConfig)
+}
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 $FileType = $FileType.ToLower()
@@ -237,12 +245,13 @@ if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
 $AKS_NAME = (az aks list --resource-group $RESOURCE_GROUP --query "[0].name" -o tsv 2>$null)
 $AKS_NAME = "$AKS_NAME".Trim() -replace "`r|`n",""
 if (-not $AKS_NAME) { LogErr "No AKS cluster found in RG $RESOURCE_GROUP"; exit 1 }
-az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_NAME --overwrite-existing --only-show-errors 2>&1 | Out-Null
+az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_NAME --overwrite-existing --only-show-errors @kubeConfigArgs 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not load the selected AKS kubeconfig." }
 
 $EXT_IP = (kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null)
 if (-not $EXT_IP) { $EXT_IP = (kubectl get svc omnivec-api -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null) }
 if (-not $EXT_IP) { LogErr "No external IP found on omnivec-web or omnivec-api — is the cluster up?"; exit 1 }
-$script:SERVER_URL = "http://$EXT_IP"
+$script:SERVER_URL = if ($ServerUrl) { $ServerUrl.TrimEnd('/') } else { "http://$EXT_IP" }
 $SEARCH_IP = (kubectl get svc omnivec-search -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null)
 $SEARCH_TOKEN = Get-AzdValue "OMNIVEC_SEARCH_TOKEN"
 
@@ -354,6 +363,14 @@ if (-not $ok) { LogErr "Admin token rejected by API"; exit 1 }
 LogOk "Admin token accepted"
 
 # ── AOAI creds ─────────────────────────────────────────────────────────────
+if ($ModelId) {
+    $models = Invoke-ApiCall GET "/api/models"
+    if (-not ($models.models | Where-Object { $_.id -eq $ModelId })) {
+        throw "Registered embedding model '$ModelId' was not found."
+    }
+    $MODEL_ID = $ModelId
+    LogOk "Using registered embedding model: $MODEL_ID"
+} else {
 if (-not $AoaiEndpoint) { $AoaiEndpoint = Read-Host "  Azure OpenAI endpoint (https://<res>.openai.azure.com)" }
 if (-not $AoaiKey) {
     $sec = Read-Host "  Azure OpenAI API key" -AsSecureString
@@ -386,6 +403,7 @@ if (-not $MODEL_ID) {
     LogOk "Registered model: $MODEL_ID ($AoaiDeployment, ${AoaiDims}d)"
 } else {
     LogOk "Re-using existing model: $MODEL_ID"
+}
 }
 
 # ── Upload samples via in-cluster K8s Job ──────────────────────────────────
@@ -535,7 +553,7 @@ LogOk "Container $Container populated with $SAMPLE_COUNT $FileType file(s)"
 LogStep 5 "Ensuring Cosmos database + vectors container"
 $COSMOS_ACCT = ($COSMOS_ENDPOINT -replace "https://","" -split "\.")[0]
 $DB_NAME = "e2eblob"
-$VEC_CONTAINER = "vectors"
+$VEC_CONTAINER = "vectors-$FileType"
 
 az cosmosdb sql database create --account-name $COSMOS_ACCT --resource-group $RESOURCE_GROUP `
     --name $DB_NAME --only-show-errors 2>&1 | Out-Null
@@ -569,9 +587,9 @@ else { LogErr "Vectors container setup failed: $out"; exit 1 }
 
 # ── Source + destination + pipeline ────────────────────────────────────────
 LogStep 6 "Creating source, destination, and pipeline"
-$SOURCE_NAME = "e2e-blob-source"
-$DEST_NAME   = "e2e-blob-dest"
-$PIPE_NAME   = "e2e-blob-pipeline"
+$SOURCE_NAME = "e2e-blob-$FileType-source"
+$DEST_NAME   = "e2e-blob-$FileType-dest"
+$PIPE_NAME   = "e2e-blob-$FileType-pipeline"
 
 foreach ($kind in @("pipelines","sources","destinations")) {
     $list = Invoke-ApiTry GET "/api/$kind"
@@ -664,6 +682,8 @@ LogOk "Pipeline: $PIPE_ID ($PIP_MODE mode)"
 
 # ── Activate + poll ────────────────────────────────────────────────────────
 LogStep 7 "Activating pipeline and waiting for embeddings"
+Invoke-ApiCall POST "/api/pipelines/$PIPE_ID/resume" @{} | Out-Null
+Invoke-ApiCall POST "/api/pipelines/$PIPE_ID/run" @{} | Out-Null
 Invoke-ApiCall POST "/api/sources/$SOURCE_ID/sync" @{} | Out-Null
 LogOk "Pipeline activated — controller will enumerate blobs"
 
@@ -672,17 +692,20 @@ $deadline = (Get-Date).AddMinutes(5)
 $lastCount = -1
 while ((Get-Date) -lt $deadline) {
     $countScript = @"
-import os
+import os, math
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
 client = CosmosClient("$COSMOS_ENDPOINT", credential=cred)
 c = client.get_database_client("$DB_NAME").get_container_client("$VEC_CONTAINER")
-q = list(c.query_items("SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
-print(f"COUNT={q[0]}")
+rows = list(c.query_items("SELECT c.source_ref, c.embedding FROM c WHERE c.pipeline_id = @pipeline", parameters=[{"name":"@pipeline","value":"$PIPE_ID"}], enable_cross_partition_query=True))
+assert all(len(d.get("embedding", [])) == $AoaiDims and all(math.isfinite(x) for x in d["embedding"]) and any(x != 0 for x in d["embedding"]) for d in rows), "Invalid destination vector"
+refs = {d.get("source_ref") for d in rows if d.get("source_ref")}
+print(f"COUNT={len(refs)}")
 "@
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($countScript))
     $out = kubectl exec -n omnivec $API_POD -- sh -c "echo $encoded | base64 -d | python3 -" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Blob destination verification failed: $out" }
     if ($out -match 'COUNT=(\d+)') {
         $n = [int]$Matches[1]
         if ($n -ne $lastCount) { Log "  vectors embedded: $n / $expected"; $lastCount = $n }
@@ -691,7 +714,7 @@ print(f"COUNT={q[0]}")
     Start-Sleep -Seconds 10
 }
 if ($lastCount -lt $expected) {
-    LogWarn "Only $lastCount / $expected vectors after 5 minutes. Check: kubectl logs -n omnivec deploy/omnivec-controller"
+    throw "Only $lastCount / $expected files have valid vectors after 5 minutes."
 }
 
 # ── Search validation ──────────────────────────────────────────────────────

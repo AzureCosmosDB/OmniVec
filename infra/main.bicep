@@ -14,10 +14,10 @@ param environmentName string
 param location string
 
 @description('Kubernetes version for AKS')
-param kubernetesVersion string = '1.33'
+param kubernetesVersion string = '1.35'
 
 @description('VM size for AKS system node pool')
-param systemNodeVmSize string = 'Standard_B4ms'
+param systemNodeVmSize string = 'Standard_D4s_v5'
 
 @description('Initial system node count. Kept as string so azd env substitution (which always produces a string, even for ints) never breaks ARM type-coercion. Parsed/defaulted below.')
 param systemNodeCount string = '2'

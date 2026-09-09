@@ -14,6 +14,18 @@ public class WorkerOptions
     /// <summary>DocGrok base URL for embedding calls</summary>
     public string DocGrokBaseUrl { get; set; } = "http://docgrok:80";
 
+    /// <summary>Per-request timeout: router's 300s ceiling plus 30s transport grace, bounded by the received-batch budget.</summary>
+    public int DocGrokRequestTimeoutSeconds { get; set; } = 330;
+
+    internal TimeSpan GetDocGrokRequestTimeout()
+    {
+        if (DocGrokRequestTimeoutSeconds <= 0 || MaxProcessingMinutes <= 0 || MaxLockRenewalMinutes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(DocGrokRequestTimeoutSeconds),
+                "DocGrok timeout and processing/renewal budgets must be positive.");
+        var budgetSeconds = Math.Min(MaxProcessingMinutes, MaxLockRenewalMinutes) * 60L;
+        return TimeSpan.FromSeconds(Math.Min(DocGrokRequestTimeoutSeconds, budgetSeconds));
+    }
+
     /// <summary>OmniVec API base URL for metrics reporting</summary>
     public string OmniVecApiBaseUrl { get; set; } = "http://omnivec-api:80";
 
@@ -28,6 +40,9 @@ public class WorkerOptions
 
     /// <summary>Auto-lock renewal duration for long-running processing</summary>
     public int MaxLockRenewalMinutes { get; set; } = 10;
+
+    /// <summary>Maximum lifetime of a received batch, including retries and waiting for concurrency slots.</summary>
+    public int MaxProcessingMinutes { get; set; } = 8;
 
     /// <summary>
     /// Maximum estimated tokens per /embed/batch call. Batches are packed
@@ -59,6 +74,9 @@ public class WorkerOptions
     /// a CLIP batch of 64.
     /// </summary>
     public int BlobConcurrency { get; set; } = 32;
+
+    /// <summary>SharePoint buffers raw bytes and base64 JSON; keep its memory-heavy concurrency separate from images.</summary>
+    public int SharePointConcurrency { get; set; } = 1;
 
     /// <summary>
     /// Number of blob_ref messages bundled into a single bulk /embed call.

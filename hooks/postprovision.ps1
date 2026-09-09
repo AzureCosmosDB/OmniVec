@@ -6,16 +6,24 @@ $ErrorActionPreference = "Stop"
 # Refresh PATH (tools installed by preprovision may not be in current PATH)
 # Preserve current PATH entries and add any new registry entries
 $registryPath = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-$env:Path = $env:Path + ";" + $registryPath
+$env:Path = "$HOME\.azure-kubectl;$HOME\.azure-kubelogin;" + $env:Path + ";" + $registryPath
 
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
+. "$PSScriptRoot\lib\deployment.ps1"
+$script:imagesChanged = $false
 
 # -- Deployment lock: prevent concurrent postprovision runs --
 $lockDir = Join-Path $HOME ".omnivec" "locks"
 if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
-$lockFile = Join-Path $lockDir "$env:AZURE_ENV_NAME.post.lock"
-@($PID, (hostname)) | Set-Content $lockFile
-function Release-PostLock { if (Test-Path $lockFile) { Remove-Item $lockFile -Force -ErrorAction SilentlyContinue } }
+$postLockPath = Join-Path $lockDir "$env:AZURE_ENV_NAME.post.lock"
+$postLockHandle = Open-DeploymentLock $postLockPath
+function Release-PostLock { $postLockHandle.Dispose() }
+$imageUpdateMarker = Join-Path $lockDir "$env:AZURE_ENV_NAME.images-pending"
+$script:imagesChanged = Test-Path $imageUpdateMarker
+function Mark-ImageUpdate {
+    New-Item -ItemType File -Path $imageUpdateMarker -Force | Out-Null
+    $script:imagesChanged = $true
+}
 
 try {
 
@@ -62,6 +70,11 @@ $SB_ENDPOINT = Get-AzdValue "AZURE_SERVICEBUS_ENDPOINT"
 $KEYVAULT_URI = Get-AzdValue "AZURE_KEYVAULT_URI"
 $APPINSIGHTS_CS = Get-AzdValue "AZURE_APPINSIGHTS_CONNECTION_STRING"
 $LOG_ANALYTICS_WS = Get-AzdValue "AZURE_LOG_ANALYTICS_WORKSPACE_ID"
+$SHAREPOINT_ENABLED = Get-AzdValue "OMNIVEC_SHAREPOINT_ENABLED"
+if (-not $SHAREPOINT_ENABLED) { $SHAREPOINT_ENABLED = "false" }
+if ($SHAREPOINT_ENABLED -notin @("true", "false")) {
+    throw 'OMNIVEC_SHAREPOINT_ENABLED must be true or false.'
+}
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -81,7 +94,7 @@ foreach ($_w in @('microsoft','windows','azure','xbox','login','bing','apple')) 
 }
 
 # Validate required vars
-foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","COSMOS_ENDPOINT","IDENTITY_CLIENT_ID","RESOURCE_GROUP")) {
+foreach ($var in @("INSTANCE_ID","AKS_CLUSTER","ACR_LOGIN_SERVER","ACR_NAME","COSMOS_ENDPOINT","IDENTITY_CLIENT_ID","RESOURCE_GROUP","STORAGE_ACCOUNT","STORAGE_BLOB_ENDPOINT","STORAGE_QUEUE_ENDPOINT")) {
     if (-not (Get-Variable $var -ValueOnly)) {
         Write-Host "`e[31mMissing required output: $var. Run 'azd provision' first.`e[0m"
         exit 1
@@ -115,7 +128,9 @@ $gpuVm = Get-AzdValue "OMNIVEC_GPU_NODE_VM_SIZE"
 $gpuCnt = Get-AzdValue "OMNIVEC_GPU_NODE_COUNT"
 $meta = Get-AzdValue "OMNIVEC_METADATA_STORE"
 $build = Get-AzdValue "OMNIVEC_BUILD_MODE"
-az tag update --resource-id (az group show --name $RESOURCE_GROUP --query "id" -o tsv) --operation merge --tags `
+$tagResourceId = az group show --name $RESOURCE_GROUP --query "id" -o tsv
+Assert-NativeSuccess 'Reading target resource group'
+az tag update --resource-id $tagResourceId --operation merge --tags `
     "omnivec-sys-sku=$sysVm" `
     "omnivec-sys-count=$sysCnt" `
     "omnivec-gpu-sku=$gpuVm" `
@@ -123,7 +138,11 @@ az tag update --resource-id (az group show --name $RESOURCE_GROUP --query "id" -
     "omnivec-metadata=$meta" `
     "omnivec-build=$build" `
     "omnivec-instance=$INSTANCE_ID" 2>$null | Out-Null
-Write-Host "  `e[32mConfig saved to RG tags.`e[0m"
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning 'Configuration was not saved to resource group tags; keep the local azd environment.'
+} else {
+    Write-Host "  `e[32mConfig saved to RG tags.`e[0m"
+}
 
 # =============================================================================
 # PHASE 1: Import or Build images
@@ -201,13 +220,19 @@ function Test-ImageUpToDate {
 function Build-Image {
     param($Name, $Dockerfile, $Context, $Tag = "latest")
 
-    if (-not $FORCE_IMPORT -and (Test-ImageExists -Name $Name -Tag $Tag)) {
+    if (-not $DO_BUILD -and -not $FORCE_IMPORT -and (Test-ImageExists -Name $Name -Tag $Tag)) {
         Write-Host "  `e[32m${Name}:${Tag} exists, skipping.`e[0m"
         return
     }
 
     Write-Host "  `e[36mBuilding ${Name}:${Tag}...`e[0m"
+    Mark-ImageUpdate
     if ($BUILD_MODE -eq "docker") {
+        if (-not $script:dockerLoggedIn) {
+            az acr login --name $ACR_NAME
+            Assert-NativeSuccess 'Logging Docker into ACR'
+            $script:dockerLoggedIn = $true
+        }
         docker build -t "${ACR_LOGIN_SERVER}/${Name}:${Tag}" -f $Dockerfile $Context
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  `e[31mdocker build failed for ${Name}:${Tag}.`e[0m"
@@ -219,15 +244,13 @@ function Build-Image {
             exit 1
         }
     } else {
-        az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --no-logs 2>$null
+        # Poll to completion without streaming Unicode through Windows Azure CLI's legacy encoding.
+        az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context --timeout 3600 --no-logs --output none
         if ($LASTEXITCODE -ne 0) {
-            az acr build --registry $ACR_NAME --image "${Name}:${Tag}" --file $Dockerfile $Context
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "  `e[31maz acr build failed for ${Name}:${Tag}.`e[0m"
-                exit 1
-            }
+            throw "az acr build failed for ${Name}:${Tag}. Inspect the ACR build logs before retrying."
         }
     }
+    $script:imagesChanged = $true
     Write-Host "  `e[32m${Name}:${Tag} pushed.`e[0m"
 }
 
@@ -301,7 +324,8 @@ if (-not $DO_BUILD -and $SKIP_IMPORT -ne "true" -and $SKIP_IMPORT -ne "1") {
         $anonOk = $true
     } else {
     Write-Host "  `e[36mTesting anonymous pull...`e[0m" -NoNewline
-    $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --force 2>&1
+    Mark-ImageUpdate
+    $testResult = Invoke-AcrImport --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --force
     if ($LASTEXITCODE -eq 0) {
         Write-Host " `e[32m✓ anonymous pull works`e[0m"
         $anonOk = $true
@@ -311,7 +335,7 @@ if (-not $DO_BUILD -and $SKIP_IMPORT -ne "true" -and $SKIP_IMPORT -ne "1") {
         # Try with stored token
         if ($SHARED_REGISTRY_TOKEN) {
             Write-Host "  `e[36mTrying stored token...`e[0m" -NoNewline
-            $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force 2>&1
+            $testResult = Invoke-AcrImport --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --username $SHARED_REGISTRY_USER --password $SHARED_REGISTRY_TOKEN --force
             if ($LASTEXITCODE -eq 0) {
                 Write-Host " `e[32m✓ token works`e[0m"
                 $tokenOk = $true
@@ -323,14 +347,18 @@ if (-not $DO_BUILD -and $SKIP_IMPORT -ne "true" -and $SKIP_IMPORT -ne "1") {
         # Prompt for token if nothing worked
         if (-not $tokenOk) {
             Write-Host "  `e[33mRegistry token required for import.`e[0m"
-            $newToken = (Read-Host "  Enter token for $SHARED_REGISTRY (or Enter to build from source)")
+            $newToken = ""
+            if (-not [Console]::IsInputRedirected -and -not ($env:OMNIVEC_NONINTERACTIVE -or $env:AZD_NONINTERACTIVE -or $env:CI -or $env:GITHUB_ACTIONS -or $env:OMNIVEC_FORCE_NO_TTY)) {
+                $newToken = Read-Host "  Enter token for $SHARED_REGISTRY (or Enter to build from source)"
+            }
             # Strip ALL whitespace (paste can inject CR/LF/tabs/spaces). Valid tokens have none.
             $newToken = ("$newToken" -replace '\s', '')
             if ($newToken) {
-                $testResult = az acr import --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --username $SHARED_REGISTRY_USER --password $newToken --force 2>&1
+                $testResult = Invoke-AcrImport --name $ACR_NAME --source "${SHARED_REGISTRY}/${FIRST_IMAGE}:$IMG_TAG" --image "${FIRST_IMAGE}:latest" --username $SHARED_REGISTRY_USER --password $newToken --force
                 if ($LASTEXITCODE -eq 0) {
                     $SHARED_REGISTRY_TOKEN = $newToken
                     azd env set OMNIVEC_SHARED_REGISTRY_TOKEN $newToken 2>$null
+                    Assert-NativeSuccess 'Persisting registry token'
                     Write-Host "  `e[32mToken valid — saved for future use.`e[0m"
                     $tokenOk = $true
                     $authImported = $true
@@ -372,6 +400,13 @@ if ($DO_BUILD) {
     $imagesToImport = @()
 
     foreach ($image in $IMAGES) {
+        if ($SKIP_IMPORT -eq "true" -or $SKIP_IMPORT -eq "1") {
+            if (-not (Test-ImageExists -Name $image -Tag "latest")) {
+                throw "OMNIVEC_SKIP_IMPORT is set, but ${image}:latest is missing. Build/push it or disable skip-import."
+            }
+            $skipCount++
+            continue
+        }
         # First image was handled by the auth test above
         if ($image -eq $FIRST_IMAGE) {
             if ($authImported) {
@@ -394,6 +429,7 @@ if ($DO_BUILD) {
         }
 
         Write-Host "  `e[36mImporting ${image}:$IMG_TAG as :latest...`e[0m"
+        Mark-ImageUpdate
         $imagesToImport += $image
 
         $job = Start-Job -ScriptBlock {
@@ -405,7 +441,7 @@ if ($DO_BUILD) {
             # Retry once on transient errors
             if ($importError -notmatch "unauthorized|authentication|401|not found|does not exist|InvalidHostName|could not be resolved") {
                 Start-Sleep -Seconds 2
-                az acr import --name $ACR --source "${SHARED}/${IMG}:${TAG}" --image "${IMG}:latest" @authArgs --force 2>&1
+                $importError = az acr import --name $ACR --source "${SHARED}/${IMG}:${TAG}" --image "${IMG}:latest" @authArgs --force 2>&1
                 if ($LASTEXITCODE -eq 0) { return "OK" }
             }
             return "FAIL: $importError"
@@ -415,11 +451,10 @@ if ($DO_BUILD) {
     }
 
     # Wait for all imports to finish
-    if ($importJobs.Count -gt 0) {
-        $importJobs | ForEach-Object { $_.Job } | Wait-Job | Out-Null
-    }
+    Wait-ImageImports -Entries $importJobs
 
     # Report results
+    $failedImports = @()
     foreach ($entry in $importJobs) {
         $result = Receive-Job $entry.Job
         Remove-Job $entry.Job
@@ -429,11 +464,15 @@ if ($DO_BUILD) {
         } else {
             Write-Host "  `e[31m$($entry.Image):latest (from $IMG_TAG) import FAILED`e[0m"
             Write-Host "  `e[31m$result`e[0m"
+            $failedImports += $entry.Image
         }
+    }
+    if ($failedImports.Count -gt 0) {
+        throw "Image imports failed: $($failedImports -join ', '). Refusing to deploy a partial image update; retry or set OMNIVEC_BUILD=true."
     }
 
     Write-Host "`e[32mImage import complete: $importCount imported, $skipCount skipped.`e[0m"
-    $script:imagesChanged = $importCount -gt 0
+    $script:imagesChanged = $script:imagesChanged -or $importCount -gt 0
 
     # If import yielded no usable images, auto-fallback to source builds
     $totalAvailable = $importCount + $skipCount
@@ -500,18 +539,16 @@ Write-Host "`e[32mConnected to AKS cluster: $AKS_CLUSTER`e[0m"
 
 Write-Host "`n`e[33mPhase 3: Creating namespaces and secrets...`e[0m"
 
-kubectl --context $KUBE_CONTEXT create namespace omnivec --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
-if ($LASTEXITCODE -ne 0) { Write-Host "`e[31mFailed to create namespace omnivec`e[0m"; exit 1 }
-kubectl --context $KUBE_CONTEXT create namespace docgrok --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
-if ($LASTEXITCODE -ne 0) { Write-Host "`e[31mFailed to create namespace docgrok`e[0m"; exit 1 }
-kubectl --context $KUBE_CONTEXT label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite | Out-Null
-kubectl --context $KUBE_CONTEXT annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite | Out-Null
+Apply-KubernetesResource -Arguments @("create", "namespace", "omnivec")
+Apply-KubernetesResource -Arguments @("create", "namespace", "docgrok")
+kubectl --context $KUBE_CONTEXT --request-timeout=30s label namespace omnivec app.kubernetes.io/managed-by=Helm --overwrite | Out-Null
+Assert-NativeSuccess 'Labelling namespace'
+kubectl --context $KUBE_CONTEXT --request-timeout=30s annotate namespace omnivec meta.helm.sh/release-name=omnivec meta.helm.sh/release-namespace=omnivec --overwrite | Out-Null
+Assert-NativeSuccess 'Annotating namespace'
 
-kubectl --context $KUBE_CONTEXT create secret generic omnivec-storage `
-    --namespace omnivec `
-    --from-literal=account-name="$STORAGE_ACCOUNT" `
-    --from-literal=queue-endpoint="$STORAGE_QUEUE_ENDPOINT" `
-    --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+Apply-KubernetesResource -Arguments @("create", "secret", "generic", "omnivec-storage",
+    "--namespace", "omnivec", "--from-literal=account-name=$STORAGE_ACCOUNT",
+    "--from-literal=queue-endpoint=$STORAGE_QUEUE_ENDPOINT")
 Write-Host "  `e[32momnivec-storage secret created.`e[0m"
 
 # Agent internal token secret (used for agent <-> API service-to-service auth)
@@ -528,11 +565,10 @@ if ([string]::IsNullOrWhiteSpace($AGENT_INTERNAL_TOKEN)) {
     }
     $AGENT_INTERNAL_TOKEN = $tokenCandidate.Substring(0, [Math]::Min(44, $tokenCandidate.Length))
     azd env set OMNIVEC_AGENT_INTERNAL_TOKEN $AGENT_INTERNAL_TOKEN | Out-Null
+    Assert-NativeSuccess 'Persisting agent token'
 }
-kubectl --context $KUBE_CONTEXT create secret generic omnivec-agent-internal `
-    --namespace omnivec `
-    --from-literal=token="$AGENT_INTERNAL_TOKEN" `
-    --dry-run=client -o yaml | kubectl --context $KUBE_CONTEXT apply -f -
+Apply-KubernetesResource -Arguments @("create", "secret", "generic", "omnivec-agent-internal",
+    "--namespace", "omnivec", "--from-literal=token=$AGENT_INTERNAL_TOKEN")
 Write-Host "  `e[32momnivec-agent-internal secret created.`e[0m"
 
 Write-Host "`e[32mNamespaces and secrets created.`e[0m"
@@ -543,31 +579,11 @@ Write-Host "`e[32mNamespaces and secrets created.`e[0m"
 
 Write-Host "`n`e[33mPhase 4: Deploying OmniVec via Helm...`e[0m"
 
-# Resolve helm chart dependencies — skip if already up to date
+# Repackage the local DocGrok subchart even if Chart.lock is unchanged.
+# Chart.lock tracks versions, not edits to local subchart templates/values.
 $chartDir = "$RootDir/helm/omnivec"
-$lockFile = "$chartDir/Chart.lock"
-$lockHashFile = "$chartDir/charts/.lock-hash"
-$currentHash = ""
-if (Test-Path $lockFile) {
-    $currentHash = (Get-FileHash $lockFile -Algorithm SHA256).Hash
-}
-$cachedHash = ""
-if (Test-Path $lockHashFile) {
-    $cachedHash = (Get-Content $lockHashFile -Raw).Trim()
-}
-if ($currentHash -and $currentHash -eq $cachedHash) {
-    Write-Host "  `e[32mHelm dependencies up to date, skipping.`e[0m"
-} else {
-    Write-Host "  `e[36mResolving helm dependencies...`e[0m"
-    helm dependency build $chartDir 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  `e[31mhelm dependency build failed.`e[0m"
-        exit 1
-    }
-    if ($currentHash) {
-        $currentHash | Set-Content $lockHashFile -NoNewline
-    }
-}
+helm dependency build $chartDir --skip-refresh
+Assert-NativeSuccess 'Resolving Helm dependencies'
 
 # Generate admin token if not already set
 $ADMIN_TOKEN = Get-AzdValue "OMNIVEC_ADMIN_TOKEN"
@@ -576,6 +592,7 @@ if (-not $ADMIN_TOKEN) {
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     $ADMIN_TOKEN = [Convert]::ToBase64String($bytes) -replace '[+/=]','' | ForEach-Object { $_.Substring(0, [Math]::Min(44, $_.Length)) }
     azd env set OMNIVEC_ADMIN_TOKEN $ADMIN_TOKEN
+    Assert-NativeSuccess 'Persisting admin token'
     Write-Host "  `e[32mGenerated new admin token.`e[0m"
 } else {
     Write-Host "  `e[32mUsing existing admin token.`e[0m"
@@ -588,6 +605,7 @@ if (-not $SEARCH_BOOTSTRAP_TOKEN) {
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     $SEARCH_BOOTSTRAP_TOKEN = [Convert]::ToBase64String($bytes) -replace '[+/=]','' | ForEach-Object { $_.Substring(0, [Math]::Min(44, $_.Length)) }
     azd env set OMNIVEC_SEARCH_TOKEN $SEARCH_BOOTSTRAP_TOKEN
+    Assert-NativeSuccess 'Persisting search bootstrap token'
     Write-Host "  `e[32mGenerated new search bootstrap token.`e[0m"
 }
 $SEARCH_INTERNAL_TOKEN = Get-AzdValue "SEARCH_INTERNAL_TOKEN"
@@ -596,6 +614,7 @@ if (-not $SEARCH_INTERNAL_TOKEN) {
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     $SEARCH_INTERNAL_TOKEN = [Convert]::ToBase64String($bytes) -replace '[+/=]','' | ForEach-Object { $_.Substring(0, [Math]::Min(44, $_.Length)) }
     azd env set SEARCH_INTERNAL_TOKEN $SEARCH_INTERNAL_TOKEN
+    Assert-NativeSuccess 'Persisting search internal token'
     Write-Host "  `e[32mGenerated new search internal token.`e[0m"
 }
 
@@ -622,6 +641,7 @@ $helmArgs = @(
     "--set", "search.bootstrapToken=$SEARCH_BOOTSTRAP_TOKEN",
     "--set", "search.internalToken=$SEARCH_INTERNAL_TOKEN",
     "--set", "dotnetWorker.enabled=true",
+    "--set", "sharepointWatcher.enabled=$SHAREPOINT_ENABLED",
     "--set", "web.service.dnsLabel=$WEB_DNS_LABEL"
 )
 
@@ -670,40 +690,11 @@ $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--kubeconfig", $OMNIVEC_KUBECON
 $helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
 $helmState = if ($helmStatus -and $helmStatus.info) { $helmStatus.info.status } else { "" }
 if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pending-") {
-    Write-Host "`e[33mDetected stuck Helm release (status: $($helmStatus.info.status)). Rolling back...`e[0m"
-    helm rollback omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "`e[33mRollback failed — uninstalling stuck release...`e[0m"
-        helm uninstall omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG 2>$null
-        $helmState = ""
-    }
-    Write-Host "`e[32mStuck release cleared. Proceeding with fresh deploy.`e[0m"
+    throw "Helm release is $helmState. Another deployment may still be active. Inspect helm status/history with kubeconfig '$OMNIVEC_KUBECONFIG' and recover it explicitly before retrying."
 }
 
-# If no helm release exists but resources do (orphaned from a prior --atomic
-# uninstall), relabel them with Helm ownership so `helm install` can adopt
-# them instead of failing with AlreadyExists.
-if (-not $helmState) {
-    $existing = kubectl --context $KUBE_CONTEXT get deploy -n omnivec -o name 2>$null | Select-Object -First 1
-    if ($existing) {
-        Write-Host "`e[33mNo Helm release found but resources exist in omnivec ns — adopting them for Helm ownership...`e[0m"
-        foreach ($kind in @('deploy','svc','sa','cm','secret','hpa','ingress')) {
-            $resources = kubectl --context $KUBE_CONTEXT get $kind -n omnivec -o name 2>$null
-            foreach ($res in $resources) {
-                if (-not $res) { continue }
-                if ($res -eq 'secret/omnivec-storage') { continue }
-                if ($res -like 'secret/sh.helm.*') { continue }
-                if ($res -like 'secret/default-token-*') { continue }
-                kubectl --context $KUBE_CONTEXT annotate $res -n omnivec --overwrite `
-                    meta.helm.sh/release-name=omnivec `
-                    meta.helm.sh/release-namespace=omnivec 2>$null | Out-Null
-                kubectl --context $KUBE_CONTEXT label $res -n omnivec --overwrite `
-                    app.kubernetes.io/managed-by=Helm 2>$null | Out-Null
-            }
-        }
-        Write-Host "`e[32mAdoption annotations applied — helm install will take ownership.`e[0m"
-    }
-}
+# Ownership conflicts are intentionally left to Helm rather than adopting
+# every resource (including unrelated secrets) in a shared namespace.
 
 # ── Skip helm upgrade if nothing has changed ────────────────────────────────
 # Rationale: helm upgrade --install --wait takes 1-2 minutes even
@@ -743,8 +734,8 @@ if ($env:OMNIVEC_FORCE_HELM -ne "true" `
     -and -not $script:imagesChanged `
     -and $helmState -eq "deployed" `
     -and $currentFp -and $currentFp -eq $cachedFp) {
-    $unavail = kubectl --context $KUBE_CONTEXT get deploy -n omnivec -o jsonpath='{range .items[?(@.status.availableReplicas==0)]}{.metadata.name}{"\n"}{end}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and -not $unavail) {
+    $deploymentJson = kubectl --context $KUBE_CONTEXT --request-timeout=30s get deploy -n omnivec -o json 2>$null
+    if ($LASTEXITCODE -eq 0 -and (Test-DeploymentsReady ($deploymentJson -join "`n"))) {
         $skipHelm = $true
     }
 }
@@ -756,6 +747,9 @@ if ($skipHelm) {
     # Retry helm on transient ARM / Kubernetes errors (mirrors retry_run in sh).
     $maxAttempts = if ($env:OMNIVEC_RETRY_ATTEMPTS) { [int]$env:OMNIVEC_RETRY_ATTEMPTS } else { 4 }
     $baseSec = if ($env:OMNIVEC_RETRY_BASE_SEC) { [int]$env:OMNIVEC_RETRY_BASE_SEC } else { 5 }
+    if ($maxAttempts -lt 1 -or $maxAttempts -gt 10 -or $baseSec -lt 0 -or $baseSec -gt 60) {
+        throw 'Retry attempts must be 1-10 and base seconds 0-60.'
+    }
     $transientPatterns = @(
         '429','throttl','Too Many Requests','ServiceBusy','ServerBusy',
         'RequestTimeout','OperationTimedOut','503','502','504',
@@ -774,6 +768,10 @@ if ($skipHelm) {
         $helmRc = $LASTEXITCODE
         Write-Host $helmOutput
         if ($helmRc -eq 0) { break }
+        if ($helmOutput -match 'context deadline exceeded|timed out waiting for the condition') {
+            Write-Host "  `e[31m[helm-deploy] readiness deadline reached — inspect workloads before retrying.`e[0m"
+            break
+        }
         $isTransient = $false
         foreach ($pat in $transientPatterns) {
             if ($helmOutput -match [regex]::Escape($pat)) { $isTransient = $true; break }
@@ -786,9 +784,9 @@ if ($skipHelm) {
     }
     if ($helmRc -ne 0) {
         Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
-        kubectl --context $KUBE_CONTEXT get pods -n omnivec -o wide
+        kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -o wide
 
-        $problemPods = kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null | `
+        $problemPods = kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec --no-headers 2>$null | `
             Where-Object { $_ -match "ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending" }
 
         foreach ($line in $problemPods) {
@@ -797,13 +795,11 @@ if ($skipHelm) {
             $podName = $parts[0]
             $status = $parts[2]
             Write-Host "`n`e[33m=== $podName ($status) ===`e[0m"
-            kubectl --context $KUBE_CONTEXT describe pod $podName -n omnivec | Select-String -Pattern "Events:" -Context 0,60
-            kubectl --context $KUBE_CONTEXT logs $podName -n omnivec --tail=80 2>$null
+            kubectl --context $KUBE_CONTEXT --request-timeout=30s describe pod $podName -n omnivec | Select-String -Pattern "Events:" -Context 0,60
+            kubectl --context $KUBE_CONTEXT --request-timeout=30s logs $podName -n omnivec --tail=80 2>$null
         }
         exit 1
     }
-    # Cache fingerprint only on success so a failed run doesn't poison future skips
-    if ($currentFp) { $currentFp | Set-Content $fingerprintFile -NoNewline }
 }
 
 Write-Host "`e[32mHelm deployment complete.`e[0m"
@@ -811,9 +807,8 @@ Write-Host "`e[32mHelm deployment complete.`e[0m"
 # Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
 if ($script:imagesChanged) {
     Write-Host "`n`e[33mImages updated — restarting pods to pull new images...`e[0m"
-    kubectl --context $KUBE_CONTEXT rollout restart deployment -n omnivec 2>$null
-    kubectl --context $KUBE_CONTEXT rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>$null
-    Write-Host "`e[32mPods restarted with new images.`e[0m"
+    kubectl --context $KUBE_CONTEXT --request-timeout=30s rollout restart deployment -n omnivec 2>$null
+    Assert-NativeSuccess 'Restarting deployments after image updates'
 }
 
 # =============================================================================
@@ -823,26 +818,28 @@ if ($script:imagesChanged) {
 Write-Host "`n`e[33mPhase 5: Verifying deployment...`e[0m"
 
 Write-Host "`n`e[36mOmniVec pods:`e[0m"
-kubectl --context $KUBE_CONTEXT get pods -n omnivec --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec --no-headers 2>$null
 
 Write-Host "`n`e[36mDocGrok pods:`e[0m"
-kubectl --context $KUBE_CONTEXT get pods -n omnivec -l app=docgrok --no-headers 2>$null
-kubectl --context $KUBE_CONTEXT get pods -n omnivec -l app=docgrok-controller --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -l app=docgrok --no-headers 2>$null
+kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -l app=docgrok-controller --no-headers 2>$null
 
 # Wait for external IP
 Write-Host "`n`e[33mWaiting for external IP...`e[0m"
 $externalIp = $null
 for ($i = 0; $i -lt 30; $i++) {
-    $externalIp = kubectl --context $KUBE_CONTEXT get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+    $externalIp = kubectl --context $KUBE_CONTEXT --request-timeout=30s get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
     if ($externalIp) { break }
     Start-Sleep -Seconds 5
 }
 
-kubectl --context $KUBE_CONTEXT rollout status deployment/omnivec-api -n omnivec --timeout=5m 2>$null
+kubectl --context $KUBE_CONTEXT --request-timeout=5m rollout status deployment -n omnivec --timeout=5m
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "`e[31mAPI deployment did not become ready.`e[0m"
+    Write-Host "`e[31mOne or more deployments did not become ready.`e[0m"
     exit 1
 }
+if ($currentFp) { $currentFp | Set-Content $fingerprintFile -NoNewline }
+if (Test-Path $imageUpdateMarker) { Remove-Item $imageUpdateMarker -Force }
 
 Write-Host ""
 Write-Host "`e[32m+==========================================+`e[0m"
