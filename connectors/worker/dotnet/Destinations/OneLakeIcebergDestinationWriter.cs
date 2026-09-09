@@ -69,7 +69,7 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
 
         await StageAsync(accountUrl, fileSystem, stagingPath, targetTable, runId, results, ct);
         await StartFabricJobAsync(
-            config, workspaceId, lakehouseItemId, jobDefinitionId, stageUri, targetTable, runId,
+            config, workspaceId, jobDefinitionId, stageUri, targetTable, runId,
             writebackColumnsJson, ct);
         await MirrorToServingEngineAsync(config, results, ct);
     }
@@ -113,7 +113,6 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
     private async Task StartFabricJobAsync(
         Dictionary<string, object> config,
         string workspaceId,
-        string lakehouseItemId,
         string jobDefinitionId,
         string stagingUri,
         string targetTable,
@@ -135,7 +134,6 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         var executionData = new Dictionary<string, object>
         {
             ["commandLineArguments"] = arguments,
-            ["defaultLakehouseId"] = lakehouseItemId,
         };
         var executableFile = Get(config, "spark_executable_file", "");
         if (!string.IsNullOrWhiteSpace(executableFile))
@@ -355,7 +353,7 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
                 "\n", records.Select(record => JsonSerializer.Serialize(record))) + "\n");
             await StagePayloadAsync(accountUrl, fileSystem, stagingPath, payload, ct);
             await StartFabricJobAsync(
-                config, workspaceId, lakehouseItemId, jobDefinitionId, stageUri, targetTable, runId,
+                config, workspaceId, jobDefinitionId, stageUri, targetTable, runId,
                 writebackColumnsJson, ct);
         }
 
