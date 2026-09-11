@@ -202,6 +202,12 @@ case "$SHAREPOINT_ENABLED" in
   true|false) ;;
   *) printf 'OMNIVEC_SHAREPOINT_ENABLED must be true or false.\n' >&2; exit 1 ;;
 esac
+ONELAKE_ICEBERG_ENABLED=$(get_azd_value "OMNIVEC_ONELAKE_ICEBERG_ENABLED")
+ONELAKE_ICEBERG_ENABLED=${ONELAKE_ICEBERG_ENABLED:-false}
+case "$ONELAKE_ICEBERG_ENABLED" in
+  true|false) ;;
+  *) printf 'OMNIVEC_ONELAKE_ICEBERG_ENABLED must be true or false.\n' >&2; exit 1 ;;
+esac
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -303,6 +309,9 @@ FORCE_IMPORT=${OMNIVEC_FORCE_IMPORT:-false}
 
 # Images to import/build
 IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet-worker omnivec-agent docgrok-pipeline-worker docgrok-router"
+if [ "$ONELAKE_ICEBERG_ENABLED" = "true" ]; then
+  IMAGES="$IMAGES omnivec-onelake-iceberg-watcher"
+fi
 
 # Release channel tag (stable / dev / sha-xxxxxxx / vX.Y.Z / latest).
 # Used for BOTH the acr import step AND the helm --set overrides so the
@@ -395,6 +404,7 @@ build_all_images() {
   build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
   build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
   build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
+  build_image "omnivec-onelake-iceberg-watcher" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/Dockerfile" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/" "latest"
   build_image "omnivec-agent" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest"
   if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
     build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
@@ -412,6 +422,7 @@ build_missing_images() {
       omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
       omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
       omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
+      omnivec-onelake-iceberg-watcher) build_image "$image" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/Dockerfile" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/" "latest" ;;
       omnivec-agent)            build_image "$image" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest" ;;
       docgrok-pipeline-worker)
         if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
@@ -826,6 +837,8 @@ dotnetWorker:
   enabled: true
 sharepointWatcher:
   enabled: ${SHAREPOINT_ENABLED}
+onelakeIcebergWatcher:
+  enabled: ${ONELAKE_ICEBERG_ENABLED}
 docgrok:
   global:
     imageRegistry: "${ACR_LOGIN_SERVER}"

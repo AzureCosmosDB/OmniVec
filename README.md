@@ -389,6 +389,7 @@ This removes the resource group, all Azure services, and local environment confi
 | `OMNIVEC_SKIP_IMPORT` | No | `false` | Preserve all required local ACR images; missing images fail instead of being imported |
 | `OMNIVEC_FORCE_IMPORT` | No | `false` | Set in the shell environment to overwrite local tags from the selected channel |
 | `OMNIVEC_SHAREPOINT_ENABLED` | No | `false` | Deploy the SharePoint watcher alongside the required .NET worker and Service Bus |
+| `OMNIVEC_ONELAKE_ICEBERG_ENABLED` | No | `false` | Deploy the OneLake Iceberg watcher; requires Fabric, OneLake, and Service Bus permissions |
 | `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
 
 ### What gets deployed
@@ -632,6 +633,7 @@ kubectl describe svc omnivec-web -n omnivec
 | `omnivec-controller` | Python | 1 | Source monitoring, job creation, metrics |
 | `omnivec-worker` | Python | 1–10 (HPA) | Job processing (download → embed → store) |
 | `omnivec-changefeed` | .NET | 15 | CosmosDB Change Feed processor (real-time CDC) |
+| `omnivec-onelake-iceberg-watcher` | Python/PyIceberg | disabled | OneLake Iceberg REST source watcher |
 | `docgrok` | Rust (Axum) | 1 | Embedding router (model discovery + routing) |
 | `docgrok-controller` | Rust | 1 | Model health monitoring, scale state |
 | `docgrok-pipeline-worker` | Python + PaddleOCR | 1 | Multi-step transforms (PDF → OCR → embed) |
@@ -648,6 +650,8 @@ See [docs/architecture.md](docs/architecture.md) for details.
 | `web/` | Web UI (static HTML/JS + nginx) |
 | `connectors/ingestion/dotnet/` | .NET Change Feed Processor connector |
 | `connectors/worker/dotnet/` | .NET embedding worker |
+| `connectors/ingestion/onelake_iceberg/` | OneLake Iceberg REST catalog watcher |
+| `connectors/fabric_spark/` | Fabric Spark Job Definition scripts |
 | `docgrok/` | Document intelligence engine (in-repo) |
 | `agent/` | OmniVec Agent — in-cluster read-only AI-ops agent (see [docs/agent.md](docs/agent.md)) |
 | `cli/` | Go CLI for managing pipelines, sources, and jobs |

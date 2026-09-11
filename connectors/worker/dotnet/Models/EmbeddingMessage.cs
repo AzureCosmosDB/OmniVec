@@ -42,6 +42,12 @@ public class EmbeddingMessage
     [JsonPropertyName("content_hash")]
     public string ContentHash { get; set; } = "";
 
+    [JsonPropertyName("source_version")]
+    public long SourceVersion { get; set; }
+
+    [JsonPropertyName("pipeline_revision")]
+    public long PipelineRevision { get; set; }
+
     [JsonPropertyName("partition_key_value")]
     public string PartitionKeyValue { get; set; } = "";
 

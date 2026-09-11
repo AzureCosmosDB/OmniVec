@@ -1,8 +1,10 @@
 """OmniVec Data Models"""
 
 from enum import Enum
+import re
+from urllib.parse import urlsplit
 from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
 
 
@@ -26,6 +28,7 @@ class SourceType(str, Enum):
     S3 = "s3"
     HTTP = "http"
     DATABRICKS = "databricks"
+    ONELAKE_ICEBERG = "onelake-iceberg"
     SHAREPOINT = "sharepoint"
 
 
@@ -33,6 +36,7 @@ class DestinationType(str, Enum):
     COSMOSDB_VECTOR = "cosmosdb-vector"
     PGVECTOR = "pgvector"
     MSSQL = "mssql"
+    ONELAKE_ICEBERG = "onelake-iceberg"
 
 
 class TriggerType(str, Enum):
@@ -175,6 +179,52 @@ class DatabricksSourceConfig(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class OneLakeIcebergSourceConfig(BaseModel):
+    """A read-only OneLake Iceberg REST catalog source.
+
+    Authentication is always obtained through DefaultAzureCredential by the
+    dedicated PyIceberg watcher; no catalog or storage secret is accepted.
+    """
+    catalog_uri: str = "https://onelake.table.fabric.microsoft.com/iceberg"
+    warehouse: str  # <workspaceId>/<dataItemId>
+    namespace: Union[str, List[str]]
+    table: str
+    content_fields: List[str] = ["content"]
+    id_field: str = "id"
+    poll_interval_seconds: int = 60
+    batch_size: int = 200
+    fabric_retry_interval_seconds: int = 900
+    checkpoint_account_url: str = "https://onelake.dfs.fabric.microsoft.com"
+    checkpoint_file_system: Optional[str] = None  # defaults to workspaceId
+    checkpoint_path: str = ".omnivec/checkpoints"
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("warehouse")
+    @classmethod
+    def _validate_warehouse(cls, value: str) -> str:
+        parts = value.strip("/").split("/")
+        if len(parts) != 2 or not all(re.fullmatch(r"[A-Za-z0-9-]+", part) for part in parts):
+            raise ValueError("warehouse must be '<workspaceId>/<dataItemId>'")
+        return "/".join(parts)
+
+    @field_validator("catalog_uri")
+    @classmethod
+    def _validate_catalog_uri(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or parsed.hostname != "onelake.table.fabric.microsoft.com":
+            raise ValueError("catalog_uri must use https://onelake.table.fabric.microsoft.com")
+        return value.rstrip("/")
+
+    @field_validator("checkpoint_account_url")
+    @classmethod
+    def _validate_checkpoint_account_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or parsed.hostname != "onelake.dfs.fabric.microsoft.com":
+            raise ValueError("checkpoint_account_url must use https://onelake.dfs.fabric.microsoft.com")
+        return value.rstrip("/")
+
+
 class SharePointSourceConfig(BaseModel):
     """SharePoint Online document library accessed through Microsoft Graph."""
     site_id: str = Field(min_length=1, max_length=512)
@@ -247,6 +297,135 @@ class PgVectorConfig(BaseModel):
     index_lists: int = 100  # For ivfflat: number of lists
     hnsw_m: int = 16  # For hnsw: max connections per layer
     hnsw_ef_construction: int = 64  # For hnsw: size of dynamic candidate list
+
+
+class OneLakeIcebergDestinationConfig(BaseModel):
+    """Fabric Spark write-back destination backed by durable OneLake staging."""
+    workspace_id: str
+    lakehouse_item_id: str
+    spark_job_definition_item_id: str
+    staging_account_url: str = "https://onelake.dfs.fabric.microsoft.com"
+    staging_file_system: str  # normally the Fabric workspace ID
+    staging_path: str = ""
+    target_table: str
+    fabric_api_base_url: str = "https://api.fabric.microsoft.com/v1"
+    spark_executable_file: Optional[str] = None
+    writeback_columns: "OneLakeIcebergWritebackColumns" = Field(
+        default_factory=lambda: OneLakeIcebergWritebackColumns()
+    )
+    mirror: Optional["OneLakeIcebergMirrorConfig"] = None
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_staging_path(cls, value: Any) -> Any:
+        if isinstance(value, dict) and str(value.get("staging_path", "")).strip("/") in ("", "Files/omnivec/staging"):
+            lakehouse_item_id = str(value.get("lakehouse_item_id", "")).strip()
+            if lakehouse_item_id:
+                value = {**value, "staging_path": f"{lakehouse_item_id}/Files/omnivec/staging"}
+        return value
+
+    @field_validator("target_table")
+    @classmethod
+    def _validate_target_table(cls, value: str) -> str:
+        if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in value.split(".")):
+            raise ValueError("target_table must be a dot-qualified SQL identifier")
+        return value
+
+    @field_validator("fabric_api_base_url")
+    @classmethod
+    def _validate_fabric_api_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or parsed.hostname != "api.fabric.microsoft.com":
+            raise ValueError("fabric_api_base_url must use https://api.fabric.microsoft.com")
+        return value.rstrip("/")
+
+    @field_validator("staging_account_url")
+    @classmethod
+    def _validate_staging_account_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or parsed.hostname != "onelake.dfs.fabric.microsoft.com":
+            raise ValueError("staging_account_url must use https://onelake.dfs.fabric.microsoft.com")
+        return value.rstrip("/")
+
+    @field_validator("staging_path")
+    @classmethod
+    def _validate_staging_path(cls, value: str) -> str:
+        normalized = value.strip("/")
+        if not normalized or any(part in ("", ".", "..") for part in normalized.split("/")):
+            raise ValueError("staging_path must be a safe OneLake-relative path")
+        return normalized
+
+
+class OneLakeIcebergWritebackColumns(BaseModel):
+    """Column mapping for updating an existing source row, never inserting one."""
+    id_field: str = "id"
+    embedding_field: str = "embedding"
+    content_hash_field: str = "content_hash"
+    pipeline_id_field: str = "pipeline_id"
+    pipeline_generation_field: str = "pipeline_generation"
+    model_field: str = "embedding_model"
+    source_id_field: str = "source_id"
+    source_ref_field: str = "source_ref"
+    writer_marker_field: str = "omnivec_writer_marker"
+    run_id_field: str = "omnivec_run_id"
+    embedded_at_field: str = "embedded_at"
+
+    @field_validator("*")
+    @classmethod
+    def _validate_column_identifier(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+            raise ValueError("write-back column names must be simple SQL identifiers")
+        return value
+
+
+class OneLakeIcebergMirrorConfig(BaseModel):
+    """Optional immediate serving mirror for OneLake write-back embeddings."""
+    type: Literal["garnet", "redis"]
+    destination_id: Optional[str] = None
+    config: Dict[str, Any]
+    best_effort: bool = False
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("config")
+    @classmethod
+    def _validate_mirror_config(cls, value: Dict[str, Any], info) -> Dict[str, Any]:
+        def config_bool(key: str, default: bool) -> bool:
+            raw = value.get(key, default)
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str) and raw.strip().lower() in ("true", "false"):
+                return raw.strip().lower() == "true"
+            raise ValueError(f"{key} must be a boolean")
+
+        mirror_type = info.data.get("type")
+        if mirror_type == "garnet":
+            endpoint = str(value.get("endpoint", "")).strip()
+            if not endpoint:
+                raise ValueError("Garnet mirror requires config.endpoint")
+            vector_set = str(value.get("vector_set", "omnivec-vectors")).strip()
+            if not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", vector_set):
+                raise ValueError("Garnet vector_set must contain only letters, numbers, ':', '_' or '-'")
+            value = {
+                **value,
+                "endpoint": endpoint,
+                "vector_set": vector_set,
+                "tls": config_bool("tls", True),
+                "use_entra_auth": config_bool("use_entra_auth", False),
+            }
+        elif mirror_type == "redis":
+            endpoint = str(value.get("endpoint", "")).strip()
+            if not endpoint:
+                raise ValueError("Redis mirror requires config.endpoint")
+            value = {
+                **value,
+                "endpoint": endpoint,
+                "tls": config_bool("tls", True),
+                "use_entra_auth": config_bool("use_entra_auth", True),
+            }
+        return value
 
 
 class ChunkConfig(BaseModel):

@@ -62,30 +62,38 @@ public class ServiceBusPublisher : IAsyncDisposable
         if (!await HasCapacityAsync(ct))
             throw new InvalidOperationException("Service Bus backpressure active; source checkpoint must be retained");
 
-        var batch = await _sender.CreateMessageBatchAsync(ct);
-        try
+        var pending = new Queue<EmbeddingMessage>(messages);
+        var published = 0;
+
+        while (pending.Count > 0)
         {
-            foreach (var msg in messages)
+            using var batch = await _sender.CreateMessageBatchAsync(ct);
+
+            while (pending.Count > 0)
             {
+                var msg = pending.Peek();
                 var sbMsg = new ServiceBusMessage(JsonSerializer.Serialize(msg))
                 {
                     MessageId = msg.MessageId,
                     ContentType = "application/json",
                     Subject = msg.PipelineId,
                 };
-                if (batch.TryAddMessage(sbMsg)) continue;
-                if (batch.Count == 0)
-                    throw new InvalidOperationException($"Service Bus message {msg.MessageId} exceeds the batch size limit");
-                await _sender.SendMessagesAsync(batch, ct);
-                batch.Dispose();
-                batch = await _sender.CreateMessageBatchAsync(ct);
+
                 if (!batch.TryAddMessage(sbMsg))
-                    throw new InvalidOperationException($"Service Bus message {msg.MessageId} exceeds the batch size limit");
+                {
+                    if (batch.Count == 0)
+                        throw new InvalidOperationException($"Message {msg.MessageId} exceeds the Service Bus batch size limit.");
+                    break;
+                }
+
+                pending.Dequeue();
             }
-            if (batch.Count > 0)
-                await _sender.SendMessagesAsync(batch, ct);
+
+            await _sender.SendMessagesAsync(batch, ct);
+            published += batch.Count;
         }
-        finally { batch.Dispose(); }
+
+        _logger.LogInformation("Published {Count} messages to Service Bus", published);
     }
 
     /// <summary>

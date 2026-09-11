@@ -50,6 +50,7 @@ from models import (  # lgtm[py/unused-import]
     CreateSourceRequest, CreateDestinationRequest, CreatePipelineRequest,
     SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
     ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
+    OneLakeIcebergSourceConfig, OneLakeIcebergDestinationConfig,
     SharePointSourceConfig,
 )
 from store import init_store, get_store
@@ -1849,6 +1850,11 @@ async def create_source(req: CreateSourceRequest):
     source_id = f"src-{str(uuid.uuid4())[:8]}"
     # Strip whitespace from URL fields in config
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     if req.type == SourceType.SHAREPOINT:
         try:
             clean_config = SharePointSourceConfig(**clean_config).model_dump()
@@ -1893,6 +1899,14 @@ async def create_source(req: CreateSourceRequest):
         except Exception as e:
             logger.warning("SharePoint source validation raised %s", type(e).__name__)
             warnings.append("Could not connect to SharePoint source. Check the site, library and Microsoft Graph application permissions.")
+    elif req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            ok, result = await _test_onelake_iceberg_connection(clean_config)
+            if not ok:
+                warnings.append(result.get("error", "Could not connect to OneLake Iceberg."))
+        except Exception as e:
+            logger.warning("OneLake Iceberg source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to OneLake Iceberg. Check Fabric and OneLake permissions.")
 
     source = Source(
         id=source_id,
@@ -1930,6 +1944,11 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     if req.type == SourceType.SHAREPOINT:
         try:
             clean_config = SharePointSourceConfig(**clean_config).model_dump()
@@ -2124,6 +2143,8 @@ async def test_source(source_id: str):
     elif source.type == SourceType.COSMOSDB:
         from connectors.cosmosdb_connector import test_cosmosdb_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_cosmosdb_connection(source.config)))
+    elif source.type == SourceType.ONELAKE_ICEBERG:
+        ok, result = await _test_onelake_iceberg_connection(source.config)
     else:
         return {"success": True, "result": {"status": "unknown", "message": "Connector not implemented"}}
 
@@ -2491,6 +2512,13 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
                 return result
             return {"success": False, "error": str(result)}
 
+        elif req.type == "onelake-iceberg":
+            ok, result = await _test_onelake_iceberg_connection(req.config)
+            return result if ok else {
+                "success": False,
+                "error": result.get("error", "OneLake Iceberg connection failed"),
+            }
+
         elif req.type == "postgresql":
             from health_checker import _connect_pg
             table = req.config.get("table", "")
@@ -2644,6 +2672,11 @@ async def create_destination(req: CreateDestinationRequest):
 
     # Auto-probe CosmosDB container for partition key, vector field, and validate
     config = dict(req.config)
+    if req.type == "onelake-iceberg":
+        try:
+            config = OneLakeIcebergDestinationConfig(**config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     warnings = []
     enabled = True
     if req.type == "cosmosdb-vector":
@@ -2742,6 +2775,11 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
 
     destination = _destination_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == "onelake-iceberg":
+        try:
+            clean_config = OneLakeIcebergDestinationConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     # Preserve stored password if masked value was sent
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
@@ -2887,6 +2925,15 @@ async def test_destination(dest_id: str):
             finally:
                 conn.close()
         ok, result = await _test_with_timeout(_test_mssql_dest)
+    elif destination.type == "onelake-iceberg":
+        tested = await test_destination_connection_before_save(TestDestConnectionRequest(
+            type=destination.type,
+            config=destination.config,
+            destination_id=destination.id,
+        ))
+        if tested.get("success"):
+            return {"success": True, "result": tested}
+        return {"success": False, "error": tested.get("error", "OneLake Iceberg connection failed")}
     else:
         from connectors.cosmosdb_vector_connector import test_vector_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
@@ -2906,6 +2953,134 @@ async def test_destination(dest_id: str):
 # =============================================================================
 # DESTINATION CONNECTION TEST (for UI before saving)
 # =============================================================================
+
+async def _test_onelake_iceberg_connection(config: dict) -> tuple[bool, dict]:
+    from azure.identity.aio import DefaultAzureCredential
+
+    try:
+        parsed = OneLakeIcebergSourceConfig(**config)
+    except ValidationError as exc:
+        return False, {"success": False, "error": f"Invalid OneLake Iceberg configuration: {exc}"}
+
+    credential = DefaultAzureCredential()
+    try:
+        token = await credential.get_token("https://storage.azure.com/.default")
+        headers = {"Authorization": f"Bearer {token.token}"}
+        base = parsed.catalog_uri.rstrip("/")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            response = await client.get(
+                f"{base}/v1/config",
+                params={"warehouse": parsed.warehouse},
+                headers=headers,
+            )
+            response.raise_for_status()
+            catalog_config = response.json()
+            prefix = str(
+                (catalog_config.get("defaults") or {}).get("prefix")
+                or (catalog_config.get("overrides") or {}).get("prefix")
+                or ""
+            ).strip("/")
+            namespace = parsed.namespace if isinstance(parsed.namespace, list) else parsed.namespace.split(".")
+            namespace_path = _urlquote("\x1f".join(namespace), safe="")
+            table_path = _urlquote(parsed.table, safe="")
+            prefix_path = f"/{prefix}" if prefix else ""
+            response = await client.get(
+                f"{base}/v1{prefix_path}/namespaces/{namespace_path}/tables/{table_path}",
+                headers=headers,
+            )
+            response.raise_for_status()
+        return True, {
+            "success": True,
+            "message": "Connected successfully to the OneLake Iceberg table.",
+            "details": f"{parsed.warehouse}/{'.'.join(namespace)}.{parsed.table}",
+        }
+    except Exception as exc:
+        logger.warning("OneLake Iceberg connection test failed: %s", type(exc).__name__)
+        return False, {
+            "success": False,
+            "error": "Could not access the OneLake Iceberg catalog or table with the workload identity.",
+        }
+    finally:
+        await credential.close()
+
+
+async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True) -> dict:
+    from redis.asyncio import Redis
+    from redis_entraid.cred_provider import create_from_default_azure_credential
+    from urllib.parse import urlsplit
+
+    endpoint = str(config.get("endpoint", "")).strip()
+    if not endpoint:
+        return {"success": False, "error": "Garnet endpoint is required"}
+    parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+    kwargs = {
+        "host": parsed.hostname or endpoint,
+        "port": parsed.port or (6380 if config.get("tls", True) else 6379),
+        "ssl": bool(config.get("tls", True)),
+        "decode_responses": False,
+        "protocol": 2,
+    }
+    if config.get("use_entra_auth", False):
+        kwargs["credential_provider"] = create_from_default_azure_credential(
+            ("https://redis.azure.com/.default",)
+        )
+    elif config.get("password_secret_ref"):
+        from azure.identity.aio import DefaultAzureCredential
+        from azure.keyvault.secrets.aio import SecretClient
+
+        reference = str(config["password_secret_ref"])
+        if not reference.startswith("kv://"):
+            return {"success": False, "error": "password_secret_ref must use kv://<vault>/<secret>"}
+        parts = reference[5:].split("/", 1)
+        if len(parts) != 2:
+            return {"success": False, "error": "password_secret_ref must use kv://<vault>/<secret>"}
+        vault_host = parts[0] if "." in parts[0] else f"{parts[0]}.vault.azure.net"
+        credential = DefaultAzureCredential()
+        secret_client = SecretClient(vault_url=f"https://{vault_host}", credential=credential)
+        try:
+            kwargs["username"] = config.get("username")
+            kwargs["password"] = (await secret_client.get_secret(parts[1])).value
+        finally:
+            await secret_client.close()
+            await credential.close()
+    client = Redis(**kwargs)
+    try:
+        await client.ping()
+        if not require_vector_set:
+            return {
+                "success": True,
+                "message": "Connected successfully to the legacy Redis string mirror.",
+                "details": f"Key prefix: {config.get('key_prefix', 'omnivec')}",
+            }
+        vector_set = str(config.get("vector_set", "omnivec-vectors"))
+        info = await client.execute_command("VINFO", vector_set)
+        size = None
+        if info:
+            decoded = [
+                value.decode("utf-8") if isinstance(value, bytes) else value
+                for value in info
+            ]
+            size = dict(zip(decoded[0::2], decoded[1::2])).get("size")
+        return {
+            "success": True,
+            "message": "Connected successfully to Garnet Vector Sets.",
+            "details": f"Vector set: {vector_set}" + (
+                f", size: {size}" if size is not None else " (created on first write)"
+            ),
+        }
+    except Exception as exc:
+        logger.warning("Garnet connection test failed: %s", type(exc).__name__)
+        return {
+            "success": False,
+            "error": (
+                "Could not execute Garnet Vector Set commands. Verify authentication and --enable-vector-set-preview."
+                if require_vector_set
+                else "Could not connect to the legacy Redis string mirror."
+            ),
+        }
+    finally:
+        await client.aclose()
+
 
 class TestDestConnectionRequest(BaseModel):
     type: str
@@ -3030,6 +3205,49 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
                 }
             finally:
                 await conn.close()
+
+        elif req.type == "onelake-iceberg":
+            config = OneLakeIcebergDestinationConfig(**req.config)
+            from azure.identity.aio import DefaultAzureCredential
+
+            credential = DefaultAzureCredential()
+            try:
+                token = await credential.get_token("https://api.fabric.microsoft.com/.default")
+                headers = {"Authorization": f"Bearer {token.token}"}
+                base = config.fabric_api_base_url.rstrip("/")
+                async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+                    lakehouse = await client.get(
+                        f"{base}/workspaces/{_urlquote(config.workspace_id, safe='')}/lakehouses/"
+                        f"{_urlquote(config.lakehouse_item_id, safe='')}",
+                        headers=headers,
+                    )
+                    lakehouse.raise_for_status()
+                    job = await client.get(
+                        f"{base}/workspaces/{_urlquote(config.workspace_id, safe='')}/sparkJobDefinitions/"
+                        f"{_urlquote(config.spark_job_definition_item_id, safe='')}",
+                        headers=headers,
+                    )
+                    job.raise_for_status()
+                result = {
+                    "success": True,
+                    "message": "Connected successfully to the Fabric lakehouse and Spark Job Definition.",
+                    "details": f"Target table: {config.target_table}",
+                    "vector_indexes": [{
+                        "path": config.writeback_columns.embedding_field,
+                        "indexType": "garnet-vector-set" if config.mirror else "iceberg",
+                    }],
+                }
+                if config.mirror and config.mirror.type in ("garnet", "redis"):
+                    mirror_result = await _test_garnet_vector_set(
+                        config.mirror.config,
+                        require_vector_set=config.mirror.type == "garnet",
+                    )
+                    if not mirror_result.get("success"):
+                        return mirror_result
+                    result["mirror"] = mirror_result
+                return result
+            finally:
+                await credential.close()
 
         elif req.type == "mssql":
             try:
@@ -3350,6 +3568,56 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
             )
 
 
+def _require_onelake_iceberg_pipeline(store, req, dest_doc) -> None:
+    """Validate the constrained same-row write-back contract."""
+    if not dest_doc or dest_doc.get("type") != "onelake-iceberg":
+        return
+    if str(req.processing_mode or "").lower() != "queue":
+        raise HTTPException(
+            status_code=400,
+            detail="OneLake Iceberg write-back requires queue processing mode.",
+        )
+    if (req.content_strategy or "truncate").lower() != "truncate":
+        raise HTTPException(
+            status_code=400,
+            detail="OneLake Iceberg same-row write-back supports content_strategy='truncate' only.",
+        )
+
+    destination_config = dest_doc.get("config", {}) or {}
+    target_parts = str(destination_config.get("target_table", "")).split(".")
+    destination_workspace = str(destination_config.get("workspace_id", ""))
+    for pipeline_source in req.sources or []:
+        source_id = pipeline_source.source_id
+        source_doc = store.get(source_id, "source")
+        if not source_doc or source_doc.get("type") != "onelake-iceberg":
+            raise HTTPException(
+                status_code=400,
+                detail="A OneLake Iceberg destination can only write back rows from a OneLake Iceberg source.",
+            )
+        source_config = source_doc.get("config", {}) or {}
+        warehouse_parts = str(source_config.get("warehouse", "")).strip("/").split("/", 1)
+        if (
+            len(warehouse_parts) != 2
+            or warehouse_parts[0] != destination_workspace
+            or warehouse_parts[1] != str(destination_config.get("lakehouse_item_id", ""))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source '{source_id}' and the OneLake destination must use the same Fabric lakehouse.",
+            )
+        namespace = source_config.get("namespace", "")
+        namespace_parts = namespace.split(".") if isinstance(namespace, str) else list(namespace)
+        source_table_parts = [*namespace_parts, str(source_config.get("table", ""))]
+        if len(target_parts) < len(source_table_parts) or target_parts[-len(source_table_parts):] != source_table_parts:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"OneLake destination target_table must identify source '{source_id}' table "
+                    f"'{'.'.join(source_table_parts)}' for same-row write-back."
+                ),
+            )
+
+
 def _inline_write_target(source: dict) -> tuple:
     """Identify the source rows sharing inline pipeline/hash/timestamp metadata."""
     kind = source.get("type")
@@ -3562,6 +3830,8 @@ async def create_pipeline(req: CreatePipelineRequest):
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
     _require_sharepoint_compatible(store, req, dest_doc)
     cosmos_chunk_config = _validate_cosmos_chunking(store, req, dest_doc)
 
@@ -3731,6 +4001,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
 
     # Validate vector_index_path against destination if provided
     dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
     if dest_doc:
         _require_sharepoint_compatible(store, req, dest_doc)
         dest_config = dest_doc.get("config", {})
@@ -5957,6 +6228,46 @@ async def _build_index_specs(destination_ids: List[str]) -> tuple[List[Dict[str,
                     "content_column": cfg.get("content_column", "content"),
                 },
                 "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                "embedding": embedding,
+                "content_fields": cf,
+                "pipeline_id": matched_pip.get("id"),
+            })
+        elif dtype == "onelake-iceberg":
+            mirror = cfg.get("mirror") or {}
+            mirror_type = str(mirror.get("type", "")).lower()
+            mirror_config = mirror.get("config") or {}
+            if mirror_type not in ("garnet", "redis"):
+                warnings.append(f"destination {dest_id} has no Garnet vector mirror")
+                continue
+            if mirror_type == "redis":
+                warnings.append(f"destination {dest_id} uses a legacy Redis string mirror that is not searchable")
+                continue
+            raw_metric = str(mirror_config.get("distance_metric", "cosine")).lower()
+            metric = {
+                "ip": "dot",
+                "xcosine_normalized": "cosine",
+            }.get(raw_metric, raw_metric)
+            indexes.append({
+                "id": dest_id,
+                "store": {
+                    "type": "garnet",
+                    "endpoint": mirror_config.get("endpoint", ""),
+                    "vector_set": mirror_config.get("vector_set", "omnivec-vectors"),
+                    "tls": mirror_config.get("tls", True),
+                    "use_entra_auth": mirror_config.get("use_entra_auth", False),
+                    "username": mirror_config.get("username"),
+                    "auth": (
+                        {"mode": "key", "secret_ref": mirror_config.get("password_secret_ref")}
+                        if mirror_config.get("password_secret_ref")
+                        else {"mode": "managed_identity"}
+                    ),
+                    "search_ef": mirror_config.get("search_ef", 100),
+                    "filter_ef": mirror_config.get("filter_ef", 16),
+                },
+                "vector": {
+                    "field": "embedding",
+                    "metric": metric,
+                },
                 "embedding": embedding,
                 "content_fields": cf,
                 "pipeline_id": matched_pip.get("id"),
