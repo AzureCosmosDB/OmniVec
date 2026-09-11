@@ -1,0 +1,36 @@
+{
+  "name": "local-search-scale-example",
+  "target_url": "http://127.0.0.1:8080/health",
+  "allowed_hosts": [
+    "127.0.0.1"
+  ],
+  "method": "GET",
+  "headers_from_env": {},
+  "body": null,
+  "request_timeout_seconds": 10,
+  "phases": [
+    {
+      "name": "warmup",
+      "requests": 20,
+      "concurrency": 2,
+      "requests_per_second": 5
+    },
+    {
+      "name": "load",
+      "requests": 500,
+      "concurrency": 25,
+      "requests_per_second": 100
+    },
+    {
+      "name": "spike",
+      "requests": 500,
+      "concurrency": 100,
+      "requests_per_second": 0
+    }
+  ],
+  "thresholds": {
+    "max_error_rate": 0.01,
+    "max_p95_ms": 1000,
+    "min_requests": 1020
+  }
+}
