@@ -274,15 +274,10 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
     {
         ct.ThrowIfCancellationRequested();
         var endpoint = Required(config, "endpoint");
-        var options = ConfigurationOptions.Parse(endpoint);
-        options.Ssl = GetBool(config, "tls", true);
-        options.AbortOnConnectFail = false;
-        if (GetBool(config, "use_entra_auth", true))
-            await AzureCacheForRedis.ConfigureForAzureWithTokenCredentialAsync(
-                options, new DefaultAzureCredential());
+        var options = await CreateRedisOptionsAsync(config, ct);
 
         var connection = RedisConnections.GetOrAdd(
-            $"{endpoint}|{options.Ssl}|{GetBool(config, "use_entra_auth", true)}",
+            BuildRedisConnectionCacheKey(config, options),
             _ => ConnectionMultiplexer.Connect(options));
         var database = connection.GetDatabase();
         var prefix = Get(config, "key_prefix", "omnivec").Trim(':');
@@ -450,14 +445,9 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         CancellationToken ct)
     {
         var endpoint = Required(config, "endpoint");
-        var options = ConfigurationOptions.Parse(endpoint);
-        options.Ssl = GetBool(config, "tls", true);
-        options.AbortOnConnectFail = false;
-        if (GetBool(config, "use_entra_auth", true))
-            await AzureCacheForRedis.ConfigureForAzureWithTokenCredentialAsync(
-                options, new DefaultAzureCredential());
+        var options = await CreateRedisOptionsAsync(config, ct);
         var connection = RedisConnections.GetOrAdd(
-            $"{endpoint}|{options.Ssl}|{GetBool(config, "use_entra_auth", true)}",
+            BuildRedisConnectionCacheKey(config, options),
             _ => ConnectionMultiplexer.Connect(options));
         var database = connection.GetDatabase();
         var prefix = Get(config, "key_prefix", "omnivec").Trim(':');
@@ -597,6 +587,40 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
             ? parsed
             : null;
 
+    public static async Task<ConfigurationOptions> CreateRedisOptionsAsync(
+        Dictionary<string, object> config,
+        CancellationToken ct)
+    {
+        var options = ConfigurationOptions.Parse(Required(config, "endpoint"));
+        options.Ssl = GetBool(config, "tls", true);
+        options.AbortOnConnectFail = false;
+        if (GetBool(config, "use_entra_auth", true))
+        {
+            await AzureCacheForRedis.ConfigureForAzureWithTokenCredentialAsync(
+                options, new DefaultAzureCredential());
+            return options;
+        }
+
+        var username = Get(config, "username", "");
+        if (!string.IsNullOrWhiteSpace(username))
+            options.User = username;
+        var secretRef = Get(config, "password_secret_ref", "");
+        if (!string.IsNullOrWhiteSpace(secretRef))
+            options.Password = await ResolveKeyVaultSecretAsync(secretRef, ct);
+        return options;
+    }
+
+    private static string BuildRedisConnectionCacheKey(
+        Dictionary<string, object> config,
+        ConfigurationOptions options)
+        => string.Join(
+            "|",
+            Required(config, "endpoint"),
+            options.Ssl,
+            GetBool(config, "use_entra_auth", true),
+            Get(config, "username", ""),
+            Get(config, "password_secret_ref", ""));
+
     private static async Task<ConfigurationOptions> CreateGarnetOptionsAsync(
         Dictionary<string, object> config,
         CancellationToken ct)
@@ -625,10 +649,10 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
     private static async Task<string> ResolveKeyVaultSecretAsync(string reference, CancellationToken ct)
     {
         if (!reference.StartsWith("kv://", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Garnet password_secret_ref must use kv://<vault>/<secret>");
+            throw new ArgumentException("password_secret_ref must use kv://<vault>/<secret>");
         var parts = reference[5..].Split('/', 2, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 2)
-            throw new ArgumentException("Garnet password_secret_ref must use kv://<vault>/<secret>");
+            throw new ArgumentException("password_secret_ref must use kv://<vault>/<secret>");
         var vaultHost = parts[0].Contains('.') ? parts[0] : $"{parts[0]}.vault.azure.net";
         var client = new SecretClient(new Uri($"https://{vaultHost}"), new DefaultAzureCredential());
         return (await client.GetSecretAsync(parts[1], cancellationToken: ct)).Value.Value;

@@ -308,7 +308,10 @@ OMNIVEC_BUILD=${OMNIVEC_BUILD:-false}
 FORCE_IMPORT=${OMNIVEC_FORCE_IMPORT:-false}
 
 # Images to import/build
-IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet-worker omnivec-onelake-iceberg-watcher omnivec-agent docgrok-pipeline-worker docgrok-router"
+IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet-worker omnivec-agent docgrok-pipeline-worker docgrok-router"
+if [ "$ONELAKE_ICEBERG_ENABLED" = "true" ]; then
+  IMAGES="$IMAGES omnivec-onelake-iceberg-watcher"
+fi
 
 # Release channel tag (stable / dev / sha-xxxxxxx / vX.Y.Z / latest).
 # Used for BOTH the acr import step AND the helm --set overrides so the

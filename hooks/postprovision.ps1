@@ -169,11 +169,13 @@ $IMAGES = @(
     "omnivec-web",
     "omnivec-changefeed",
     "omnivec-dotnet-worker",
-    "omnivec-onelake-iceberg-watcher",
     "omnivec-agent",
     "docgrok-pipeline-worker",
     "docgrok-router"
 )
+if ($ONELAKE_ICEBERG_ENABLED -eq "true") {
+    $IMAGES += "omnivec-onelake-iceberg-watcher"
+}
 
 # Release channel tag — resolved once, used for BOTH import and helm overrides.
 # 1. Explicit OMNIVEC_IMAGE_TAG (azd env) wins.

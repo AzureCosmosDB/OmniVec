@@ -540,6 +540,11 @@ def _parse_garnet_results(raw: List[Any], metric: str, include_vector: bool) -> 
         text = attributes.get("content") or "\n\n".join(
             str(value) for value in content_fields.values() if value is not None
         )
+        text_parts = [
+            {"field": str(field), "value": str(value)}
+            for field, value in content_fields.items()
+            if value is not None
+        ]
         metadata = {
             key: value
             for key, value in attributes.items()
@@ -550,7 +555,7 @@ def _parse_garnet_results(raw: List[Any], metric: str, include_vector: bool) -> 
             "score": _garnet_score(distance, metric),
             "distance": distance,
             "text": text,
-            "text_parts": content_fields or None,
+            "text_parts": text_parts or None,
             "metadata": metadata,
             "source": attributes.get("source_id"),
             "source_ref": attributes.get("source_ref"),

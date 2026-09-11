@@ -70,6 +70,29 @@ Test("Garnet vector element IDs and FP32 payloads are deterministic", () =>
     return Task.CompletedTask;
 });
 
+Test("Legacy Redis ACL configuration is applied to worker connections", async () =>
+{
+    var options = await OneLakeIcebergDestinationWriter.CreateRedisOptionsAsync(
+        new Dictionary<string, object>
+        {
+            ["endpoint"] = "localhost:6379",
+            ["tls"] = false,
+            ["use_entra_auth"] = false,
+            ["username"] = "omnivec",
+        },
+        default);
+    Assert(options.User == "omnivec");
+    Assert(options.Ssl == false);
+    await Throws(() => OneLakeIcebergDestinationWriter.CreateRedisOptionsAsync(
+        new Dictionary<string, object>
+        {
+            ["endpoint"] = "localhost:6379",
+            ["use_entra_auth"] = false,
+            ["password_secret_ref"] = "plain-text-is-not-allowed",
+        },
+        default));
+});
+
 Test("OneLake operation versions sort by Iceberg snapshot sequence", () =>
 {
     var older = OneLakeIcebergDestinationWriter.BuildOperationVersion(9, 1, "run-a");

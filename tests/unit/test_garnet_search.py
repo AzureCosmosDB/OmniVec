@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "search"))
 
-from schemas import GarnetStore, IndexSpec, ModelEmbedding  # noqa: E402
+from schemas import GarnetStore, IndexSpec, ModelEmbedding, SearchResult  # noqa: E402
 from searcher import _garnet_score, _parse_garnet_results  # noqa: E402
 
 
@@ -45,6 +45,24 @@ def test_parse_garnet_vsim_results():
             "source_ref": "row-1",
         }
     ]
+
+
+def test_parse_garnet_source_content_fields_matches_response_schema():
+    raw = [
+        b"element-1",
+        b"0",
+        (
+            b'{"id":"element-1","source_id":"src","source_ref":"row-1",'
+            b'"source_content_fields":{"title":"Vector databases","body":"Semantic search"}}'
+        ),
+    ]
+    hit = _parse_garnet_results(raw, "cosine", include_vector=False)[0]
+    assert hit["text"] == "Vector databases\n\nSemantic search"
+    assert hit["text_parts"] == [
+        {"field": "title", "value": "Vector databases"},
+        {"field": "body", "value": "Semantic search"},
+    ]
+    SearchResult(index_id="garnet", rank=1, **hit)
 
 
 def test_garnet_l2_score_is_bounded():
