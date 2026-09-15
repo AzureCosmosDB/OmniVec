@@ -63,3 +63,32 @@ async def test_invalid_sharepoint_probe_does_not_echo_validation_input(api_app):
     assert ok is False
     assert result.startswith("Invalid SharePoint configuration.")
     assert "sensitive-internal-detail" not in result
+
+
+@pytest.mark.asyncio
+async def test_mssql_destination_warning_does_not_expose_probe_error(
+    api_app, monkeypatch, caplog
+):
+    api = sys.modules["api"]
+    internal_detail = "sensitive-mssql-driver-detail"
+    pyodbc = ModuleType("pyodbc")
+    pyodbc.connect = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError(internal_detail)
+    )
+    monkeypatch.setitem(sys.modules, "pyodbc", pyodbc)
+    saved = []
+    store = SimpleNamespace(list=lambda kind: [], upsert=saved.append)
+    monkeypatch.setattr(api, "get_store", lambda: store)
+
+    result = await api.create_destination(api.CreateDestinationRequest(
+        name="mssql-validation-test",
+        type="mssql",
+        config={"server": "test", "database": "test", "table": "vectors"},
+    ))
+
+    assert result["success"] is True
+    assert len(saved) == 1
+    assert len(result["warnings"]) == 1
+    assert internal_detail not in str(result)
+    assert internal_detail not in caplog.text
+    assert "RuntimeError" in caplog.text

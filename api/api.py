@@ -2740,8 +2740,11 @@ async def create_destination(req: CreateDestinationRequest):
             finally:
                 mssql_conn.close()
         except Exception as e:
-            warnings.append(f"Could not probe MSSQL table: {str(e)}. "
-                "Vector column discovery skipped.")
+            logger.warning("MSSQL destination probe raised %s", type(e).__name__)
+            warnings.append(
+                "Could not probe MSSQL table. Check the server, database, table, "
+                "and managed identity access. Vector column discovery skipped."
+            )
 
     dest_id = f"dst-{str(uuid.uuid4())[:8]}"
     destination = Destination(
@@ -3940,10 +3943,17 @@ async def create_pipeline(req: CreatePipelineRequest):
                 res = await _provision_blob_eventgrid(src)
                 auto_provision_results.append({"source_id": ps.source_id, **res})
             except Exception as e:  # lgtm[py/catch-base-exception]
+                logger.warning(
+                    "Blob Event Grid auto-provisioning raised %s for source %s",
+                    type(e).__name__,
+                    ps.source_id,
+                )
                 auto_provision_results.append({
                     "source_id": ps.source_id,
                     "success": False,
-                    "error": f"auto-provision failed: {e}",
+                    "error": (
+                        "auto-provision failed; blob polling fallback remains active"
+                    ),
                 })
 
     resp = {"success": True, "pipeline": pipeline}
