@@ -68,6 +68,37 @@
   .timer{margin-top:10px;font-size:14px;color:var(--muted);opacity:0;animation:fadeIn .5s 1.2s forwards}
   .timer b{color:var(--gold);font-size:20px}
 
+  /* Customer value slide */
+  .value-wrap{position:absolute;inset:112px 6% 106px;display:grid;grid-template-columns:1fr 1fr;gap:44px}
+  .value-brand{position:absolute;top:24px;left:6%;font-size:44px;font-weight:850;letter-spacing:.5px;background:linear-gradient(90deg,#22d3ee,#a78bfa,#34d399);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 0 18px rgba(167,139,250,.25));z-index:12}
+  .value-panel{padding:30px 34px;border-radius:22px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.11);backdrop-filter:blur(8px);opacity:0;transform:translateY(18px)}
+  .value-panel:first-child{display:flex;flex-direction:column}
+  .scene.on .value-panel{animation:valueIn .65s ease forwards}
+  .scene.on .value-panel:nth-child(2){animation-delay:.2s}
+  @keyframes valueIn{to{opacity:1;transform:none}}
+  #sceneValue .title h1{font-size:32px}
+  #sceneValue .title p{font-size:16px}
+  .value-kicker{font-size:13px;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:12px}
+  .value-panel h2{font-size:27px;line-height:1.22;margin:0 0 18px}
+  .value-problem{font-size:17px;line-height:1.5;color:var(--muted);margin:0 0 30px}
+  .value-problem b{color:#fecaca}
+  .value-promise{padding:20px 22px;border-radius:16px;background:linear-gradient(110deg,rgba(34,211,238,.15),rgba(167,139,250,.17),rgba(52,211,153,.15));border:1.5px solid rgba(167,139,250,.58);font-size:22px;line-height:1.42;margin-bottom:24px;box-shadow:0 0 28px rgba(167,139,250,.13)}
+  .value-promise strong{color:#fff;font-weight:750}
+  .value-list{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:auto}
+  .value-item{padding:15px 17px;border-radius:11px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.08);font-size:18px;line-height:1.4;color:#dbe4ff}
+  .value-item b{display:block;color:#fff;font-size:20px;margin-bottom:4px}
+  .customer-grid{display:grid;grid-template-columns:1fr;gap:13px}
+  .customer-card{position:relative;padding:15px 18px;border-radius:14px;background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.10);opacity:0;transform:scale(.94)}
+  .scene.on .customer-card{animation:customerIn .45s ease forwards}
+  .scene.on .customer-card:nth-child(1){animation-delay:.45s}
+  .scene.on .customer-card:nth-child(2){animation-delay:.62s}
+  .scene.on .customer-card:nth-child(3){animation-delay:.79s}
+  .scene.on .customer-card:nth-child(4){animation-delay:.96s}
+  @keyframes customerIn{to{opacity:1;transform:none}}
+  .customer-name{font-size:23px;font-weight:750;color:#fff;margin-bottom:6px;padding-right:106px}
+  .customer-country{position:absolute;top:14px;right:14px;padding:4px 9px;border-radius:999px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);color:#a7f3d0;font-size:13px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
+  .customer-desc{font-size:16px;line-height:1.42;color:var(--muted)}
+
   /* Hub scene */
   .hub-wrap{position:absolute;top:120px;bottom:120px;left:5%;right:5%;display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:0;align-items:center;z-index:5}
   .hub-col{display:flex;flex-direction:column;gap:14px;align-items:stretch}
@@ -365,6 +396,55 @@
     </div>
   </div>
 
+  <!-- CUSTOMER VALUE: problem, solution, and customer landscape -->
+  <div class="scene" id="sceneValue">
+    <div class="value-brand">OmniVec</div>
+    <div class="title">
+      <h1>Reliable AI data pipelines — without building them yourself</h1>
+      <p>Customer problem · OmniVec solution · Real-world reach</p>
+    </div>
+    <div class="value-wrap">
+      <div class="value-panel">
+        <div class="value-kicker">The customer problem</div>
+        <h2>Every new source, model, and destination creates another pipeline to own.</h2>
+        <p class="value-problem"><b>Custom pipelines become brittle infrastructure:</b> connector code, format handling, retries, scaling, monitoring, model upgrades, and index synchronization — multiplied across every AI use case.</p>
+        <div class="value-promise"><strong>OmniVec provides reliable data pipelines from any source, in any format, through any embedding model, to any destination — up and running in minutes.</strong></div>
+        <div class="value-list">
+          <div class="value-item"><b>🔌 Any source</b>Cosmos DB, PostgreSQL, SQL Server, and more.</div>
+          <div class="value-item"><b>📄 Any format</b>JSON, PDF, DOCX, images, and more.</div>
+          <div class="value-item"><b>🧠 Any model</b>OpenAI, native open-source models, custom models, and more.</div>
+          <div class="value-item"><b>🎯 Any destination</b>Cosmos DB, pgvector, and more.</div>
+        </div>
+      </div>
+      <div class="value-panel">
+        <div class="value-kicker">Customer landscape</div>
+        <h2>Built for data-intensive leaders across industries and regions.</h2>
+        <div class="customer-grid">
+          <div class="customer-card">
+            <div class="customer-country">UK</div>
+            <div class="customer-name">Nationwide · Financial institution</div>
+            <div class="customer-desc"><b>Project:</b> Custom decision-tree knowledge extracted from DOCX servicing documents and used by an agent-based Q&amp;A bot for complex member scenarios, including change of address and credit-card servicing.</div>
+          </div>
+          <div class="customer-card">
+            <div class="customer-country">India</div>
+            <div class="customer-name">IndiGo · Aviation</div>
+            <div class="customer-desc"><b>Project:</b> Unified knowledge ingestion across multiple enterprise data sources, including less commonly supported systems such as SharePoint.</div>
+          </div>
+          <div class="customer-card">
+            <div class="customer-country">Australia</div>
+            <div class="customer-name">PointsBet · Online wagering</div>
+            <div class="customer-desc">A digital sports betting and wagering technology platform built around real-time events, content, and customer interactions.</div>
+          </div>
+          <div class="customer-card">
+            <div class="customer-country">Australia</div>
+            <div class="customer-name">JB Hi-Fi · Retail</div>
+            <div class="customer-desc">One of the region's largest consumer electronics, appliances, and home entertainment retail groups.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- SCENE 4: OmniVec hub — sources left, destinations right, example pipelines light up -->
   <div class="scene" id="scene4">
     <div class="title">
@@ -479,7 +559,7 @@
 </div>
 
 <script>
-const sceneIds = ['scene0','scene1','scene2','scene3','scene4','scene5','scene6'];
+const sceneIds = ['sceneValue','scene0','scene1','scene2','scene3','scene4','scene5','scene6'];
 let timers = [];
 
 function show(id){
@@ -992,6 +1072,7 @@ function runAgentLoop(){
 // Slide navigation: prev/next + clickable dots, manual + auto
 // ============================================================
 const SCENES = [
+  { id:'sceneValue', title:'Customer Value', run: ()=>{},                                                    autoDur:12000 },
   { id:'scene0', title:'Build-up',         run: ()=>runProgressiveBuild(),                                   autoDur:10000 },
   { id:'scene1', title:'Grid',             run: ()=>{ drawWires('wires', 30, null); },                       autoDur: 2000 },
   { id:'scene2', title:'Chaos',            run: ()=>{ drawWires('wires2', 60, 'bad'); spawnToasts(); },      autoDur: 6000 },
@@ -1001,7 +1082,7 @@ const SCENES = [
   { id:'scene6', title:'Agents',           run: ()=>{ runAgentLoop(); },                                     autoDur:12000 },
 ];
 let currentScene = 0;
-let autoMode = true;
+let autoMode = false;
 let autoTimer = null;
 
 function renderNavDots(){
@@ -1058,7 +1139,14 @@ document.addEventListener('keydown', e=>{
 
 function play(){
   renderNavDots();
-  autoMode = true;
+  const requestedScene = new URLSearchParams(window.location.search).get('slide');
+  const requestedIndex = SCENES.findIndex(scene => scene.id === requestedScene);
+  if(requestedIndex >= 0){
+    autoMode = false;
+    goTo(requestedIndex);
+    return;
+  }
+  autoMode = false;
   goTo(0);
 }
 
