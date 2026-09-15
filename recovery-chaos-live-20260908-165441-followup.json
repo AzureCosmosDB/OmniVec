@@ -1,0 +1,67 @@
+{
+  "run_id": "443a8a3989524b9dbb22a04b60b6634e",
+  "result": "failed",
+  "base_report": "recovery-chaos-live-20260908-165441.json",
+  "live_attempts": {
+    "base_worker_restart_scenario": 1,
+    "separate_agent_recovery_scenario": 0,
+    "additional_outages_or_retries": 0
+  },
+  "fault_and_repair": {
+    "worker_outage": "confirmed",
+    "owned_message_peeked_while_processing_absent": true,
+    "restart_requests_submitted": [
+      "docgrok",
+      "docgrok-controller",
+      "omnivec-api",
+      "omnivec-blob-ingestor"
+    ],
+    "repair_actor": "harness_finally_replica_restore",
+    "agent_repair": "not_exercised",
+    "watchdog": "completion acknowledged and deleted by harness after verified restoration"
+  },
+  "failure_evidence": {
+    "reported_error_type": "RuntimeError",
+    "reported_last_operation": "kubectl get",
+    "processing_checks": "did not complete successfully in the harness",
+    "cleanup": "failed_owned_fixture_only; lock_retained",
+    "root_cause": "not established; harness suppressed command output and did not preserve separate primary/cleanup exception stages",
+    "do_not_infer": "Later successful read-only inspection does not change the original failed result"
+  },
+  "read_only_followup": {
+    "all_deployments_ready_and_available": true,
+    "worker_replicas": 2,
+    "api_replicas": 2,
+    "blob_ingestor_replicas": 1,
+    "docgrok_replicas": 1,
+    "docgrok_controller_replicas": 1,
+    "changefeed_replicas": 15,
+    "agent_replicas": 1,
+    "fixture_name": "pr183-chaos-443a8a3989524b9dbb22a04b60b6634e.txt",
+    "fixture_blob_exists": true,
+    "fixture_vectors": 1,
+    "fixture_vectors_valid": true,
+    "original_snapshot_unchanged": true,
+    "references": {
+      "azure-blob-storage.txt": 1,
+      "azure-cosmos-db.txt": 1,
+      "azure-kubernetes-service.txt": 1,
+      "chaos-backlog.txt": 1,
+      "pr183-chaos-443a8a3989524b9dbb22a04b60b6634e.txt": 1
+    }
+  },
+  "retained_exact_resources": {
+    "configmap": "pr183-recovery-chaos-lock",
+    "lock_phase": "restored",
+    "worker_signal_annotations": "retained by failed-cleanup path",
+    "blob": "pr183-chaos-443a8a3989524b9dbb22a04b60b6634e.txt",
+    "destination_vector": "one matching owned fixture row",
+    "watchdog_job": "absent"
+  },
+  "static_report_label_correction": {
+    "chat_model": "mdl-ext-075dd3b9 is configured per coordinator; base report's hardcoded no-chat label is stale",
+    "diagnostic_contracts": "implemented and deployed per coordinator; base harness does not invoke them",
+    "agent_repair": "No agent action or separate agent recovery scenario was attempted"
+  },
+  "next_action": "Coordinator review required before targeted cleanup retry, harness fixes or any further live scenario"
+}
