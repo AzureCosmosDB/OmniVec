@@ -66,23 +66,34 @@ async def test_invalid_sharepoint_probe_does_not_echo_validation_input(api_app):
 
 
 @pytest.mark.asyncio
-async def test_mssql_destination_warning_does_not_expose_probe_error(
-    api_app, monkeypatch, caplog
+@pytest.mark.parametrize(
+    "destination_type,module_name,probe_name",
+    [
+        ("cosmosdb-vector", "connectors.cosmosdb_vector_connector", "test_vector_connection"),
+        ("pgvector", "connectors.postgres_connector", "test_destination_connection"),
+        ("mssql", "pyodbc", "connect"),
+    ],
+)
+async def test_destination_warning_does_not_expose_probe_error(
+    api_app, monkeypatch, caplog, destination_type, module_name, probe_name
 ):
     api = sys.modules["api"]
-    internal_detail = "sensitive-mssql-driver-detail"
-    pyodbc = ModuleType("pyodbc")
-    pyodbc.connect = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        RuntimeError(internal_detail)
-    )
-    monkeypatch.setitem(sys.modules, "pyodbc", pyodbc)
+    internal_detail = "sensitive-destination-probe-detail"
+    module = ModuleType(module_name)
+    if destination_type == "mssql":
+        setattr(module, probe_name, lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError(internal_detail)
+        ))
+    else:
+        setattr(module, probe_name, AsyncMock(side_effect=RuntimeError(internal_detail)))
+    monkeypatch.setitem(sys.modules, module_name, module)
     saved = []
     store = SimpleNamespace(list=lambda kind: [], upsert=saved.append)
     monkeypatch.setattr(api, "get_store", lambda: store)
 
     result = await api.create_destination(api.CreateDestinationRequest(
-        name="mssql-validation-test",
-        type="mssql",
+        name=f"{destination_type}-validation-test",
+        type=destination_type,
         config={"server": "test", "database": "test", "table": "vectors"},
     ))
 

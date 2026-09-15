@@ -2705,8 +2705,11 @@ async def create_destination(req: CreateDestinationRequest):
                     "for better search performance.")
         except Exception as e:
             enabled = False
-            warnings.append(f"Could not connect to destination: {str(e)}. "
-                "Check endpoint, database, container, and permissions.")
+            logger.warning("CosmosDB destination probe raised %s", type(e).__name__)
+            warnings.append(
+                "Could not connect to destination. Check endpoint, database, "
+                "container, and managed identity access."
+            )
 
     # Auto-probe pgvector table for vector columns
     elif req.type == "pgvector":
@@ -2721,8 +2724,11 @@ async def create_destination(req: CreateDestinationRequest):
                 warnings.append("No vector columns found in table. "
                     "Ensure the table has columns of type vector(N).")
         except Exception as e:
-            warnings.append(f"Could not probe pgvector table: {str(e)}. "
-                "Vector column discovery skipped.")
+            logger.warning("pgvector destination probe raised %s", type(e).__name__)
+            warnings.append(
+                "Could not probe pgvector table. Check the endpoint, database, "
+                "table, and credentials. Vector column discovery skipped."
+            )
 
     # Auto-probe MSSQL table for vector columns
     elif req.type == "mssql":
