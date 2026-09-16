@@ -88,8 +88,20 @@ LOCK_HELD=false
 
 acquire_lock() {
   if ! mkdir "$LOCK_FILE" 2>/dev/null; then
-    printf 'Another hook owns %s. For a stale lock, confirm the owner has stopped before removing this directory.\n' "$LOCK_FILE" >&2
-    exit 1
+    _lock_pid=$(sed -n '1p' "$LOCK_FILE/pid" 2>/dev/null || true)
+    _lock_host=$(sed -n '2p' "$LOCK_FILE/pid" 2>/dev/null || true)
+    _this_host=$(hostname 2>/dev/null || printf unknown)
+    if [ -n "$_lock_pid" ] && [ "$_lock_host" = "$_this_host" ] && kill -0 "$_lock_pid" 2>/dev/null; then
+      printf 'Another hook owns %s (PID %s).\n' "$LOCK_FILE" "$_lock_pid" >&2
+      exit 1
+    fi
+    if [ -n "$_lock_host" ] && [ "$_lock_host" != "$_this_host" ]; then
+      printf 'Lock %s belongs to host %s; refusing unsafe takeover.\n' "$LOCK_FILE" "$_lock_host" >&2
+      exit 1
+    fi
+    printf 'Removing stale hook lock %s.\n' "$LOCK_FILE"
+    rm -rf -- "$LOCK_FILE"
+    mkdir "$LOCK_FILE"
   fi
   LOCK_HELD=true
   printf "%s\n%s\n" "$$" "$(hostname 2>/dev/null || echo unknown)" > "$LOCK_FILE/pid"
@@ -330,7 +342,11 @@ if [ "$RG_EXISTS" = "true" ]; then
     "omnivec-gpu-sku:OMNIVEC_GPU_NODE_VM_SIZE" \
     "omnivec-gpu-count:OMNIVEC_GPU_NODE_COUNT" \
     "omnivec-metadata:OMNIVEC_METADATA_STORE" \
-    "omnivec-build:OMNIVEC_BUILD_MODE"; do
+    "omnivec-build:OMNIVEC_BUILD_MODE" \
+    "omnivec-build-source:OMNIVEC_BUILD" \
+    "omnivec-image-tag:OMNIVEC_IMAGE_TAG" \
+    "omnivec-sharepoint:OMNIVEC_SHAREPOINT_ENABLED" \
+    "omnivec-onelake-iceberg:OMNIVEC_ONELAKE_ICEBERG_ENABLED"; do
     _tag=$(echo "$_pair" | cut -d: -f1)
     _env=$(echo "$_pair" | cut -d: -f2)
     _configured=$(azd_get "$_env")
