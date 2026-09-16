@@ -20,10 +20,14 @@ if ($LASTEXITCODE -eq 0 -or $result -notmatch 'requires azure.serviceBus.namespa
 Write-Host 'OK watcher without Service Bus is rejected'
 foreach ($hook in 'postprovision.ps1','postprovision.sh') {
     $source = Get-Content "$root\hooks\$hook" -Raw
-    if ($source -notmatch 'OMNIVEC_SHAREPOINT_ENABLED' -or $source -notmatch 'sharepointWatcher' -or $source -notmatch 'dependency build.*--skip-refresh') {
-        throw "$hook must wire the persisted watcher setting and package local charts without refreshing unrelated repositories"
+    if ($source -notmatch 'OMNIVEC_SHAREPOINT_ENABLED' -or
+        $source -notmatch 'sharepointWatcher' -or
+        $source -notmatch 'dependency build.*--skip-refresh' -or
+        $source -notmatch '\-\-repository-config' -or
+        $source -notmatch '\-\-repository-cache') {
+        throw "$hook must wire the persisted watcher setting and package local charts with an isolated repository cache"
     }
-    Write-Host "OK $hook wires SharePoint and packages charts offline"
+    Write-Host "OK $hook wires SharePoint and isolates Helm dependency resolution"
 }
 Write-Host '8 Helm deployment checks passed'
 exit 0

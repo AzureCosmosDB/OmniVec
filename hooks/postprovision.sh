@@ -773,7 +773,17 @@ printf "\n${YELLOW}Phase 4: Deploying OmniVec via Helm...${NC}\n"
 
 # Chart.lock does not track edits to local subchart templates; repackage it.
 CHART_DIR="${ROOT_DIR}/helm/omnivec"
-helm dependency build "$CHART_DIR" --skip-refresh </dev/null
+HELM_DEPENDENCY_DIR="$(mktemp -d)"
+mkdir -p "${HELM_DEPENDENCY_DIR}/repository"
+printf "apiVersion: v1\ngenerated: '1970-01-01T00:00:00Z'\nrepositories: []\n" \
+  > "${HELM_DEPENDENCY_DIR}/repositories.yaml"
+if ! helm dependency build "$CHART_DIR" --skip-refresh \
+  --repository-config "${HELM_DEPENDENCY_DIR}/repositories.yaml" \
+  --repository-cache "${HELM_DEPENDENCY_DIR}/repository" </dev/null; then
+  rm -rf -- "${HELM_DEPENDENCY_DIR:?}"
+  exit 1
+fi
+rm -rf -- "${HELM_DEPENDENCY_DIR:?}"
 
 # Image tag used for all images built in Phase 1
 # Generate admin token if not already set

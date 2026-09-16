@@ -592,8 +592,19 @@ Write-Host "`n`e[33mPhase 4: Deploying OmniVec via Helm...`e[0m"
 # Repackage the local DocGrok subchart even if Chart.lock is unchanged.
 # Chart.lock tracks versions, not edits to local subchart templates/values.
 $chartDir = "$RootDir/helm/omnivec"
-helm dependency build $chartDir --skip-refresh
-Assert-NativeSuccess 'Resolving Helm dependencies'
+$helmDependencyDir = Join-Path ([IO.Path]::GetTempPath()) ("omnivec-helm-" + [guid]::NewGuid().ToString("N"))
+$helmRepositoryCache = Join-Path $helmDependencyDir "repository"
+$helmRepositoryConfig = Join-Path $helmDependencyDir "repositories.yaml"
+New-Item -ItemType Directory -Path $helmRepositoryCache -Force | Out-Null
+Set-Content -Path $helmRepositoryConfig -Value "apiVersion: v1`ngenerated: '1970-01-01T00:00:00Z'`nrepositories: []"
+try {
+    helm dependency build $chartDir --skip-refresh `
+        --repository-config $helmRepositoryConfig `
+        --repository-cache $helmRepositoryCache
+    Assert-NativeSuccess 'Resolving Helm dependencies'
+} finally {
+    Remove-Item $helmDependencyDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # Generate admin token if not already set
 $ADMIN_TOKEN = Get-AzdValue "OMNIVEC_ADMIN_TOKEN"
