@@ -11,6 +11,7 @@ $env:Path = "$HOME\.azure-kubectl;$HOME\.azure-kubelogin;" + $env:Path + ";" + $
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 . "$PSScriptRoot\lib\deployment.ps1"
 $script:imagesChanged = $false
+$helmWorkDir = $null
 
 # -- Deployment lock: prevent concurrent postprovision runs --
 $lockDir = Join-Path $HOME ".omnivec" "locks"
@@ -133,6 +134,10 @@ $gpuVm = Get-AzdValue "OMNIVEC_GPU_NODE_VM_SIZE"
 $gpuCnt = Get-AzdValue "OMNIVEC_GPU_NODE_COUNT"
 $meta = Get-AzdValue "OMNIVEC_METADATA_STORE"
 $build = Get-AzdValue "OMNIVEC_BUILD_MODE"
+$buildSource = Get-AzdValue "OMNIVEC_BUILD"
+if (-not $buildSource) { $buildSource = "false" }
+$configuredImageTag = Get-AzdValue "OMNIVEC_IMAGE_TAG"
+if (-not $configuredImageTag) { $configuredImageTag = "stable" }
 $tagResourceId = az group show --name $RESOURCE_GROUP --query "id" -o tsv
 Assert-NativeSuccess 'Reading target resource group'
 az tag update --resource-id $tagResourceId --operation merge --tags `
@@ -142,6 +147,10 @@ az tag update --resource-id $tagResourceId --operation merge --tags `
     "omnivec-gpu-count=$gpuCnt" `
     "omnivec-metadata=$meta" `
     "omnivec-build=$build" `
+    "omnivec-build-source=$buildSource" `
+    "omnivec-image-tag=$configuredImageTag" `
+    "omnivec-sharepoint=$SHAREPOINT_ENABLED" `
+    "omnivec-onelake-iceberg=$ONELAKE_ICEBERG_ENABLED" `
     "omnivec-instance=$INSTANCE_ID" 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Warning 'Configuration was not saved to resource group tags; keep the local azd environment.'
@@ -201,14 +210,22 @@ if ($IMG_TAG -notmatch '^[A-Za-z0-9._-]+$') {
 
 function Test-ImageExists {
     param($Name, $Tag)
-    try {
+    $lastError = ""
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
         $existing = az acr repository show-tags --name $ACR_NAME --repository $Name --query "[?@ == '$Tag']" -o tsv 2>&1
-        if ($LASTEXITCODE -ne 0) { return $false }
-        $result = "$existing".Trim()
-        return ($result -eq $Tag)
-    } catch {
-        return $false
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return ("$existing".Trim() -eq $Tag)
+        }
+        $lastError = "$existing"
+        if ($lastError -match '(?i)not found|does not exist|NAME_UNKNOWN|repository.+unknown') {
+            return $false
+        }
+        if ($attempt -lt 3) {
+            Start-Sleep -Seconds (2 * $attempt)
+        }
     }
+    throw "Unable to verify ${Name}:${Tag} in ACR after 3 attempts. $lastError"
 }
 
 function Test-ImageUpToDate {
@@ -591,20 +608,20 @@ Write-Host "`n`e[33mPhase 4: Deploying OmniVec via Helm...`e[0m"
 
 # Repackage the local DocGrok subchart even if Chart.lock is unchanged.
 # Chart.lock tracks versions, not edits to local subchart templates/values.
-$chartDir = "$RootDir/helm/omnivec"
-$helmDependencyDir = Join-Path ([IO.Path]::GetTempPath()) ("omnivec-helm-" + [guid]::NewGuid().ToString("N"))
-$helmRepositoryCache = Join-Path $helmDependencyDir "repository"
-$helmRepositoryConfig = Join-Path $helmDependencyDir "repositories.yaml"
+$sourceChartDir = "$RootDir/helm/omnivec"
+$sourceDocGrokChartDir = "$RootDir/helm/docgrok"
+$helmWorkDir = Join-Path ([IO.Path]::GetTempPath()) ("omnivec-helm-" + [guid]::NewGuid().ToString("N"))
+$chartDir = Join-Path $helmWorkDir "omnivec"
+$helmRepositoryCache = Join-Path $helmWorkDir "repository"
+$helmRepositoryConfig = Join-Path $helmWorkDir "repositories.yaml"
 New-Item -ItemType Directory -Path $helmRepositoryCache -Force | Out-Null
+Copy-Item $sourceChartDir $chartDir -Recurse -Force
+Copy-Item $sourceDocGrokChartDir (Join-Path $helmWorkDir "docgrok") -Recurse -Force
 Set-Content -Path $helmRepositoryConfig -Value "apiVersion: v1`ngenerated: '1970-01-01T00:00:00Z'`nrepositories: []"
-try {
-    helm dependency build $chartDir --skip-refresh `
-        --repository-config $helmRepositoryConfig `
-        --repository-cache $helmRepositoryCache
-    Assert-NativeSuccess 'Resolving Helm dependencies'
-} finally {
-    Remove-Item $helmDependencyDir -Recurse -Force -ErrorAction SilentlyContinue
-}
+helm dependency build $chartDir --skip-refresh `
+    --repository-config $helmRepositoryConfig `
+    --repository-cache $helmRepositoryCache
+Assert-NativeSuccess 'Resolving Helm dependencies'
 
 # Generate admin token if not already set
 $ADMIN_TOKEN = Get-AzdValue "OMNIVEC_ADMIN_TOKEN"
@@ -708,11 +725,28 @@ $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--kubeconfig", $OMNIVEC_KUBECON
 # + orphaned resources → fresh install conflicts on AlreadyExists → --atomic
 # times out → uninstall again → infinite loop.
 
-# Detect stuck Helm release (pending-install / pending-upgrade from interrupted deploy)
+# Recover a Helm release left pending by an interrupted prior deployment.
 $helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
 $helmState = if ($helmStatus -and $helmStatus.info) { $helmStatus.info.status } else { "" }
 if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pending-") {
-    throw "Helm release is $helmState. Another deployment may still be active. Inspect helm status/history with kubeconfig '$OMNIVEC_KUBECONFIG' and recover it explicitly before retrying."
+    if ($env:OMNIVEC_RECOVER_PENDING_HELM -eq "false") {
+        throw "Helm release is $helmState. Set OMNIVEC_RECOVER_PENDING_HELM=true or recover it explicitly before retrying."
+    }
+    Write-Host "  `e[33mRecovering interrupted Helm release in state '$helmState'...`e[0m"
+    if ($helmState -eq "pending-install") {
+        helm uninstall omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG --wait --timeout 5m
+        Assert-NativeSuccess 'Removing interrupted Helm install'
+        $helmState = ""
+    } else {
+        helm rollback omnivec 0 -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG --wait --timeout 10m
+        Assert-NativeSuccess 'Rolling back interrupted Helm operation'
+        $helmStatus = helm status omnivec -n omnivec --kube-context $KUBE_CONTEXT --kubeconfig $OMNIVEC_KUBECONFIG -o json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $helmState = if ($helmStatus -and $helmStatus.info) { $helmStatus.info.status } else { "" }
+        if ($helmState -ne "deployed") {
+            throw "Helm recovery completed but release state is '$helmState', not 'deployed'."
+        }
+    }
+    Write-Host "  `e[32mInterrupted Helm release recovered.`e[0m"
 }
 
 # Ownership conflicts are intentionally left to Helm rather than adopting
@@ -726,7 +760,7 @@ if ($helmStatus -and $helmStatus.info -and $helmStatus.info.status -match "^pend
 #   3. helm args fingerprint matches the one cached after the last successful deploy,
 #   4. all deployments in the omnivec namespace have >=1 available replica.
 # Set $env:OMNIVEC_FORCE_HELM = 'true' to bypass.
-$fingerprintFile = "$chartDir/.last-deploy-fingerprint"
+$fingerprintFile = Join-Path $lockDir "$env:AZURE_ENV_NAME.last-deploy-fingerprint"
 # Fingerprint captures everything that determines the rendered manifest:
 #   - the helm args (values + --set) we're about to pass in
 #   - every file under the chart dir (templates, values.yaml, Chart.yaml,
@@ -737,8 +771,11 @@ try {
     $argsHash = [BitConverter]::ToString($sha.ComputeHash(
         [Text.Encoding]::UTF8.GetBytes(($helmArgs -join "`n"))
     )) -replace '-',''
-    $chartHashes = Get-ChildItem -Path $chartDir -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -ne '.last-deploy-fingerprint' } |
+    $chartHashes = @(
+        Get-ChildItem -Path $sourceChartDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne '.last-deploy-fingerprint' -and $_.DirectoryName -notlike '*\charts' }
+        Get-ChildItem -Path $sourceDocGrokChartDir -Recurse -File -ErrorAction SilentlyContinue
+    ) |
         Sort-Object FullName |
         ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
     $combined = $argsHash + "`n" + ($chartHashes -join "`n")
@@ -846,20 +883,40 @@ Write-Host "`n`e[36mDocGrok pods:`e[0m"
 kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -l app=docgrok --no-headers 2>$null
 kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -l app=docgrok-controller --no-headers 2>$null
 
-# Wait for external IP
-Write-Host "`n`e[33mWaiting for external IP...`e[0m"
-$externalIp = $null
-for ($i = 0; $i -lt 30; $i++) {
-    $externalIp = kubectl --context $KUBE_CONTEXT --request-timeout=30s get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
-    if ($externalIp) { break }
-    Start-Sleep -Seconds 5
-}
-
 kubectl --context $KUBE_CONTEXT --request-timeout=5m rollout status deployment -n omnivec --timeout=5m
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`e[31mOne or more deployments did not become ready.`e[0m"
     exit 1
 }
+
+Write-Host "`n`e[33mWaiting for external IP...`e[0m"
+$externalIp = $null
+for ($i = 0; $i -lt 60; $i++) {
+    $externalIp = kubectl --context $KUBE_CONTEXT --request-timeout=30s get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
+    if ($externalIp) { break }
+    Start-Sleep -Seconds 5
+}
+if (-not $externalIp) {
+    throw 'The omnivec-web load balancer did not receive an external IP within 5 minutes.'
+}
+
+Write-Host "`e[33mVerifying public health endpoint...`e[0m"
+$healthy = $false
+for ($i = 0; $i -lt 30; $i++) {
+    try {
+        $health = Invoke-RestMethod -Uri "http://$externalIp/health" -TimeoutSec 10
+        if ($health.status -eq "healthy") {
+            $healthy = $true
+            break
+        }
+    } catch {}
+    Start-Sleep -Seconds 5
+}
+if (-not $healthy) {
+    throw "OmniVec public health endpoint did not become healthy: http://$externalIp/health"
+}
+Write-Host "  `e[32mPublic health endpoint is healthy.`e[0m"
+
 if ($currentFp) { $currentFp | Set-Content $fingerprintFile -NoNewline }
 if (Test-Path $imageUpdateMarker) { Remove-Item $imageUpdateMarker -Force }
 
@@ -874,7 +931,7 @@ Write-Host "  AKS Cluster:   `e[36m$AKS_CLUSTER`e[0m"
 Write-Host "  ACR Registry:  `e[36m$ACR_LOGIN_SERVER`e[0m"
 Write-Host "  CosmosDB:      `e[36m$COSMOS_ENDPOINT`e[0m"
 
-Write-Host "  Admin Token:   `e[36m$ADMIN_TOKEN`e[0m"
+Write-Host "  Admin token:   `e[36mpersisted in the local azd environment (not printed)`e[0m"
 
 $LOCATION = $env:AZURE_LOCATION
 if (-not $LOCATION) { $LOCATION = Get-AzdValue "AZURE_LOCATION" }
@@ -903,5 +960,8 @@ if ($externalIp) {
 Write-Host ""
 
 } finally {
+    if ($helmWorkDir -and (Test-Path $helmWorkDir)) {
+        Remove-Item $helmWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Release-PostLock
 }

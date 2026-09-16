@@ -24,10 +24,35 @@ foreach ($hook in 'postprovision.ps1','postprovision.sh') {
         $source -notmatch 'sharepointWatcher' -or
         $source -notmatch 'dependency build.*--skip-refresh' -or
         $source -notmatch '\-\-repository-config' -or
-        $source -notmatch '\-\-repository-cache') {
-        throw "$hook must wire the persisted watcher setting and package local charts with an isolated repository cache"
+        $source -notmatch '\-\-repository-cache' -or
+        $source -notmatch 'pending-install' -or
+        $source -notmatch 'rollback omnivec 0' -or
+        $source -notmatch 'uninstall omnivec' -or
+        $source -notmatch 'public health endpoint' -or
+        $source -notmatch 'after 3 attempts' -or
+        $source -notmatch 'not printed') {
+        throw "$hook must support isolated chart packaging, interrupted-release recovery, resilient ACR probes, health verification, and secret-safe output"
     }
-    Write-Host "OK $hook wires SharePoint and isolates Helm dependency resolution"
+    if ($source -match 'Admin Token:\s+.*\$ADMIN_TOKEN' -or $source -match 'Admin Token:\s+.*\$\{ADMIN_TOKEN\}') {
+        throw "$hook must not print the admin token"
+    }
+    Write-Host "OK $hook hardens retries, recovery, health checks, and secret output"
 }
-Write-Host '8 Helm deployment checks passed'
+foreach ($hook in 'preprovision.sh','postprovision.sh') {
+    $source = Get-Content "$root\hooks\$hook" -Raw
+    if ($source -notmatch 'Removing stale' -or $source -notmatch 'kill -0') {
+        throw "$hook must automatically recover same-host stale lock directories"
+    }
+    Write-Host "OK $hook recovers stale same-host locks"
+}
+foreach ($hook in 'preprovision.ps1','preprovision.sh','postprovision.ps1','postprovision.sh') {
+    $source = Get-Content "$root\hooks\$hook" -Raw
+    foreach ($setting in 'OMNIVEC_BUILD','OMNIVEC_IMAGE_TAG','OMNIVEC_SHAREPOINT_ENABLED','OMNIVEC_ONELAKE_ICEBERG_ENABLED') {
+        if ($source -notmatch $setting) {
+            throw "$hook must preserve $setting across recovery"
+        }
+    }
+    Write-Host "OK $hook preserves recovery configuration"
+}
+Write-Host 'Helm deployment and recovery checks passed'
 exit 0

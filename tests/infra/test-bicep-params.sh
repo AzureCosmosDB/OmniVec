@@ -20,11 +20,13 @@ PARAM_TMPL="$REPO_ROOT/infra/main.parameters.json"
 MAIN_BICEP="$REPO_ROOT/infra/main.bicep"
 
 BICEP_BIN=""
-if command -v bicep >/dev/null 2>&1; then
+if command -v bicep >/dev/null 2>&1 && bicep --version >/dev/null 2>&1; then
     BICEP_BIN="bicep"
-elif [ -x "$HOME/.azure/bin/bicep" ];     then BICEP_BIN="$HOME/.azure/bin/bicep"
-elif [ -x "$HOME/.azure/bin/bicep.exe" ]; then BICEP_BIN="$HOME/.azure/bin/bicep.exe"
-elif command -v az >/dev/null 2>&1; then
+elif [ -x "$HOME/.azure/bin/bicep" ] && "$HOME/.azure/bin/bicep" --version >/dev/null 2>&1; then
+    BICEP_BIN="$HOME/.azure/bin/bicep"
+elif [ -x "$HOME/.azure/bin/bicep.exe" ] && "$HOME/.azure/bin/bicep.exe" --version >/dev/null 2>&1; then
+    BICEP_BIN="$HOME/.azure/bin/bicep.exe"
+elif command -v az >/dev/null 2>&1 && az bicep version >/dev/null 2>&1; then
     BICEP_BIN="az-bicep"
 fi
 
