@@ -104,3 +104,46 @@ def test_sharepoint_destination_requires_transaction_compatible_partition(api_ap
         api._require_sharepoint_compatible(store, request, destination)
     # Existing non-SharePoint pipeline configurations remain unaffected.
     api._require_sharepoint_compatible(SimpleNamespace(get=lambda *_: {"type": "cosmosdb"}), request, destination)
+
+
+def test_sharepoint_identity_is_rejected_for_non_sharepoint_source(api_app):
+    from fastapi import HTTPException
+    api = sys.modules["api"]
+    store = SimpleNamespace(get=lambda *_: {"type": "azure-blob"})
+    request = SimpleNamespace(
+        sources=[SimpleNamespace(
+            source_id="source",
+            sharepoint_identity=SimpleNamespace(
+                tenant_id="11111111-1111-1111-1111-111111111111",
+                client_id="22222222-2222-2222-2222-222222222222",
+            ),
+        )],
+        processing_mode="queue",
+        vector_index_path="embedding",
+        content_field=None,
+        store_content=True,
+    )
+    with pytest.raises(HTTPException, match="only be configured for SharePoint"):
+        api._require_sharepoint_compatible(
+            store, request,
+            {"type": "cosmosdb-vector", "config": {"partition_key_path": "/document_id"}},
+        )
+
+
+def test_pipeline_identities_are_rejected_for_wrong_source_types(api_app):
+    from fastapi import HTTPException
+    api = sys.modules["api"]
+    identity = SimpleNamespace(
+        tenant_id="11111111-1111-1111-1111-111111111111",
+        client_id="22222222-2222-2222-2222-222222222222",
+    )
+    request = SimpleNamespace(sources=[SimpleNamespace(
+        source_id="source", sharepoint_identity=None, onelake_identity=identity,
+    )])
+    with pytest.raises(HTTPException, match="only be configured for OneLake"):
+        api._require_pipeline_source_identities(
+            SimpleNamespace(get=lambda *_: {"type": "azure-blob"}), request
+        )
+    api._require_pipeline_source_identities(
+        SimpleNamespace(get=lambda *_: {"type": "onelake-iceberg"}), request
+    )

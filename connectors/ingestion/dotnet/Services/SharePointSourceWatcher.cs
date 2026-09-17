@@ -25,7 +25,8 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     private readonly ContentHasher _hasher;
     private readonly ServiceBusPublisher _sbPublisher;
     private readonly ILogger<SharePointSourceWatcher> _logger;
-    private readonly DefaultAzureCredential _credential = new();
+    private readonly TokenCredential _credential;
+    private readonly string _stateScopeId;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(60) };
     private readonly Dictionary<string, string> _knownRefs = new(StringComparer.Ordinal);
     private readonly object _pipelineLock = new();
@@ -53,7 +54,9 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         ContentHasher hasher,
         ILogger<SharePointSourceWatcher> logger,
         string? generation = null,
-        ServiceBusPublisher? sbPublisher = null)
+        ServiceBusPublisher? sbPublisher = null,
+        PipelineSource? pipelineSource = null,
+        string? stateScopeId = null)
     {
         _source = source;
         _options = options;
@@ -62,6 +65,8 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         _logger = logger;
         _sbPublisher = sbPublisher
             ?? throw new InvalidOperationException("SharePoint sources require Service Bus");
+        _credential = SharePointGraphCredentialFactory.Create(pipelineSource?.SharePointIdentity);
+        _stateScopeId = stateScopeId ?? source.Id;
         Generation = generation ?? "0";
     }
 
@@ -90,7 +95,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             || string.IsNullOrWhiteSpace(_source.SharePointDriveId))
             throw new InvalidOperationException("SharePoint source requires site_id and drive_id");
 
-        _stateContainer = await _stateStore.EnsureLeaseContainerAsync(_source.Id, ct);
+        _stateContainer = await _stateStore.EnsureLeaseContainerAsync(_stateScopeId, ct);
         await LoadStateAsync(ct);
         _deltaUrl ??= BuildInitialDeltaUrl();
         await ValidateDriveAsync(ct);
@@ -469,6 +474,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             var destination = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
             if (destination is null)
                 throw new InvalidOperationException($"SharePoint pipeline {pipeline.Id} has no destination");
+            var pipelineSource = pipeline.Sources.First(ps => ps.SourceId == _source.Id);
 
             var messages = changes.Select(change => new EmbeddingMessage
             {
@@ -498,6 +504,8 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 SharePointETag = change.ETag,
                 SharePointFileName = Path.GetFileName(change.SourceRef),
                 SharePointMaxFileSizeBytes = _source.SharePointMaxFileSizeBytes,
+                SharePointGraphTenantId = pipelineSource.SharePointIdentity?.TenantId,
+                SharePointGraphClientId = pipelineSource.SharePointIdentity?.ClientId,
             }).ToList();
 
             allMessages.AddRange(messages);

@@ -3618,6 +3618,22 @@ def _require_onelake_iceberg_pipeline(store, req, dest_doc) -> None:
             )
 
 
+def _require_pipeline_source_identities(store, req) -> None:
+    for pipeline_source in req.sources or []:
+        source_doc = store.get(pipeline_source.source_id, "source")
+        source_type = (source_doc or {}).get("type")
+        if getattr(pipeline_source, "sharepoint_identity", None) is not None and source_type != "sharepoint":
+            raise HTTPException(
+                status_code=400,
+                detail="sharepoint_identity can only be configured for SharePoint sources.",
+            )
+        if getattr(pipeline_source, "onelake_identity", None) is not None and source_type != "onelake-iceberg":
+            raise HTTPException(
+                status_code=400,
+                detail="onelake_identity can only be configured for OneLake Iceberg sources.",
+            )
+
+
 def _inline_write_target(source: dict) -> tuple:
     """Identify the source rows sharing inline pipeline/hash/timestamp metadata."""
     kind = source.get("type")
@@ -3772,10 +3788,17 @@ def _validate_cosmos_chunking(store, req, destination):
 
 
 def _require_sharepoint_compatible(store, req, destination):
-    if not any(
-        (store.get(source.source_id, "source") or {}).get("type") == "sharepoint"
-        for source in req.sources
-    ):
+    sources = [
+        (entry, store.get(entry.source_id, "source") or {})
+        for entry in req.sources
+    ]
+    for entry, source in sources:
+        if getattr(entry, "sharepoint_identity", None) is not None and source.get("type") != "sharepoint":
+            raise HTTPException(
+                status_code=400,
+                detail="sharepoint_identity can only be configured for SharePoint pipeline sources",
+            )
+    if not any(source.get("type") == "sharepoint" for _, source in sources):
         return
     if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
         raise HTTPException(status_code=400, detail="SharePoint requires queue processing and a Cosmos DB vector destination")
@@ -3832,6 +3855,7 @@ async def create_pipeline(req: CreatePipelineRequest):
         )
     _require_onelake_iceberg_pipeline(store, req, dest_doc)
     _require_onelake_iceberg_pipeline(store, req, dest_doc)
+    _require_pipeline_source_identities(store, req)
     _require_sharepoint_compatible(store, req, dest_doc)
     cosmos_chunk_config = _validate_cosmos_chunking(store, req, dest_doc)
 

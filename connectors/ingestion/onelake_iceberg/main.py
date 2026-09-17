@@ -16,8 +16,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
-from azure.identity.aio import DefaultAzureCredential
+from azure.identity import (
+    DefaultAzureCredential as SyncDefaultAzureCredential,
+    WorkloadIdentityCredential as SyncWorkloadIdentityCredential,
+)
+from azure.identity.aio import DefaultAzureCredential, WorkloadIdentityCredential
 from azure.core.exceptions import ResourceExistsError
 from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
@@ -67,6 +70,9 @@ class OneLakeIcebergWatcher:
         self.credential = DefaultAzureCredential()
         self.pyiceberg_credential = SyncDefaultAzureCredential()
         self._last_scan: dict[str, float] = {}
+        self._onelake_credentials: dict[
+            tuple[str, str], tuple[WorkloadIdentityCredential, SyncWorkloadIdentityCredential]
+        ] = {}
 
     async def run_forever(self) -> None:
         while True:
@@ -85,30 +91,50 @@ class OneLakeIcebergWatcher:
         active = [p for p in pipelines if p.get("status") == "active"]
         dest_by_id = {
             d["id"]: d for d in destinations
-            if d.get("enabled") and d.get("type") == "onelake-iceberg"
+            if d.get("enabled") and d.get("type") in ("onelake-iceberg", "cosmosdb-vector")
         }
         for source in sources:
             if source.get("type") != "onelake-iceberg" or not source.get("enabled"):
                 continue
-            now = asyncio.get_running_loop().time()
             poll_interval = int(source.get("config", {}).get("poll_interval_seconds", 60))
-            if now - self._last_scan.get(source["id"], 0) < poll_interval:
-                continue
             source_pipelines = [
                 pipeline for pipeline in active
                 if any(ps.get("source_id") == source["id"] for ps in pipeline.get("sources", []))
                 and pipeline.get("destination_id") in dest_by_id
             ]
-            if source_pipelines:
-                await self.scan_source(source, source_pipelines, dest_by_id)
-                self._last_scan[source["id"]] = now
+            legacy_pipelines = [
+                pipeline for pipeline in source_pipelines
+                if self._pipeline_identity(pipeline, source["id"]) is None
+            ]
+            plans: list[tuple[str, list[dict[str, Any]], dict[str, str] | None]] = []
+            if legacy_pipelines:
+                plans.append((source["id"], legacy_pipelines, None))
+            for pipeline in source_pipelines:
+                identity = self._pipeline_identity(pipeline, source["id"])
+                if identity is not None:
+                    plans.append((f"{source['id']}--{pipeline['id']}", [pipeline], identity))
+            now = asyncio.get_running_loop().time()
+            for checkpoint_scope, plan_pipelines, identity in plans:
+                if now - self._last_scan.get(checkpoint_scope, 0) < poll_interval:
+                    continue
+                await self.scan_source(
+                    source, plan_pipelines, dest_by_id, checkpoint_scope, identity
+                )
+                self._last_scan[checkpoint_scope] = now
 
     async def scan_source(
-        self, source: dict[str, Any], pipelines: list[dict[str, Any]], destinations: dict[str, dict[str, Any]]
+        self,
+        source: dict[str, Any],
+        pipelines: list[dict[str, Any]],
+        destinations: dict[str, dict[str, Any]],
+        checkpoint_scope: str | None = None,
+        identity: dict[str, str] | None = None,
     ) -> None:
         config = source["config"]
-        checkpoint = await self.load_checkpoint(source["id"], config)
-        token = (await self.credential.get_token("https://storage.azure.com/.default")).token
+        checkpoint_scope = checkpoint_scope or source["id"]
+        onelake_credential, pyiceberg_credential = self._credentials_for(identity)
+        checkpoint = await self.load_checkpoint(checkpoint_scope, config, onelake_credential)
+        token = (await onelake_credential.get_token("https://storage.azure.com/.default")).token
         namespace = config["namespace"]
         namespace_tuple = tuple(namespace.split(".")) if isinstance(namespace, str) else tuple(namespace)
         catalog = load_catalog(
@@ -120,7 +146,7 @@ class OneLakeIcebergWatcher:
             **{
                 "adls.account-name": "onelake",
                 "adls.account-host": "onelake.blob.fabric.microsoft.com",
-                "adls.credential": self.pyiceberg_credential,
+                "adls.credential": pyiceberg_credential,
             },
         )
         table = catalog.load_table((*namespace_tuple, config["table"]))
@@ -157,6 +183,8 @@ class OneLakeIcebergWatcher:
         projection = {config.get("id_field", "id"), *config.get("content_fields", ["content"])}
         for pipeline in pipelines:
             destination = destinations[pipeline["destination_id"]]
+            if destination["type"] != "onelake-iceberg":
+                continue
             writeback = {
                 **DEFAULT_WRITEBACK_COLUMNS,
                 **destination["config"].get("writeback_columns", {}),
@@ -191,22 +219,28 @@ class OneLakeIcebergWatcher:
             pipeline_revision = checkpoint.pipeline_revisions[pipeline["id"]]
             pipeline_changed = checkpoint.pipelines.get(pipeline["id"]) != pipeline_state[pipeline["id"]]
             destination = destinations[pipeline["destination_id"]]
-            writeback = {
-                **DEFAULT_WRITEBACK_COLUMNS,
-                **destination["config"].get("writeback_columns", {}),
-            }
+            writes_to_onelake = destination["type"] == "onelake-iceberg"
+            writeback = (
+                {
+                    **DEFAULT_WRITEBACK_COLUMNS,
+                    **destination["config"].get("writeback_columns", {}),
+                }
+                if writes_to_onelake
+                else {}
+            )
             managed_fields = set(writeback.values())
             fields = [field for field in fields if field not in managed_fields]
             if not fields:
                 log.warning("Pipeline %s has no user content fields allowed by source %s", pipeline["id"], source["id"])
                 continue
-            signature = tuple(sorted(managed_fields))
-            if signature in writeback_signatures:
-                raise ValueError(
-                    f"Source {source['id']} has multiple active pipelines writing the same OneLake columns; "
-                    "configure distinct write-back columns to prevent an embedding loop"
-                )
-            writeback_signatures.add(signature)
+            if writes_to_onelake:
+                signature = tuple(sorted(managed_fields))
+                if signature in writeback_signatures:
+                    raise ValueError(
+                        f"Source {source['id']} has multiple active pipelines writing the same OneLake columns; "
+                        "configure distinct write-back columns to prevent an embedding loop"
+                    )
+                writeback_signatures.add(signature)
             current_refs: set[str] = set()
             for row in rows:
                 source_ref = str(row.get(id_field, ""))
@@ -218,7 +252,7 @@ class OneLakeIcebergWatcher:
                 current_refs.add(source_ref)
                 digest = content_hash(content)
                 key = checkpoint_key(pipeline["id"], pipeline_state[pipeline["id"]], source_ref)
-                if row_has_current_omnivec_embedding(
+                if writes_to_onelake and row_has_current_omnivec_embedding(
                     row, digest, pipeline["id"], pipeline["docgrok_pipeline"], generation, writeback
                 ) and not pipeline_changed:
                     checkpoint.processed.pop(key, None)
@@ -255,22 +289,25 @@ class OneLakeIcebergWatcher:
 
             previous_refs = set(checkpoint.known_refs.get(pipeline["id"], []))
             deleted_refs = previous_refs - all_refs
-            pending_empty_refs = set(checkpoint.pending_empty_refs.get(pipeline["id"], []))
-            pending_empty_refs.difference_update(current_refs)
-            pending_empty_refs.update((previous_refs - current_refs) & all_refs)
-            cleared_empty_refs = {
-                source_ref
-                for source_ref in pending_empty_refs
-                if rows_by_ref[source_ref].get(writeback["content_hash_field"]) is None
-                and rows_by_ref[source_ref].get(writeback["pipeline_id_field"]) is None
-            }
-            pending_empty_refs.difference_update(cleared_empty_refs)
-            checkpoint_keys_to_remove.update(
-                checkpoint_key(
-                    pipeline["id"], pipeline_state[pipeline["id"]], source_ref
+            if writes_to_onelake:
+                pending_empty_refs = set(checkpoint.pending_empty_refs.get(pipeline["id"], []))
+                pending_empty_refs.difference_update(current_refs)
+                pending_empty_refs.update((previous_refs - current_refs) & all_refs)
+                cleared_empty_refs = {
+                    source_ref
+                    for source_ref in pending_empty_refs
+                    if rows_by_ref[source_ref].get(writeback["content_hash_field"]) is None
+                    and rows_by_ref[source_ref].get(writeback["pipeline_id_field"]) is None
+                }
+                pending_empty_refs.difference_update(cleared_empty_refs)
+                checkpoint_keys_to_remove.update(
+                    checkpoint_key(
+                        pipeline["id"], pipeline_state[pipeline["id"]], source_ref
+                    )
+                    for source_ref in cleared_empty_refs
                 )
-                for source_ref in cleared_empty_refs
-            )
+            else:
+                pending_empty_refs = (previous_refs - current_refs) & all_refs
             for source_ref in sorted(deleted_refs | pending_empty_refs):
                 delete_digest = content_hash(f"delete:{source_ref}")
                 key = checkpoint_key(pipeline["id"], pipeline_state[pipeline["id"]], source_ref)
@@ -333,8 +370,48 @@ class OneLakeIcebergWatcher:
             checkpoint.submitted_at.pop(key, None)
         checkpoint.snapshot_id = snapshot_id
         checkpoint.pipelines = pipeline_state
-        await self.save_checkpoint(source["id"], config, checkpoint)
+        await self.save_checkpoint(checkpoint_scope, config, checkpoint, onelake_credential)
         log.info("Scanned source=%s snapshot=%s published=%s", source["id"], snapshot_id, len(messages))
+
+    @staticmethod
+    def _pipeline_identity(
+        pipeline: dict[str, Any], source_id: str
+    ) -> dict[str, str] | None:
+        pipeline_source = next(
+            (source for source in pipeline.get("sources", []) if source.get("source_id") == source_id),
+            None,
+        )
+        return (pipeline_source or {}).get("onelake_identity")
+
+    def _credentials_for(
+        self, identity: dict[str, str] | None
+    ) -> tuple[DefaultAzureCredential | WorkloadIdentityCredential, Any]:
+        if identity is None:
+            return self.credential, self.pyiceberg_credential
+        tenant_id = identity["tenant_id"]
+        client_id = identity["client_id"]
+        key = (tenant_id, client_id)
+        credentials = self._onelake_credentials.get(key)
+        if credentials is None:
+            token_file_path = os.environ.get("AZURE_FEDERATED_TOKEN_FILE")
+            if not token_file_path:
+                raise RuntimeError(
+                    "AZURE_FEDERATED_TOKEN_FILE is required for pipeline-scoped OneLake identity"
+                )
+            credentials = (
+                WorkloadIdentityCredential(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    token_file_path=token_file_path,
+                ),
+                SyncWorkloadIdentityCredential(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    token_file_path=token_file_path,
+                ),
+            )
+            self._onelake_credentials[key] = credentials
+        return credentials
 
     @staticmethod
     def _checkpoint_location(source_id: str, config: dict[str, Any]) -> tuple[str, str, str]:
@@ -344,9 +421,11 @@ class OneLakeIcebergWatcher:
         root = config.get("checkpoint_path", ".omnivec/checkpoints").strip("/")
         return account_url, file_system, f"{data_item_id}/Files/{root}/{source_id}.json"
 
-    async def load_checkpoint(self, source_id: str, config: dict[str, Any]) -> Checkpoint:
+    async def load_checkpoint(
+        self, source_id: str, config: dict[str, Any], credential: Any | None = None
+    ) -> Checkpoint:
         account_url, file_system, path = self._checkpoint_location(source_id, config)
-        service = DataLakeServiceClient(account_url, credential=self.credential)
+        service = DataLakeServiceClient(account_url, credential=credential or self.credential)
         async with service:
             file = service.get_file_system_client(file_system).get_file_client(path)
             try:
@@ -367,9 +446,15 @@ class OneLakeIcebergWatcher:
                     return Checkpoint(None, {}, {}, {}, {}, {}, {})
                 raise
 
-    async def save_checkpoint(self, source_id: str, config: dict[str, Any], checkpoint: Checkpoint) -> None:
+    async def save_checkpoint(
+        self,
+        source_id: str,
+        config: dict[str, Any],
+        checkpoint: Checkpoint,
+        credential: Any | None = None,
+    ) -> None:
         account_url, file_system, path = self._checkpoint_location(source_id, config)
-        service = DataLakeServiceClient(account_url, credential=self.credential)
+        service = DataLakeServiceClient(account_url, credential=credential or self.credential)
         async with service:
             filesystem = service.get_file_system_client(file_system)
             directory = path.rsplit("/", 1)[0]

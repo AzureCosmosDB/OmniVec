@@ -8013,6 +8013,44 @@
                         <strong>Container:</strong> ${source.config.container || 'N/A'}
                     </div>
                 `;
+            } else if (source.type === 'sharepoint') {
+                sourceSpecificHtml = `
+                    <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Pipeline SharePoint Identity</div>
+                    <div class="form-group">
+                        <label class="form-label">Directory (tenant) ID</label>
+                        <input class="form-input" name="sharepoint_tenant_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Application (client) ID</label>
+                        <input class="form-input" name="sharepoint_client_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <small style="color: var(--text-tertiary); font-size: 11px;">
+                        Optional for same-tenant access. Configure both for a pipeline-specific cross-tenant federated identity.
+                    </small>
+                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); font-size: 12px; color: var(--text-tertiary);">
+                        <strong>Site:</strong> ${source.config.site_id || 'N/A'}<br>
+                        <strong>Drive:</strong> ${source.config.drive_id || 'N/A'}
+                    </div>
+                `;
+            } else if (source.type === 'onelake-iceberg') {
+                sourceSpecificHtml = `
+                    <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Pipeline OneLake Identity</div>
+                    <div class="form-group">
+                        <label class="form-label">Directory (tenant) ID</label>
+                        <input class="form-input" name="onelake_tenant_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Application (client) ID</label>
+                        <input class="form-input" name="onelake_client_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <small style="color: var(--text-tertiary); font-size: 11px;">
+                        Optional for same-tenant access. Configure both for a pipeline-specific cross-tenant federated identity.
+                    </small>
+                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); font-size: 12px; color: var(--text-tertiary);">
+                        <strong>Warehouse:</strong> ${source.config.warehouse || 'N/A'}<br>
+                        <strong>Table:</strong> ${source.config.namespace || 'dbo'}.${source.config.table || 'N/A'}
+                    </div>
+                `;
             } else if (source.type === 'postgresql') {
                 sourceSpecificHtml = `
                     <div style="margin-bottom: 12px; font-size: 12px; color: var(--text-tertiary);">
@@ -8220,6 +8258,7 @@
 
             let sourceId = null;
             let sourceConfig = {};
+            let sourceType = null;
 
             // --- Resolve Source ---
             if (pipelineSourceMode === 'existing') {
@@ -8229,6 +8268,9 @@
                     showPipelineStep('source');
                     return;
                 }
+                sourceType = typeof sources !== 'undefined'
+                    ? sources.find(source => source.id === sourceId)?.type || null
+                    : null;
                 // File type overrides are collected below for the pipeline source entry
             } else {
                 // Create new source first
@@ -8238,6 +8280,7 @@
                     showPipelineStep('source');
                     return;
                 }
+                sourceType = srcData.type;
                 try {
                     const srcRes = await apiFetch('/api/sources', {
                         method: 'POST',
@@ -8362,6 +8405,35 @@
             };
             if (urlContentTypes.length > 0) pipelineSourceEntry.url_content_types = urlContentTypes;
             if (fileTypes.length > 0) pipelineSourceEntry.file_types = fileTypes;
+            if (sourceType === 'sharepoint') {
+                const tenantId = (formData.get('sharepoint_tenant_id') || '').trim();
+                const clientId = (formData.get('sharepoint_client_id') || '').trim();
+                if ((tenantId && !clientId) || (!tenantId && clientId)) {
+                    alert('SharePoint tenant ID and client ID must be configured together.');
+                    showPipelineStep('source');
+                    return;
+                }
+                if (tenantId) {
+                    pipelineSourceEntry.sharepoint_identity = {
+                        tenant_id: tenantId,
+                        client_id: clientId,
+                    };
+                }
+            } else if (sourceType === 'onelake-iceberg') {
+                const tenantId = (formData.get('onelake_tenant_id') || '').trim();
+                const clientId = (formData.get('onelake_client_id') || '').trim();
+                if ((tenantId && !clientId) || (!tenantId && clientId)) {
+                    alert('OneLake tenant ID and client ID must be configured together.');
+                    showPipelineStep('source');
+                    return;
+                }
+                if (tenantId) {
+                    pipelineSourceEntry.onelake_identity = {
+                        tenant_id: tenantId,
+                        client_id: clientId,
+                    };
+                }
+            }
 
             const data = {
                 name: formData.get('name'),

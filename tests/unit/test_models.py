@@ -194,6 +194,36 @@ class TestPipeline:
         )
         assert p.status == api_models.PipelineStatus.ACTIVE
 
+    def test_sharepoint_identity_is_pipeline_scoped_and_validated(self, api_models):
+        source = api_models.PipelineSource(
+            source_id="s1",
+            sharepoint_identity={
+                "tenant_id": "11111111-1111-1111-1111-111111111111",
+                "client_id": "22222222-2222-2222-2222-222222222222",
+            },
+        )
+        assert source.sharepoint_identity.tenant_id == "11111111-1111-1111-1111-111111111111"
+        with pytest.raises(ValidationError):
+            api_models.PipelineSource(
+                source_id="s1",
+                sharepoint_identity={"tenant_id": "not-a-guid", "client_id": "also-bad"},
+            )
+
+    def test_onelake_identity_is_pipeline_scoped_and_validated(self, api_models):
+        source = api_models.PipelineSource(
+            source_id="s1",
+            onelake_identity={
+                "tenant_id": "11111111-1111-1111-1111-111111111111",
+                "client_id": "22222222-2222-2222-2222-222222222222",
+            },
+        )
+        assert source.onelake_identity.client_id == "22222222-2222-2222-2222-222222222222"
+        with pytest.raises(ValidationError):
+            api_models.PipelineSource(
+                source_id="s1",
+                onelake_identity={"tenant_id": "not-a-guid", "client_id": "also-bad"},
+            )
+
 
 # ===========================================================================
 # Job + JobStats

@@ -129,6 +129,12 @@ public class EmbeddingMessage
     [JsonPropertyName("sharepoint_max_file_size_bytes")]
     public long SharePointMaxFileSizeBytes { get; set; } = 50L * 1024 * 1024;
 
+    [JsonPropertyName("sharepoint_graph_tenant_id")]
+    public string? SharePointGraphTenantId { get; set; }
+
+    [JsonPropertyName("sharepoint_graph_client_id")]
+    public string? SharePointGraphClientId { get; set; }
+
     /// <summary>"upsert" (default) or "delete". When "delete", the worker
     /// removes all destination documents matching source_id + source_ref.</summary>
     [JsonPropertyName("message_type")]
