@@ -245,6 +245,7 @@ def test_all_connector_detail_pages_show_type_specific_fields(ui_page):
     }
     for source_id, (selectors, auth_text) in source_expectations.items():
         page.evaluate(f'showSourceDetail("{source_id}")')
+        page.locator("#source-detail-modal").wait_for(state="visible")
         for selector in selectors:
             assert page.locator(selector).is_visible()
         if source_id == "src-lake":
