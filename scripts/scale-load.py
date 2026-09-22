@@ -6,11 +6,13 @@ an exact confirmation phrase and writes a new structured report.
 
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import http.client
 import json
 import math
 import os
 from pathlib import Path
 import re
+import tempfile
 import time
 from urllib.parse import urlsplit
 import urllib.error
@@ -20,9 +22,29 @@ import urllib.request
 CONFIRMATION = "OMNIVEC-SCALE-LOAD-AUTHORIZED"
 MAX_CONCURRENCY = 500
 MAX_REQUESTS_PER_PHASE = 1_000_000
+MAX_TOTAL_REQUESTS = 1_000_000
+MAX_PHASES = 100
 MAX_REQUESTS_PER_SECOND = 10_000
 MAX_TIMEOUT_SECONDS = 300
+MAX_RESPONSE_BYTES = 1_048_576
+MAX_CONFIG_BYTES = 1_048_576
+MAX_ESTIMATED_PHASE_SECONDS = 86_400
+MAX_NAME_LENGTH = 128
+MAX_URL_LENGTH = 2_048
+MAX_HEADER_VALUE_LENGTH = 8_192
 ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+RESERVED_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 CONFIG_FIELDS = {
     "name",
     "target_url",
@@ -47,8 +69,41 @@ def require(condition, message):
         raise InvalidConfiguration(message)
 
 
+def is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def is_finite_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise InvalidConfiguration(f"Duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def reject_json_constant(value):
+    raise InvalidConfiguration(f"Invalid JSON constant: {value}")
+
+
 def load_config(path):
-    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    with Path(path).open("rb") as handle:
+        raw = handle.read(MAX_CONFIG_BYTES + 1)
+    require(len(raw) <= MAX_CONFIG_BYTES, "Configuration exceeds the size limit")
+    try:
+        config = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_json_constant,
+        )
+    except UnicodeDecodeError as exc:
+        raise InvalidConfiguration("Configuration must be UTF-8 JSON") from exc
+    except json.JSONDecodeError as exc:
+        raise InvalidConfiguration("Configuration must contain valid JSON") from exc
     validate_config(config)
     return config
 
@@ -56,11 +111,27 @@ def load_config(path):
 def validate_config(config):
     require(isinstance(config, dict), "Configuration must be an object")
     require(set(config) == CONFIG_FIELDS, "Unknown or missing configuration fields")
-    require(isinstance(config["name"], str) and config["name"].strip(), "name is required")
+    require(
+        isinstance(config["name"], str)
+        and config["name"].strip()
+        and len(config["name"]) <= MAX_NAME_LENGTH,
+        "name must be a non-empty bounded string",
+    )
 
+    require(
+        isinstance(config["target_url"], str)
+        and len(config["target_url"]) <= MAX_URL_LENGTH
+        and not any(character.isspace() for character in config["target_url"]),
+        "target_url must be a bounded string without whitespace",
+    )
     parsed = urlsplit(config["target_url"])
     require(parsed.scheme in ("http", "https") and parsed.hostname, "target_url must be HTTP(S)")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise InvalidConfiguration("target_url contains an invalid port") from exc
     require(not parsed.username and not parsed.password, "target_url must not contain credentials")
+    require(not parsed.query and not parsed.fragment, "target_url must not contain query parameters or fragments")
     if parsed.scheme != "https":
         require(parsed.hostname in ("localhost", "127.0.0.1", "::1"), "Non-local targets require HTTPS")
     allowed_hosts = config["allowed_hosts"]
@@ -75,49 +146,84 @@ def validate_config(config):
     require(config["method"] in ("GET", "POST"), "method must be GET or POST")
     require(isinstance(config["headers_from_env"], dict), "headers_from_env must be an object")
     for header, variable in config["headers_from_env"].items():
-        require(isinstance(header, str) and header.strip(), "Header names must be non-empty")
+        require(
+            isinstance(header, str) and HEADER_NAME.fullmatch(header),
+            "Header names must be valid HTTP field names",
+        )
+        require(header.lower() not in RESERVED_HEADERS, "Reserved transport headers are not allowed")
         require(isinstance(variable, str) and ENV_NAME.fullmatch(variable), "Invalid environment variable name")
     require(config["body"] is None or isinstance(config["body"], (dict, list)), "body must be JSON or null")
     require(config["method"] == "POST" or config["body"] is None, "GET profiles cannot define a body")
+    if config["body"] is not None:
+        try:
+            json.dumps(config["body"], allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise InvalidConfiguration("body must contain finite JSON values") from exc
 
     timeout = config["request_timeout_seconds"]
-    require(isinstance(timeout, int) and 1 <= timeout <= MAX_TIMEOUT_SECONDS, "Invalid request timeout")
+    require(is_int(timeout) and 1 <= timeout <= MAX_TIMEOUT_SECONDS, "Invalid request timeout")
     phases = config["phases"]
-    require(isinstance(phases, list) and phases, "At least one phase is required")
+    require(
+        isinstance(phases, list) and 1 <= len(phases) <= MAX_PHASES,
+        "Phase count exceeds the safety limit",
+    )
     names = set()
     for phase in phases:
         require(isinstance(phase, dict) and set(phase) == PHASE_FIELDS, "Invalid phase fields")
-        require(isinstance(phase["name"], str) and phase["name"].strip(), "Phase name is required")
+        require(
+            isinstance(phase["name"], str)
+            and phase["name"].strip()
+            and len(phase["name"]) <= MAX_NAME_LENGTH,
+            "Phase name must be a non-empty bounded string",
+        )
         require(phase["name"] not in names, "Phase names must be unique")
         names.add(phase["name"])
         require(
-            isinstance(phase["requests"], int) and 1 <= phase["requests"] <= MAX_REQUESTS_PER_PHASE,
+            is_int(phase["requests"]) and 1 <= phase["requests"] <= MAX_REQUESTS_PER_PHASE,
             "Invalid phase request count",
         )
         require(
-            isinstance(phase["concurrency"], int) and 1 <= phase["concurrency"] <= MAX_CONCURRENCY,
+            is_int(phase["concurrency"]) and 1 <= phase["concurrency"] <= MAX_CONCURRENCY,
             "Invalid phase concurrency",
         )
         require(
-            isinstance(phase["requests_per_second"], int)
+            is_int(phase["requests_per_second"])
             and 0 <= phase["requests_per_second"] <= MAX_REQUESTS_PER_SECOND,
             "Invalid phase request rate",
         )
+        batches = math.ceil(phase["requests"] / phase["concurrency"])
+        pacing = (
+            (phase["requests"] - 1) / phase["requests_per_second"]
+            if phase["requests_per_second"]
+            else 0
+        )
+        require(
+            batches * timeout + pacing <= MAX_ESTIMATED_PHASE_SECONDS,
+            "Estimated phase duration exceeds the safety limit",
+        )
+    require(
+        sum(phase["requests"] for phase in phases) <= MAX_TOTAL_REQUESTS,
+        "Total requests exceed the safety limit",
+    )
 
     thresholds = config["thresholds"]
     require(isinstance(thresholds, dict) and set(thresholds) == THRESHOLD_FIELDS, "Invalid thresholds")
     require(
-        isinstance(thresholds["max_error_rate"], (int, float))
+        is_finite_number(thresholds["max_error_rate"])
         and 0 <= thresholds["max_error_rate"] <= 1,
         "max_error_rate must be between 0 and 1",
     )
     require(
-        isinstance(thresholds["max_p95_ms"], (int, float)) and thresholds["max_p95_ms"] > 0,
+        is_finite_number(thresholds["max_p95_ms"]) and thresholds["max_p95_ms"] > 0,
         "max_p95_ms must be positive",
     )
     require(
-        isinstance(thresholds["min_requests"], int) and thresholds["min_requests"] > 0,
+        is_int(thresholds["min_requests"]) and thresholds["min_requests"] > 0,
         "min_requests must be positive",
+    )
+    require(
+        thresholds["min_requests"] <= sum(phase["requests"] for phase in phases),
+        "min_requests cannot exceed configured requests",
     )
 
 
@@ -143,21 +249,33 @@ def percentile(values, quantile):
     return ordered[index]
 
 
-def request_once(request, timeout, opener=urllib.request.urlopen, clock=time.perf_counter):
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def secure_urlopen(request, timeout):
+    return urllib.request.build_opener(NoRedirectHandler()).open(request, timeout=timeout)
+
+
+def request_once(request, timeout, opener=secure_urlopen, clock=time.perf_counter):
     started = clock()
     status = None
     error = None
     try:
         with opener(request, timeout=timeout) as response:
             status = int(response.status)
-            response.read()
+            if len(response.read(MAX_RESPONSE_BYTES + 1)) > MAX_RESPONSE_BYTES:
+                error = "response_too_large"
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
         error = "http_error"
-    except urllib.error.URLError:
-        error = "transport_error"
+    except urllib.error.URLError as exc:
+        error = "timeout" if isinstance(exc.reason, TimeoutError) else "transport_error"
     except TimeoutError:
         error = "timeout"
+    except http.client.HTTPException:
+        error = "transport_error"
     except OSError:
         error = "transport_error"
     elapsed_ms = max(0.0, (clock() - started) * 1000)
@@ -170,6 +288,11 @@ def build_request(config):
     for header, variable in config["headers_from_env"].items():
         value = os.environ.get(variable)
         require(value, f"Required environment variable is not set: {variable}")
+        require(
+            len(value) <= MAX_HEADER_VALUE_LENGTH
+            and all(ord(character) >= 32 and ord(character) != 127 for character in value),
+            f"Invalid HTTP header value from environment variable: {variable}",
+        )
         headers[header] = value
     payload = None
     if config["body"] is not None:
@@ -198,6 +321,7 @@ def summarize_phase(phase, results, elapsed_seconds):
         "name": phase["name"],
         "configured_requests": phase["requests"],
         "completed_requests": len(results),
+        "failed_requests": failures,
         "concurrency": phase["concurrency"],
         "requests_per_second": phase["requests_per_second"],
         "elapsed_seconds": elapsed_seconds,
@@ -215,7 +339,9 @@ def summarize_phase(phase, results, elapsed_seconds):
     }
 
 
-def run_phase(config, phase, opener=urllib.request.urlopen, clock=time.perf_counter, sleep=time.sleep):
+def run_phase(config, phase, opener=None, clock=time.perf_counter, sleep=time.sleep):
+    if opener is None:
+        opener = urllib.request.build_opener(NoRedirectHandler()).open
     request = build_request(config)
     results = []
     started = clock()
@@ -249,7 +375,7 @@ def run_phase(config, phase, opener=urllib.request.urlopen, clock=time.perf_coun
 
 def evaluate_thresholds(config, phases):
     completed = sum(phase["completed_requests"] for phase in phases)
-    failures = sum(round(phase["error_rate"] * phase["completed_requests"]) for phase in phases)
+    failures = sum(phase["failed_requests"] for phase in phases)
     latencies = [phase["latency_ms"]["p95"] for phase in phases if phase["latency_ms"]["p95"] is not None]
     checks = {
         "minimum_requests": completed >= config["thresholds"]["min_requests"],
@@ -261,7 +387,7 @@ def evaluate_thresholds(config, phases):
     return checks, all(checks.values())
 
 
-def execute(config, opener=urllib.request.urlopen):
+def execute(config, opener=None):
     started = time.time()
     phases = [run_phase(config, phase, opener=opener) for phase in config["phases"]]
     checks, passed = evaluate_thresholds(config, phases)
@@ -286,6 +412,28 @@ def report_path(value):
     return path
 
 
+def write_report(path, result):
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="x",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(result, handle, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(Path(__file__).with_name("scale-load-example.json")))
@@ -301,7 +449,7 @@ def main(argv=None):
     require(args.report, "--report is required for live execution")
     path = report_path(args.report)
     result = execute(config)
-    path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    write_report(path, result)
     return 0 if result["result"] == "passed" else 1
 
 
