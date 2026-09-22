@@ -1813,6 +1813,25 @@
           'title': 'JobStatus',
           'type': 'string',
         }),
+        'OneLakePipelineIdentity': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'client_id': dict({
+              'title': 'Client Id',
+              'type': 'string',
+            }),
+            'tenant_id': dict({
+              'title': 'Tenant Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'tenant_id',
+            'client_id',
+          ]),
+          'title': 'OneLakePipelineIdentity',
+          'type': 'object',
+        }),
         'PipelineSource': dict({
           'properties': dict({
             'content_fields': dict({
@@ -1862,6 +1881,26 @@
               }),
               'title': 'Filters',
               'type': 'object',
+            }),
+            'onelake_identity': dict({
+              'anyOf': list([
+                dict({
+                  '$ref': '#/components/schemas/OneLakePipelineIdentity',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+            }),
+            'sharepoint_identity': dict({
+              'anyOf': list([
+                dict({
+                  '$ref': '#/components/schemas/SharePointPipelineIdentity',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
             }),
             'source_id': dict({
               'title': 'Source Id',
@@ -1932,6 +1971,25 @@
             'destination_ids',
           ]),
           'title': 'PlaygroundSearchRequest',
+          'type': 'object',
+        }),
+        'SharePointPipelineIdentity': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'client_id': dict({
+              'title': 'Client Id',
+              'type': 'string',
+            }),
+            'tenant_id': dict({
+              'title': 'Tenant Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'tenant_id',
+            'client_id',
+          ]),
+          'title': 'SharePointPipelineIdentity',
           'type': 'object',
         }),
         'SourceType': dict({

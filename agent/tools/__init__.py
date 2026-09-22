@@ -86,7 +86,7 @@ def _reset_registry_for_tests() -> None:
 
 def _load_builtin_tools() -> None:
     """Eager-import the built-in tool modules so they self-register on import."""
-    from . import omnivec_api, k8s, cosmos, servicebus, metrics, mutations, diagnostics  # noqa: F401
+    from . import omnivec_api, k8s, cosmos, servicebus, metrics, mutations, diagnostics, runbooks  # noqa: F401
 
 
 _load_builtin_tools()

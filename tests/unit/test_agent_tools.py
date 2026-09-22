@@ -71,6 +71,7 @@ class TestRegistryShape:
             "count_docs_in_container", "get_doc_by_id", "query_diag",
             "get_queue_depth", "get_dlq_count", "list_topics",
             "recent_errors_last_n", "latency_p99_last_hour", "throughput_last_hour",
+            "get_troubleshooting_runbook",
         }
         missing = expected - names
         assert not missing, f"missing tools: {missing}"
@@ -99,6 +100,34 @@ class TestRegistryShape:
         # Phase 2: admin sees strictly more (mutating tools added).
         assert reader.issubset(admin)
         assert "restart_pod" in admin and "restart_pod" not in reader
+        assert "get_troubleshooting_runbook" in reader
+
+
+class TestTroubleshootingRunbooks:
+    @pytest.mark.asyncio
+    async def test_exact_failure_code_returns_safe_recovery_contract(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(failure_code="dead_letter_messages"))
+        match = result["matches"][0]
+        assert match["component"] == "messaging"
+        assert any("Never" in value or "purging" in value for value in match["avoid"])
+        assert match["authoritative_checks"]
+        assert match["recovery_verification"]
+
+    @pytest.mark.asyncio
+    async def test_search_finds_sharepoint_and_identity_failures(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(query="SharePoint Graph 403 Sites.Selected", limit=4))
+        codes = {match["failure_code"] for match in result["matches"]}
+        assert "sharepoint_permission_failure" in codes
+        assert all("safe_actions" in match and "avoid" in match for match in result["matches"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_fails_open_as_unknown_not_fake_advice(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(failure_code="unknown_new_failure"))
+        assert result["matches"] == []
+        assert "No exact runbook" in result["unknown"]
 
 
 # ---------------------------------------------------------------------------

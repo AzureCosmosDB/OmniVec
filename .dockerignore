@@ -1,6 +1,7 @@
 # Ignore node_modules and other large directories
 node_modules/
 .git/
+.worktrees/
 .venv/
 venv/
 __pycache__/
@@ -50,6 +51,7 @@ nul
 *.tar.gz
 *.json
 docgrok/
+**/target/
 web/static/lib/
 .claude/
 connectors/ingestion/dotnet/bin/

@@ -12,14 +12,14 @@ Grant the OmniVec workload identity a Microsoft Graph application permission:
 - `Sites.Selected` (recommended), followed by a read grant on each allowed site.
 - `Files.Read.All` for tenant-wide document-library access.
 
-Admin consent is required. No SharePoint credential or download URL is stored in
-source configuration or placed on Service Bus.
+Admin consent is required. No SharePoint client secret, certificate, or download
+URL is stored in source configuration or placed on Service Bus.
 
 The SharePoint watcher also requires Service Bus and the .NET embedding worker.
-The watcher stores its Graph delta link and item-to-path mappings in the source's
-Cosmos lease container so progress and delete handling survive pod restarts.
-Attaching a new active pipeline resets that source cursor and replays the library
-so the new pipeline receives existing files.
+Cross-tenant pipelines get isolated watchers, ownership leases, Graph
+credentials, delta cursors, revision sequences, and item-to-path mappings.
+Same-tenant pipelines retain the legacy shared source cursor so upgrades preserve
+existing outboxes, revision high-water marks, and delete reconciliation state.
 
 ## Source configuration
 
@@ -45,6 +45,40 @@ Use Microsoft Graph Explorer or the Graph API to resolve the site and drive IDs:
 GET /v1.0/sites/{hostname}:/sites/{site-path}
 GET /v1.0/sites/{site-id}/drives
 ```
+
+## Pipeline-scoped identity
+
+Same-tenant pipelines can omit `sharepoint_identity` and use the deployment's
+normal managed identity. For cross-tenant access, configure the SharePoint app
+registration on the individual pipeline source:
+
+```json
+{
+  "name": "Policy search",
+  "sources": [{
+    "source_id": "src-sharepoint",
+    "sharepoint_identity": {
+      "tenant_id": "11111111-1111-1111-1111-111111111111",
+      "client_id": "22222222-2222-2222-2222-222222222222"
+    }
+  }],
+  "docgrok_pipeline": "mdl-example",
+  "destination_id": "dst-vectors",
+  "vector_index_path": "embedding",
+  "processing_mode": "queue"
+}
+```
+
+The IDs are non-secret identity selectors stored with the pipeline and copied
+to that pipeline's Service Bus messages. The watcher and worker exchange the
+projected Kubernetes service-account token for Microsoft Graph tokens using the
+selected tenant/app. No tenant/client ID is configured in Helm, `azd`, Bicep, or
+deployment hooks.
+
+The app registration must have Microsoft Graph `Sites.Selected` application
+permission, admin consent, a site-specific `read` grant, and a federated
+credential matching the AKS OIDC issuer and
+`system:serviceaccount:omnivec:omnivec-api`.
 
 Enable the dedicated watcher in Helm:
 

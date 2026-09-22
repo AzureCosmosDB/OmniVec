@@ -20,7 +20,12 @@ python -m pytest tests\unit\test_recovery_chaos.py tests\unit\test_recovery_chao
 `scale-load.py` runs versioned warmup, load, spike, and soak profiles against an
 explicitly allowlisted HTTP endpoint. It uses bounded concurrency and timeouts,
 loads sensitive headers only from environment variables, never writes header
-values to reports, and evaluates error-rate, request-count, and p95 thresholds.
+values to reports, rejects redirects so credentials cannot leave the allowlisted
+host, rejects secret-bearing query strings and reserved transport headers, caps
+configuration and response reads at 1 MiB, bounds profile size and estimated
+phases at 24 hours, validates secret header values, publishes reports atomically
+without overwriting, and evaluates exact error-rate, request-count, and p95
+thresholds.
 
 Plan mode is the default and performs no network calls:
 

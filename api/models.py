@@ -2,6 +2,7 @@
 
 from enum import Enum
 import re
+import uuid
 from urllib.parse import urlsplit
 from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -481,6 +482,38 @@ class Destination(BaseModel):
 # PIPELINE MODELS
 # =============================================================================
 
+class SharePointPipelineIdentity(BaseModel):
+    tenant_id: str
+    client_id: str
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("tenant_id", "client_id")
+    @classmethod
+    def validate_guid(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            return str(uuid.UUID(value))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("must be a valid GUID") from exc
+
+
+class OneLakePipelineIdentity(BaseModel):
+    tenant_id: str
+    client_id: str
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("tenant_id", "client_id")
+    @classmethod
+    def validate_guid(cls, value: str) -> str:
+        value = value.strip()
+        try:
+            return str(uuid.UUID(value))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("must be a valid GUID") from exc
+
+
 class PipelineSource(BaseModel):
     source_id: str
     filters: Dict[str, Any] = {}  # Additional filters like file patterns
@@ -490,6 +523,8 @@ class PipelineSource(BaseModel):
     url_content_types: List[str] = ["txt", "json", "pdf"]  # For URL modes
     content_type_field: Optional[str] = None  # Optional: field containing content type hint
     file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv"]  # For blob/S3 sources: which file types to process
+    sharepoint_identity: Optional[SharePointPipelineIdentity] = None
+    onelake_identity: Optional[OneLakePipelineIdentity] = None
 
 
 class Pipeline(BaseModel):

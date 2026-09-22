@@ -83,11 +83,14 @@ func newSourceCreateCmd() *cobra.Command {
 				exitErr("--name is required")
 			}
 			if srcType == "" {
-				exitErr("--type is required (azure-blob, cosmosdb)")
+				exitErr("--type is required (%s)", connectorTypeHelp("source"))
 			}
 			cfg, err := parseConfig(config, configFile)
 			if err != nil {
 				exitErr("invalid config: %v", err)
+			}
+			if err := validateConnectorConfig("source", srcType, cfg); err != nil {
+				exitErr("%v", err)
 			}
 			body := map[string]any{
 				"name":   name,
@@ -112,7 +115,7 @@ func newSourceCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Source name")
-	cmd.Flags().StringVarP(&srcType, "type", "t", "", "Source type (azure-blob, cosmosdb)")
+	cmd.Flags().StringVarP(&srcType, "type", "t", "", "Source type ("+connectorTypeHelp("source")+")")
 	cmd.Flags().StringVarP(&config, "config", "c", "", "JSON config string")
 	cmd.Flags().StringVarP(&configFile, "file", "f", "", "JSON config file path")
 	return cmd
@@ -151,6 +154,11 @@ func newSourceUpdateCmd() *cobra.Command {
 				}
 				body["config"] = cfg
 			}
+			finalType, _ := body["type"].(string)
+			finalConfig, _ := body["config"].(map[string]any)
+			if err := validateConnectorConfig("source", finalType, finalConfig); err != nil {
+				exitErr("%v", err)
+			}
 			data, err := c.Put(fmt.Sprintf("/api/sources/%s", id), body)
 			if err != nil {
 				exitErr("%v", err)
@@ -165,7 +173,7 @@ func newSourceUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Source name")
-	cmd.Flags().StringVarP(&srcType, "type", "t", "", "Source type")
+	cmd.Flags().StringVarP(&srcType, "type", "t", "", "Source type ("+connectorTypeHelp("source")+")")
 	cmd.Flags().StringVarP(&config, "config", "c", "", "JSON config string")
 	cmd.Flags().StringVarP(&configFile, "file", "f", "", "JSON config file path")
 	return cmd
