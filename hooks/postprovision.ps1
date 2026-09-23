@@ -11,7 +11,11 @@ $env:Path = "$HOME\.azure-kubectl;$HOME\.azure-kubelogin;" + $env:Path + ";" + $
 $RootDir = (Resolve-Path "$PSScriptRoot/..").Path
 . "$PSScriptRoot\lib\deployment.ps1"
 $script:imagesChanged = $false
+$script:immutableSourceBuild = $false
+$script:changedImages = [Collections.Generic.List[string]]::new()
+$script:imageTags = @{}
 $helmWorkDir = $null
+$buildContextRoot = $null
 
 # -- Deployment lock: prevent concurrent postprovision runs --
 $lockDir = Join-Path $HOME ".omnivec" "locks"
@@ -202,6 +206,17 @@ $IMAGES = @(
 if ($ONELAKE_ICEBERG_ENABLED -eq "true") {
     $IMAGES += "omnivec-onelake-iceberg-watcher"
 }
+foreach ($image in @($IMAGES + "omnivec-onelake-iceberg-watcher")) {
+    $script:imageTags[$image] = "latest"
+}
+
+function Add-ChangedImage {
+    param([string]$Name)
+    if ($Name -and -not $script:changedImages.Contains($Name)) {
+        $script:changedImages.Add($Name)
+    }
+    Add-ChangedImage -Name $FIRST_IMAGE
+}
 
 # Release channel tag — resolved once, used for BOTH import and helm overrides.
 # 1. Explicit OMNIVEC_IMAGE_TAG (azd env) wins.
@@ -268,7 +283,7 @@ function Build-Image {
     }
 
     Write-Host "  `e[36mBuilding ${Name}:${Tag}...`e[0m"
-    Mark-ImageUpdate
+    Add-ChangedImage -Name $Name
     if ($BUILD_MODE -eq "docker") {
         if (-not $script:dockerLoggedIn) {
             az acr login --name $ACR_NAME
@@ -296,21 +311,189 @@ function Build-Image {
     Write-Host "  `e[32m${Name}:${Tag} pushed.`e[0m"
 }
 
-function Build-AllImages {
-    Build-Image -Name "omnivec-api" -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest"
-    Build-Image -Name "omnivec-search" -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest"
-    Build-Image -Name "omnivec-web" -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest"
-    Build-Image -Name "omnivec-changefeed" -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest"
-    Build-Image -Name "omnivec-dotnet-worker" -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest"
-    Build-Image -Name "omnivec-onelake-iceberg-watcher" -Dockerfile "$RootDir/connectors/ingestion/onelake_iceberg/Dockerfile" -Context "$RootDir/connectors/ingestion/onelake_iceberg/" -Tag "latest"
-    Build-Image -Name "omnivec-agent" -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest"
+function Copy-MinimalBuildTree {
+    param([string]$Source, [string]$Destination)
+    $excludedDirectories = @(
+        '.git', '.worktrees', '.venv', 'venv', 'node_modules', 'bin', 'obj',
+        'target', '__pycache__', '.pytest_cache', '.mypy_cache', 'dist', 'build'
+    )
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $sourceRoot = (Resolve-Path $Source).Path
+    foreach ($item in Get-ChildItem -Path $sourceRoot -Recurse -Force -ErrorAction Stop) {
+        $relative = $item.FullName.Substring($sourceRoot.Length).TrimStart('\')
+        if (-not $relative) { continue }
+        $segments = $relative -split '[\\/]'
+        if (@($segments | Where-Object { $_ -in $excludedDirectories }).Count -gt 0) { continue }
+        if ($item.Name -match '\.(pyc|pdb|rlib|rmeta|tmp|bak|log)$') { continue }
+        $target = Join-Path $Destination $relative
+        if ($item.PSIsContainer) {
+            New-Item -ItemType Directory -Path $target -Force | Out-Null
+        } else {
+            $parent = Split-Path $target -Parent
+            if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            Copy-Item $item.FullName $target -Force
+        }
+    }
+}
 
-    if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {
-        Build-Image -Name "docgrok-pipeline-worker" -Dockerfile "$RootDir/docgrok/pipeline-worker/Dockerfile" -Context "$RootDir/docgrok/pipeline-worker/" -Tag "latest"
+function Get-SourceBuildSpec {
+    param([string]$Name)
+    if (-not $script:buildContextRoot) {
+        $script:buildContextRoot = Join-Path ([IO.Path]::GetTempPath()) ("omnivec-build-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $script:buildContextRoot -Force | Out-Null
     }
-    if (Test-Path "$RootDir/docgrok/router/Dockerfile") {
-        Build-Image -Name "docgrok-router" -Dockerfile "$RootDir/docgrok/router/Dockerfile" -Context "$RootDir/docgrok/router/" -Tag "latest"
+    $context = Join-Path $script:buildContextRoot $Name
+    New-Item -ItemType Directory -Path $context -Force | Out-Null
+    switch ($Name) {
+        "omnivec-api" {
+            Copy-MinimalBuildTree "$RootDir\api" (Join-Path $context "api")
+            Copy-MinimalBuildTree "$RootDir\web" (Join-Path $context "web")
+            $dockerfile = Join-Path $context "api\Dockerfile"
+        }
+        "omnivec-search" {
+            Copy-MinimalBuildTree "$RootDir\search" (Join-Path $context "search")
+            $dockerfile = Join-Path $context "search\Dockerfile"
+        }
+        "omnivec-agent" {
+            Copy-MinimalBuildTree "$RootDir\agent" (Join-Path $context "agent")
+            $dockerfile = Join-Path $context "agent\Dockerfile"
+        }
+        "omnivec-web" {
+            Copy-MinimalBuildTree "$RootDir\web" $context
+            $dockerfile = Join-Path $context "Dockerfile"
+        }
+        "omnivec-changefeed" {
+            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\dotnet" $context
+            $dockerfile = Join-Path $context "Dockerfile"
+        }
+        "omnivec-dotnet-worker" {
+            Copy-MinimalBuildTree "$RootDir\connectors\worker\dotnet" $context
+            $dockerfile = Join-Path $context "Dockerfile"
+        }
+        "omnivec-onelake-iceberg-watcher" {
+            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\onelake_iceberg" $context
+            $dockerfile = Join-Path $context "Dockerfile"
+        }
+        "docgrok-pipeline-worker" {
+            Copy-MinimalBuildTree "$RootDir\docgrok\pipeline-worker" $context
+            $dockerfile = Join-Path $context "Dockerfile"
+        }
+        "docgrok-router" {
+            Copy-MinimalBuildTree "$RootDir\docgrok\router" $context
+            $dockerfile = Join-Path $context "Dockerfile"
+        }
+        default { throw "No source-build mapping exists for image '$Name'." }
     }
+
+    $hashLines = Get-ChildItem $context -File -Recurse |
+        Sort-Object FullName |
+        ForEach-Object {
+            $relative = $_.FullName.Substring($context.Length).TrimStart('\').Replace('\','/')
+            "${relative}:$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"
+        }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $fingerprint = [BitConverter]::ToString($sha.ComputeHash(
+        [Text.Encoding]::UTF8.GetBytes(($hashLines -join "`n"))
+    )).Replace('-','').ToLowerInvariant()
+    [pscustomobject]@{
+        Name = $Name
+        Context = $context
+        Dockerfile = $dockerfile
+        Tag = "src-$($fingerprint.Substring(0,16))"
+    }
+}
+
+function Invoke-SourceBuilds {
+    param([string[]]$Images)
+    $specs = @($Images | ForEach-Object { Get-SourceBuildSpec -Name $_ })
+    $toBuild = @()
+    foreach ($spec in $specs) {
+        $script:imageTags[$spec.Name] = $spec.Tag
+        if (Test-ImageExists -Name $spec.Name -Tag $spec.Tag) {
+            Write-Host "  `e[32m$($spec.Name):$($spec.Tag) already matches source; reusing.`e[0m"
+        } else {
+            $toBuild += $spec
+        }
+    }
+    if ($toBuild.Count -eq 0) {
+        Write-Host "  `e[32mAll source fingerprints already exist in ACR; no builds required.`e[0m"
+        $script:immutableSourceBuild = $true
+        return
+    }
+
+    foreach ($spec in $toBuild) { Add-ChangedImage -Name $spec.Name }
+    if ($BUILD_MODE -eq "docker") {
+        az acr login --name $ACR_NAME
+        Assert-NativeSuccess 'Logging Docker into ACR'
+        foreach ($spec in $toBuild) {
+            Write-Host "  `e[36mBuilding $($spec.Name):$($spec.Tag)...`e[0m"
+            docker build -t "${ACR_LOGIN_SERVER}/$($spec.Name):$($spec.Tag)" `
+                -t "${ACR_LOGIN_SERVER}/$($spec.Name):latest" `
+                -f $spec.Dockerfile $spec.Context
+            Assert-NativeSuccess "Building $($spec.Name)"
+            docker push "${ACR_LOGIN_SERVER}/$($spec.Name):$($spec.Tag)"
+            Assert-NativeSuccess "Pushing $($spec.Name):$($spec.Tag)"
+            docker push "${ACR_LOGIN_SERVER}/$($spec.Name):latest"
+            Assert-NativeSuccess "Pushing $($spec.Name):latest"
+        }
+    } else {
+        $concurrency = if ($env:OMNIVEC_BUILD_CONCURRENCY) { [int]$env:OMNIVEC_BUILD_CONCURRENCY } else { 3 }
+        if ($concurrency -lt 1 -or $concurrency -gt 5) { throw 'OMNIVEC_BUILD_CONCURRENCY must be 1-5.' }
+        $pending = [Collections.Generic.Queue[object]]::new()
+        foreach ($spec in $toBuild) { $pending.Enqueue($spec) }
+        $running = [Collections.Generic.List[object]]::new()
+        $deadline = [DateTime]::UtcNow.AddHours(2)
+        try {
+            while ($pending.Count -gt 0 -or $running.Count -gt 0) {
+                while ($pending.Count -gt 0 -and $running.Count -lt $concurrency) {
+                    $spec = $pending.Dequeue()
+                    Write-Host "  `e[36mQueueing $($spec.Name):$($spec.Tag) from $($spec.Context)...`e[0m"
+                    $job = Start-Job -ArgumentList $ACR_NAME, $spec.Name, $spec.Tag, $spec.Dockerfile, $spec.Context -ScriptBlock {
+                        param($Registry, $Name, $Tag, $Dockerfile, $Context)
+                        $output = & az acr build --registry $Registry `
+                            --image "${Name}:${Tag}" --image "${Name}:latest" `
+                            --file $Dockerfile $Context --timeout 3600 --no-logs --output none 2>&1
+                        [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output -join "`n") }
+                    }
+                    $running.Add([pscustomobject]@{ Spec = $spec; Job = $job })
+                }
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw 'Parallel ACR builds exceeded the two-hour aggregate deadline.'
+                }
+                $completed = @($running | Where-Object { $_.Job.State -in @('Completed','Failed','Stopped') })
+                if ($completed.Count -eq 0) {
+                    Start-Sleep -Seconds 2
+                    continue
+                }
+                foreach ($entry in $completed) {
+                    try {
+                        $result = Receive-Job $entry.Job -ErrorAction Stop
+                        if ($entry.Job.State -ne 'Completed' -or $result.ExitCode -ne 0) {
+                            throw "ACR build failed for $($entry.Spec.Name):$($entry.Spec.Tag). $($result.Output)"
+                        }
+                        Write-Host "  `e[32m$($entry.Spec.Name):$($entry.Spec.Tag) pushed.`e[0m"
+                    } finally {
+                        Remove-Job $entry.Job -Force
+                        $running.Remove($entry) | Out-Null
+                    }
+                }
+            }
+        } catch {
+            foreach ($entry in @($running)) {
+                if ($entry.Job.State -notin @('Completed','Failed','Stopped')) {
+                    Stop-Job $entry.Job -ErrorAction SilentlyContinue
+                }
+                Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+    }
+    $script:imagesChanged = $true
+    $script:immutableSourceBuild = $true
+}
+
+function Build-AllImages {
+    Invoke-SourceBuilds -Images $IMAGES
 }
 
 function Build-MissingImages {
@@ -429,7 +612,6 @@ if ($DO_BUILD) {
     Write-Host "`n`e[33mPhase 1: Building images from source...`e[0m"
 
     Build-AllImages
-    $script:imagesChanged = $true
 
     Write-Host "`e[32mAll images built and pushed.`e[0m"
 } else {
@@ -473,7 +655,7 @@ if ($DO_BUILD) {
         }
 
         Write-Host "  `e[36mImporting ${image}:$IMG_TAG as :latest...`e[0m"
-        Mark-ImageUpdate
+        Add-ChangedImage -Name $image
         $imagesToImport += $image
 
         $job = Start-Job -ScriptBlock {
@@ -523,7 +705,6 @@ if ($DO_BUILD) {
     if ($totalAvailable -eq 0) {
         Write-Host "`n`e[33mImport provided no usable images. Falling back to source build mode...`e[0m"
         Build-AllImages
-        $script:imagesChanged = $true
     }
 }
 
@@ -534,15 +715,19 @@ if ($AGENT_IMAGE_TAG -ne "latest" -and -not (Test-ImageExists -Name "omnivec-age
 Write-Host "`n`e[33mVerifying all required images exist in ACR...`e[0m"
 $missingImages = @()
 foreach ($image in $IMAGES) {
-    if (-not (Test-ImageExists -Name $image -Tag "latest")) {
-        Write-Host "  `e[31mMISSING: ${image}:latest`e[0m"
+    $requiredTag = $script:imageTags[$image]
+    if (-not (Test-ImageExists -Name $image -Tag $requiredTag)) {
+        Write-Host "  `e[31mMISSING: ${image}:${requiredTag}`e[0m"
         $missingImages += $image
     } else {
-        Write-Host "  `e[32mOK: ${image}:latest`e[0m"
+        Write-Host "  `e[32mOK: ${image}:${requiredTag}`e[0m"
     }
 }
 
 if ($missingImages.Count -gt 0) {
+    if ($DO_BUILD) {
+        throw "Source-fingerprinted images disappeared after build: $($missingImages -join ', '). Rerun azd up after checking ACR availability."
+    }
     Write-Host "`n`e[33mBuilding missing images from source...`e[0m"
     Build-MissingImages -Images $missingImages
 
@@ -676,7 +861,8 @@ if (-not $SEARCH_INTERNAL_TOKEN) {
     Write-Host "  `e[32mGenerated new search internal token.`e[0m"
 }
 
-$IMAGE_TAG = "latest"
+$IMAGE_TAG = $script:imageTags["omnivec-api"]
+$agentDeployTag = if ($AGENT_IMAGE_TAG -eq "latest") { $script:imageTags["omnivec-agent"] } else { $AGENT_IMAGE_TAG }
 
 $helmArgs = @(
     "upgrade", "--install", "omnivec", "$RootDir/helm/omnivec",
@@ -686,23 +872,29 @@ $helmArgs = @(
     "--set", "azure.cosmos.endpoint=$COSMOS_ENDPOINT",
     "--set", "api.image.tag=$IMAGE_TAG",
     "--set", "controller.image.tag=$IMAGE_TAG",
-    "--set", "web.image.tag=$IMAGE_TAG",
-    "--set", "changefeed.image.tag=$IMAGE_TAG",
+    "--set", "blobEnumerator.image.tag=$IMAGE_TAG",
+    "--set", "sourceWorker.image.tag=$IMAGE_TAG",
+    "--set", "blobWatcher.image.tag=$IMAGE_TAG",
+    "--set", "web.image.tag=$($script:imageTags['omnivec-web'])",
+    "--set", "changefeed.image.tag=$($script:imageTags['omnivec-changefeed'])",
     "--set", "docgrok.global.imageRegistry=$ACR_LOGIN_SERVER",
     "--set", "docgrok.azure.workloadIdentity.clientId=$IDENTITY_CLIENT_ID",
     "--set", "docgrok.azure.cosmos.endpoint=$COSMOS_ENDPOINT",
     "--set", "docgrok.azure.cosmos.database=omnivec",
     "--set", "docgrok.azure.cosmos.container=metadata",
-    "--set", "docgrok.docgrok.image.tag=$IMAGE_TAG",
+    "--set", "docgrok.docgrok.image.tag=$($script:imageTags['docgrok-router'])",
+    "--set", "docgrok.pipelineWorker.image.tag=$($script:imageTags['docgrok-pipeline-worker'])",
     "--set", "api.adminToken=$ADMIN_TOKEN",
-    "--set", "search.image.tag=$IMAGE_TAG",
+    "--set", "search.image.tag=$($script:imageTags['omnivec-search'])",
     "--set", "search.bootstrapToken=$SEARCH_BOOTSTRAP_TOKEN",
     "--set", "search.internalToken=$SEARCH_INTERNAL_TOKEN",
     "--set", "dotnetWorker.enabled=true",
+    "--set", "dotnetWorker.image.tag=$($script:imageTags['omnivec-dotnet-worker'])",
     "--set", "sharepointWatcher.enabled=$SHAREPOINT_ENABLED",
     "--set", "onelakeIcebergWatcher.enabled=$ONELAKE_ICEBERG_ENABLED",
+    "--set", "onelakeIcebergWatcher.image.tag=$($script:imageTags['omnivec-onelake-iceberg-watcher'])",
     "--set-string", "agent.defaultModelId=$AGENT_DEFAULT_MODEL_ID",
-    "--set-string", "agent.image.tag=$AGENT_IMAGE_TAG",
+    "--set-string", "agent.image.tag=$agentDeployTag",
     "--set", "agent.allowKubernetesRemediation=$AGENT_ALLOW_K8S_REMEDIATION",
     "--set", "web.service.dnsLabel=$WEB_DNS_LABEL"
 )
@@ -894,10 +1086,27 @@ if ($skipHelm) {
 Write-Host "`e[32mHelm deployment complete.`e[0m"
 
 # Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
-if ($script:imagesChanged) {
+if ($script:imagesChanged -and -not $script:immutableSourceBuild) {
     Write-Host "`n`e[33mImages updated — restarting pods to pull new images...`e[0m"
-    kubectl --context $KUBE_CONTEXT --request-timeout=30s rollout restart deployment -n omnivec 2>$null
-    Assert-NativeSuccess 'Restarting deployments after image updates'
+    $deployments = kubectl --context $KUBE_CONTEXT --request-timeout=30s get deployment -n omnivec -o json | ConvertFrom-Json
+    Assert-NativeSuccess 'Listing deployments for targeted restart'
+    $restartNames = @()
+    foreach ($deployment in $deployments.items) {
+        $containerImages = @($deployment.spec.template.spec.containers | ForEach-Object image)
+        foreach ($changedImage in $script:changedImages) {
+            if (@($containerImages | Where-Object { $_ -match "/$([regex]::Escape($changedImage)):" }).Count -gt 0) {
+                $restartNames += $deployment.metadata.name
+                break
+            }
+        }
+    }
+    if ($restartNames.Count -eq 0 -and $script:changedImages.Count -eq 0) {
+        $restartNames = @($deployments.items | ForEach-Object { $_.metadata.name })
+    }
+    foreach ($deploymentName in ($restartNames | Sort-Object -Unique)) {
+        kubectl --context $KUBE_CONTEXT --request-timeout=30s rollout restart "deployment/$deploymentName" -n omnivec 2>$null
+        Assert-NativeSuccess "Restarting deployment $deploymentName"
+    }
 }
 
 # =============================================================================
@@ -1005,6 +1214,9 @@ if ($externalIp) {
 Write-Host ""
 
 } finally {
+    if ($script:buildContextRoot -and (Test-Path $script:buildContextRoot)) {
+        Remove-Item $script:buildContextRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if ($helmWorkDir -and (Test-Path $helmWorkDir)) {
         Remove-Item $helmWorkDir -Recurse -Force -ErrorAction SilentlyContinue
     }

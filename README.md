@@ -117,6 +117,15 @@ unrelated Kubernetes resources or overwrites the default kubeconfig. Genuine
 configuration, authorization, image, or workload failures still stop explicitly
 with diagnostics instead of being reported as a successful deployment.
 
+Source-build deployments use minimal per-image contexts and immutable
+`src-<fingerprint>` tags. Existing matching fingerprints are reused, independent
+images are built with bounded concurrency, and Helm rolls only workloads whose
+image tag changed. For an already-provisioned environment, use
+`./deploy.sh --code-only --environment <name>` to skip Bicep reconciliation and
+run only the resumable image/Helm/health deployment path. On Windows use
+`.\deploy.ps1 -CodeOnly --environment <name>`. Set
+`OMNIVEC_BUILD_CONCURRENCY` from 1 to 5 to tune ACR build parallelism (default 3).
+
 ### Save these values
 
 When deployment finishes, the console prints two important values. **Copy them now:**
