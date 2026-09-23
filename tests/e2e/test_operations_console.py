@@ -109,7 +109,20 @@ def test_programmatic_navigation_and_keyboard_navigation(page):
 def test_chat_models_exclude_embeddings_and_prompts_do_not_send(page):
     page.evaluate("showSection('agent')")
     page.evaluate("agentInit()")
-    page.locator("#agent-model option").nth(1).wait_for(state="attached")
+    with page.expect_response(lambda response: urlparse(response.url).path == "/api/models") as reply:
+        page.evaluate("agentRefreshModels()")
+    assert reply.value.status == 200
+    models = reply.value.json()["models"]
+    expected_ids = [
+        model["id"] for model in models
+        if model.get("model_category") == "chat"
+        and model.get("enabled") is not False
+        and model.get("type") in {"azure-openai", "openai", "openai-compatible"}
+    ]
+    values = page.locator("#agent-model option").evaluate_all(
+        "(options) => options.map(option => option.value)"
+    )
+    assert values == [""] + expected_ids
     labels = page.locator("#agent-model option").all_text_contents()
     assert all("text-embedding" not in label.lower() for label in labels)
     before = page.locator("#agent-transcript").inner_text()
