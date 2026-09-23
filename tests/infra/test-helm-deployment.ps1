@@ -47,12 +47,25 @@ foreach ($hook in 'preprovision.sh','postprovision.sh') {
 }
 foreach ($hook in 'preprovision.ps1','preprovision.sh','postprovision.ps1','postprovision.sh') {
     $source = Get-Content "$root\hooks\$hook" -Raw
-    foreach ($setting in 'OMNIVEC_BUILD','OMNIVEC_IMAGE_TAG','OMNIVEC_SHAREPOINT_ENABLED','OMNIVEC_ONELAKE_ICEBERG_ENABLED') {
+    foreach ($setting in 'OMNIVEC_BUILD','OMNIVEC_IMAGE_TAG','OMNIVEC_SHAREPOINT_ENABLED','OMNIVEC_ONELAKE_ICEBERG_ENABLED','OMNIVEC_AGENT_DEFAULT_MODEL_ID','OMNIVEC_AGENT_IMAGE_TAG','OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION') {
         if ($source -notmatch $setting) {
             throw "$hook must preserve $setting across recovery"
         }
     }
     Write-Host "OK $hook preserves recovery configuration"
 }
+$agent = & helm template omnivec $chart --show-only templates/agent-deployment.yaml --set-string agent.defaultModelId=mdl-chat-test --set-string agent.image.tag=agent-test-pin 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $agent -notmatch 'value: "mdl-chat-test"' -or $agent -notmatch 'omnivec-agent:agent-test-pin') {
+    throw 'Agent image pin and default chat model must reach the Deployment'
+}
+$readOnly = & helm template omnivec $chart --show-only templates/agent-rbac.yaml 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $readOnly -match '"delete"|"patch"|deployments/scale') {
+    throw 'Default agent RBAC must not allow mutations'
+}
+$remediation = & helm template omnivec $chart --show-only templates/agent-rbac.yaml --set agent.allowKubernetesRemediation=true 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $remediation -notmatch 'deployments/scale' -or $remediation -notmatch 'resourceNames:' -or $remediation -match 'kind: ClusterRole') {
+    throw 'Opted-in agent remediation must remain namespace-scoped with named deployment scaling'
+}
+Write-Host 'OK agent model/image settings render and remediation RBAC remains opt-in'
 Write-Host 'Helm deployment and recovery checks passed'
 exit 0

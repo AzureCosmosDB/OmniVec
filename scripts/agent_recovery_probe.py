@@ -38,7 +38,7 @@ def prefix_valid(prefix):
     require(bool(re.fullmatch(r"pr183-agent-recovery-[0-9a-f]{32}", prefix)), "invalid_owned_prefix")
 
 
-def parse_sse(lines, *, clock=time.monotonic, deadline=None):
+def parse_sse(lines, *, clock=time.monotonic, deadline=None, on_event=None):
     """Consume the actual proxy's data: JSON SSE contract, with hard input caps."""
     events, data, size = [], [], 0
     for line in lines:
@@ -56,6 +56,8 @@ def parse_sse(lines, *, clock=time.monotonic, deadline=None):
             data = []
             require(len(events) <= 512, "sse_event_limit")
             require(event["type"] != "error", "agent_or_proxy_error")
+            if on_event is not None:
+                on_event(event)
             if event["type"] == "done":
                 return events
     raise Blocked("sse_missing_done")
@@ -114,7 +116,7 @@ def arm_deadline(seconds):
         signal.alarm(seconds)
 
 
-def recovery_proof(events, call_id, pipeline_id):
+def recovery_proof(events, call_id, pipeline_id, *, expected_before=0):
     """Accept runtime action evidence, never free-text chat claims or idle snapshots."""
     decisions = [e for e in events if e["type"] == "approval_decision"]
     require(len(decisions) == 1 and decisions[0].get("call_id") == call_id
@@ -147,7 +149,9 @@ def recovery_proof(events, call_id, pipeline_id):
             and rows[0].get("processing_verified") is True, "runtime_pipeline_progress_missing")
     progress = rows[0].get("progress", {})
     old, new = progress.get("embedded_before"), progress.get("embedded_after")
-    require(numeric(old) and numeric(new) and old == 0 and new > old, "runtime_progress_did_not_increase")
+    require(numeric(expected_before) and expected_before >= 0
+            and numeric(old) and numeric(new) and old == expected_before and new > old,
+            "runtime_progress_did_not_increase")
     finals = [e for e in events if e["type"] == "final"]
     require(len(finals) == 1 and finals[0].get("recovery") == record, "authoritative_final_record_missing")
     require(any(e["type"] == "verification" and e.get("recovery") == record for e in events),
@@ -176,8 +180,18 @@ def validate_chunks(rows, pipeline_id, source_id, expected):
 
 
 class Scenario:
-    def __init__(self, prefix):
+    endpoint = ENDPOINT
+    database = DATABASE
+    embedding_model = EMBEDDING_MODEL
+    chat_model = CHAT_MODEL
+    initial_embedded_count = 0
+    event_observer = None
+
+    def validate_prefix(self, prefix):
         prefix_valid(prefix)
+
+    def __init__(self, prefix):
+        self.validate_prefix(prefix)
         import requests
         from azure.cosmos import CosmosClient
         from azure.identity import DefaultAzureCredential
@@ -193,9 +207,9 @@ class Scenario:
             "Content-Type": "application/json",
         })
         self.credential = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
-        self.cosmos = CosmosClient(ENDPOINT, credential=self.credential,
+        self.cosmos = CosmosClient(self.endpoint, credential=self.credential,
                                   connection_timeout=10, read_timeout=20, retry_total=0)
-        self.db = self.cosmos.get_database_client(DATABASE)
+        self.db = self.cosmos.get_database_client(self.database)
         self.report = {
             "result": "blocked", "prefix": prefix, "fault_injected": [],
             "observed_failure": "not_checked", "repair_actor": "none",
@@ -233,7 +247,7 @@ class Scenario:
         ) as response:
             require(response.status_code == 200, "agent_proxy_http_" + str(response.status_code))
             require("text/event-stream" in response.headers.get("Content-Type", ""), "agent_proxy_not_sse")
-            return parse_sse(response.iter_lines(), deadline=deadline)
+            return parse_sse(response.iter_lines(), deadline=deadline, on_event=self.event_observer)
 
     def rows(self):
         self.remaining()
@@ -254,14 +268,14 @@ class Scenario:
                 "pipeline_ownership_lost")
         require(pipe.get("destination_id") == self.destination_id
                 and [s.get("source_id") for s in pipe.get("sources", [])] == [self.source_id]
-                and pipe.get("docgrok_pipeline") == EMBEDDING_MODEL, "pipeline_binding_changed")
+                and pipe.get("docgrok_pipeline") == self.embedding_model, "pipeline_binding_changed")
         return pipe
 
     def preflight(self):
         models = self.call("GET", "models")["models"]
-        chat = [m for m in models if m.get("id") == CHAT_MODEL]
+        chat = [m for m in models if m.get("id") == self.chat_model]
         require(len(chat) == 1 and chat[0].get("model_category") == "chat", "approved_chat_model_not_available")
-        require(sum(m.get("id") == EMBEDDING_MODEL for m in models) == 1, "embedding_model_missing")
+        require(sum(m.get("id") == self.embedding_model for m in models) == 1, "embedding_model_missing")
         catalog = self.call("GET", "agent/tools")
         require(catalog.get("role") == "admin", "legitimate_authenticated_admin_required")
         tools = {t["name"]: t for t in catalog.get("tools", [])}
@@ -275,9 +289,8 @@ class Scenario:
             entries = self.call("GET", kind)[kind]
             require(not any(e.get("name", "").startswith(self.prefix) for e in entries), "fixture_prefix_already_registered")
 
-    def create_fixture(self):
+    def create_resources(self):
         from azure.cosmos import PartitionKey
-        from chunker import chunk_text
 
         self.report["fixture_creation_attempted"] = True
         self.source = self.db.create_container(id=self.prefix + "-source", partition_key=PartitionKey(path="/id"))
@@ -289,7 +302,7 @@ class Scenario:
                              "includedPaths": [{"path": "/*"}], "excludedPaths": [{"path": '/"embedding"/*'}],
                              "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}]},
         )
-        connection = {"endpoint": ENDPOINT, "database": DATABASE, "auth_type": "managed-identity",
+        connection = {"endpoint": self.endpoint, "database": self.database, "auth_type": "managed-identity",
                       "client_id": os.environ.get("AZURE_CLIENT_ID", "")}
         source = self.call("POST", "sources", {
             "name": self.prefix + "-source", "type": "cosmosdb",
@@ -301,21 +314,26 @@ class Scenario:
             "config": {**connection, "container": self.prefix + "-vectors", "vector_dimensions": 1536},
         })["destination"]
         self.destination_id = identifier(dest["id"])
-        # Create against EMPTY source, pause, then introduce the pending document.
+        # Register against an empty, newly owned source before introducing data.
         pipeline = self.call("POST", "pipelines", {
             "name": self.prefix + "-pipeline",
             "sources": [{"source_id": self.source_id, "content_fields": ["content"], "content_mode": "field"}],
-            "destination_id": self.destination_id, "docgrok_pipeline": EMBEDDING_MODEL,
+            "destination_id": self.destination_id, "docgrok_pipeline": self.embedding_model,
             "vector_index_path": "embedding", "processing_mode": "queue", "process_existing": True,
             "content_strategy": "chunk", "chunk_config": CHUNK, "metadata_fields": [],
         })["pipeline"]
         self.pipeline_id = identifier(pipeline["id"])
         self.report["fixture"] = {"source_id": self.source_id, "destination_id": self.destination_id,
-                                  "pipeline_id": self.pipeline_id, "database": DATABASE,
+                                  "pipeline_id": self.pipeline_id, "database": self.database,
                                   "source_container": self.prefix + "-source",
                                   "vector_container": self.prefix + "-vectors"}
         self.emit()
         self.owned_pipeline()
+
+    def create_fixture(self):
+        from chunker import chunk_text
+
+        self.create_resources()
         self.call("POST", "pipelines/" + self.pipeline_id + "/pause")
         require(self.owned_pipeline().get("status") == "paused", "fixture_pause_failed")
         self.report["fault_injected"] = ["paused_new_synthetic_pipeline_with_pending_document"]
@@ -338,7 +356,7 @@ class Scenario:
         def check():
             health = self.call("GET", "health/checks")
             for kind, item_id in (("sources", self.source_id), ("destinations", self.destination_id),
-                                  ("models", EMBEDDING_MODEL)):
+                                  ("models", self.embedding_model)):
                 row = next((r for r in health.get(kind, []) if r.get("id") == item_id), {})
                 if row.get("status") != "healthy":
                     return False
@@ -355,6 +373,9 @@ class Scenario:
         # Never trigger a broad health-check run across originals.
         self.wait(check, 360, "fresh_fixture_dependency_health_unavailable")
 
+    def validate_paused_fault(self):
+        require(self.owned_pipeline().get("status") == "paused" and not self.rows(), "fault_changed_before_approval")
+
     def request_and_approve(self):
         prompt = (
             f"Diagnose ONLY synthetic pipeline {self.pipeline_id} using diagnose_pipeline. "
@@ -366,12 +387,12 @@ class Scenario:
             "queue operations or model changes. Wait for the existing approval flow. "
             "After approval use runtime recovery evidence; idle, unknown or unchanged counts are not repair."
         )
-        proposed = self.stream("agent/chat", {"model_id": CHAT_MODEL,
+        proposed = self.stream("agent/chat", {"model_id": self.chat_model,
                                             "messages": [{"role": "user", "content": prompt}]})
         session_id, call_id = select_proposal(proposed, self.pipeline_id)
         pending = self.call("GET", "agent/sessions/" + session_id + "/approvals")
         validate_pending(pending, session_id, call_id, self.pipeline_id)
-        require(self.owned_pipeline().get("status") == "paused" and not self.rows(), "fault_changed_before_approval")
+        self.validate_paused_fault()
         self.report["approval"] = {"session_id": session_id, "call_id": call_id,
                                    "tool": "resume_pipeline", "args": {"pipeline_id": self.pipeline_id}}
         self.report["approval_attempts"] = 1
@@ -389,7 +410,9 @@ class Scenario:
                     if e["type"] == "tool_result" and e.get("id") == call_id]
         allowed_outcomes = {"VERIFIED_PROCESSING", "READY_IDLE", "NOT_VERIFIED", "ACTION_FAILED", "ACTION_NOT_EXECUTED"}
         self.report["runtime_outcome"] = outcomes[0] if outcomes and outcomes[0] in allowed_outcomes else "UNKNOWN"
-        self.report["runtime_proof"] = recovery_proof(approved, call_id, self.pipeline_id)
+        self.report["runtime_proof"] = recovery_proof(
+            approved, call_id, self.pipeline_id, expected_before=self.initial_embedded_count,
+        )
 
     def verify_data(self):
         def check():

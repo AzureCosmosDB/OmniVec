@@ -81,6 +81,20 @@ if (-not $ONELAKE_ICEBERG_ENABLED) { $ONELAKE_ICEBERG_ENABLED = "false" }
 if ($ONELAKE_ICEBERG_ENABLED -notin @("true", "false")) {
     throw 'OMNIVEC_ONELAKE_ICEBERG_ENABLED must be true or false.'
 }
+$AGENT_DEFAULT_MODEL_ID = Get-AzdValue "OMNIVEC_AGENT_DEFAULT_MODEL_ID"
+if ($AGENT_DEFAULT_MODEL_ID -and $AGENT_DEFAULT_MODEL_ID -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\z') {
+    throw 'OMNIVEC_AGENT_DEFAULT_MODEL_ID must be a registered model ID (1-160 ASCII identifier characters).'
+}
+$AGENT_IMAGE_TAG = Get-AzdValue "OMNIVEC_AGENT_IMAGE_TAG"
+if (-not $AGENT_IMAGE_TAG) { $AGENT_IMAGE_TAG = "latest" }
+if ($AGENT_IMAGE_TAG -cnotmatch '\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\z') {
+    throw 'OMNIVEC_AGENT_IMAGE_TAG must be a valid container image tag.'
+}
+$AGENT_ALLOW_K8S_REMEDIATION = Get-AzdValue "OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION"
+if (-not $AGENT_ALLOW_K8S_REMEDIATION) { $AGENT_ALLOW_K8S_REMEDIATION = "false" }
+if ($AGENT_ALLOW_K8S_REMEDIATION -cnotin @("true", "false")) {
+    throw 'OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION must be true or false.'
+}
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -151,6 +165,9 @@ az tag update --resource-id $tagResourceId --operation merge --tags `
     "omnivec-image-tag=$configuredImageTag" `
     "omnivec-sharepoint=$SHAREPOINT_ENABLED" `
     "omnivec-onelake-iceberg=$ONELAKE_ICEBERG_ENABLED" `
+    "omnivec-agent-model=$AGENT_DEFAULT_MODEL_ID" `
+    "omnivec-agent-image-tag=$AGENT_IMAGE_TAG" `
+    "omnivec-agent-k8s-remediation=$AGENT_ALLOW_K8S_REMEDIATION" `
     "omnivec-instance=$INSTANCE_ID" 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Warning 'Configuration was not saved to resource group tags; keep the local azd environment.'
@@ -511,6 +528,9 @@ if ($DO_BUILD) {
 }
 
 # -- Final image check: verify all required images exist, build any missing --
+if ($AGENT_IMAGE_TAG -ne "latest" -and -not (Test-ImageExists -Name "omnivec-agent" -Tag $AGENT_IMAGE_TAG)) {
+    throw "Pinned agent image omnivec-agent:$AGENT_IMAGE_TAG is missing from $ACR_NAME. Publish that exact tag before deployment; refusing to substitute latest."
+}
 Write-Host "`n`e[33mVerifying all required images exist in ACR...`e[0m"
 $missingImages = @()
 foreach ($image in $IMAGES) {
@@ -681,6 +701,9 @@ $helmArgs = @(
     "--set", "dotnetWorker.enabled=true",
     "--set", "sharepointWatcher.enabled=$SHAREPOINT_ENABLED",
     "--set", "onelakeIcebergWatcher.enabled=$ONELAKE_ICEBERG_ENABLED",
+    "--set-string", "agent.defaultModelId=$AGENT_DEFAULT_MODEL_ID",
+    "--set-string", "agent.image.tag=$AGENT_IMAGE_TAG",
+    "--set", "agent.allowKubernetesRemediation=$AGENT_ALLOW_K8S_REMEDIATION",
     "--set", "web.service.dnsLabel=$WEB_DNS_LABEL"
 )
 
@@ -714,9 +737,8 @@ $helmArgs += @(
     "--set", "blobIngestor.enabled=true"
 )
 
-# Image tags are NOT overridden here — postprovision imports every image
-# into the env-specific ACR tagged :latest (from OMNIVEC_IMAGE_TAG / branch),
-# so the default values.yaml (image.tag: latest) resolves for every service.
+# Imported images use :latest. An explicitly pinned agent tag must already
+# exist in the environment's ACR and is never substituted by an imported image.
 
 $helmArgs += @("--kube-context", $KUBE_CONTEXT, "--kubeconfig", $OMNIVEC_KUBECONFIG, "--wait", "--timeout", "10m")
 # Intentionally NO --atomic: on failure, --atomic runs `helm uninstall`, which

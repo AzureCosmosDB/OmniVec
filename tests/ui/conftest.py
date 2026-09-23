@@ -18,6 +18,11 @@ class QuietStaticHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         pass
 
+    def translate_path(self, path: str) -> str:
+        if path.startswith("/static/"):
+            path = path[len("/static"):]
+        return super().translate_path(path)
+
 
 @pytest.fixture(scope="module")
 def static_server_url() -> Iterator[str]:
@@ -91,7 +96,7 @@ def ui_page(browser: Browser, static_server_url: str) -> Iterator[tuple[Page, li
 
     page.route("**/api/**", handle_api)
     page.route("https://**/*", lambda route: route.abort())
-    page.goto(f"{static_server_url}/index.html", wait_until="domcontentloaded")
+    page.goto(f"{static_server_url}/index.html", wait_until="networkidle")
     yield page, requests
     assert page_errors == []
     page.close()

@@ -68,7 +68,7 @@ def test_cosmos_destination_wizard_scopes_role_and_checks_vectors(ui_page):
     assert page.locator("#destination-wizard-create").is_disabled()
     page.click("#test-dest-btn")
     page.locator("#dest-test-result").get_by_text("Connection Successful").wait_for()
-    assert page.get_by_text("/embedding", exact=True).is_visible()
+    page.get_by_text("/embedding", exact=True).wait_for(state="visible")
     assert page.locator("#destination-wizard-create").is_enabled()
 
     test_request = next(
@@ -178,7 +178,10 @@ def test_sharepoint_source_detail_uses_sharepoint_fields_and_payload(ui_page):
         """
     )
 
-    assert page.locator("#source-detail-info").get_by_text("SharePoint Online", exact=True).is_visible()
+    page.locator("#source-detail-modal").wait_for(state="visible")
+    page.locator("#source-detail-info").get_by_text(
+        "SharePoint Online", exact=True
+    ).wait_for(state="visible")
     assert page.locator("#detail-sp-site-id").input_value() == "contoso.sharepoint.com,site,web"
     assert page.locator("#detail-sp-drive-id").input_value() == "drive-id"
     assert page.locator("#detail-sp-folder-path").input_value() == "Policies"
@@ -191,8 +194,10 @@ def test_sharepoint_source_detail_uses_sharepoint_fields_and_payload(ui_page):
 
     page.click('#source-detail-modal [data-tab="auth"]')
     auth_panel = page.locator("#source-detail-config")
-    assert auth_panel.get_by_text("Sites.Selected", exact=True).first.is_visible()
-    assert auth_panel.get_by_text("Files.Read.All", exact=True).is_visible()
+    auth_panel.get_by_text("Sites.Selected", exact=True).first.wait_for(
+        state="visible"
+    )
+    auth_panel.get_by_text("Files.Read.All", exact=True).wait_for(state="visible")
 
     page.click('#source-detail-modal [data-tab="general"]')
     page.fill("#detail-sp-folder-path", "Policies/Published")
@@ -247,7 +252,7 @@ def test_all_connector_detail_pages_show_type_specific_fields(ui_page):
         page.evaluate(f'showSourceDetail("{source_id}")')
         page.locator("#source-detail-modal").wait_for(state="visible")
         for selector in selectors:
-            assert page.locator(selector).is_visible()
+            page.locator(selector).wait_for(state="visible")
         if source_id == "src-lake":
             general = page.locator("#source-detail-config").inner_text()
             for label in ["Warehouse", "Namespace", "Table", "Content Fields", "ID Field", "Poll Interval"]:
@@ -266,7 +271,7 @@ def test_all_connector_detail_pages_show_type_specific_fields(ui_page):
         page.evaluate(f'showDestinationDetail("{destination_id}")')
         page.locator("#destination-detail-modal").wait_for(state="visible")
         for selector in selectors:
-            assert page.locator(selector).is_visible()
+            page.locator(selector).wait_for(state="visible")
         if destination_id == "dst-lake":
             general = page.locator("#destination-detail-config").inner_text()
             for label in [

@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 # Initialize telemetry (in-memory MetricsStore always active; App Insights if configured)
 try:
@@ -1091,6 +1091,50 @@ def _agent_headers(request: Request) -> dict:
         "X-Caller-Id": str(auth.get("name") or auth.get("id") or "anonymous"),
         "X-Caller-Role": str(auth.get("role") or "reader"),
     }
+
+
+class AgentDiagnosticRequest(BaseModel):
+    pipeline_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+async def _agent_diagnostics_proxy(request: Request, pipeline_id: str | None = None):
+    if not _INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="Agent diagnostics are not configured.")
+    path = "/v1/diagnostics/pipeline" if pipeline_id else "/v1/diagnostics/system"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as client:
+            response = await client.request(
+                "POST" if pipeline_id else "GET", _AGENT_URL + path,
+                headers=_agent_headers(request),
+                **({"json": {"pipeline_id": pipeline_id}} if pipeline_id else {}),
+            )
+    except httpx.TimeoutException:
+        logger.warning("Agent diagnostics timed out")
+        raise HTTPException(status_code=504, detail="Diagnostics timed out. Retry a single pipeline scope.") from None
+    except httpx.RequestError:
+        logger.warning("Agent diagnostics service unavailable")
+        raise HTTPException(status_code=503, detail="Agent diagnostics service is unavailable.") from None
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=f"Agent diagnostics failed (HTTP {response.status_code}).")
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Agent returned an invalid diagnostic response.") from None
+    if (not isinstance(data, dict) or data.get("scope") != (pipeline_id or "system")
+            or data.get("status") not in {"HEALTHY", "READY_IDLE", "BLOCKED", "UNHEALTHY", "UNKNOWN"}
+            or any(not isinstance(data.get(key), list) for key in ("pipelines", "findings", "unknown"))):
+        raise HTTPException(status_code=502, detail="Agent returned an incomplete or mismatched diagnostic response.")
+    return data
+
+
+@app.get("/api/agent/diagnostics/system")
+async def agent_system_diagnostics(request: Request):
+    return await _agent_diagnostics_proxy(request)
+
+
+@app.post("/api/agent/diagnostics/pipeline")
+async def agent_pipeline_diagnostics(body: AgentDiagnosticRequest, request: Request):
+    return await _agent_diagnostics_proxy(request, body.pipeline_id)
 
 
 @app.post("/api/agent/chat")

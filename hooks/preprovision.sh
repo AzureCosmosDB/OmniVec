@@ -346,7 +346,10 @@ if [ "$RG_EXISTS" = "true" ]; then
     "omnivec-build-source:OMNIVEC_BUILD" \
     "omnivec-image-tag:OMNIVEC_IMAGE_TAG" \
     "omnivec-sharepoint:OMNIVEC_SHAREPOINT_ENABLED" \
-    "omnivec-onelake-iceberg:OMNIVEC_ONELAKE_ICEBERG_ENABLED"; do
+    "omnivec-onelake-iceberg:OMNIVEC_ONELAKE_ICEBERG_ENABLED" \
+    "omnivec-agent-model:OMNIVEC_AGENT_DEFAULT_MODEL_ID" \
+    "omnivec-agent-image-tag:OMNIVEC_AGENT_IMAGE_TAG" \
+    "omnivec-agent-k8s-remediation:OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION"; do
     _tag=$(echo "$_pair" | cut -d: -f1)
     _env=$(echo "$_pair" | cut -d: -f2)
     _configured=$(azd_get "$_env")

@@ -1,8 +1,8 @@
 """LLM client for the OmniVec Agent.
 
-The control plane owns registered CHAT model metadata. DocGrok's registry
-handles embeddings and does not expose the previously assumed chat route.
-The agent calls the registered provider's HTTPS chat endpoint with tool calling.
+The control plane owns registered CHAT model metadata. Unlike older agents
+using DocGrok's registry chat proxy, this agent calls the registered provider's
+HTTPS chat endpoint directly with tool calling.
 
   1. ``model_id`` arg on the request — looked up through ``/api/models``.
   2. ``AGENT_DEFAULT_MODEL_ID`` env var (same registry lookup).

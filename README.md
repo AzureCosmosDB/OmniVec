@@ -19,6 +19,28 @@ MSSQL              ─┘
 
 This guide walks you through deploying OmniVec and running your first end-to-end pipeline.
 
+### Operations console
+
+The desktop console uses a Web3-inspired visual design with persistent dark/light
+themes, keyboard-accessible navigation, and a source-to-pipeline-to-vector-store
+overview. The **Metrics** view separates runtime throughput, latency percentiles
+and job counters from the selected historical time range. Unavailable measurements
+remain unknown rather than turning into zero.
+
+**Diagnostics** provides read-only system or pipeline evidence without requiring
+a chat model: workload readiness, queue/dead-letter counters, dependency health,
+coverage gaps and prioritized next steps. **Recovery Agent** uses registered chat
+models for investigation and approval-gated repairs; readiness is not processing
+proof. See [the agent operational contract](docs/agent.md).
+
+Desktop browser regressions are in `tests\e2e\test_operations_console.py`. They
+are opt-in: provide `OMNIVEC_E2E_BASE_URL` for a localhost Kubernetes tunnel and
+`OMNIVEC_E2E_TOKEN` through the process environment, then run
+`python -m pytest tests\e2e\test_operations_console.py -q`. Set
+`OMNIVEC_E2E_CHAT=1` only with an approved chat deployment to include real
+read-only inference. Browser tests prohibit mutation/approval requests and do
+not replace ingestion or approved-repair E2E tests.
+
 ---
 
 ## Part 1 — Deploy OmniVec
@@ -390,6 +412,9 @@ This removes the resource group, all Azure services, and local environment confi
 | `OMNIVEC_FORCE_IMPORT` | No | `false` | Set in the shell environment to overwrite local tags from the selected channel |
 | `OMNIVEC_SHAREPOINT_ENABLED` | No | `false` | Deploy the SharePoint watcher alongside the required .NET worker and Service Bus |
 | `OMNIVEC_ONELAKE_ICEBERG_ENABLED` | No | `false` | Deploy the OneLake Iceberg watcher; requires Fabric, OneLake, and Service Bus permissions |
+| `OMNIVEC_AGENT_DEFAULT_MODEL_ID` | No | empty | Registered chat-model ID for troubleshooting; does not register a model or grant inference access |
+| `OMNIVEC_AGENT_IMAGE_TAG` | No | `latest` | Pin an already-published `omnivec-agent` tag in this environment's ACR; missing pins fail deployment |
+| `OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION` | No | `false` | Opt in to namespace-scoped agent restart/scale permissions; each action still needs operator approval |
 | `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
 
 ### What gets deployed

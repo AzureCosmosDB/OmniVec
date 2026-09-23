@@ -224,6 +224,26 @@ case "$ONELAKE_ICEBERG_ENABLED" in
   true|false) ;;
   *) printf 'OMNIVEC_ONELAKE_ICEBERG_ENABLED must be true or false.\n' >&2; exit 1 ;;
 esac
+AGENT_DEFAULT_MODEL_ID=$(get_azd_value "OMNIVEC_AGENT_DEFAULT_MODEL_ID")
+AGENT_IMAGE_TAG=$(get_azd_value "OMNIVEC_AGENT_IMAGE_TAG")
+AGENT_IMAGE_TAG=${AGENT_IMAGE_TAG:-latest}
+case "$AGENT_DEFAULT_MODEL_ID$AGENT_IMAGE_TAG" in
+  *[!A-Za-z0-9_.-]*) printf 'Agent model IDs and image tags must contain only ASCII identifier characters.\n' >&2; exit 1 ;;
+esac
+if [ -n "$AGENT_DEFAULT_MODEL_ID" ] && ! printf '%s' "$AGENT_DEFAULT_MODEL_ID" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$'; then
+  printf 'OMNIVEC_AGENT_DEFAULT_MODEL_ID must be a registered model ID (1-160 ASCII identifier characters).\n' >&2
+  exit 1
+fi
+if ! printf '%s' "$AGENT_IMAGE_TAG" | LC_ALL=C grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+  printf 'OMNIVEC_AGENT_IMAGE_TAG must be a valid container image tag.\n' >&2
+  exit 1
+fi
+AGENT_ALLOW_K8S_REMEDIATION=$(get_azd_value "OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION")
+AGENT_ALLOW_K8S_REMEDIATION=${AGENT_ALLOW_K8S_REMEDIATION:-false}
+case "$AGENT_ALLOW_K8S_REMEDIATION" in
+  true|false) ;;
+  *) printf 'OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION must be true or false.\n' >&2; exit 1 ;;
+esac
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -311,6 +331,9 @@ if az tag update --resource-id "$_RG_ID" --operation merge --tags \
     "omnivec-image-tag=$CONFIGURED_IMAGE_TAG" \
     "omnivec-sharepoint=$SHAREPOINT_ENABLED" \
     "omnivec-onelake-iceberg=$ONELAKE_ICEBERG_ENABLED" \
+    "omnivec-agent-model=$AGENT_DEFAULT_MODEL_ID" \
+    "omnivec-agent-image-tag=$AGENT_IMAGE_TAG" \
+    "omnivec-agent-k8s-remediation=$AGENT_ALLOW_K8S_REMEDIATION" \
     "omnivec-instance=$INSTANCE_ID" </dev/null >/dev/null 2>&1; then
   printf "  ${GREEN}Config saved to RG tags.${NC}\n"
 else
@@ -693,6 +716,10 @@ else
 fi
 
 # ── Final image check: verify all required images exist, build any missing ──
+if [ "$AGENT_IMAGE_TAG" != "latest" ] && ! image_exists "omnivec-agent" "$AGENT_IMAGE_TAG"; then
+  printf 'Pinned agent image omnivec-agent:%s is missing from %s. Publish that exact tag before deployment; refusing to substitute latest.\n' "$AGENT_IMAGE_TAG" "$ACR_NAME" >&2
+  exit 1
+fi
 printf "\n${YELLOW}Verifying all required images exist in ACR...${NC}\n"
 MISSING_IMAGES=""
 for image in $IMAGES; do
@@ -896,6 +923,11 @@ sharepointWatcher:
   enabled: ${SHAREPOINT_ENABLED}
 onelakeIcebergWatcher:
   enabled: ${ONELAKE_ICEBERG_ENABLED}
+agent:
+  defaultModelId: "${AGENT_DEFAULT_MODEL_ID}"
+  image:
+    tag: "${AGENT_IMAGE_TAG}"
+  allowKubernetesRemediation: ${AGENT_ALLOW_K8S_REMEDIATION}
 docgrok:
   global:
     imageRegistry: "${ACR_LOGIN_SERVER}"
