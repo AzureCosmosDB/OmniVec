@@ -215,7 +215,7 @@ function Add-ChangedImage {
     if ($Name -and -not $script:changedImages.Contains($Name)) {
         $script:changedImages.Add($Name)
     }
-    Add-ChangedImage -Name $FIRST_IMAGE
+    Mark-ImageUpdate
 }
 
 # Release channel tag — resolved once, used for BOTH import and helm overrides.
