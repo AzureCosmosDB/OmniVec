@@ -410,6 +410,8 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
                 required.add("omnivec-cosmos-changefeed")
             if st == "sharepoint":
                 required.add("omnivec-sharepoint-watcher")
+            if st in ("onelake-iceberg", "onelake_iceberg"):
+                required.add("omnivec-onelake-iceberg-watcher")
         for name in sorted(required):
             d = deployments.get(name)
             if not d:
@@ -433,16 +435,20 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
         embedded, source_count = _number(stats.get("embedded_count")), _number(stats.get("source_doc_count"))
         source_types = [s.get("type") for s in p.get("sources", [])]
         source_ids = p.get("source_ids") or [s.get("id") for s in p.get("sources", [])]
+        non_enumerable_sources = {
+            "azure_blob", "azure-blob", "blob", "sharepoint",
+            "onelake-iceberg", "onelake_iceberg",
+        }
         inventory_not_collected = (
             len(source_ids) > 1 or
-            bool(source_types) and all(t in ("azure_blob", "azure-blob", "blob") for t in source_types)
-            and stats.get("source_doc_count") is None
+            bool(source_types) and all(t in non_enumerable_sources for t in source_types)
+            and source_count is None
         )
         pl = []
         if len(source_ids) > 1:
             source_count = None
         if inventory_not_collected:
-            pl.append("Complete source inventory is not collected for Blob/multi-source pipelines; source coverage and catch-up are not verified.")
+            pl.append("Complete source inventory is not collected for connector-driven or multi-source pipelines; source coverage and catch-up are not verified.")
         backlog = (pending or 0) + (processing or 0)
         if source_count is not None and embedded is not None:
             backlog = max(backlog, source_count - embedded)

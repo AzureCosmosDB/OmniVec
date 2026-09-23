@@ -59,14 +59,15 @@ logs/configuration. Credential-shaped fields are scrubbed from tool results.
 Counts cannot prove semantic embedding quality or every document's correctness.
 
 Diagnostics distinguish missing required telemetry from intentionally absent
-inventory. The control plane does not enumerate Blob containers, and its source
-count does not cover all sources of a multi-source pipeline. These scopes cannot
-claim complete catch-up or idle from a zero job count. Increasing destination
-counts can still prove processing with healthy dependencies and preserved
-bindings; the response retains an explicit source-coverage limitation. Invalid
-or missing required counters still prevent verification. `repair_plan` orders
-concrete blockers before observation gaps and never authorizes an action.
-Agent read-permission failures are identified separately from ingestion faults.
+inventory. The control plane does not enumerate Blob, SharePoint or OneLake
+source inventories, and its source count does not cover all sources of a
+multi-source pipeline. These scopes cannot claim complete catch-up or idle from
+a zero job count. Increasing destination counts can still prove processing with
+healthy dependencies and preserved bindings; the response retains an explicit
+source-coverage limitation. Invalid or missing required counters still prevent
+verification. `repair_plan` orders concrete blockers before observation gaps
+and never authorizes an action. Agent read-permission failures are identified
+separately from ingestion faults.
 
 ## Practical runbooks
 
@@ -78,7 +79,7 @@ Agent read-permission failures are identified separately from ingestion faults.
 | Poison message / DLQ | Inspect failure metadata without exposing payload secrets. Correct the cause before bounded operator replay; account for duplicate delivery. The built-in replay facade currently **fails closed** rather than pretending to move messages. Purging never counts as repair. |
 | Disabled Blob event consumer | Enable the existing `ChangeFeed__BlobEventConsumerEnabled` setting through Helm. Verify Event Grid delivery, `blob-events` consumption, embedding subscription processing and destination writes. Do not recreate triggers blindly. |
 | Source permissions/credentials | Source owner restores required access for the existing identity. Do not bypass auth or request secrets in chat. Wait for fresh source health and verify ingestion. |
-| Dead poller / no progress | Compare source/destination/job counters over a source-appropriate window and inspect the responsible controller, change-feed processor, blob ingestor or SharePoint watcher. Quiet/idle alone is not a fault. Preserve checkpoints; fix the proven cause before restarting. |
+| Dead poller / no progress | Compare source/destination/job counters over a source-appropriate window and inspect the responsible controller, change-feed processor, blob ingestor, OneLake watcher or SharePoint watcher. Quiet/idle alone is not a fault. Preserve checkpoints; fix the proven cause before restarting. |
 | Bad chunk config | Correct size > 0, 0 ≤ overlap < size and unit `chars`/`tokens` in the existing edit flow. Preserve IDs/checkpoints; verify newly processed chunks. The agent does not silently rewrite pipeline configuration. |
 
 Destructive reset/purge and cancellation are excluded from routine repair.
