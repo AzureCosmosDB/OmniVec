@@ -204,6 +204,18 @@ Check ($source -match 'docgrok\.pipelineWorker\.image\.tag' -and
 Check ($source -match '\$script:immutableSourceBuild' -and
        $source -match '\$script:changedImages') 'immutable source builds avoid blanket restarts and track changed images'
 
+$addChangedImage = $ast.Find({
+    param($n)
+    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Add-ChangedImage'
+}, $true)
+Invoke-Expression $addChangedImage.Extent.Text
+$script:changedImages = [Collections.Generic.List[string]]::new()
+$script:imagesChanged = $false
+function Mark-ImageUpdate { $script:imagesChanged = $true }
+Add-ChangedImage -Name 'omnivec-api'
+Add-ChangedImage -Name 'omnivec-api'
+Check ($script:imagesChanged -and $script:changedImages.Count -eq 1) 'changed-image tracking invokes the marker without recursion and deduplicates names'
+
 $copyBuildTree = $ast.Find({
     param($n)
     $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Copy-MinimalBuildTree'
