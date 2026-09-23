@@ -27,7 +27,7 @@ def run_js(code):
 
 def test_all_inline_scripts_parse():
     scripts = re.findall(
-        r"<script(?:\s[^>]*)?>(.*?)</script>",
+        r"<script(?:\s[^>]*)?>(.*?)</script\s*>",
         HTML,
         re.IGNORECASE | re.DOTALL,
     )
