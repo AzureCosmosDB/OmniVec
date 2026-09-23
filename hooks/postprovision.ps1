@@ -836,7 +836,10 @@ if ($skipHelm) {
         'RequestTimeout','OperationTimedOut','503','502','504',
         'Service Unavailable','Temporary failure','Connection reset',
         'TLS handshake','InternalServerError','i/o timeout',
-        'context deadline exceeded','no such host','dial tcp'
+        'context deadline exceeded','no such host','dial tcp',
+        'forcibly closed','wsarecv','connection refused','unexpected EOF',
+        'transport is closing','client connection lost','stream error',
+        'another operation (install/upgrade/rollback) is in progress'
     )
     $helmRc = 1
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
@@ -866,6 +869,8 @@ if ($skipHelm) {
     if ($helmRc -ne 0) {
         Write-Host "`e[31mHelm deploy failed. Collecting pod diagnostics...`e[0m"
         kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -o wide
+        $warningEvents = (kubectl --context $KUBE_CONTEXT --request-timeout=30s get events -n omnivec `
+            --field-selector type=Warning --sort-by=.lastTimestamp 2>&1 | Select-Object -Last 30 | Out-String)
 
         $problemPods = kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec --no-headers 2>$null | `
             Where-Object { $_ -match "ImagePullBackOff|ErrImagePull|CrashLoopBackOff|Error|Pending" }
@@ -879,6 +884,9 @@ if ($skipHelm) {
             kubectl --context $KUBE_CONTEXT --request-timeout=30s describe pod $podName -n omnivec | Select-String -Pattern "Events:" -Context 0,60
             kubectl --context $KUBE_CONTEXT --request-timeout=30s logs $podName -n omnivec --tail=80 2>$null
         }
+        Write-Host "`n`e[33mRecommended next action:`e[0m"
+        Get-DeploymentRemediation -Evidence "$helmOutput`n$warningEvents" |
+            ForEach-Object { Write-Host "  - $_" }
         exit 1
     }
 }
@@ -907,8 +915,23 @@ kubectl --context $KUBE_CONTEXT --request-timeout=30s get pods -n omnivec -l app
 
 kubectl --context $KUBE_CONTEXT --request-timeout=5m rollout status deployment -n omnivec --timeout=5m
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "`e[31mOne or more deployments did not become ready.`e[0m"
-    exit 1
+    $recoveryTimeout = if ($env:OMNIVEC_ROLLOUT_RECOVERY_SEC) {
+        [int]$env:OMNIVEC_ROLLOUT_RECOVERY_SEC
+    } else { 600 }
+    Write-Host "`e[33mInitial rollout watch timed out; checking actual deployment convergence for up to ${recoveryTimeout}s...`e[0m"
+    if (-not (Wait-DeploymentsReady -Context $KUBE_CONTEXT -KubeConfig $OMNIVEC_KUBECONFIG `
+            -TimeoutSeconds $recoveryTimeout -PollSeconds 10)) {
+        Write-Host "`e[31mOne or more deployments did not converge after the recovery window.`e[0m"
+        kubectl --context $KUBE_CONTEXT --request-timeout=30s get deployment -n omnivec
+        $warningEvents = (kubectl --context $KUBE_CONTEXT --request-timeout=30s get events -n omnivec `
+            --field-selector type=Warning --sort-by=.lastTimestamp 2>&1 | Select-Object -Last 20 | Out-String)
+        Write-Host $warningEvents
+        Write-Host "`e[33mRecommended next action:`e[0m"
+        Get-DeploymentRemediation -Evidence $warningEvents |
+            ForEach-Object { Write-Host "  - $_" }
+        exit 1
+    }
+    Write-Host "  `e[32mAll deployments converged after the initial rollout watch timed out.`e[0m"
 }
 
 Write-Host "`n`e[33mWaiting for external IP...`e[0m"

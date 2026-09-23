@@ -62,7 +62,22 @@ retry_run "always" -- always_transient >/dev/null 2>&1 || _rc=$?
 _n=$(cat "$T3")
 [ "$_rc" -ne 0 ] && [ "$_n" = "3" ] && ok "gives up after max attempts" || bad "gives up after max attempts" "rc=$_rc calls=$_n"
 
-rm -f "$T" "$T2" "$T3"
+# ── 4b. Windows/AKS transport resets are transient ─────────────────────────
+T3B="$WORK_DIR/transport"; echo 0 > "$T3B"
+flaky_transport() {
+    n=$(cat "$T3B"); n=$((n+1)); echo "$n" > "$T3B"
+    if [ "$n" -lt 2 ]; then
+        echo "wsarecv: An existing connection was forcibly closed by the remote host" >&2
+        return 1
+    fi
+    return 0
+}
+_rc=0
+retry_run "transport-reset" -- flaky_transport >/dev/null 2>&1 || _rc=$?
+_n=$(cat "$T3B")
+[ "$_rc" -eq 0 ] && [ "$_n" = "2" ] && ok "retries AKS transport resets" || bad "AKS transport reset retry" "rc=$_rc calls=$_n"
+
+rm -f "$T" "$T2" "$T3" "$T3B"
 
 # ── 5. Excerpt is shown to stderr on transient retry ────────────────────────
 T4="$WORK_DIR/excerpt"; echo 0 > "$T4"

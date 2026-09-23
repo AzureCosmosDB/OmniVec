@@ -3,10 +3,10 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 HOOK="$ROOT/hooks/postprovision.sh"
-for fn in read_input build_image run_bounded_import import_image kubectl_omnivec apply_kubernetes_resource; do
+for fn in read_input build_image run_bounded_import import_image kubectl_omnivec apply_kubernetes_resource wait_deployments_ready print_deployment_remediation; do
   eval "$(sed -n "/^${fn}() {/,/^}/p" "$HOOK")"
 done
-GREEN='' CYAN='' RED='' NC=''
+GREEN='' CYAN='' YELLOW='' RED='' NC=''
 FORCE_IMPORT=false OMNIVEC_BUILD=true BUILD_MODE=docker
 ACR_NAME=mock ACR_LOGIN_SERVER=mock.invalid
 CALLS=""
@@ -93,10 +93,38 @@ if healthy "" || healthy "2 2 2   " || healthy "2 1 2 2 2 2" || healthy "2 2 2 1
 fi
 echo "OK empty, unobserved, and incomplete rollouts cannot pass health checks"
 
-if grep -Eq 'helm (rollback|uninstall) omnivec|cp -f .*HOME/.kube/config|adopt_orphaned_resources' "$HOOK"; then
-  echo "FAIL unsafe automatic deployment recovery"; exit 1
+kubectl_omnivec() {
+  printf '1 1 1 1 1 1\n'
+}
+wait_deployments_ready 0 1
+kubectl_omnivec() {
+  printf '2 1 1 0 1 1\n'
+}
+if wait_deployments_ready 0 1; then
+  echo "FAIL incomplete rollout passed convergence recovery"; exit 1
 fi
-echo "OK no automatic uninstall, ownership takeover, or default kubeconfig overwrite"
+echo "OK convergence recovery accepts only fully observed deployments"
+if sed -n '/^wait_deployments_ready() {/,/^}/p' "$HOOK" | grep -q 'while :'; then
+  echo "FAIL deployment convergence retry is unbounded"; exit 1
+fi
+echo "OK deployment convergence retry has an explicit attempt ceiling"
+
+_hint=$(print_deployment_remediation 'FailedScheduling: Too many pods')
+case "$_hint" in *"Scale the AKS node pool"*) ;; *) echo "FAIL capacity remediation guidance"; exit 1;; esac
+_hint=$(print_deployment_remediation 'ImagePullBackOff: manifest unknown')
+case "$_hint" in *"environment ACR"*) ;; *) echo "FAIL image remediation guidance"; exit 1;; esac
+echo "OK terminal deployment failures include actionable recovery guidance"
+
+if ! grep -q 'OMNIVEC_RECOVER_PENDING_HELM' "$HOOK" ||
+   ! grep -q 'pending-install' "$HOOK" ||
+   ! grep -q 'helm uninstall omnivec' "$HOOK" ||
+   ! grep -q 'helm rollback omnivec 0' "$HOOK"; then
+  echo "FAIL guarded interrupted Helm recovery missing"; exit 1
+fi
+if grep -Eq 'cp -f .*HOME/.kube/config|adopt_orphaned_resources' "$HOOK"; then
+  echo "FAIL unsafe ownership takeover or default kubeconfig overwrite"; exit 1
+fi
+echo "OK interrupted Helm recovery is guarded without ownership takeover"
 eval "$(sed -n '/^validate_system_pool() {/,/^}/p' "$ROOT/hooks/preprovision.sh")"
 validate_system_pool Standard_D4s_v5 2
 if validate_system_pool Standard_B4ms 2 2>/dev/null ||
@@ -125,4 +153,4 @@ rc=$?
 set -e
 [ "$rc" = 19 ]
 echo "OK resource apply failures propagate"
-echo "14 deployment checks passed"
+echo "17 deployment checks passed"
