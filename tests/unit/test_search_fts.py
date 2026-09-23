@@ -279,6 +279,46 @@ def test_search_one_index_fts_errors_on_pure_punctuation(search_mods):
 
 
 # ---------------------------------------------------------------------------
+# Hybrid RRF fusion
+# ---------------------------------------------------------------------------
+def test_rrf_fuses_same_document_from_hybrid_indexes(search_mods):
+    schemas, searcher = search_mods
+    merged = searcher._merge(
+        [
+            ("dest::vec", [{"id": "shared", "text": "vector result"}]),
+            ("dest::fts", [{"id": "shared", "text": "full-text result"}]),
+        ],
+        schemas.MergeConfig(strategy="rrf", rrf_k=60),
+        top_k=10,
+        fusion_groups={"dest::vec": "dest", "dest::fts": "dest"},
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["id"] == "shared"
+    assert merged[0]["index_id"] == "dest"
+    assert merged[0]["rrf_score"] == pytest.approx(2 / 61)
+    assert merged[0]["rank"] == 1
+
+
+def test_rrf_keeps_same_document_separate_without_fusion_group(search_mods):
+    schemas, searcher = search_mods
+    merged = searcher._merge(
+        [
+            ("dest::vec", [{"id": "shared"}]),
+            ("dest::fts", [{"id": "shared"}]),
+        ],
+        schemas.MergeConfig(strategy="rrf", rrf_k=60),
+        top_k=10,
+    )
+
+    assert len(merged) == 2
+    assert {result["index_id"] for result in merged} == {
+        "dest::vec",
+        "dest::fts",
+    }
+
+
+# ---------------------------------------------------------------------------
 # explain_search handles FTS without embedding
 # ---------------------------------------------------------------------------
 def test_explain_search_with_fts_index(search_mods):
