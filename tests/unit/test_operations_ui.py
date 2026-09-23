@@ -1,5 +1,6 @@
 """Execute operational UI calculations and parse the shipped scripts with Node."""
 import json
+from html.parser import HTMLParser
 from pathlib import Path
 import re
 import shutil
@@ -11,6 +12,26 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 HTML = (ROOT / "web" / "static" / "index.html").read_text(encoding="utf-8")
 SCRIPT = ROOT / "web" / "static" / "operations.js"
+
+
+class InlineScriptParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.scripts = []
+        self._current = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag.casefold() == "script" and "src" not in dict(attrs):
+            self._current = []
+
+    def handle_data(self, data):
+        if self._current is not None:
+            self._current.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.casefold() == "script" and self._current is not None:
+            self.scripts.append("".join(self._current))
+            self._current = None
 
 
 def run_js(code):
@@ -26,11 +47,9 @@ def run_js(code):
 
 
 def test_all_inline_scripts_parse():
-    scripts = re.findall(
-        r"<script(?:\s[^>]*)?>(.*?)</script\s*>",
-        HTML,
-        re.IGNORECASE | re.DOTALL,
-    )
+    parser = InlineScriptParser()
+    parser.feed(HTML)
+    scripts = parser.scripts
     result = run_js("const vm = require('vm'); const scripts = " + json.dumps(scripts) +
                     "; scripts.forEach(source => new vm.Script(source)); console.log(JSON.stringify(scripts.length));")
     assert result >= 1
