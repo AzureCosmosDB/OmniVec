@@ -14,7 +14,12 @@ public record EmbeddingResult(
     string SourceId = "",
     bool? StoreContent = null,
     List<string>? MetadataFields = null,
-    string? ContentField = null)
+    string? ContentField = null,
+    int? ChunkIndex = null,
+    int? ChunkCount = null,
+    string ModelName = "",
+    long SourceVersion = 0,
+    long PipelineRevision = 0)
 {
     /// <summary>
     /// Returns true when the named optional metadata field should be written.
@@ -28,6 +33,16 @@ public record EmbeddingResult(
 public interface IDestinationWriter
 {
     string DestinationType { get; }
+
+    Task ReplaceTextChunksAsync(Dictionary<string, object> config, DeleteRequest source,
+        List<EmbeddingResult> chunks, CancellationToken ct)
+        => throw new NotSupportedException("This destination does not support Cosmos text chunk replacement");
+
+    Task<bool> ReplaceSharePointAsync(
+        Dictionary<string, object> config,
+        SharePointReplacement replacement,
+        CancellationToken ct)
+        => throw new NotSupportedException("This destination does not support SharePoint synchronization");
 
     Task WriteBatchAsync(
         Dictionary<string, object> config,
@@ -43,11 +58,22 @@ public interface IDestinationWriter
     Task DeleteByRefAsync(
         Dictionary<string, object> config,
         List<DeleteRequest> requests,
-        CancellationToken ct) => Task.CompletedTask;
+        CancellationToken ct) => throw new NotSupportedException("This destination does not support delete propagation");
 }
 
 public record DeleteRequest(
     string SourceId,
     string SourceRef,
     string PartitionKeyValue,
-    string PipelineId);
+    string PipelineId,
+    HashSet<string>? KeepIds = null,
+    long SourceVersion = 0,
+    long PipelineRevision = 0);
+
+public record SharePointReplacement(
+    string Identity,
+    long Revision,
+    string SourceId,
+    string PipelineId,
+    string SourceRef,
+    List<EmbeddingResult> Chunks);

@@ -23,12 +23,13 @@ from hypothesis import given, strategies as st
 class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
-            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks"
+            "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks",
+            "onelake-iceberg", "sharepoint"
         }
 
     def test_destination_type_values(self, api_models):
         assert {e.value for e in api_models.DestinationType} == {
-            "cosmosdb-vector", "pgvector", "mssql"
+            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg"
         }
 
     def test_job_status_values(self, api_models):
@@ -74,6 +75,52 @@ class TestSource:
     def test_invalid_config_type(self, api_models):
         with pytest.raises(ValidationError):
             api_models.Source(name="x", type=api_models.SourceType.HTTP, config="not-a-dict")
+
+    def test_sharepoint_round_trip(self, api_models):
+        config = api_models.SharePointSourceConfig(
+            site_id="contoso.sharepoint.com,site-guid,web-guid",
+            drive_id="drive-guid",
+            folder_path="Shared Documents/Policies",
+        )
+        source = api_models.Source(
+            name="Policies",
+            type=api_models.SourceType.SHAREPOINT,
+            config=config.model_dump(),
+        )
+        assert api_models.Source(**source.model_dump()) == source
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("site_id", " "),
+            ("drive_id", ""),
+            ("poll_interval_seconds", 9),
+            ("max_file_size_bytes", 0),
+            ("max_file_size_bytes", 50 * 1024 * 1024 + 1),
+            ("auth_type", "client-secret"),
+            ("file_types", ["../pdf"]),
+        ],
+    )
+    def test_sharepoint_rejects_invalid_config(self, api_models, field, value):
+        config = {
+            "site_id": "contoso.sharepoint.com,site-guid,web-guid",
+            "drive_id": "drive-guid",
+            field: value,
+        }
+        with pytest.raises(ValidationError):
+            api_models.SharePointSourceConfig(**config)
+
+    def test_sharepoint_normalizes_config(self, api_models):
+        config = api_models.SharePointSourceConfig(
+            site_id="  contoso.sharepoint.com,site-guid,web-guid ",
+            drive_id=" drive-guid ",
+            folder_path="/Shared Documents/Policies/",
+            file_types=[".PDF", "pdf", " DOCX "],
+        )
+        assert config.site_id == "contoso.sharepoint.com,site-guid,web-guid"
+        assert config.drive_id == "drive-guid"
+        assert config.folder_path == "Shared Documents/Policies"
+        assert config.file_types == ["pdf", "docx"]
 
     @given(st.text(min_size=1, max_size=40))
     def test_name_text_round_trip(self, api_models, name):
@@ -146,6 +193,36 @@ class TestPipeline:
             vector_index_path="/x",
         )
         assert p.status == api_models.PipelineStatus.ACTIVE
+
+    def test_sharepoint_identity_is_pipeline_scoped_and_validated(self, api_models):
+        source = api_models.PipelineSource(
+            source_id="s1",
+            sharepoint_identity={
+                "tenant_id": "11111111-1111-1111-1111-111111111111",
+                "client_id": "22222222-2222-2222-2222-222222222222",
+            },
+        )
+        assert source.sharepoint_identity.tenant_id == "11111111-1111-1111-1111-111111111111"
+        with pytest.raises(ValidationError):
+            api_models.PipelineSource(
+                source_id="s1",
+                sharepoint_identity={"tenant_id": "not-a-guid", "client_id": "also-bad"},
+            )
+
+    def test_onelake_identity_is_pipeline_scoped_and_validated(self, api_models):
+        source = api_models.PipelineSource(
+            source_id="s1",
+            onelake_identity={
+                "tenant_id": "11111111-1111-1111-1111-111111111111",
+                "client_id": "22222222-2222-2222-2222-222222222222",
+            },
+        )
+        assert source.onelake_identity.client_id == "22222222-2222-2222-2222-222222222222"
+        with pytest.raises(ValidationError):
+            api_models.PipelineSource(
+                source_id="s1",
+                onelake_identity={"tenant_id": "not-a-guid", "client_id": "also-bad"},
+            )
 
 
 # ===========================================================================
@@ -300,3 +377,145 @@ class TestHTTPConfig:
     def test_url_required(self, api_models):
         with pytest.raises(ValidationError):
             api_models.HTTPConfig(method="GET")
+
+
+class TestOneLakeIcebergConfig:
+    def test_source_defaults_and_round_trip(self, api_models):
+        config = api_models.OneLakeIcebergSourceConfig(
+            warehouse="workspace/item", namespace="dbo", table="documents"
+        )
+        assert config.catalog_uri == "https://onelake.table.fabric.microsoft.com/iceberg"
+        assert api_models.OneLakeIcebergSourceConfig(**config.model_dump()) == config
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("catalog_uri", "https://attacker.example/iceberg"),
+            ("checkpoint_account_url", "https://attacker.example"),
+        ],
+    )
+    def test_source_rejects_untrusted_token_hosts(self, api_models, field, value):
+        with pytest.raises(Exception):
+            api_models.OneLakeIcebergSourceConfig(
+                warehouse="workspace/lakehouse",
+                namespace="dbo",
+                table="documents",
+                **{field: value},
+            )
+
+    def test_destination_defaults_and_round_trip(self, api_models):
+        config = api_models.OneLakeIcebergDestinationConfig(
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            spark_job_definition_item_id="job-definition",
+            staging_file_system="workspace",
+            target_table="dbo.embeddings",
+        )
+        assert config.writeback_columns.embedding_field == "embedding"
+        assert config.staging_path == "lakehouse/Files/omnivec/staging"
+        assert api_models.OneLakeIcebergDestinationConfig(**config.model_dump()) == config
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("fabric_api_base_url", "https://attacker.example/v1"),
+            ("staging_account_url", "https://attacker.example"),
+        ],
+    )
+    def test_destination_rejects_untrusted_token_hosts(self, api_models, field, value):
+        with pytest.raises(Exception):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace",
+                lakehouse_item_id="lakehouse",
+                spark_job_definition_item_id="job-definition",
+                staging_file_system="workspace",
+                target_table="dbo.embeddings",
+                **{field: value},
+            )
+
+    def test_garnet_mirror_defaults_to_self_hosted_auth(self, api_models):
+        config = api_models.OneLakeIcebergDestinationConfig(
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            spark_job_definition_item_id="job-definition",
+            staging_file_system="workspace",
+            target_table="dbo.embeddings",
+            mirror={
+                "type": "garnet",
+                "config": {"endpoint": "garnet.internal:6380"},
+            },
+        )
+        assert config.mirror.config["vector_set"] == "omnivec-vectors"
+        assert config.mirror.config["use_entra_auth"] is False
+
+    def test_legacy_redis_mirror_preserves_entra_default(self, api_models):
+        config = api_models.OneLakeIcebergDestinationConfig(
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            spark_job_definition_item_id="job-definition",
+            staging_file_system="workspace",
+            target_table="dbo.embeddings",
+            mirror={
+                "type": "redis",
+                "config": {"endpoint": "cache.example:6380", "key_prefix": "legacy"},
+            },
+        )
+        assert config.mirror.config["key_prefix"] == "legacy"
+        assert config.mirror.config["use_entra_auth"] is True
+
+    def test_garnet_boolean_strings_are_parsed_strictly(self, api_models):
+        config = api_models.OneLakeIcebergDestinationConfig(
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            spark_job_definition_item_id="job-definition",
+            staging_file_system="workspace",
+            target_table="dbo.embeddings",
+            mirror={
+                "type": "garnet",
+                "config": {
+                    "endpoint": "garnet.internal:6380",
+                    "tls": "false",
+                    "use_entra_auth": "false",
+                },
+            },
+        )
+        assert config.mirror.config["tls"] is False
+        assert config.mirror.config["use_entra_auth"] is False
+
+    def test_destination_rejects_unsafe_writeback_column(self, api_models):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace", spark_job_definition_item_id="job-definition",
+                lakehouse_item_id="lakehouse",
+                staging_file_system="workspace", target_table="dbo.embeddings",
+                writeback_columns={"embedding_field": "embedding; DROP TABLE rows"},
+            )
+
+    @pytest.mark.parametrize("warehouse", ["workspace", "workspace/item/extra", "../item"])
+    def test_source_rejects_invalid_warehouse(self, api_models, warehouse):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergSourceConfig(
+                warehouse=warehouse, namespace="dbo", table="documents"
+            )
+
+    @pytest.mark.parametrize("target_table", ["dbo.documents;DROP", "dbo..documents", "dbo/documents"])
+    def test_destination_rejects_unsafe_target_table(self, api_models, target_table):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace",
+                lakehouse_item_id="lakehouse",
+                spark_job_definition_item_id="job-definition",
+                staging_file_system="workspace",
+                target_table=target_table,
+            )
+
+    def test_destination_rejects_staging_path_traversal(self, api_models):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace",
+                lakehouse_item_id="lakehouse",
+                spark_job_definition_item_id="job-definition",
+                staging_file_system="workspace",
+                staging_path="item/../Files/staging",
+                target_table="dbo.documents",
+            )

@@ -50,6 +50,10 @@ class CheckpointManager:
         store = get_store()
         try:
             doc = store.get(self.checkpoint_id, partition_key="checkpoint")
+            if doc is None:
+                self._current_etag = None
+                self._checkpoint = None
+                return None
             self._current_etag = doc.get("_etag")
             self._checkpoint = {
                 k: v for k, v in doc.items() if not k.startswith("_")
@@ -62,6 +66,8 @@ class CheckpointManager:
             )
             return self._checkpoint
         except CosmosResourceNotFoundError:
+            self._current_etag = None
+            self._checkpoint = None
             logger.info("No existing checkpoint for %s", self.checkpoint_id)
             return None
 
@@ -109,25 +115,20 @@ class CheckpointManager:
         try:
             if self._current_etag:
                 # Update with etag check
-                store.replace_with_etag(checkpoint, self._current_etag)
+                saved = store.replace_with_etag(checkpoint, self._current_etag)
             else:
                 # First save - try create first to avoid race condition
                 # If another worker already created it, we'll catch the error and load
                 try:
-                    store.create(checkpoint)
+                    saved = store.create(checkpoint)
                 except CosmosResourceExistsError:
-                    # Another worker created it first - reload and retry with etag
+                    # Our state predates the winning writer; do not overwrite it.
                     logger.info("Checkpoint %s already exists, reloading", self.checkpoint_id)
                     self.load()
-                    if self._current_etag:
-                        store.replace_with_etag(checkpoint, self._current_etag)
-                    else:
-                        # Still no etag means load failed - don't overwrite
-                        return False
+                    return False
 
-            # Update local etag
-            doc = store.get(self.checkpoint_id, partition_key="checkpoint")
-            self._current_etag = doc.get("_etag")
+            # Use the write response, not a later read of another worker's update.
+            self._current_etag = saved.get("_etag")
             self._checkpoint = checkpoint
 
             logger.debug(
@@ -158,6 +159,8 @@ class CheckpointManager:
             logger.info("Reset checkpoint %s", self.checkpoint_id)
             return True
         except CosmosResourceNotFoundError:
+            self._current_etag = None
+            self._checkpoint = None
             return True
         except Exception as e:
             logger.error("Failed to reset checkpoint %s: %s", self.checkpoint_id, e)

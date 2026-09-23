@@ -1,0 +1,39 @@
+{{- if .Values.onelakeIcebergWatcher.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-onelake-iceberg-watcher
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: omnivec-onelake-iceberg-watcher
+    {{- include "omnivec.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.onelakeIcebergWatcher.replicaCount }}
+  selector:
+    matchLabels:
+      app: omnivec-onelake-iceberg-watcher
+  template:
+    metadata:
+      labels:
+        app: omnivec-onelake-iceberg-watcher
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      containers:
+        - name: onelake-iceberg-watcher
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.onelakeIcebergWatcher.image.repository }}:{{ .Values.onelakeIcebergWatcher.image.tag }}
+          imagePullPolicy: {{ .Values.onelakeIcebergWatcher.image.pullPolicy }}
+          env:
+            - name: OMNIVEC_API_BASE_URL
+              value: "http://omnivec-api:80"
+            - name: ONELAKE_ICEBERG_SERVICEBUS_NAMESPACE
+              value: {{ .Values.azure.serviceBus.namespace | quote }}
+            - name: ONELAKE_ICEBERG_SERVICEBUS_TOPIC
+              value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            - name: ONELAKE_ICEBERG_DISCOVERY_INTERVAL_SECONDS
+              value: {{ .Values.onelakeIcebergWatcher.discoveryIntervalSeconds | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+          resources:
+            {{- toYaml .Values.onelakeIcebergWatcher.resources | nindent 12 }}
+{{- end }}

@@ -1,6 +1,6 @@
 ﻿# OmniVec End-to-End Demo — Fully Automated
 # Creates environment, provisions infra, registers model, creates pipeline, verifies it works
-# Tests both queue mode (CFP → jobs → worker → destination) and inline mode (CFP embeds directly into source)
+# Tests queue mode across containers and inline mode with a separate same-container pipeline.
 #
 # Usage:
 #   pwsh scripts/e2e-demo.ps1               # Run all steps (1-11)
@@ -16,6 +16,8 @@ param(
     [switch]$SkipQueue, # Skip queue-mode steps (8-9); inline mode only
     [Alias('h','?')][switch]$Help,
     [string]$EnvName = $env:AZURE_ENV_NAME,
+    [string]$ServerUrl,
+    [string]$KubeConfig,
     [string]$AdminToken = $env:OMNIVEC_ADMIN_TOKEN,
     [string]$AoaiEndpoint = $env:AOAI_ENDPOINT,
     [string]$AoaiKey = $env:AOAI_KEY,
@@ -46,6 +48,8 @@ OPTIONS:
   -FromStep N             Start at step N (1-12). Auto-resumes from last
                           successful step via .e2e-checkpoint if present.
   -EnvName NAME           azd environment name.
+  -ServerUrl URL          Override the API URL (e.g. a local kubectl tunnel).
+  -KubeConfig PATH        Use a dedicated kubeconfig without changing the default.
   -AdminToken TOKEN       OmniVec admin token (skips auto-discovery).
   -AoaiEndpoint URL       Azure OpenAI endpoint.
   -AoaiKey KEY            Azure OpenAI API key.
@@ -90,7 +94,7 @@ STEPS (12 total):
    8. Create pipeline
    9. Upload sample documents
   10. Verify queue-mode embeddings land in destination
-  11. Verify inline-mode embeddings patched back to source
+  11. Verify inline-mode embeddings in a separate same-container pipeline
   12. Vector search smoke test
 
 Linux/macOS/WSL: use the shell variant instead:
@@ -222,10 +226,20 @@ $MODEL_NAME      = "azure-openai-embed"
 $SOURCE_NAME     = "demo-cosmosdb-source"
 $DEST_NAME       = "demo-vector-store"
 $PIPELINE_NAME   = "demo-pipeline"
+$INLINE_SOURCE_NAME = "demo-inline-source"
+$INLINE_DEST_NAME = "demo-inline-vector-store"
+$INLINE_PIPELINE_NAME = "demo-inline-pipeline"
+$INLINE_CONTAINER = "inline-documents"
+$SOURCE_CONTAINER = if ($SkipQueue) { "vectors" } else { "test-documents" }
 $AOAI_ENDPOINT   = $AoaiEndpoint
 $AOAI_KEY        = $AoaiKey
 $AOAI_DEPLOYMENT = $AoaiDeployment
 $AOAI_DIMS       = $AoaiDims
+$kubeConfigArgs = @()
+if ($KubeConfig) {
+    $env:KUBECONFIG = $KubeConfig
+    $kubeConfigArgs = @('--file', $KubeConfig)
+}
 
 if ($FromStep -le 6) {
     if (-not $AOAI_ENDPOINT) {
@@ -304,12 +318,12 @@ if ($Existing) {
     $ADMIN_TOKEN = $AdminToken
 
     # Get AKS credentials
-    az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing 2>$null
+    az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing @kubeConfigArgs 2>$null
 
     # Get server IP
     $SERVER = kubectl get svc omnivec-web -n omnivec -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null
     if (-not $SERVER) { LogErr "Failed to get external IP"; exit 1 }
-    $SERVER_URL = "http://$SERVER"
+    $SERVER_URL = if ($ServerUrl) { $ServerUrl.TrimEnd('/') } else { "http://$SERVER" }
 
     LogOk "AKS:    $AKS_CLUSTER"
     LogOk "RG:     $RESOURCE_GROUP"
@@ -407,9 +421,8 @@ if (-not $AKS_CLUSTER -or -not $RESOURCE_GROUP -or -not $ADMIN_TOKEN) {
     LogErr "Missing required azd outputs (AKS cluster/resource group/admin token)."
     exit 1
 }
-az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing 2>$null
+az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER --overwrite-existing @kubeConfigArgs 2>$null
 
-Log "  Admin Token: $ADMIN_TOKEN"
 Log "  AKS:         $AKS_CLUSTER"
 
 # Wait for external IP
@@ -421,7 +434,7 @@ for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 5
 }
 if (-not $SERVER) { LogErr "Failed to get external IP"; exit 1 }
-$SERVER_URL = "http://$SERVER"
+$SERVER_URL = if ($ServerUrl) { $ServerUrl.TrimEnd('/') } else { "http://$SERVER" }
 LogOk "Server: $SERVER_URL"
 
 # Wait for API
@@ -604,22 +617,22 @@ if ($FromStep -le 6) {
 if ($FromStep -le 7) {
     LogStep 7 "Creating source and destination..."
 
-    # Clean up any existing resources from previous runs
-    try {
-        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
-        foreach ($p in $existing.pipelines) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
-    } catch {}
-    try {
-        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
-        foreach ($s in $existing.sources) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
-    } catch {}
-    try {
-        $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN"; "Content-Type" = "application/json" }
-        foreach ($d in $existing.destinations) { try { Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers @{ "Authorization" = "Bearer $ADMIN_TOKEN" } | Out-Null } catch {} }
-    } catch {}
+    # Remove only this demo's entities, never unrelated pipelines or connectors.
+    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
+    foreach ($p in ($existing.pipelines | Where-Object { $_.name -in @($PIPELINE_NAME, $INLINE_PIPELINE_NAME) })) {
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$($p.id)" -Method DELETE -Headers $apiHeaders | Out-Null
+    }
+    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $apiHeaders
+    foreach ($s in ($existing.sources | Where-Object { $_.name -in @($SOURCE_NAME, $INLINE_SOURCE_NAME) })) {
+        Invoke-RestMethod -Uri "$SERVER_URL/api/sources/$($s.id)" -Method DELETE -Headers $apiHeaders | Out-Null
+    }
+    $existing = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $apiHeaders
+    foreach ($d in ($existing.destinations | Where-Object { $_.name -in @($DEST_NAME, $INLINE_DEST_NAME) })) {
+        Invoke-RestMethod -Uri "$SERVER_URL/api/destinations/$($d.id)" -Method DELETE -Headers $apiHeaders | Out-Null
+    }
 
     $srcBody = @{ name = $SOURCE_NAME; type = "cosmosdb"; config = @{
-        endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = "test-documents"
+        endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = $SOURCE_CONTAINER
         auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID
     }} | ConvertTo-Json -Depth 5
     $srcResult = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Method POST -Headers $apiHeaders -Body $srcBody
@@ -692,7 +705,7 @@ from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
 client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred, connection_timeout=30)
-c = client.get_database_client("testdb").get_container_client("test-documents")
+c = client.get_database_client("testdb").get_container_client("$SOURCE_CONTAINER")
 docs = [
     {"id": "doc-001", "title": "Azure Cosmos DB", "content": "Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling.", "category": "database"},
     {"id": "doc-002", "title": "Azure Kubernetes Service", "content": "AKS simplifies deploying managed Kubernetes clusters in Azure by offloading operational overhead.", "category": "compute"},
@@ -794,6 +807,44 @@ if ($SkipQueue) {
         LogErr "Queue mode verification failed: embedded_count is 0."
         exit 1
     }
+    Invoke-PodPython @"
+import os, math, hashlib, time, uuid
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID")), connection_timeout=30)
+db = client.get_database_client("testdb")
+source = db.get_container_client("test-documents")
+destination = db.get_container_client("vectors")
+deadline = time.monotonic() + 180
+while True:
+    rows = list(destination.query_items("SELECT * FROM c", enable_cross_partition_query=True))
+    if len(rows) == 3:
+        break
+    assert time.monotonic() < deadline, "Queue mode did not write all three destination documents"
+    time.sleep(5)
+assert {d["id"] for d in rows} == {"doc-001", "doc-002", "doc-003"}
+assert all(len(d.get("embedding", [])) == $AOAI_DIMS and all(math.isfinite(x) for x in d["embedding"]) and any(x != 0 for x in d["embedding"]) for d in rows), "Invalid destination vectors"
+before = destination.read_item("doc-001", partition_key="doc-001")
+doc = source.read_item("doc-001", partition_key="doc-001")
+doc["content"] = "Azure Cosmos DB is a globally distributed multi-model database service providing turnkey global distribution with elastic scaling. Synthetic vector search update " + uuid.uuid4().hex
+expected = hashlib.sha256(doc["content"].encode("utf-8")).hexdigest()
+source.upsert_item(doc)
+deadline = time.monotonic() + 240
+while True:
+    updated = destination.read_item("doc-001", partition_key="doc-001")
+    if updated.get("content_hash") == expected:
+        assert updated.get("content") == doc["content"], "Destination content is stale after its vector changed"
+        assert len(updated.get("embedding", [])) == $AOAI_DIMS and all(math.isfinite(x) for x in updated["embedding"])
+        assert updated["embedding"] != before["embedding"], "Source update did not change its vector"
+        count = list(destination.query_items("SELECT VALUE COUNT(1) FROM c", enable_cross_partition_query=True))[0]
+        assert count == 3, "Update created duplicate destination documents"
+        assert "embedding" not in source.read_item("doc-001", partition_key="doc-001"), "Queue mode wrote a vector into the source"
+        print("QUEUE_VERIFIED: 3 valid vectors; updated text, hash and vector; no duplicates or source embedding")
+        break
+    assert time.monotonic() < deadline, "Source update did not propagate within 240 seconds"
+    time.sleep(5)
+"@
+    if ($LASTEXITCODE -ne 0) { throw "Queue destination/update verification failed." }
     Save-Checkpoint 9
 } else {
     LogErr "No pipeline found for queue-mode verification."
@@ -801,29 +852,68 @@ if ($SkipQueue) {
 }
 
 # =============================================================================
-# STEP 10: Switch to inline mode, reset, reprocess same docs
+# STEP 10: Test inline mode with an independent same-container pipeline
 # =============================================================================
 if ($FromStep -le 10 -and $PIP_ID) {
     if ($SkipQueue) {
         LogStep 10 "Waiting for inline-mode embeddings (queue skipped — no reset needed)..."
+        $INLINE_PIP_ID = $PIP_ID
+        $INLINE_CONTAINER = $SOURCE_CONTAINER
     } else {
-        LogStep 10 "Switching pipeline to inline mode, resetting..."
-
-        # Pause pipeline before switching mode
-        try { Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/pause" -Method POST -Headers $apiHeaders | Out-Null } catch {}
-
-        # Switch processing mode to inline
-        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/processing-mode/inline" -Method POST -Headers $apiHeaders | Out-Null
-        LogOk "Switched to inline mode"
-
-        # Reset pipeline — forces CFP to reprocess all docs from the beginning
-        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/reset" -Method POST -Headers $apiHeaders | Out-Null
-        LogOk "Pipeline reset — will reprocess all docs in inline mode"
-
-        # Resume pipeline
-        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
-        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
-        LogOk "Pipeline resumed (inline mode). Waiting for reprocessing..."
+        LogStep 10 "Creating a separate same-container inline pipeline..."
+        Invoke-PodPython @"
+import os
+from azure.cosmos import CosmosClient
+from azure.identity import DefaultAzureCredential
+client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID")) )
+db = client.get_database_client("testdb")
+vp = {"vectorEmbeddings": [{"path": "/embedding", "dataType": "float32", "distanceFunction": "cosine", "dimensions": $AOAI_DIMS}]}
+ip = {"includedPaths": [{"path": "/*"}], "excludedPaths": [{"path": "/embedding/*"}], "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}]}
+target = db.create_container_if_not_exists(id="$INLINE_CONTAINER", partition_key={"paths": ["/id"], "kind": "Hash"}, vector_embedding_policy=vp, indexing_policy=ip)
+for doc in db.get_container_client("test-documents").query_items("SELECT * FROM c", enable_cross_partition_query=True):
+    target.upsert_item({k: v for k, v in doc.items() if not k.startswith("_")})
+print("Inline test container seeded.")
+"@
+        if ($LASTEXITCODE -ne 0) { throw "Inline container setup failed." }
+        $inlineConfig = @{
+            endpoint = $TEST_COSMOS_ENDPOINT; database = "testdb"; container = $INLINE_CONTAINER
+            auth_type = "managed-identity"; client_id = $IDENTITY_CLIENT_ID; vector_dimensions = $AOAI_DIMS
+        }
+        $sources = Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Headers $apiHeaders
+        $inlineSource = $sources.sources | Where-Object { $_.name -eq $INLINE_SOURCE_NAME } | Select-Object -First 1
+        if (-not $inlineSource) {
+            $body = @{name=$INLINE_SOURCE_NAME; type="cosmosdb"; config=$inlineConfig} | ConvertTo-Json -Depth 5
+            $inlineSource = (Invoke-RestMethod -Uri "$SERVER_URL/api/sources" -Method POST -Headers $apiHeaders -Body $body).source
+        }
+        $destinations = Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Headers $apiHeaders
+        $inlineDestination = $destinations.destinations | Where-Object { $_.name -eq $INLINE_DEST_NAME } | Select-Object -First 1
+        if (-not $inlineDestination) {
+            $body = @{name=$INLINE_DEST_NAME; type="cosmosdb-vector"; config=$inlineConfig} | ConvertTo-Json -Depth 5
+            $inlineDestination = (Invoke-RestMethod -Uri "$SERVER_URL/api/destinations" -Method POST -Headers $apiHeaders -Body $body).destination
+        }
+        foreach ($entity in @($inlineSource, $inlineDestination)) {
+            if ($entity.config.endpoint.TrimEnd('/') -ne $TEST_COSMOS_ENDPOINT.TrimEnd('/') -or $entity.config.database -ne "testdb" -or $entity.config.container -ne $INLINE_CONTAINER) {
+                throw "Existing inline demo configuration points at a different container."
+            }
+        }
+        $pipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
+        $inlinePipeline = $pipelines.pipelines | Where-Object { $_.name -eq $INLINE_PIPELINE_NAME } | Select-Object -First 1
+        if (-not $inlinePipeline) {
+            $body = @{
+                name=$INLINE_PIPELINE_NAME; sources=@(@{source_id=$inlineSource.id; filters=@{}; content_fields=@("content")})
+                destination_id=$inlineDestination.id; docgrok_pipeline=$MODEL_ID; vector_index_path="embedding"
+                process_existing=$true; processing_mode="inline"
+            } | ConvertTo-Json -Depth 5
+            $inlinePipeline = (Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Method POST -Headers $apiHeaders -Body $body).pipeline
+        } elseif ($inlinePipeline.processing_mode -ne "inline" -or $inlinePipeline.destination_id -ne $inlineDestination.id -or
+                  @($inlinePipeline.sources).Count -ne 1 -or $inlinePipeline.sources[0].source_id -ne $inlineSource.id) {
+            throw "Existing inline demo pipeline does not match the dedicated inline source and destination."
+        }
+        $INLINE_PIP_ID = $inlinePipeline.id
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$INLINE_PIP_ID/reset" -Method POST -Headers $apiHeaders | Out-Null
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$INLINE_PIP_ID/resume" -Method POST -Headers $apiHeaders | Out-Null
+        Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines/$INLINE_PIP_ID/run" -Method POST -Headers $apiHeaders | Out-Null
+        LogOk "Inline pipeline activated: $INLINE_PIP_ID"
     }
 
     # Poll source container until embeddings appear or 120s timeout
@@ -835,11 +925,11 @@ from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
 client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
-c = client.get_database_client("testdb").get_container_client("test-documents")
+c = client.get_database_client("testdb").get_container_client("$INLINE_CONTAINER")
 count = sum(1 for d in c.query_items("SELECT c.id FROM c WHERE IS_DEFINED(c.embedding)", enable_cross_partition_query=True))
 print(count)
 "@
-        if ($pollResult -match "3") {
+        if ($LASTEXITCODE -eq 0 -and ("$pollResult".Trim() -eq "3")) {
             $inlineReady = $true
             break
         }
@@ -859,28 +949,35 @@ print(count)
 # STEP 11: Verify inline mode results
 # =============================================================================
 LogStep 11 "Verifying inline mode results..."
-if (-not $PIP_ID) {
+if ($SkipQueue) {
+    $INLINE_PIP_ID = $PIP_ID
+    $INLINE_CONTAINER = $SOURCE_CONTAINER
+} elseif (-not $INLINE_PIP_ID) {
+    $pipelines = Invoke-RestMethod -Uri "$SERVER_URL/api/pipelines" -Headers $apiHeaders
+    $INLINE_PIP_ID = ($pipelines.pipelines | Where-Object { $_.name -eq $INLINE_PIPELINE_NAME } | Select-Object -First 1).id
+}
+if (-not $INLINE_PIP_ID) {
     LogErr "No pipeline found for inline-mode verification."
     exit 1
 }
-if (-not $Quiet -and $PIP_ID) { & $CLI pipeline show $PIP_ID }
+if (-not $Quiet) { & $CLI pipeline show $INLINE_PIP_ID }
 
 # Inline mode embeds directly into the source container — check for embedding field
 Log "  Checking source container for inline embeddings..."
 $inlineCheck = $null
 try {
     $inlineCheck = Invoke-PodPython @"
-import os
+import os, math
 from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 cred = DefaultAzureCredential(managed_identity_client_id=os.environ.get("AZURE_CLIENT_ID"))
 client = CosmosClient("$TEST_COSMOS_ENDPOINT", credential=cred)
-c = client.get_database_client("testdb").get_container_client("test-documents")
+c = client.get_database_client("testdb").get_container_client("$INLINE_CONTAINER")
 embedded = 0
 checked = 0
-for doc in c.query_items("SELECT c.id, IS_DEFINED(c.embedding) as has_emb FROM c", enable_cross_partition_query=True):
+for doc in c.query_items("SELECT c.id, c.embedding FROM c", enable_cross_partition_query=True):
     checked += 1
-    if doc.get('has_emb'):
+    if len(doc.get('embedding', [])) == $AOAI_DIMS and all(math.isfinite(x) for x in doc['embedding']) and any(x != 0 for x in doc['embedding']):
         embedded += 1
         print(f"  {doc['id']}: embedding present")
     else:
@@ -900,7 +997,7 @@ if ($inlineCheckStr -match "INLINE_RESULT:(\d+)/(\d+)") {
     $inlineTotal = [int]$Matches[2]
 }
 
-if ($inlineEmbeddedCount -gt 0) {
+if ($inlineEmbeddedCount -eq 3 -and $inlineTotal -eq 3) {
     LogOk "Inline mode: $inlineEmbeddedCount/$inlineTotal documents embedded directly into source container!"
 } else {
     LogErr "Inline mode verification failed: no embeddings detected in source container."
@@ -942,7 +1039,6 @@ foreach ($sq in $searchQueries) {
                 $searchPassed++
             } else {
                 LogWarn "Search '$($sq.query)' → top result: $topId (expected: $($sq.expected), score: $topScore)"
-                $searchPassed++  # Still got results, just not the expected order
             }
         } else {
             LogErr "Search '$($sq.query)' → no results returned"
@@ -955,7 +1051,7 @@ foreach ($sq in $searchQueries) {
 if ($searchPassed -eq $searchQueries.Count) {
     LogOk "Vector search: $searchPassed/$($searchQueries.Count) queries returned results!"
 } else {
-    LogWarn "Vector search: $searchPassed/$($searchQueries.Count) queries returned results"
+    throw "Vector search: only $searchPassed/$($searchQueries.Count) queries returned the expected top result."
 }
 
 Save-Checkpoint 12
@@ -969,13 +1065,12 @@ Write-Host "`e[32m║           End-to-End Demo Complete!                  ║`e
 Write-Host "`e[32m╚══════════════════════════════════════════════════════╝`e[0m"
 Write-Host ""
 Write-Host "  Server:          `e[36m$SERVER_URL`e[0m"
-Write-Host "  Admin Token:     `e[36m$ADMIN_TOKEN`e[0m"
 Write-Host "  Source:          `e[36m$SOURCE_ID`e[0m"
 Write-Host "  Destination:     `e[36m$DEST_ID`e[0m"
 Write-Host "  Pipeline:        `e[36m$PIP_ID`e[0m"
 Write-Host "  Model:           `e[36m$MODEL_ID ($AOAI_DEPLOYMENT)`e[0m"
 Write-Host ""
-Write-Host "  Tested both modes on the same pipeline and same documents:"
+Write-Host "  Tested queue and inline modes with separate, correctly scoped pipelines:"
 Write-Host "  `e[36mQueue mode:`e[0m  CFP -> Service Bus -> .NET worker -> destination container"
 Write-Host "  `e[36mInline mode:`e[0m CFP -> embed directly -> patch back to source container"
 Write-Host "  `e[36mSearch:`e[0m      Vector similarity search verified against all 3 documents"
@@ -983,12 +1078,25 @@ Write-Host ""
 
 # Clean up checkpoint on successful completion
 Remove-Item $CheckpointFile -ErrorAction SilentlyContinue
-Save-Checkpoint 11
 
 # =============================================================================
 # Cleanup (only when -Cleanup flag is passed)
 # =============================================================================
 if ($Cleanup) {
+    if (-not $SkipQueue) {
+        foreach ($kind in @("pipelines", "sources", "destinations")) {
+            $name = switch ($kind) {
+                "pipelines" { $INLINE_PIPELINE_NAME }
+                "sources" { $INLINE_SOURCE_NAME }
+                "destinations" { $INLINE_DEST_NAME }
+            }
+            $entities = Invoke-RestMethod -Uri "$SERVER_URL/api/$kind" -Headers $apiHeaders
+            foreach ($entity in ($entities.$kind | Where-Object { $_.name -eq $name })) {
+                Invoke-RestMethod -Uri "$SERVER_URL/api/$kind/$($entity.id)" -Method DELETE -Headers $apiHeaders | Out-Null
+                LogOk "Deleted inline demo ${kind}: $($entity.id)"
+            }
+        }
+    }
     Write-Host "`n`e[33mCleaning up test resources...`e[0m"
 
     # Delete OmniVec resources (pipeline → source → destination → model)

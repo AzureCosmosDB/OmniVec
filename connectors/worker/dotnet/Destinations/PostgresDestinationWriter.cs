@@ -87,7 +87,7 @@ public class PostgresDestinationWriter : IDestinationWriter
 
         foreach (var result in results)
         {
-            var embeddingStr = "[" + string.Join(",", result.Embedding) + "]";
+            var embeddingStr = System.Text.Json.JsonSerializer.Serialize(result.Embedding);
 
             for (int attempt = 1; ; attempt++)
             {
@@ -134,13 +134,13 @@ public class PostgresDestinationWriter : IDestinationWriter
                     break;
                 }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
+                catch (NpgsqlException ex) when (ex.IsTransient)
                 {
                     if (attempt >= 5)
                     {
                         _logger.LogError("Postgres write failed doc={DocId} after {Attempt} attempts: {Error}",
                             result.DocId, attempt, ex.Message);
-                        break;
+                        throw;
                     }
                     var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                     _logger.LogWarning("Postgres upsert error doc={DocId}: {Error}, attempt {Attempt}, retrying",

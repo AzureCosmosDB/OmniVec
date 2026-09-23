@@ -145,7 +145,8 @@ async def _scheduler_loop():
         cursor = 0
         for it in items:
             n = len(it.images)
-            it.future.set_result(emb_list[cursor:cursor + n])
+            if not it.future.done():
+                it.future.set_result(emb_list[cursor:cursor + n])
             cursor += n
 
 

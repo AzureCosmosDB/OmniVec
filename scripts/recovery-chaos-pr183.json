@@ -1,0 +1,26 @@
+{
+  "subscription": "074d02eb-4d74-486a-b299-b262264d1536",
+  "resource_group": "rg-omnivec-omnivec-pr183-test",
+  "cluster": "omnivec-aks-v3fapuy5j6s7c",
+  "namespace": "omnivec",
+  "kubeconfig": "C:\\Users\\prsasatt\\.kube\\omnivec-omnivec-pr183-test",
+  "source_id": "src-1b2aac6d",
+  "pipeline_id": "pip-11f0ffed",
+  "destination_id": "dst-ef1231b2",
+  "model_id": "mdl-ext-52423101",
+  "route_ids": ["trp-34a1c7fa", "trp-e0728ae8"],
+  "blob_account": "omnivecdemo9918e79d45",
+  "blob_container": "e2e-blob-txt",
+  "cosmos_account": "omnivec-cosmos-v3fapuy5j6s7c",
+  "cosmos_database": "e2eblob",
+  "cosmos_container": "vectors-txt",
+  "servicebus_namespace": "omnivec-sb-v3fapuy5j6s7c",
+  "topic": "embeddings",
+  "subscription_name": "worker",
+  "expected_refs": [
+    "azure-blob-storage.txt",
+    "azure-cosmos-db.txt",
+    "azure-kubernetes-service.txt",
+    "chaos-backlog.txt"
+  ]
+}

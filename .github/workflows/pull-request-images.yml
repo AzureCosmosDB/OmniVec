@@ -1,0 +1,38 @@
+name: build-pull-request-images
+
+on:
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: omnivec-api
+            context: .
+            dockerfile: Dockerfile
+          - image: omnivec-web
+            context: web
+            dockerfile: web/Dockerfile
+          - image: omnivec-changefeed
+            context: connectors/ingestion/dotnet
+            dockerfile: connectors/ingestion/dotnet/Dockerfile
+    steps:
+      - name: Checkout OmniVec
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build without publishing
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false

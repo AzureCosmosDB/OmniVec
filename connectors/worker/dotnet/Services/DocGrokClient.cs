@@ -1,22 +1,21 @@
 using System.Net.Http.Json;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace OmniVec.Worker.Services;
 
-/// <summary>
-/// HTTP client for DocGrok router with infinite retry on transient errors.
-/// Handles both text embedding (/embed/batch) and blob/PDF processing (/process/blob).
-/// The router decides whether to call models directly or route through pipeline-worker.
-/// </summary>
+/// <summary>Bounded HTTP retries; delivery retries remain the queue's responsibility.</summary>
 public class DocGrokClient
 {
+    private const int MaxAttempts = 4;
     private readonly HttpClient _http;
     private readonly ILogger<DocGrokClient> _logger;
-
-    // Cap retries on persistent 5xx so a stopped/missing model doesn't cause
-    // the worker to spin forever. After this many 5xx attempts we surface an
-    // EmbeddingClientException so the worker can mark the job FAILED.
-    private const int MaxEmbedRetries = 20;
+    internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } = Task.Delay;
+    // API JSON, not HTML: escaping '+' in base64 as \u002B defeats the 4/3 wire budget.
+    private static readonly JsonSerializerOptions InlineDocumentJson = new(JsonSerializerDefaults.Web)
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     public DocGrokClient(HttpClient http, ILogger<DocGrokClient> logger)
     {
@@ -24,332 +23,141 @@ public class DocGrokClient
         _logger = logger;
     }
 
-    /// <summary>
-    /// Embed a batch of texts. Returns one float[] per input text.
-    /// Retries infinitely on 429/5xx/network errors.
-    /// </summary>
+    private static Dictionary<string, object?> RequestFor(string modelOrPipeline)
+        => new() { [modelOrPipeline.StartsWith("mdl-") ? "model_id" : "pipeline"] = modelOrPipeline };
+
+    private async Task<JsonDocument> PostAsync(
+        string path, Dictionary<string, object?> request, CancellationToken ct, bool inline = false)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            TimeSpan delay;
+            try
+            {
+                using var response = inline
+                    ? await _http.PostAsJsonAsync(path, request, InlineDocumentJson, ct)
+                    : await _http.PostAsJsonAsync(path, request, ct);
+                var body = await response.Content.ReadAsStringAsync(ct);
+                if (response.IsSuccessStatusCode) return JsonDocument.Parse(body);
+                var status = (int)response.StatusCode;
+                if (!IsTransientStatus(status) || attempt >= MaxAttempts)
+                    throw new EmbeddingClientException(status, body,
+                        $"DocGrok {path} returned {status} after {attempt} attempt(s): {body[..Math.Min(500, body.Length)]}");
+                var retryAfter = response.Headers.RetryAfter?.Delta
+                    ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow);
+                delay = TimeSpan.FromSeconds(Math.Clamp(
+                    retryAfter?.TotalSeconds ?? Math.Pow(2, attempt), 0, 30));
+            }
+            catch (HttpRequestException) when (attempt < MaxAttempts)
+            {
+                delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && attempt < MaxAttempts)
+            {
+                delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"DocGrok {path} timed out after {attempt} attempts", ex);
+            }
+            _logger.LogWarning("DocGrok {Path} transient failure; retry {Attempt}/{Max} in {Delay}s",
+                path, attempt + 1, MaxAttempts, delay.TotalSeconds);
+            await DelayAsync(delay, ct);
+        }
+    }
+
+    internal static bool IsTransientStatus(int status) => status is 408 or 429 || status >= 500;
+    internal static bool IsInputError(int status) => status is 400 or 413 or 415 or 422;
+
+    private static float[] Vector(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Array && value.GetArrayLength() > 0
+            && value[0].ValueKind == JsonValueKind.Array)
+            value = value[0];
+        if (value.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("DocGrok embedding must be an array");
+        var vector = value.EnumerateArray().Select(element => element.GetSingle()).ToArray();
+        if (vector.Length == 0 || vector.Any(number => !float.IsFinite(number)))
+            throw new InvalidOperationException("DocGrok returned an empty or non-finite embedding");
+        return vector;
+    }
+
+    private static List<(string ChunkText, float[] Embedding)> Chunks(JsonElement root)
+    {
+        if (!root.TryGetProperty("chunks", out var chunks) || chunks.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("Document processor response must contain a chunks array");
+        if (root.TryGetProperty("dim_skipped", out var dimSkipped) && dimSkipped.GetInt32() > 0)
+            throw new InvalidOperationException("Document processor dropped chunks with invalid dimensions");
+        if (chunks.GetArrayLength() == 0)
+        {
+            if (root.TryGetProperty("skipped", out var skipped) && skipped.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("skip_reason", out var reason)
+                && reason.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(reason.GetString()))
+                return [];
+            throw new InvalidOperationException("Document processor returned no chunks without an explicit skip reason");
+        }
+        return chunks.EnumerateArray().Select(chunk => (
+            chunk.TryGetProperty("text", out var text) ? text.GetString() ?? "" : "",
+            Vector(chunk.GetProperty("embedding")))).ToList();
+    }
+
     public async Task<List<float[]>> EmbedBatchAsync(
         string modelOrPipeline, List<string> texts, CancellationToken ct)
     {
-        object request;
-        if (modelOrPipeline.StartsWith("mdl-"))
-            request = new { model_id = modelOrPipeline, texts };
-        else
-            request = new { pipeline = modelOrPipeline, texts };
-
-        HttpResponseMessage resp = null!;
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                resp = await _http.PostAsJsonAsync("/embed/batch", request, ct);
-
-                if ((int)resp.StatusCode == 429)
-                {
-                    var retryAfter = resp.Headers.RetryAfter?.Delta
-                        ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                    _logger.LogWarning("Embed 429, attempt {Attempt}, retry after {Delay}s",
-                        attempt, retryAfter.TotalSeconds);
-                    await Task.Delay(retryAfter, ct);
-                    continue;
-                }
-
-                if ((int)resp.StatusCode >= 500)
-                {
-                    if (attempt >= MaxEmbedRetries)
-                    {
-                        var body5 = await resp.Content.ReadAsStringAsync(ct);
-                        _logger.LogError(
-                            "Embed giving up after {Attempt} 5xx attempts ({Status}): {Body}",
-                            attempt, resp.StatusCode, Truncate(body5, 300));
-                        throw new EmbeddingClientException(
-                            (int)resp.StatusCode,
-                            body5,
-                            $"Embed failed after {attempt} retries: {(int)resp.StatusCode} {resp.StatusCode}");
-                    }
-                    var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                    _logger.LogWarning("Embed {Status}, attempt {Attempt}, retry after {Delay}s",
-                        resp.StatusCode, attempt, delay.TotalSeconds);
-                    await Task.Delay(delay, ct);
-                    continue;
-                }
-
-                // Non-retryable 4xx (400 context length, 413 payload too large, etc.).
-                // Surface as a typed exception so the worker can bisect/dead-letter
-                // instead of abandoning the whole batch into a redelivery loop.
-                if ((int)resp.StatusCode >= 400)
-                {
-                    var body = await resp.Content.ReadAsStringAsync(ct);
-                    throw new EmbeddingClientException(
-                        (int)resp.StatusCode,
-                        body,
-                        $"Embed returned {(int)resp.StatusCode} {resp.StatusCode}: {Truncate(body, 500)}");
-                }
-
-                break;
-            }
-            catch (EmbeddingClientException) { throw; }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                _logger.LogWarning("Embed call failed: {Error}, attempt {Attempt}, retry after {Delay}s",
-                    ex.Message, attempt, delay.TotalSeconds);
-                await Task.Delay(delay, ct);
-            }
-        }
-
-        resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-        var outputs = doc.RootElement.GetProperty("outputs");
-
-        var results = new List<float[]>(outputs.GetArrayLength());
-        foreach (var output in outputs.EnumerateArray())
-        {
-            // Handle nested arrays: [[0.1, 0.2, ...]] → [0.1, 0.2, ...]
-            var arr = output;
-            if (arr.ValueKind == JsonValueKind.Array && arr.GetArrayLength() > 0 &&
-                arr[0].ValueKind == JsonValueKind.Array)
-                arr = arr[0];
-
-            var floats = new float[arr.GetArrayLength()];
-            int i = 0;
-            foreach (var val in arr.EnumerateArray())
-                floats[i++] = val.GetSingle();
-            results.Add(floats);
-        }
-
+        var request = RequestFor(modelOrPipeline);
+        request["texts"] = texts;
+        using var json = await PostAsync("/embed/batch", request, ct);
+        var results = json.RootElement.GetProperty("outputs").EnumerateArray().Select(Vector).ToList();
+        if (results.Count != texts.Count)
+            throw new InvalidOperationException($"DocGrok returned {results.Count} vectors for {texts.Count} texts");
         return results;
     }
 
-    private static string Truncate(string s, int max)
-        => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s.Substring(0, max) + "…");
-
-    /// <summary>
-    /// Process a blob/PDF via DocGrok router.Passes blob reference URLs to the router,
-    /// which routes to the pipeline-worker for OCR/chunking/embedding.
-    /// Returns a list of (chunkText, embedding) pairs — one per chunk.
-    /// </summary>
     public async Task<List<(string ChunkText, float[] Embedding)>> EmbedBlobAsync(
-        string modelOrPipeline,
-        string blobAccountUrl,
-        string? blobConnectionString,
-        string blobContainer,
-        string blobName,
-        CancellationToken ct)
+        string modelOrPipeline, string blobAccountUrl, string? blobConnectionString,
+        string blobContainer, string blobName, CancellationToken ct)
     {
-        var request = new Dictionary<string, object?>
-        {
-            ["blob_name"] = blobName,
-            ["blob_container"] = blobContainer,
-        };
-
-        if (modelOrPipeline.StartsWith("mdl-"))
-            request["model_id"] = modelOrPipeline;
-        else
-            request["pipeline"] = modelOrPipeline;
-
-        if (!string.IsNullOrEmpty(blobConnectionString))
-            request["blob_connection_string"] = blobConnectionString;
-        else if (!string.IsNullOrEmpty(blobAccountUrl))
-            request["blob_account_url"] = blobAccountUrl;
-
-        HttpResponseMessage resp = null!;
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                resp = await _http.PostAsJsonAsync("/embed", request, ct);
-
-                if ((int)resp.StatusCode == 429)
-                {
-                    var retryAfter = resp.Headers.RetryAfter?.Delta
-                        ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                    _logger.LogWarning("EmbedBlob 429, attempt {Attempt}, retry after {Delay}s",
-                        attempt, retryAfter.TotalSeconds);
-                    await Task.Delay(retryAfter, ct);
-                    continue;
-                }
-
-                if ((int)resp.StatusCode >= 500)
-                {
-                    if (attempt >= MaxEmbedRetries)
-                    {
-                        var body5 = await resp.Content.ReadAsStringAsync(ct);
-                        _logger.LogError(
-                            "EmbedBlob giving up after {Attempt} 5xx attempts ({Status}): {Body}",
-                            attempt, resp.StatusCode, Truncate(body5, 300));
-                        throw new EmbeddingClientException(
-                            (int)resp.StatusCode,
-                            body5,
-                            $"EmbedBlob failed after {attempt} retries: {(int)resp.StatusCode} {resp.StatusCode}");
-                    }
-                    var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                    _logger.LogWarning("EmbedBlob {Status}, attempt {Attempt}, retry after {Delay}s",
-                        resp.StatusCode, attempt, delay.TotalSeconds);
-                    await Task.Delay(delay, ct);
-                    continue;
-                }
-
-                break;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                _logger.LogWarning("EmbedBlob call failed: {Error}, attempt {Attempt}, retry after {Delay}s",
-                    ex.Message, attempt, delay.TotalSeconds);
-                await Task.Delay(delay, ct);
-            }
-        }
-
-        resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-
-        // Response format: { "chunks": [{ "text": "...", "embedding": [0.1, ...] }, ...] }
-        var results = new List<(string, float[])>();
-
-        if (doc.RootElement.TryGetProperty("chunks", out var chunks))
-        {
-            foreach (var chunk in chunks.EnumerateArray())
-            {
-                var text = chunk.GetProperty("text").GetString() ?? "";
-                var embArr = chunk.GetProperty("embedding");
-                var target = embArr;
-                if (target.ValueKind == JsonValueKind.Array && target.GetArrayLength() > 0 &&
-                    target[0].ValueKind == JsonValueKind.Array)
-                    target = target[0];
-                var floats = new float[target.GetArrayLength()];
-                int i = 0;
-                foreach (var val in target.EnumerateArray())
-                    floats[i++] = val.GetSingle();
-                results.Add((text, floats));
-            }
-        }
-        else if (doc.RootElement.TryGetProperty("outputs", out var outputs))
-        {
-            // Fallback: same format as text embedding
-            foreach (var output in outputs.EnumerateArray())
-            {
-                var arr = output;
-                if (arr.ValueKind == JsonValueKind.Array && arr.GetArrayLength() > 0 &&
-                    arr[0].ValueKind == JsonValueKind.Array)
-                    arr = arr[0];
-                var floats = new float[arr.GetArrayLength()];
-                int i = 0;
-                foreach (var val in arr.EnumerateArray())
-                    floats[i++] = val.GetSingle();
-                results.Add(("", floats));
-            }
-        }
-
-        return results;
+        var request = RequestFor(modelOrPipeline);
+        request["blob_name"] = blobName;
+        request["blob_container"] = blobContainer;
+        if (!string.IsNullOrEmpty(blobConnectionString)) request["blob_connection_string"] = blobConnectionString;
+        else request["blob_account_url"] = blobAccountUrl;
+        using var json = await PostAsync("/embed", request, ct);
+        if (json.RootElement.TryGetProperty("chunks", out _)) return Chunks(json.RootElement);
+        var vectors = json.RootElement.GetProperty("outputs").EnumerateArray().Select(Vector).ToList();
+        if (vectors.Count == 0) throw new InvalidOperationException("Blob processing returned no embeddings");
+        return vectors.Select(vector => ("", vector)).ToList();
     }
 
-    /// <summary>
-    /// Bulk blob embedding. Posts a single request to docgrok router with a
-    /// list of blob names; the router forwards to the backend's bulk endpoint
-    /// (e.g. CLIP /v1/embeddings) which parallel-downloads and runs a single
-    /// batched forward. Returns one float[] per input blob, in input order.
-    /// Retries 429/5xx/transient errors.
-    /// </summary>
-    public async Task<List<float[]>> EmbedBlobBatchAsync(
-        string modelOrPipeline,
-        string blobAccountUrl,
-        string blobContainer,
-        List<string> blobNames,
-        CancellationToken ct)
+    public async Task<List<(string ChunkText, float[] Embedding)>> EmbedDataAsync(
+        string modelOrPipeline, byte[] data, string fileName, CancellationToken ct)
     {
-        if (blobNames.Count == 0) return new List<float[]>();
+        if (data.LongLength > 50L * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(data), "SharePoint input exceeds 50 MiB");
+        var request = RequestFor(modelOrPipeline);
+        request["data"] = Convert.ToBase64String(data);
+        request["requestId"] = fileName;
+        request["source_name"] = fileName;
+        using var json = await PostAsync("/process", request, ct, inline: true);
+        var chunks = Chunks(json.RootElement);
+        if (chunks.Count == 0) _logger.LogInformation("Document processor explicitly skipped {File}: {Reason}",
+            fileName, json.RootElement.GetProperty("skip_reason").GetString());
+        return chunks;
+    }
 
-        var request = new Dictionary<string, object?>
-        {
-            ["model_id"] = modelOrPipeline,
-            ["blob_names"] = blobNames,
-            ["blob_account_url"] = blobAccountUrl,
-            ["blob_container"] = blobContainer,
-        };
-
-        HttpResponseMessage resp = null!;
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                resp = await _http.PostAsJsonAsync("/embed", request, ct);
-
-                if ((int)resp.StatusCode == 429)
-                {
-                    var retryAfter = resp.Headers.RetryAfter?.Delta
-                        ?? TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                    _logger.LogWarning("EmbedBlobBatch 429, attempt {Attempt}, retry after {Delay}s",
-                        attempt, retryAfter.TotalSeconds);
-                    await Task.Delay(retryAfter, ct);
-                    continue;
-                }
-
-                if ((int)resp.StatusCode >= 500)
-                {
-                    // Cap retries so a persistently-failing backend (e.g. the
-                    // model has been stopped, or DocGrok lost its registry entry)
-                    // doesn't spin forever. After MaxRetries 5xx attempts we
-                    // surface as EmbeddingClientException so the worker can
-                    // dead-letter the job instead of redelivering forever.
-                    if (attempt >= MaxEmbedRetries)
-                    {
-                        var body5 = await resp.Content.ReadAsStringAsync(ct);
-                        _logger.LogError(
-                            "EmbedBlobBatch giving up after {Attempt} 5xx attempts ({Status}): {Body}",
-                            attempt, resp.StatusCode, Truncate(body5, 300));
-                        throw new EmbeddingClientException(
-                            (int)resp.StatusCode,
-                            body5,
-                            $"EmbedBlobBatch failed after {attempt} retries: {(int)resp.StatusCode} {resp.StatusCode}");
-                    }
-                    var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                    _logger.LogWarning("EmbedBlobBatch {Status}, attempt {Attempt}, retry after {Delay}s",
-                        resp.StatusCode, attempt, delay.TotalSeconds);
-                    await Task.Delay(delay, ct);
-                    continue;
-                }
-                break;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                var delay = TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 60));
-                _logger.LogWarning("EmbedBlobBatch call failed: {Error}, attempt {Attempt}, retry after {Delay}s",
-                    ex.Message, attempt, delay.TotalSeconds);
-                await Task.Delay(delay, ct);
-            }
-        }
-
-        resp.EnsureSuccessStatusCode();
-        var json = await resp.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-
-        var results = new List<float[]>(blobNames.Count);
-        if (doc.RootElement.TryGetProperty("chunks", out var chunks))
-        {
-            foreach (var chunk in chunks.EnumerateArray())
-            {
-                var embArr = chunk.GetProperty("embedding");
-                var target = embArr;
-                if (target.ValueKind == JsonValueKind.Array && target.GetArrayLength() > 0 &&
-                    target[0].ValueKind == JsonValueKind.Array)
-                    target = target[0];
-                var floats = new float[target.GetArrayLength()];
-                int i = 0;
-                foreach (var val in target.EnumerateArray())
-                    floats[i++] = val.GetSingle();
-                results.Add(floats);
-            }
-        }
-        if (results.Count != blobNames.Count)
-            throw new EmbeddingClientException(
-                200,
-                null,
-                $"EmbedBlobBatch returned {results.Count} embeddings for {blobNames.Count} blobs");
-        return results;
+    public async Task<List<float[]>> EmbedBlobBatchAsync(
+        string modelOrPipeline, string blobAccountUrl, string blobContainer,
+        List<string> blobNames, CancellationToken ct)
+    {
+        if (blobNames.Count == 0) return [];
+        var request = RequestFor(modelOrPipeline);
+        request["blob_names"] = blobNames;
+        request["blob_account_url"] = blobAccountUrl;
+        request["blob_container"] = blobContainer;
+        using var json = await PostAsync("/embed", request, ct);
+        var vectors = Chunks(json.RootElement).Select(chunk => chunk.Embedding).ToList();
+        if (vectors.Count != blobNames.Count)
+            throw new InvalidOperationException($"DocGrok returned {vectors.Count} vectors for {blobNames.Count} blobs");
+        return vectors;
     }
 }

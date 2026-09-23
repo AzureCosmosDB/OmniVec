@@ -10,6 +10,7 @@ import logging
 import hashlib
 import secrets
 import httpx
+from azure.core.exceptions import AzureError
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -17,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Initialize telemetry (in-memory MetricsStore always active; App Insights if configured)
 try:
@@ -48,7 +49,9 @@ from models import (  # lgtm[py/unused-import]
     Source, Destination, Pipeline, Job, JobStatus, JobStats,
     CreateSourceRequest, CreateDestinationRequest, CreatePipelineRequest,
     SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
-    ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest
+    ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
+    OneLakeIcebergSourceConfig, OneLakeIcebergDestinationConfig,
+    SharePointSourceConfig,
 )
 from store import init_store, get_store
 from security_utils import safe_agent_segment, safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
@@ -944,6 +947,17 @@ def _to_doc(model: BaseModel, doc_type: str) -> dict:
     doc["doc_type"] = doc_type
     return doc
 
+
+def _replace_control_doc(store, original: dict, model: BaseModel, doc_type: str) -> dict:
+    """Reject stale lifecycle actions rather than overwriting newer state."""
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+
+    updated = {**original, **_to_doc(model, doc_type)}
+    try:
+        return store.replace_with_etag(updated, original["_etag"])
+    except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError):
+        raise HTTPException(status_code=409, detail="Resource changed during the operation; reload and retry")
+
 # Event processing queue
 EVENT_QUEUE: asyncio.Queue = None
 
@@ -1049,9 +1063,9 @@ async def get_capabilities():
         "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
         "agent_enabled": bool(os.getenv("AGENT_URL", "").strip()),
         "allowed_source_types": (
-            ["azure-blob", "cosmosdb", "postgres", "mssql", "databricks"]
+            ["azure-blob", "cosmosdb", "postgres", "mssql", "databricks", "sharepoint"]
             if _BLOB_SOURCE_ENABLED else
-            ["cosmosdb", "postgres", "mssql", "databricks"]
+            ["cosmosdb", "postgres", "mssql", "databricks", "sharepoint"]
         ),
         "allowed_processing_modes": (
             ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
@@ -1836,6 +1850,16 @@ async def create_source(req: CreateSourceRequest):
     source_id = f"src-{str(uuid.uuid4())[:8]}"
     # Strip whitespace from URL fields in config
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    if req.type == SourceType.SHAREPOINT:
+        try:
+            clean_config = SharePointSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid SharePoint configuration: {exc}") from exc
 
     # Auto-validate source connectivity
     warnings = []
@@ -1846,21 +1870,43 @@ async def create_source(req: CreateSourceRequest):
             from connectors.blob_connector import test_blob_connection
             ok, result = await test_blob_connection(clean_config)
             if not ok:
-                warnings.append(f"Blob source validation failed: {result}. "
+                warnings.append("Blob source validation failed. "
                     "Check account_url, container name, and that the OmniVec managed identity has "
                     "Storage Blob Data Reader role on the storage account.")
         except Exception as e:
-            warnings.append(f"Could not connect to blob source: {str(e)}")
+            logger.warning("Blob source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to blob source. Check the account, container and managed identity access.")
     elif req.type == SourceType.COSMOSDB:
         try:
             from connectors.cosmosdb_connector import test_cosmosdb_connection
             ok, result = await test_cosmosdb_connection(clean_config)
             if not ok:
-                warnings.append(f"CosmosDB source validation failed: {result}. "
+                warnings.append("CosmosDB source validation failed. "
                     "Check endpoint, database, container, and that the OmniVec managed identity has "
                     "Cosmos DB Built-in Data Reader role on the account.")
         except Exception as e:
-            warnings.append(f"Could not connect to CosmosDB source: {str(e)}")
+            logger.warning("CosmosDB source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to CosmosDB source. Check the endpoint, database, container and managed identity access.")
+    elif req.type == SourceType.SHAREPOINT:
+        try:
+            ok, result = await _test_sharepoint_connection(clean_config)
+            if not ok:
+                warnings.append(
+                    "SharePoint source validation failed. "
+                    "Grant the OmniVec managed identity Microsoft Graph application access "
+                    "(Sites.Selected or Files.Read.All) to the configured site."
+                )
+        except Exception as e:
+            logger.warning("SharePoint source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to SharePoint source. Check the site, library and Microsoft Graph application permissions.")
+    elif req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            ok, result = await _test_onelake_iceberg_connection(clean_config)
+            if not ok:
+                warnings.append(result.get("error", "Could not connect to OneLake Iceberg."))
+        except Exception as e:
+            logger.warning("OneLake Iceberg source validation raised %s", type(e).__name__)
+            warnings.append("Could not connect to OneLake Iceberg. Check Fabric and OneLake permissions.")
 
     source = Source(
         id=source_id,
@@ -1898,6 +1944,16 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == SourceType.ONELAKE_ICEBERG:
+        try:
+            clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    if req.type == SourceType.SHAREPOINT:
+        try:
+            clean_config = SharePointSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid SharePoint configuration: {exc}") from exc
     # Preserve stored password if masked value was sent
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
@@ -2087,6 +2143,8 @@ async def test_source(source_id: str):
     elif source.type == SourceType.COSMOSDB:
         from connectors.cosmosdb_connector import test_cosmosdb_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_cosmosdb_connection(source.config)))
+    elif source.type == SourceType.ONELAKE_ICEBERG:
+        ok, result = await _test_onelake_iceberg_connection(source.config)
     else:
         return {"success": True, "result": {"status": "unknown", "message": "Connector not implemented"}}
 
@@ -2319,6 +2377,57 @@ class TestConnectionRequest(BaseModel):
     source_id: Optional[str] = None
 
 
+async def _test_sharepoint_connection(config: dict) -> tuple[bool, dict | str]:
+    try:
+        sharepoint = SharePointSourceConfig(**config)
+    except ValidationError:
+        return False, "Invalid SharePoint configuration. Check the site, library, folder and polling settings."
+
+    from azure.identity.aio import DefaultAzureCredential
+
+    credential = DefaultAzureCredential()
+    try:
+        token = await credential.get_token("https://graph.microsoft.com/.default")
+        site_id = _urlquote(sharepoint.site_id, safe="")
+        drive_id = _urlquote(sharepoint.drive_id, safe="")
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {token.token}"})
+            if response.status_code >= 400:
+                return False, f"Microsoft Graph returned {response.status_code}: {response.text[:300]}"
+            drive = response.json()
+
+            folder_detail = ""
+            if sharepoint.folder_path:
+                encoded_folder = "/".join(
+                    _urlquote(segment, safe="")
+                    for segment in sharepoint.folder_path.split("/")
+                    if segment
+                )
+                folder_url = (
+                    f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}"
+                    f"/root:/{encoded_folder}"
+                )
+                folder_response = await client.get(
+                    folder_url,
+                    headers={"Authorization": f"Bearer {token.token}"},
+                )
+                if folder_response.status_code >= 400:
+                    return False, (
+                        f"Microsoft Graph could not access folder '{sharepoint.folder_path}' "
+                        f"({folder_response.status_code}): {folder_response.text[:300]}"
+                    )
+                folder_detail = f", folder: {sharepoint.folder_path}"
+
+        return True, {
+            "success": True,
+            "message": "Connected successfully to SharePoint.",
+            "details": f"Document library: {drive.get('name', sharepoint.drive_id)}{folder_detail}",
+        }
+    finally:
+        await credential.close()
+
+
 @app.post("/api/sources/test-connection")
 async def test_source_connection_before_save(req: TestConnectionRequest):
     """Test source connection before saving (used by UI)."""
@@ -2396,6 +2505,19 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
             if ok:
                 return result  # lgtm[py/stack-trace-exposure]
             raise Exception(result)
+
+        elif req.type == "sharepoint":
+            ok, result = await _test_sharepoint_connection(req.config)
+            if ok:
+                return result
+            return {"success": False, "error": str(result)}
+
+        elif req.type == "onelake-iceberg":
+            ok, result = await _test_onelake_iceberg_connection(req.config)
+            return result if ok else {
+                "success": False,
+                "error": result.get("error", "OneLake Iceberg connection failed"),
+            }
 
         elif req.type == "postgresql":
             from health_checker import _connect_pg
@@ -2550,6 +2672,11 @@ async def create_destination(req: CreateDestinationRequest):
 
     # Auto-probe CosmosDB container for partition key, vector field, and validate
     config = dict(req.config)
+    if req.type == "onelake-iceberg":
+        try:
+            config = OneLakeIcebergDestinationConfig(**config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     warnings = []
     enabled = True
     if req.type == "cosmosdb-vector":
@@ -2648,6 +2775,11 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
 
     destination = _destination_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
+    if req.type == "onelake-iceberg":
+        try:
+            clean_config = OneLakeIcebergDestinationConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     # Preserve stored password if masked value was sent
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
@@ -2793,6 +2925,15 @@ async def test_destination(dest_id: str):
             finally:
                 conn.close()
         ok, result = await _test_with_timeout(_test_mssql_dest)
+    elif destination.type == "onelake-iceberg":
+        tested = await test_destination_connection_before_save(TestDestConnectionRequest(
+            type=destination.type,
+            config=destination.config,
+            destination_id=destination.id,
+        ))
+        if tested.get("success"):
+            return {"success": True, "result": tested}
+        return {"success": False, "error": tested.get("error", "OneLake Iceberg connection failed")}
     else:
         from connectors.cosmosdb_vector_connector import test_vector_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_vector_connection(destination.config)))
@@ -2812,6 +2953,134 @@ async def test_destination(dest_id: str):
 # =============================================================================
 # DESTINATION CONNECTION TEST (for UI before saving)
 # =============================================================================
+
+async def _test_onelake_iceberg_connection(config: dict) -> tuple[bool, dict]:
+    from azure.identity.aio import DefaultAzureCredential
+
+    try:
+        parsed = OneLakeIcebergSourceConfig(**config)
+    except ValidationError as exc:
+        return False, {"success": False, "error": f"Invalid OneLake Iceberg configuration: {exc}"}
+
+    credential = DefaultAzureCredential()
+    try:
+        token = await credential.get_token("https://storage.azure.com/.default")
+        headers = {"Authorization": f"Bearer {token.token}"}
+        base = parsed.catalog_uri.rstrip("/")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            response = await client.get(
+                f"{base}/v1/config",
+                params={"warehouse": parsed.warehouse},
+                headers=headers,
+            )
+            response.raise_for_status()
+            catalog_config = response.json()
+            prefix = str(
+                (catalog_config.get("defaults") or {}).get("prefix")
+                or (catalog_config.get("overrides") or {}).get("prefix")
+                or ""
+            ).strip("/")
+            namespace = parsed.namespace if isinstance(parsed.namespace, list) else parsed.namespace.split(".")
+            namespace_path = _urlquote("\x1f".join(namespace), safe="")
+            table_path = _urlquote(parsed.table, safe="")
+            prefix_path = f"/{prefix}" if prefix else ""
+            response = await client.get(
+                f"{base}/v1{prefix_path}/namespaces/{namespace_path}/tables/{table_path}",
+                headers=headers,
+            )
+            response.raise_for_status()
+        return True, {
+            "success": True,
+            "message": "Connected successfully to the OneLake Iceberg table.",
+            "details": f"{parsed.warehouse}/{'.'.join(namespace)}.{parsed.table}",
+        }
+    except Exception as exc:
+        logger.warning("OneLake Iceberg connection test failed: %s", type(exc).__name__)
+        return False, {
+            "success": False,
+            "error": "Could not access the OneLake Iceberg catalog or table with the workload identity.",
+        }
+    finally:
+        await credential.close()
+
+
+async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True) -> dict:
+    from redis.asyncio import Redis
+    from redis_entraid.cred_provider import create_from_default_azure_credential
+    from urllib.parse import urlsplit
+
+    endpoint = str(config.get("endpoint", "")).strip()
+    if not endpoint:
+        return {"success": False, "error": "Garnet endpoint is required"}
+    parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+    kwargs = {
+        "host": parsed.hostname or endpoint,
+        "port": parsed.port or (6380 if config.get("tls", True) else 6379),
+        "ssl": bool(config.get("tls", True)),
+        "decode_responses": False,
+        "protocol": 2,
+    }
+    if config.get("use_entra_auth", False):
+        kwargs["credential_provider"] = create_from_default_azure_credential(
+            ("https://redis.azure.com/.default",)
+        )
+    elif config.get("password_secret_ref"):
+        from azure.identity.aio import DefaultAzureCredential
+        from azure.keyvault.secrets.aio import SecretClient
+
+        reference = str(config["password_secret_ref"])
+        if not reference.startswith("kv://"):
+            return {"success": False, "error": "password_secret_ref must use kv://<vault>/<secret>"}
+        parts = reference[5:].split("/", 1)
+        if len(parts) != 2:
+            return {"success": False, "error": "password_secret_ref must use kv://<vault>/<secret>"}
+        vault_host = parts[0] if "." in parts[0] else f"{parts[0]}.vault.azure.net"
+        credential = DefaultAzureCredential()
+        secret_client = SecretClient(vault_url=f"https://{vault_host}", credential=credential)
+        try:
+            kwargs["username"] = config.get("username")
+            kwargs["password"] = (await secret_client.get_secret(parts[1])).value
+        finally:
+            await secret_client.close()
+            await credential.close()
+    client = Redis(**kwargs)
+    try:
+        await client.ping()
+        if not require_vector_set:
+            return {
+                "success": True,
+                "message": "Connected successfully to the legacy Redis string mirror.",
+                "details": f"Key prefix: {config.get('key_prefix', 'omnivec')}",
+            }
+        vector_set = str(config.get("vector_set", "omnivec-vectors"))
+        info = await client.execute_command("VINFO", vector_set)
+        size = None
+        if info:
+            decoded = [
+                value.decode("utf-8") if isinstance(value, bytes) else value
+                for value in info
+            ]
+            size = dict(zip(decoded[0::2], decoded[1::2])).get("size")
+        return {
+            "success": True,
+            "message": "Connected successfully to Garnet Vector Sets.",
+            "details": f"Vector set: {vector_set}" + (
+                f", size: {size}" if size is not None else " (created on first write)"
+            ),
+        }
+    except Exception as exc:
+        logger.warning("Garnet connection test failed: %s", type(exc).__name__)
+        return {
+            "success": False,
+            "error": (
+                "Could not execute Garnet Vector Set commands. Verify authentication and --enable-vector-set-preview."
+                if require_vector_set
+                else "Could not connect to the legacy Redis string mirror."
+            ),
+        }
+    finally:
+        await client.aclose()
+
 
 class TestDestConnectionRequest(BaseModel):
     type: str
@@ -2936,6 +3205,49 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
                 }
             finally:
                 await conn.close()
+
+        elif req.type == "onelake-iceberg":
+            config = OneLakeIcebergDestinationConfig(**req.config)
+            from azure.identity.aio import DefaultAzureCredential
+
+            credential = DefaultAzureCredential()
+            try:
+                token = await credential.get_token("https://api.fabric.microsoft.com/.default")
+                headers = {"Authorization": f"Bearer {token.token}"}
+                base = config.fabric_api_base_url.rstrip("/")
+                async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+                    lakehouse = await client.get(
+                        f"{base}/workspaces/{_urlquote(config.workspace_id, safe='')}/lakehouses/"
+                        f"{_urlquote(config.lakehouse_item_id, safe='')}",
+                        headers=headers,
+                    )
+                    lakehouse.raise_for_status()
+                    job = await client.get(
+                        f"{base}/workspaces/{_urlquote(config.workspace_id, safe='')}/sparkJobDefinitions/"
+                        f"{_urlquote(config.spark_job_definition_item_id, safe='')}",
+                        headers=headers,
+                    )
+                    job.raise_for_status()
+                result = {
+                    "success": True,
+                    "message": "Connected successfully to the Fabric lakehouse and Spark Job Definition.",
+                    "details": f"Target table: {config.target_table}",
+                    "vector_indexes": [{
+                        "path": config.writeback_columns.embedding_field,
+                        "indexType": "garnet-vector-set" if config.mirror else "iceberg",
+                    }],
+                }
+                if config.mirror and config.mirror.type in ("garnet", "redis"):
+                    mirror_result = await _test_garnet_vector_set(
+                        config.mirror.config,
+                        require_vector_set=config.mirror.type == "garnet",
+                    )
+                    if not mirror_result.get("success"):
+                        return mirror_result
+                    result["mirror"] = mirror_result
+                return result
+            finally:
+                await credential.close()
 
         elif req.type == "mssql":
             try:
@@ -3256,6 +3568,263 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
             )
 
 
+def _require_onelake_iceberg_pipeline(store, req, dest_doc) -> None:
+    """Validate the constrained same-row write-back contract."""
+    if not dest_doc or dest_doc.get("type") != "onelake-iceberg":
+        return
+    if str(req.processing_mode or "").lower() != "queue":
+        raise HTTPException(
+            status_code=400,
+            detail="OneLake Iceberg write-back requires queue processing mode.",
+        )
+    if (req.content_strategy or "truncate").lower() != "truncate":
+        raise HTTPException(
+            status_code=400,
+            detail="OneLake Iceberg same-row write-back supports content_strategy='truncate' only.",
+        )
+
+    destination_config = dest_doc.get("config", {}) or {}
+    target_parts = str(destination_config.get("target_table", "")).split(".")
+    destination_workspace = str(destination_config.get("workspace_id", ""))
+    for pipeline_source in req.sources or []:
+        source_id = pipeline_source.source_id
+        source_doc = store.get(source_id, "source")
+        if not source_doc or source_doc.get("type") != "onelake-iceberg":
+            raise HTTPException(
+                status_code=400,
+                detail="A OneLake Iceberg destination can only write back rows from a OneLake Iceberg source.",
+            )
+        source_config = source_doc.get("config", {}) or {}
+        warehouse_parts = str(source_config.get("warehouse", "")).strip("/").split("/", 1)
+        if (
+            len(warehouse_parts) != 2
+            or warehouse_parts[0] != destination_workspace
+            or warehouse_parts[1] != str(destination_config.get("lakehouse_item_id", ""))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source '{source_id}' and the OneLake destination must use the same Fabric lakehouse.",
+            )
+        namespace = source_config.get("namespace", "")
+        namespace_parts = namespace.split(".") if isinstance(namespace, str) else list(namespace)
+        source_table_parts = [*namespace_parts, str(source_config.get("table", ""))]
+        if len(target_parts) < len(source_table_parts) or target_parts[-len(source_table_parts):] != source_table_parts:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"OneLake destination target_table must identify source '{source_id}' table "
+                    f"'{'.'.join(source_table_parts)}' for same-row write-back."
+                ),
+            )
+
+
+def _require_pipeline_source_identities(store, req) -> None:
+    for pipeline_source in req.sources or []:
+        source_doc = store.get(pipeline_source.source_id, "source")
+        source_type = (source_doc or {}).get("type")
+        if getattr(pipeline_source, "sharepoint_identity", None) is not None and source_type != "sharepoint":
+            raise HTTPException(
+                status_code=400,
+                detail="sharepoint_identity can only be configured for SharePoint sources.",
+            )
+        if getattr(pipeline_source, "onelake_identity", None) is not None and source_type != "onelake-iceberg":
+            raise HTTPException(
+                status_code=400,
+                detail="onelake_identity can only be configured for OneLake Iceberg sources.",
+            )
+
+
+def _inline_write_target(source: dict) -> tuple:
+    """Identify the source rows sharing inline pipeline/hash/timestamp metadata."""
+    kind = source.get("type")
+    config = source.get("config") or {}
+    if kind == "cosmosdb":
+        from urllib.parse import urlsplit, urlunsplit
+        endpoint = (config.get("endpoint") or "").strip().rstrip("/").lower()
+        try:
+            parsed = urlsplit(endpoint)
+            if (parsed.scheme, parsed.port) in (("https", 443), ("http", 80)):
+                endpoint = urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit(":", 1)[0]))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Cannot determine inline source ownership: invalid endpoint") from exc
+        return ("cosmosdb", endpoint, config.get("database"), config.get("container"))
+    if kind in ("postgresql", "pgvector", "mssql"):
+        host = config.get("host") or config.get("server") or ""
+        database = config.get("database")
+        port = config.get("port") or (1433 if kind == "mssql" else 5432)
+        connection = config.get("connection_string")
+        if connection:
+            # Connection strings override individual fields in the .NET watcher.
+            # Parse quoted ADO.NET values without exposing credentials in errors.
+            import re
+            parts = {}
+            position = 0
+            pattern = re.compile(r'''\s*([^=;]+?)\s*=\s*("(?:[^"]|"")*"|'(?:[^']|'')*'|[^;'"]*)\s*(?:;|$)''')
+            while position < len(connection):
+                if not connection[position:].strip(" ;\t\r\n"):
+                    break
+                match = pattern.match(connection, position)
+                if not match:
+                    raise HTTPException(status_code=409, detail="Cannot determine inline source ownership from connection string")
+                value = match[2].strip()
+                if value.startswith(('"', "'")):
+                    quote = value[0]
+                    value = value[1:-1].replace(quote * 2, quote)
+                parts[match[1].strip().lower()] = value
+                position = match.end()
+            host = next((parts[key] for key in ("host", "server", "data source", "address", "addr", "network address") if key in parts), "")
+            database = parts.get("database") or parts.get("initial catalog")
+            port = parts.get("port") or (1433 if kind == "mssql" else 5432)
+            if not host or not database:
+                raise HTTPException(status_code=409, detail="Inline source connection string must identify a server and database")
+        host = str(host).strip().lower().rstrip(".")
+        if kind == "mssql":
+            host = host.removeprefix("tcp:")
+            if "," in host:
+                host, port = host.rsplit(",", 1)
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Cannot determine inline source ownership: invalid port")
+        schema = config.get("schema_name") or config.get("schema") or ("dbo" if kind == "mssql" else "public")
+        return ("mssql" if kind == "mssql" else "postgresql", host, port, database, schema, config.get("table"))
+    return ("source", source["id"])
+
+
+def _require_exclusive_inline_sources(store, pipeline_sources, pipeline_id=None):
+    """Inline writers share metadata even when their vector fields differ."""
+    source_cache = {}
+
+    def targets(sources, *, reject_aliases=False):
+        result = set()
+        owners = {}
+        for entry in sources:
+            source_id = entry.source_id if hasattr(entry, "source_id") else entry["source_id"]
+            if source_id not in source_cache:
+                source_cache[source_id] = store.get(source_id, "source")
+            source = source_cache[source_id]
+            if source:
+                target = _inline_write_target(source)
+                if reject_aliases and target in owners and owners[target] != source_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Multiple source registrations in this pipeline share the same inline metadata. "
+                               "Use one source registration per physical target or queue processing.",
+                    )
+                owners[target] = source_id
+                result.add(target)
+        return result
+
+    requested = targets(pipeline_sources, reject_aliases=True)
+    for other in store.list("pipeline"):
+        if (other.get("id") == pipeline_id or other.get("status") != "active"
+                or other.get("processing_mode") != "inline"):
+            continue
+        if requested & targets(other.get("sources", [])):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Inline source metadata is already owned by active pipeline '{other['id']}'. "
+                       "Pause that pipeline before activating another inline writer, even with a different vector field.",
+            )
+
+
+def _validate_cosmos_chunking(store, req, destination):
+    """Validate the settings actually supported by the .NET Cosmos text path."""
+    from models import ChunkConfig
+    from string import Formatter
+    sources = [(entry, store.get(entry.source_id, "source") or {}) for entry in req.sources]
+    if not any(source.get("type") == "cosmosdb" for _, source in sources):
+        return None
+    if req.content_strategy not in ("truncate", "chunk"):
+        raise HTTPException(status_code=400, detail="content_strategy must be truncate or chunk")
+    if req.content_strategy != "chunk":
+        return None
+    if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
+        raise HTTPException(status_code=400, detail="Cosmos text chunking requires queue processing and a Cosmos vector destination; chunk+inline is unsupported")
+    for entry, source in sources:
+        if (source.get("type") != "cosmosdb" or entry.content_mode != "field"
+                or source.get("config", {}).get("attachments_field")):
+            raise HTTPException(status_code=400, detail="Cosmos text chunking supports only Cosmos field-content sources, not URL/attachment/mixed sources")
+    raw = req.chunk_config or {}
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+    allowed = {"chunk_size", "chunk_overlap", "chunk_unit", "store_text", "text_field", "doc_id_pattern"}
+    if set(raw) - allowed:
+        raise HTTPException(status_code=400, detail="Unknown Cosmos chunk_config options")
+    try:
+        config = ChunkConfig(**raw)
+        if (config.chunk_size < 100 or config.chunk_overlap < 0
+                or config.chunk_overlap >= config.chunk_size or config.chunk_unit not in ("chars", "tokens")):
+            raise ValueError("Require size >= 100, 0 <= overlap < size, unit chars/tokens")
+        variables = set()
+        for _, field, spec, conversion in Formatter().parse(config.doc_id_pattern):
+            if field is not None:
+                if spec or conversion:
+                    raise ValueError("Chunk ID format specifiers and conversions are unsupported")
+                variables.add(field)
+        if ("chunk" not in variables or variables - {
+                "source", "source_ref", "source_hash", "chunk", "pipeline", "pipeline_hash"}
+                or "{{" in config.doc_id_pattern or "}}" in config.doc_id_pattern
+                or any(c in config.doc_id_pattern for c in "/\\?#")
+                or len(config.doc_id_pattern.encode("utf-8")) > 900):
+            raise ValueError("doc_id_pattern requires {chunk}, supported variables and Cosmos-safe characters")
+        reserved = {
+            "id", "source_id", "source_ref", "pipeline_id", "pipeline_name", "pipeline_generation",
+            "embedded_at", "content_hash", "embedding_dims", "chunk_index", "chunk_count",
+            "chunk_source_partition", "ttl", "_omnivec_sync",
+        }
+        pk = (destination.get("config", {}).get("partition_key_path") or "").lstrip("/")
+        vector = req.vector_index_path.lstrip("/")
+        if not pk or "/" in pk or (pk != "id" and pk in reserved):
+            raise ValueError("Chunking requires a probed single top-level partition key, /id or a non-metadata field")
+        if not vector or "/" in vector or vector in reserved or vector == pk:
+            raise ValueError("Chunk vector field conflicts with partition/metadata fields")
+        if (not config.text_field.strip() or config.text_field in reserved | {pk, vector}
+                or "/" in config.text_field or config.text_field.startswith("_")):
+            raise ValueError("Chunk text_field conflicts with partition/vector/metadata fields")
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid Cosmos chunk_config: {exc}") from exc
+    return config
+
+
+def _require_sharepoint_compatible(store, req, destination):
+    sources = [
+        (entry, store.get(entry.source_id, "source") or {})
+        for entry in req.sources
+    ]
+    for entry, source in sources:
+        if getattr(entry, "sharepoint_identity", None) is not None and source.get("type") != "sharepoint":
+            raise HTTPException(
+                status_code=400,
+                detail="sharepoint_identity can only be configured for SharePoint pipeline sources",
+            )
+    if not any(source.get("type") == "sharepoint" for _, source in sources):
+        return
+    if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
+        raise HTTPException(status_code=400, detail="SharePoint requires queue processing and a Cosmos DB vector destination")
+    config = destination.get("config", {})
+    pk_path = config.get("partition_key_path") or ""
+    pk_parts = pk_path.lstrip("/").split("/")
+    reserved = {
+        "id", "_omnivec_sync", "source_id", "pipeline_id", "source_ref",
+        "embedded_at", "pipeline_generation", "pipeline_name", "content_hash", "embedding_dims", "ttl",
+    }
+    vector_field = req.vector_index_path.lstrip("/")
+    if (not pk_path.startswith("/") or not all(pk_parts)
+            or pk_parts[0] in reserved or pk_parts[0] == vector_field):
+        raise HTTPException(
+            status_code=400,
+            detail="SharePoint requires a probed dedicated document partition key such as /document_id, not /id or a metadata/vector field",
+        )
+    if not vector_field or "/" in vector_field or vector_field in reserved:
+        raise HTTPException(status_code=400, detail="SharePoint vector field conflicts with synchronization fields")
+    content_field = req.content_field or "content"
+    if req.store_content is True and (
+        content_field in reserved or content_field in (vector_field, pk_parts[0]) or "/" in content_field
+    ):
+        raise HTTPException(status_code=400, detail="SharePoint content field conflicts with synchronization fields")
+
+
 @app.post("/api/pipelines")
 async def create_pipeline(req: CreatePipelineRequest):
     """Create a new pipeline."""
@@ -3284,12 +3853,18 @@ async def create_pipeline(req: CreatePipelineRequest):
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
+    _require_pipeline_source_identities(store, req)
+    _require_sharepoint_compatible(store, req, dest_doc)
+    cosmos_chunk_config = _validate_cosmos_chunking(store, req, dest_doc)
 
     # Reject inline mode when source and destination are different stores.
     # Inline mode writes embeddings back to source docs in-place, so the source
     # container/table must be the same physical location as the destination.
     if str(req.processing_mode or "").lower() == "inline":
         _require_inline_compatible(store, req.sources, dest_doc)
+        _require_exclusive_inline_sources(store, req.sources)
 
     # Reject queue mode when source and destination ARE the same store.
     # Same-store pipelines must use inline (queue would be redundant).
@@ -3331,7 +3906,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             raise HTTPException(status_code=400, detail="chunk_size must be >= 100")
         if cc.get("chunk_overlap", 0) >= cc.get("chunk_size", 1000):
             raise HTTPException(status_code=400, detail="chunk_overlap must be less than chunk_size")
-        chunk_config = ChunkConfig(**cc)
+        chunk_config = cosmos_chunk_config or ChunkConfig(**cc)
 
     # store_content only makes sense when source and destination are different
     # stores. For same-store (inline) pipelines, the original content is
@@ -3409,6 +3984,20 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if not doc:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
+    chunk_destination = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    cosmos_chunk_config = _validate_cosmos_chunking(store, req, chunk_destination)
+    if any((store.get(s.source_id, "source") or {}).get("type") == "cosmosdb" for s in req.sources):
+        # A different strategy/text-storage contract requires migration of existing
+        # documents; do not leave raw vectors or previously stored text behind.
+        if req.content_strategy != doc.get("content_strategy", "truncate"):
+            raise HTTPException(status_code=400, detail="Cosmos content_strategy is immutable; create a new pipeline")
+        old_chunk = doc.get("chunk_config") or {}
+        if cosmos_chunk_config is not None and (
+            cosmos_chunk_config.store_text != old_chunk.get("store_text", False)
+            or cosmos_chunk_config.text_field != old_chunk.get("text_field", "text")
+        ):
+            raise HTTPException(status_code=400, detail="Cosmos chunk store_text/text_field are immutable; create a new pipeline")
+
     # Reject queue mode when Service Bus wasn't provisioned (blob source disabled)
     if str(req.processing_mode or "").lower() == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
@@ -3417,6 +4006,8 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if str(req.processing_mode or "").lower() == "inline":
         dest_doc_for_mode = await asyncio.to_thread(store.get, req.destination_id, "destination")
         _require_inline_compatible(store, req.sources, dest_doc_for_mode)
+        if doc.get("status") == PipelineStatus.ACTIVE.value:
+            await asyncio.to_thread(_require_exclusive_inline_sources, store, req.sources, pipeline_id)
 
     # Reject queue mode when source/destination ARE the same store.
     if str(req.processing_mode or "").lower() == "queue":
@@ -3434,7 +4025,9 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
 
     # Validate vector_index_path against destination if provided
     dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    _require_onelake_iceberg_pipeline(store, req, dest_doc)
     if dest_doc:
+        _require_sharepoint_compatible(store, req, dest_doc)
         dest_config = dest_doc.get("config", {})
         vector_indexes = dest_config.get("vector_indexes", [])
         if vector_indexes:
@@ -3464,7 +4057,10 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
-    if req.chunk_config and pipeline.content_strategy == "chunk":
+    pipeline.doc_id_pattern = req.doc_id_pattern
+    if cosmos_chunk_config is not None:
+        pipeline.chunk_config = cosmos_chunk_config
+    elif req.chunk_config and pipeline.content_strategy == "chunk":
         from models import ChunkConfig
         pipeline.chunk_config = ChunkConfig(**req.chunk_config)
     # store_content: same constraint as create — reject true on same-store pipelines.
@@ -3482,7 +4078,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.metadata_fields = req.metadata_fields
     pipeline.updated_at = datetime.utcnow()
 
-    await asyncio.to_thread(store.upsert, _to_doc(pipeline, "pipeline"))
+    await asyncio.to_thread(_replace_control_doc, store, doc, pipeline, "pipeline")
     return {"success": True, "pipeline": pipeline}
 
 
@@ -3509,7 +4105,7 @@ def pause_pipeline(pipeline_id: str):
     pipeline = _pipeline_from_doc(doc)
     pipeline.status = PipelineStatus.PAUSED
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
     return {"success": True}
 
 
@@ -3522,9 +4118,12 @@ def resume_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
+    if pipeline.processing_mode == "inline":
+        _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     pipeline.status = PipelineStatus.ACTIVE
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
     return {"success": True}
 
 
@@ -3540,9 +4139,13 @@ def set_processing_mode(pipeline_id: str, mode: str):
     if mode == "queue":
         _require_blob_source_enabled("queue-mode pipeline")
     pipeline = _pipeline_from_doc(doc)
+    proposed = pipeline.model_copy(update={"processing_mode": mode})
+    _validate_cosmos_chunking(store, proposed, store.get(pipeline.destination_id, "destination"))
     if mode == "inline":
         dest_doc_for_mode = store.get(pipeline.destination_id, "destination")
         _require_inline_compatible(store, pipeline.sources, dest_doc_for_mode)
+        if pipeline.status == PipelineStatus.ACTIVE:
+            _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     if mode == "queue":
         dest_doc_for_queue = store.get(pipeline.destination_id, "destination")
         if _is_inline_compatible(store, pipeline.sources, dest_doc_for_queue):
@@ -3555,7 +4158,7 @@ def set_processing_mode(pipeline_id: str, mode: str):
             )
     pipeline.processing_mode = mode
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
     return {"success": True, "processing_mode": mode}
 
 
@@ -3577,10 +4180,15 @@ async def run_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
+    if pipeline.processing_mode == "inline":
+        await asyncio.to_thread(_require_exclusive_inline_sources, store, pipeline.sources, pipeline_id)
 
     dest_doc = store.get(pipeline.destination_id, "destination")
+    if not dest_doc:
+        raise HTTPException(status_code=409, detail="Cannot activate pipeline: destination no longer exists")
     if dest_doc:
-        destination = _destination_from_doc(dest_doc)
+        destination = _destination_from_doc(dest_doc, mask=False)
         if not destination.enabled:
             try:
                 if destination.type == "cosmosdb-vector":
@@ -3605,7 +4213,7 @@ async def run_pipeline(pipeline_id: str):
                         )
                 destination.enabled = True
                 destination.updated_at = datetime.utcnow()
-                store.upsert(_to_doc(destination, "destination"))
+                _replace_control_doc(store, dest_doc, destination, "destination")
                 logger.info("Destination %s auto-enabled by pipeline %s run", destination.id, pipeline_id)  # lgtm[py/log-injection]
                 pipeline.reset_at = datetime.utcnow()
             except HTTPException:
@@ -3618,7 +4226,7 @@ async def run_pipeline(pipeline_id: str):
 
     pipeline.status = PipelineStatus.ACTIVE
     pipeline.updated_at = datetime.utcnow()
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
 
     return {"success": True, "message": "Pipeline activated — controller will begin processing"}
 
@@ -3631,6 +4239,8 @@ def reset_pipeline(pipeline_id: str):
     delete its lease container and restart the change feed from the beginning.
     Prior status (ACTIVE/PAUSED) is preserved so the user doesn't have to
     manually resume after every reset.
+    Cleanup failures leave the pipeline paused and are reported to the caller;
+    retry the reset after resolving the failure.
     """
     store = get_store()
     doc = store.get(pipeline_id, "pipeline")
@@ -3639,12 +4249,14 @@ def reset_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     prior_status = pipeline.status
+    if prior_status == PipelineStatus.ACTIVE and pipeline.processing_mode == "inline":
+        _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
 
     # Force pause before reset to prevent race with active changefeed
     if pipeline.status == PipelineStatus.ACTIVE:
         pipeline.status = PipelineStatus.PAUSED
         pipeline.updated_at = datetime.utcnow()
-        store.upsert(_to_doc(pipeline, "pipeline"))
+        doc = _replace_control_doc(store, doc, pipeline, "pipeline")
         logger.info("Pipeline %s paused before reset", pipeline_id)  # lgtm[py/log-injection]
 
     # Delete all jobs for this pipeline (skip for inline mode â€” no jobs created)
@@ -3659,8 +4271,12 @@ def reset_pipeline(pipeline_id: str):
             try:
                 store.delete(j["id"], "job")
                 deleted += 1
-            except Exception:  # lgtm[py/empty-except]
-                pass
+            except Exception as exc:
+                from azure.cosmos.exceptions import CosmosResourceNotFoundError
+                if isinstance(exc, CosmosResourceNotFoundError):
+                    continue
+                logger.exception("Failed to delete job %s during pipeline reset", j["id"])
+                raise HTTPException(status_code=503, detail="Job cleanup failed; pipeline remains paused. Retry reset.")
 
     # Reset pipeline metrics
     metrics_doc = store.get("global", "metrics")
@@ -3677,17 +4293,18 @@ def reset_pipeline(pipeline_id: str):
     if getattr(pipeline, 'content_strategy', 'truncate') == 'chunk':
         try:
             dest_doc = store.get(pipeline.destination_id, "destination")
-            if dest_doc:
-                destination = _destination_from_doc(dest_doc)
+            if dest_doc and dest_doc.get("type") == "cosmosdb-vector":
+                destination = _destination_from_doc(dest_doc, mask=False)
                 from connectors.cosmosdb_vector_connector import delete_chunks_by_prefix
                 import asyncio  # lgtm[py/repeated-import]
                 chunk_prefix = f"{pipeline_id}-"
-                chunks_deleted = asyncio.get_event_loop().run_until_complete(
+                chunks_deleted = asyncio.run(
                     delete_chunks_by_prefix(destination.config, chunk_prefix)
                 )
                 logger.info("Deleted %d chunk documents for pipeline %s", chunks_deleted, pipeline_id)  # lgtm[py/log-injection]
         except Exception as e:
             logger.warning("Failed to clean up chunks for pipeline %s: %s", pipeline_id, e)  # lgtm[py/log-injection]
+            raise HTTPException(status_code=503, detail="Chunk cleanup failed; pipeline remains paused. Retry reset.")
 
     # Set reset_at — the .NET CFP service watches this and will delete its
     # lease container + restart the change feed from the beginning
@@ -3703,7 +4320,8 @@ def reset_pipeline(pipeline_id: str):
     # replay happens regardless. Leaving paused was a UX footgun.
     pipeline.status = prior_status
     pipeline.updated_at = reset_ts
-    store.upsert(_to_doc(pipeline, "pipeline"))
+    _replace_control_doc(store, doc, pipeline, "pipeline")
+    _pipeline_stats_cache.pop(pipeline_id, None)
 
     return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset — {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
 
@@ -3889,7 +4507,8 @@ def cancel_job(job_id: str):
         )
 
     job.status = JobStatus.CANCELLED
-    store.upsert(_to_doc(job, "job"))
+    job.completed_at = datetime.utcnow()
+    _replace_control_doc(store, doc, job, "job")
     return {"success": True}
 
 
@@ -3916,12 +4535,16 @@ def retry_job(job_id: str):
                    f"Investigate the root cause: {job.error}"
         )
 
+    pipeline = store.get(job.pipeline_id, "pipeline")
+    if not pipeline or pipeline.get("status") != PipelineStatus.ACTIVE.value:
+        raise HTTPException(status_code=409, detail="Activate the job's pipeline before retrying")
+
     job.status = JobStatus.PENDING
     job.error = None
     job.started_at = None
     job.completed_at = None
     job.retry_count += 1
-    store.upsert(_to_doc(job, "job"))
+    _replace_control_doc(store, doc, job, "job")
 
     return {"success": True, "message": f"Job reset to PENDING (retry {job.retry_count}/{MAX_MANUAL_RETRIES})"}
 
@@ -4878,43 +5501,39 @@ async def list_models():
     """List all models â€” proxied from DocGrok model registry, enriched with model_category."""
     try:
         resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry")
+        resp.raise_for_status()
         data = resp.json()
-        models = data.get("models", [])
+        models = data.get("models")
+        if not isinstance(models, list):
+            raise HTTPException(status_code=503, detail="DocGrok returned an invalid model registry")
 
         # Load stored model metadata from CosmosDB to get model_category
         store = get_store()
         stored = {}
-        try:
-            for doc in store.query(
-                "SELECT c.id, c.model_category FROM c WHERE c.doc_type = 'docgrok_model'",
-                partition_key="docgrok_model",
-            ):
-                stored[doc["id"]] = doc.get("model_category", "embedding")
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for doc in store.query(
+            "SELECT c.id, c.model_category FROM c WHERE c.doc_type = 'docgrok_model'",
+            partition_key="docgrok_model",
+        ):
+            stored[doc["id"]] = doc.get("model_category", "embedding")
 
         # Add chat-only models from CosmosDB that aren't in DocGrok
         docgrok_ids = {m.get("id") for m in models}
-        try:
-            for doc in store.query(
-                "SELECT * FROM c WHERE c.doc_type = 'docgrok_model' AND c.model_category = 'chat'",
-                partition_key="docgrok_model",
-            ):
-                if doc["id"] not in docgrok_ids:
-                    models.append({
-                        "id": doc["id"],
-                        "name": doc.get("name", ""),
-                        "kind": "external",
-                        "type": doc.get("type", "azure-openai"),
-                        "endpoint": doc.get("endpoint", ""),
-                        "deployment": doc.get("deployment", ""),
-                        "embedding_dim": doc.get("embedding_dim", 0),
-                        "api_version": doc.get("api_version", ""),
-                        "model_category": "chat",
-                    })
-
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for doc in store.query(
+            "SELECT * FROM c WHERE c.doc_type = 'docgrok_model' AND c.model_category = 'chat'",
+            partition_key="docgrok_model",
+        ):
+            if doc["id"] not in docgrok_ids:
+                models.append({
+                    "id": doc["id"],
+                    "name": doc.get("name", ""),
+                    "kind": "external",
+                    "type": doc.get("type", "azure-openai"),
+                    "endpoint": doc.get("endpoint", ""),
+                    "deployment": doc.get("deployment", ""),
+                    "embedding_dim": doc.get("embedding_dim", 0),
+                    "api_version": doc.get("api_version", ""),
+                    "model_category": "chat",
+                })
 
         # Enrich all models with model_category (default to "embedding" for existing)
         # Mask sensitive fields (api_key, secret) from responses
@@ -4927,8 +5546,19 @@ async def list_models():
 
         data["models"] = models
         return data
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"DocGrok error: {str(e)}")
+    except (AzureError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.error("Model listing failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Model registry or metadata storage is unavailable") from exc
+
+
+def _replace_model_metadata(store, doc: dict):
+    """Preserve concurrent credential changes when writing API-owned metadata."""
+    from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
+
+    try:
+        return store.replace_with_etag(doc, doc["_etag"])
+    except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError) as exc:
+        raise HTTPException(status_code=409, detail="Model changed during the operation; reload and retry") from exc
 
 
 @app.post("/api/models")
@@ -4956,17 +5586,16 @@ async def create_model(payload: dict):
         # Preserve stored ID â€” look up by name in CosmosDB so DocGrok always
         # gets the same ID even after restart (prevents ID drift).
         store = get_store()
-        try:
-            existing = store.query(
-                "SELECT c.id FROM c WHERE c.doc_type = 'docgrok_model' AND c.name = @name",
-                partition_key="docgrok_model",
-                parameters=[{"name": "@name", "value": model_name}],
-            )
-            for doc in existing:
-                reg_payload["id"] = doc["id"]
-                break
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        existing_model = None
+        existing = store.query(
+            "SELECT * FROM c WHERE c.doc_type = 'docgrok_model' AND c.name = @name",
+            partition_key="docgrok_model",
+            parameters=[{"name": "@name", "value": model_name}],
+        )
+        for doc in existing:
+            existing_model = doc
+            reg_payload["id"] = doc["id"]
+            break
 
         # Store API key in Key Vault (if configured), strip from CosmosDB doc
         from keyvault_client import set_model_api_key
@@ -4976,20 +5605,30 @@ async def create_model(payload: dict):
         if model_category == "chat":
             model_id = reg_payload.get("id") or f"mdl-ext-{str(uuid.uuid4())[:8]}"
             # Store key in Key Vault, remove from CosmosDB doc
-            persist_doc = {k: v for k, v in reg_payload.items() if k != "api_key"}
-            if api_key_value and set_model_api_key(model_id, api_key_value):
-                persist_doc["api_key_source"] = "keyvault"
-            else:
-                persist_doc["api_key"] = api_key_value  # Fallback: store in CosmosDB
-            store.upsert({
+            persist_doc = {
+                **(existing_model or {}),
+                **{k: v for k, v in reg_payload.items() if k != "api_key"},
+            }
+            if api_key_value:
+                if set_model_api_key(model_id, api_key_value):
+                    persist_doc["api_key_source"] = "keyvault"
+                    persist_doc.pop("api_key", None)
+                else:
+                    persist_doc["api_key"] = api_key_value
+                    persist_doc.pop("api_key_source", None)
+            persist_doc.update({
                 "id": model_id,
                 "doc_type": "docgrok_model",
                 **persist_doc,
                 "model_category": model_category,
                 "stored_at": datetime.utcnow().isoformat(),
             })
-            result = {"id": model_id, "name": model_name, "kind": "external",
-                      "model_category": model_category, **persist_doc}
+            if existing_model:
+                _replace_model_metadata(store, persist_doc)
+            else:
+                store.create(persist_doc)
+            result = {**{k: v for k, v in reg_payload.items() if k != "api_key"},
+                      "id": model_id, "kind": "external", "model_category": model_category}
         else:
             # Send full payload (including api_key) to DocGrok for in-memory use.
             # DocGrok handles CosmosDB persistence with envelope-encrypted api_key,
@@ -5003,13 +5642,11 @@ async def create_model(payload: dict):
             # onto the existing doc without disturbing api_key_envelope.
             model_id = result.get("id", "")
             if model_id.startswith("mdl-ext-"):
-                try:
-                    existing = store.get(model_id, "docgrok_model")
-                    if existing and existing.get("model_category") != model_category:
-                        existing["model_category"] = model_category
-                        store.upsert(existing)
-                except Exception:  # lgtm[py/empty-except]
-                    pass
+                existing = store.get(model_id, "docgrok_model")
+                if not existing:
+                    raise HTTPException(status_code=503, detail="Registered model metadata is unavailable; retry registration")
+                if existing.get("model_category") != model_category:
+                    _replace_model_metadata(store, {**existing, "model_category": model_category})
             result["model_category"] = model_category
 
         return result
@@ -5025,14 +5662,20 @@ async def update_model(model_id: str, payload: dict):
     if not model_id.startswith("mdl-ext-"):
         raise HTTPException(status_code=400, detail="Only external models can be updated")
 
-    store = get_store()
-    doc = None
     try:
+        store = get_store()
         doc = store.get(model_id, "docgrok_model")
-    except Exception:  # lgtm[py/empty-except]
-        pass
+    except (AzureError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail="Model metadata storage is unavailable") from exc
     if not doc:
+        try:
+            resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry/{safe_url_segment(model_id)}")
+            if resp.status_code != 404:
+                raise HTTPException(status_code=503, detail="Model registry and metadata are unavailable or inconsistent; retry after recovery")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="Model registry is unavailable") from exc
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    doc = dict(doc)
 
     # Merge updatable fields
     updatable = ("api_key", "endpoint", "deployment", "api_version", "embedding_dim", "auth_type", "client_id")
@@ -5080,14 +5723,19 @@ async def update_model(model_id: str, payload: dict):
                 "embedding_dim": int(doc.get("embedding_dim", 1536)),
                 "api_version": doc.get("api_version", "2024-06-01"),
             }
+            if "client_id" in doc:
+                reg_payload["client_id"] = doc["client_id"]
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
-                logger.warning(f"DocGrok re-register failed: {resp.text}")
-        except Exception as e:
-            logger.warning(f"DocGrok re-register error: {e}")
+                raise HTTPException(status_code=resp.status_code, detail="DocGrok model update failed")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="DocGrok model update is unavailable") from exc
     else:
         # Chat-only path: api.py owns the persisted doc
-        store.upsert(doc)
+        try:
+            _replace_model_metadata(store, doc)
+        except AzureError as exc:
+            raise HTTPException(status_code=503, detail="Model metadata update failed") from exc
 
     return {"status": "updated", "id": model_id, "fields_updated": changed}
 
@@ -5095,30 +5743,31 @@ async def update_model(model_id: str, payload: dict):
 @app.delete("/api/models/{model_id}")
 async def delete_model(model_id: str):
     """Delete an external model — proxied to DocGrok, removed from CosmosDB."""
+    if not model_id.startswith("mdl-ext-"):
+        raise HTTPException(status_code=400, detail="Only external models can be deleted")
     try:
         store = get_store()
 
         # Guard: refuse delete if any pipeline or assistant references this model.
-        # Pipelines reference models via the `docgrok_pipeline` field (which can
-        # also be a transform pipeline id; direct equality is fine as a match).
-        # Assistants reference chat models via `model_id`.
+        # Include routing pipelines: ingestion pipelines usually reference a
+        # routing id rather than the embedding model directly.
         pipeline_users: list[str] = []
-        try:
-            for d in store.list("pipeline"):
-                if d.get("docgrok_pipeline") == model_id:
-                    pipeline_users.append(d.get("name") or d.get("id") or "<unnamed>")
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for d in store.list("pipeline"):
+            if d.get("docgrok_pipeline") == model_id:
+                pipeline_users.append(d.get("name") or d.get("id") or "<unnamed>")
 
         assistant_users: list[str] = []
-        try:
-            for d in store.list("assistant"):
-                if d.get("model_id") == model_id:
-                    assistant_users.append(d.get("name") or d.get("id") or "<unnamed>")
-        except Exception:  # lgtm[py/empty-except]
-            pass
+        for d in store.list("assistant"):
+            if d.get("model_id") == model_id:
+                assistant_users.append(d.get("name") or d.get("id") or "<unnamed>")
 
-        if pipeline_users or assistant_users:
+        routing_users = []
+        for d in store.list("docgrok_pipeline"):
+            configs = [d, *(d.get("steps") or [])]
+            if any(c.get("model_id") == model_id or c.get("model") == model_id for c in configs):
+                routing_users.append(d.get("name") or d.get("id") or "<unnamed>")
+
+        if pipeline_users or assistant_users or routing_users:
             parts: list[str] = []
             if pipeline_users:
                 names = ", ".join(f"'{n}'" for n in pipeline_users)
@@ -5126,6 +5775,9 @@ async def delete_model(model_id: str):
             if assistant_users:
                 names = ", ".join(f"'{n}'" for n in assistant_users)
                 parts.append(f"{len(assistant_users)} assistant(s): {names}")
+            if routing_users:
+                names = ", ".join(f"'{n}'" for n in routing_users)
+                parts.append(f"{len(routing_users)} routing pipeline(s): {names}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot delete — model is used by {' and '.join(parts)}. "
@@ -5135,10 +5787,7 @@ async def delete_model(model_id: str):
         # Check if it's a chat-only model (only in CosmosDB, not in DocGrok)
         doc = None
         if model_id.startswith("mdl-ext-"):
-            try:
-                doc = store.get(model_id, "docgrok_model")
-            except Exception:  # lgtm[py/empty-except]
-                pass
+            doc = store.get(model_id, "docgrok_model")
 
         if doc and doc.get("model_category") == "chat":
             # Chat model — only delete from CosmosDB
@@ -5146,14 +5795,16 @@ async def delete_model(model_id: str):
             return {"status": "deleted", "id": model_id}
 
         resp = await http_client.delete(f"{DOCGROK_URL}/admin/models/registry/{safe_url_segment(model_id)}")
-        if resp.status_code >= 400:
+        if resp.status_code >= 400 and resp.status_code != 404:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
         # Remove from CosmosDB persistence and Key Vault
         if model_id.startswith("mdl-ext-"):
+            from azure.cosmos.exceptions import CosmosResourceNotFoundError
             try:
                 store.delete(model_id, "docgrok_model")
-            except Exception:  # lgtm[py/empty-except]
+            except CosmosResourceNotFoundError:
+                # DocGrok may already have deleted the shared metadata record.
                 pass
             try:
                 from keyvault_client import delete_model_api_key
@@ -5161,7 +5812,7 @@ async def delete_model(model_id: str):
             except Exception:  # lgtm[py/empty-except]
                 pass
 
-        return resp.json()
+        return {"status": "deleted", "id": model_id} if resp.status_code == 404 else resp.json()
     except HTTPException:
         raise
     except Exception as e:
@@ -5639,6 +6290,46 @@ async def _build_index_specs(
                 },
                 "mode": "vector",
                 "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                "embedding": embedding,
+                "content_fields": cf,
+                "pipeline_id": matched_pip.get("id"),
+            })
+        elif dtype == "onelake-iceberg":
+            mirror = cfg.get("mirror") or {}
+            mirror_type = str(mirror.get("type", "")).lower()
+            mirror_config = mirror.get("config") or {}
+            if mirror_type not in ("garnet", "redis"):
+                warnings.append(f"destination {dest_id} has no Garnet vector mirror")
+                continue
+            if mirror_type == "redis":
+                warnings.append(f"destination {dest_id} uses a legacy Redis string mirror that is not searchable")
+                continue
+            raw_metric = str(mirror_config.get("distance_metric", "cosine")).lower()
+            metric = {
+                "ip": "dot",
+                "xcosine_normalized": "cosine",
+            }.get(raw_metric, raw_metric)
+            indexes.append({
+                "id": dest_id,
+                "store": {
+                    "type": "garnet",
+                    "endpoint": mirror_config.get("endpoint", ""),
+                    "vector_set": mirror_config.get("vector_set", "omnivec-vectors"),
+                    "tls": mirror_config.get("tls", True),
+                    "use_entra_auth": mirror_config.get("use_entra_auth", False),
+                    "username": mirror_config.get("username"),
+                    "auth": (
+                        {"mode": "key", "secret_ref": mirror_config.get("password_secret_ref")}
+                        if mirror_config.get("password_secret_ref")
+                        else {"mode": "managed_identity"}
+                    ),
+                    "search_ef": mirror_config.get("search_ef", 100),
+                    "filter_ef": mirror_config.get("filter_ef", 16),
+                },
+                "vector": {
+                    "field": "embedding",
+                    "metric": metric,
+                },
                 "embedding": embedding,
                 "content_fields": cf,
                 "pipeline_id": matched_pip.get("id"),

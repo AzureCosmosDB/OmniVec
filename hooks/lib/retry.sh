@@ -128,6 +128,15 @@ retry_run() {
             return 0
         fi
         _out=$(cat "$_log")
+        if [ "$_label" = "helm-deploy" ]; then
+            case "$_out" in
+                *"context deadline exceeded"*|*"timed out waiting for the condition"*)
+                    printf '%s\n' "$_out"
+                    printf '  [helm-deploy] readiness deadline reached; inspect workloads before retrying.\n' >&2
+                    return "$_rc"
+                    ;;
+            esac
+        fi
         if [ "$_attempt" -ge "$OMNIVEC_RETRY_ATTEMPTS" ]; then
             printf '%s\n' "$_out"
             printf "  ${RED}[%s] failed after %d attempts (rc=%d). Full log: %s${NC}\n" \

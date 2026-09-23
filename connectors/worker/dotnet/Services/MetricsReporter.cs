@@ -20,7 +20,8 @@ public class MetricsReporter
         try
         {
             var payload = new { processed, failed, processing_time_ms = processingTimeMs, batch_key = batchKey };
-            await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
+            using var response = await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
+            response.EnsureSuccessStatusCode();
         }
         catch (Exception ex)
         {

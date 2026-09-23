@@ -13,9 +13,10 @@ by the .NET changefeed service + .NET worker via Service Bus.
 import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
+from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceNotFoundError
 
 from models import Job, JobStatus, PipelineStatus, Pipeline
 from store import init_store, get_store
@@ -76,32 +77,55 @@ def _get_active_pipelines() -> list[Pipeline]:
 # ── job health monitor ───────────────────────────────────────────────────
 
 def monitor_job_health():
-    """Detect stuck or retriable jobs."""
+    """Recover eligible jobs without overwriting concurrent worker updates."""
     store = get_store()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     timeout_cutoff = now - timedelta(minutes=JOB_TIMEOUT_MINUTES)
 
-    for doc in store.list("job"):
-        job = _job_from_doc(doc)
-
-        # Stuck PROCESSING → FAILED
-        if job.status == JobStatus.PROCESSING and job.started_at:
-            if job.started_at < timeout_cutoff:
+    for doc in store.query(
+        "SELECT * FROM c WHERE c.doc_type = 'job' AND c.status IN ('processing', 'failed')",
+        partition_key="job",
+    ):
+        if doc.get("status") not in (JobStatus.PROCESSING.value, JobStatus.FAILED.value):
+            continue
+        try:
+            job = _job_from_doc(doc)
+            changed = False
+            started_at = job.started_at or job.created_at
+            if started_at is None and doc.get("_ts") is not None:
+                started_at = datetime.fromtimestamp(doc["_ts"], tz=timezone.utc)
+            if started_at and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if job.status == JobStatus.PROCESSING and started_at and started_at < timeout_cutoff:
                 job.status = JobStatus.FAILED
                 job.error = f"Timed out after {JOB_TIMEOUT_MINUTES} minutes"
                 job.completed_at = now
-                store.upsert(_to_doc(job, "job"))
-                logger.warning("Job %s timed out", job.id)
+                changed = True
 
-        # FAILED with retries left → reset to PENDING
-        if job.status == JobStatus.FAILED and job.retry_count < MAX_RETRY_COUNT:
-            job.status = JobStatus.PENDING
-            job.error = None
-            job.retry_count += 1
-            job.started_at = None
-            job.completed_at = None
-            store.upsert(_to_doc(job, "job"))
-            logger.info("Job %s reset to PENDING (retry %d)", job.id, job.retry_count)
+            if job.status == JobStatus.FAILED and job.retry_count < MAX_RETRY_COUNT:
+                pipeline = store.get(job.pipeline_id, "pipeline")
+                # A paused/deleted pipeline must not consume retries or revive work.
+                if pipeline and pipeline.get("status") == PipelineStatus.ACTIVE.value:
+                    job.status = JobStatus.PENDING
+                    job.error = None
+                    job.retry_count += 1
+                    job.started_at = None
+                    job.completed_at = None
+                    changed = True
+
+            if changed:
+                updated = dict(doc)
+                # Preserve worker-owned fields that are not part of the API model.
+                recovered = job.model_dump(mode="json")
+                for field in ("status", "error", "retry_count", "started_at", "completed_at"):
+                    updated[field] = recovered[field]
+                store.replace_with_etag(updated, doc["_etag"])
+                logger.info("Recovered job %s to %s (retry %d)", job.id, job.status.value, job.retry_count)
+        except (CosmosAccessConditionFailedError, CosmosResourceNotFoundError):
+            logger.debug("Job %s changed during recovery; skipping", doc.get("id"))
+        except Exception:
+            # One malformed document or failed write must not starve later jobs.
+            logger.exception("Could not recover job %s", doc.get("id"))
 
 
 # ── main loop ─────────────────────────────────────────────────────────────

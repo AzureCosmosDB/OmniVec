@@ -44,6 +44,17 @@ spec:
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: AGENT_DEFAULT_MODEL_ID
               value: {{ .Values.agent.defaultModelId | default "" | quote }}
+            - name: AGENT_CHAT_AUTH_MODE
+              value: {{ .Values.agent.chatAuthMode | default "managed-identity" | quote }}
+            {{- with .Values.agent.chatApiKeySecret }}
+            - name: AGENT_CHAT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "api-key" | quote }}
+            - name: AGENT_CHAT_API_KEY_MODEL_ID
+              value: {{ required "agent.chatApiKeySecret.modelId must bind the secret to one registered chat model" .modelId | quote }}
+            {{- end }}
             - name: DOCGROK_URL
               value: {{ .Values.agent.docgrokUrl | default "http://omnivec-docgrok-router" | quote }}
             - name: OMNIVEC_API_URL
@@ -51,7 +62,26 @@ spec:
             - name: OMNIVEC_NAMESPACE
               value: {{ .Values.global.namespace | quote }}
             - name: SERVICEBUS_FQNS
-              value: {{ .Values.agent.servicebusFqns | default "" | quote }}
+              value: {{ .Values.agent.servicebusFqns | default .Values.azure.serviceBus.namespace | quote }}
+            - name: AGENT_QUEUE_NAMES
+              {{- if hasKey .Values.agent "queueNames" }}
+              value: {{ .Values.agent.queueNames | quote }}
+              {{- else }}
+              value: {{ .Values.agent.queueNames | default "blob-events" | quote }}
+              {{- end }}
+            - name: AGENT_SB_SUBSCRIPTIONS
+              {{- if hasKey .Values.agent "servicebusSubscriptions" }}
+              value: {{ .Values.agent.servicebusSubscriptions | quote }}
+              {{- else }}
+              value: {{ .Values.agent.servicebusSubscriptions | default (printf "%s/worker" (.Values.azure.serviceBus.embeddingsTopic | default "embeddings")) | quote }}
+              {{- end }}
+            {{- with .Values.agent.apiTokenSecret }}
+            - name: OMNIVEC_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name | quote }}
+                  key: {{ .key | default "token" | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.agent.logLevel | default "INFO" | quote }}
             - name: INTERNAL_API_TOKEN

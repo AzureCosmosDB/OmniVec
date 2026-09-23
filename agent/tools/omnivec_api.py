@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Optional
 
 import httpx
@@ -26,13 +27,37 @@ async def _get(path: str, params: dict | None = None) -> Any:
     """GET ``{OMNIVEC_API_URL}{path}`` and return parsed JSON."""
     client = _get_client()
     url = OMNIVEC_API_URL.rstrip("/") + path
-    # Host header matches api.py's internal-call allowlist (no auth needed).
-    headers = {"Host": "omnivec-api"}
+    headers = api_headers()
     resp = await client.get(url, params=params or None, headers=headers)
     resp.raise_for_status()
     if resp.headers.get("content-type", "").startswith("application/json"):
         return resp.json()
     return {"text": resp.text}
+
+
+def api_headers() -> dict:
+    """Use configured service authentication, never forge an internal Host."""
+    token = os.getenv("OMNIVEC_API_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _path_id(identifier: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,511}", identifier):
+        raise ValueError("Resource identifiers must be 1-512 ASCII letters, digits, dots, underscores or hyphens, starting with a letter or digit")
+    return identifier
+
+
+_RESOURCE_PATHS = {
+    "sources": "/api/sources/",
+    "destinations": "/api/destinations/",
+    "pipelines": "/api/pipelines/",
+    "jobs": "/api/jobs/",
+    "docgrok_pipelines": "/api/docgrok/pipelines/",
+}
+
+
+async def _get_resource(resource: str, identifier: str) -> Any:
+    return await _get(_RESOURCE_PATHS[resource] + _path_id(identifier))
 
 
 class _Empty(BaseModel):
@@ -74,7 +99,7 @@ async def list_sources(_p: _Empty, **_ctx) -> Any:
 
 @tool("get_source", "Return a single source by id.", _SourceId)
 async def get_source(p: _SourceId, **_ctx) -> Any:
-    return await _get(f"/api/sources/{p.source_id}")
+    return await _get_resource("sources", p.source_id)
 
 
 @tool("list_destinations", "List all configured destinations.", _Empty)
@@ -84,7 +109,7 @@ async def list_destinations(_p: _Empty, **_ctx) -> Any:
 
 @tool("get_destination", "Return a single destination by id.", _DestinationId)
 async def get_destination(p: _DestinationId, **_ctx) -> Any:
-    return await _get(f"/api/destinations/{p.destination_id}")
+    return await _get_resource("destinations", p.destination_id)
 
 
 @tool("list_pipelines", "List all pipelines and their headline status.", _Empty)
@@ -94,14 +119,14 @@ async def list_pipelines(_p: _Empty, **_ctx) -> Any:
 
 @tool("get_pipeline", "Return a single pipeline by id.", _PipelineId)
 async def get_pipeline(p: _PipelineId, **_ctx) -> Any:
-    return await _get(f"/api/pipelines/{p.pipeline_id}")
+    return await _get_resource("pipelines", p.pipeline_id)
 
 
 @tool("get_pipeline_status", "Return the current status of a pipeline.", _PipelineId)
 async def get_pipeline_status(p: _PipelineId, **_ctx) -> Any:
     # The control-plane has no /status sub-route; the parent pipeline document
     # already carries status + processing_mode + generation, so project those.
-    pipe = await _get(f"/api/pipelines/{p.pipeline_id}")
+    pipe = await _get_resource("pipelines", p.pipeline_id)
     return {
         "id": pipe.get("id"),
         "name": pipe.get("name"),
@@ -116,7 +141,7 @@ async def get_pipeline_status(p: _PipelineId, **_ctx) -> Any:
 @tool("get_pipeline_metrics", "Return aggregate metrics for a pipeline.", _PipelineId)
 async def get_pipeline_metrics(p: _PipelineId, **_ctx) -> Any:
     # No /metrics sub-route either — the parent doc embeds `stats`.
-    pipe = await _get(f"/api/pipelines/{p.pipeline_id}")
+    pipe = await _get_resource("pipelines", p.pipeline_id)
     return {"id": pipe.get("id"), "name": pipe.get("name"), "stats": pipe.get("stats", {})}
 
 
@@ -127,7 +152,11 @@ async def list_models(_p: _Empty, **_ctx) -> Any:
 
 @tool("get_model", "Return a single model by id.", _ModelId)
 async def get_model(p: _ModelId, **_ctx) -> Any:
-    return await _get(f"/api/models/{p.model_id}")
+    # The public control plane only exposes the registry list, not a GET by ID.
+    data = await _get("/api/models")
+    models = data.get("models", []) if isinstance(data, dict) else data
+    return next((m for m in models if m.get("id") == p.model_id),
+                {"error": "Model not found in the current registry", "id": p.model_id})
 
 
 @tool("list_jobs", "List recent ingestion jobs.", _Empty)
@@ -137,7 +166,7 @@ async def list_jobs(_p: _Empty, **_ctx) -> Any:
 
 @tool("get_job", "Return a single job by id.", _JobId)
 async def get_job(p: _JobId, **_ctx) -> Any:
-    return await _get(f"/api/jobs/{p.job_id}")
+    return await _get_resource("jobs", p.job_id)
 
 
 @tool("get_audit_log", "Recent audit-log entries (filterable by actor, method, path).", _AuditFilter)

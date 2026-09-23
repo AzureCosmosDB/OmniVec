@@ -4,8 +4,10 @@ param location string
 param tags object = {}
 param kubernetesVersion string
 param systemNodeVmSize string
+@minValue(2)
 param systemNodeCount int
 param gpuNodeVmSize string
+@minValue(0)
 param gpuNodeCount int
 
 var gpuPool = gpuNodeCount > 0 ? [
@@ -13,7 +15,7 @@ var gpuPool = gpuNodeCount > 0 ? [
     name: 'gpu'
     count: gpuNodeCount
     minCount: 0
-    maxCount: 8
+    maxCount: max(8, gpuNodeCount)
     enableAutoScaling: true
     vmSize: gpuNodeVmSize
     osType: 'Linux'
@@ -57,7 +59,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2026-01-02-preview' = {
         name: 'system'
         count: systemNodeCount
         minCount: systemNodeCount
-        maxCount: 5
+        maxCount: max(5, systemNodeCount)
         enableAutoScaling: true
         vmSize: systemNodeVmSize
         osType: 'Linux'

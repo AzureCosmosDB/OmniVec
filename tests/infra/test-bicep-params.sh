@@ -20,11 +20,13 @@ PARAM_TMPL="$REPO_ROOT/infra/main.parameters.json"
 MAIN_BICEP="$REPO_ROOT/infra/main.bicep"
 
 BICEP_BIN=""
-if command -v bicep >/dev/null 2>&1; then
+if command -v bicep >/dev/null 2>&1 && bicep --version >/dev/null 2>&1; then
     BICEP_BIN="bicep"
-elif [ -x "$HOME/.azure/bin/bicep" ];     then BICEP_BIN="$HOME/.azure/bin/bicep"
-elif [ -x "$HOME/.azure/bin/bicep.exe" ]; then BICEP_BIN="$HOME/.azure/bin/bicep.exe"
-elif command -v az >/dev/null 2>&1; then
+elif [ -x "$HOME/.azure/bin/bicep" ] && "$HOME/.azure/bin/bicep" --version >/dev/null 2>&1; then
+    BICEP_BIN="$HOME/.azure/bin/bicep"
+elif [ -x "$HOME/.azure/bin/bicep.exe" ] && "$HOME/.azure/bin/bicep.exe" --version >/dev/null 2>&1; then
+    BICEP_BIN="$HOME/.azure/bin/bicep.exe"
+elif command -v az >/dev/null 2>&1 && az bicep version >/dev/null 2>&1; then
     BICEP_BIN="az-bicep"
 fi
 
@@ -44,7 +46,8 @@ if [ -z "$PY_BIN" ]; then
     exit 0
 fi
 
-TMP=$(mktemp -d 2>/dev/null || mktemp -d -t omnivec-bicep)
+TMP="$SCRIPT_DIR/.bicep-test-$$"
+(umask 077 && mkdir "$TMP") || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
 PASS=0
@@ -114,7 +117,7 @@ pass "bicep build main.bicep compiles cleanly"
 
 (
     export AZURE_ENV_NAME="testenv" AZURE_LOCATION="eastus2"
-    export OMNIVEC_SYSTEM_NODE_VM_SIZE="Standard_B4ms"
+    export OMNIVEC_SYSTEM_NODE_VM_SIZE="Standard_D4s_v5"
     export OMNIVEC_SYSTEM_NODE_COUNT="2"
     export OMNIVEC_GPU_NODE_VM_SIZE=""
     export OMNIVEC_GPU_NODE_COUNT="0"
@@ -125,7 +128,7 @@ pass "bicep build main.bicep compiles cleanly"
 
 (
     export AZURE_ENV_NAME="testenv" AZURE_LOCATION="eastus2"
-    export OMNIVEC_SYSTEM_NODE_VM_SIZE="Standard_B4ms"
+    export OMNIVEC_SYSTEM_NODE_VM_SIZE="Standard_D4s_v5"
     export OMNIVEC_SYSTEM_NODE_COUNT="2"
     export OMNIVEC_GPU_NODE_COUNT="0"
     export OMNIVEC_ENABLE_BLOB_SOURCE="true"
@@ -150,7 +153,7 @@ pass "bicep build main.bicep compiles cleanly"
     # azd env set) PLUS Bicep-side normalization (trim/replace). Here we simulate
     # the hook stripping CR, and verify the resulting params round-trip cleanly.
     export AZURE_ENV_NAME="testenv" AZURE_LOCATION="eastus2"
-    raw_size="Standard_B4ms$(printf '\r')"
+    raw_size="Standard_D4s_v5$(printf '\r')"
     raw_count="2$(printf '\r')"
     raw_blob="false$(printf '\r')"
     # Simulate hook sanitize: tr -d '\r' (matches env sanitize loop in preprovision.sh)
@@ -165,7 +168,7 @@ pass "bicep build main.bicep compiles cleanly"
 
 (
     export AZURE_ENV_NAME="testenv" AZURE_LOCATION="eastus2"
-    export OMNIVEC_SYSTEM_NODE_VM_SIZE="Standard_B4ms"
+    export OMNIVEC_SYSTEM_NODE_VM_SIZE="Standard_D4s_v5"
     export OMNIVEC_SYSTEM_NODE_COUNT="2"
     export OMNIVEC_GPU_NODE_VM_SIZE=""
     export OMNIVEC_GPU_NODE_COUNT="0"

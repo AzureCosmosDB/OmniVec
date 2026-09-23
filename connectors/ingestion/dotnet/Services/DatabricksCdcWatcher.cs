@@ -20,7 +20,7 @@ namespace OmniVec.ChangeFeed.Services;
 ///     id 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d).
 ///
 /// Cursor is the Delta `_commit_version` (long) of the last row processed. Stored in
-/// memory only for v1 (re-scans from v0 on pod restart — fine for the demo).
+/// memory only: restart replays a version-pinned table snapshot before consuming CDF.
 /// </summary>
 public class DatabricksCdcWatcher : ISourceWatcher
 {
@@ -34,6 +34,7 @@ public class DatabricksCdcWatcher : ISourceWatcher
     private readonly ILogger<DatabricksCdcWatcher> _logger;
     private readonly ServiceBusPublisher? _sbPublisher;
     private readonly HttpClient _http;
+    private readonly HttpClient _externalHttp = new() { Timeout = TimeSpan.FromMinutes(2) };
     private readonly TokenCredential _credential = new DefaultAzureCredential();
 
     private CancellationTokenSource? _cts;
@@ -43,8 +44,9 @@ public class DatabricksCdcWatcher : ISourceWatcher
     private readonly object _pipelineLock = new();
     private List<Destination> _destinations = new();
 
-    // -1 means "no rows seen yet" → first poll reads from version 0
+    // -1 means a version-pinned initial snapshot is required.
     private long _lastVersion = -1;
+    private long? _snapshotVersion;
 
     public string SourceId => _source.Id;
     public string Generation { get; }
@@ -113,22 +115,32 @@ public class DatabricksCdcWatcher : ISourceWatcher
             try
             {
                 var since = _lastVersion + 1;
-                var sql = $"SELECT * FROM table_changes('{fqTable}', {since}) " +
-                          "WHERE _change_type IN ('insert', 'update_postimage') " +
-                          "ORDER BY _commit_version ASC LIMIT 1000";
-
-                var rows = await ExecuteStatementAsync(sql, ct);
-                if (rows.Count > 0)
+                if (_sbPublisher?.IsEnabled != true)
+                    throw new InvalidOperationException("Databricks queue processing requires Service Bus");
+                if (!await _sbPublisher.HasCapacityAsync(ct))
                 {
-                    var maxV = rows.Max(r => GetLong(r, "_commit_version") ?? _lastVersion);
-                    await HandleChangesAsync(rows, ct);
-                    _lastVersion = maxV;
-                    _logger.LogInformation(
-                        "Databricks CDF source={SourceId}: processed {Count} rows, cursor → v{Version}",
-                        _source.Id, rows.Count, _lastVersion);
+                    await Task.Delay(pollInterval, ct);
+                    continue;
                 }
+                if (_lastVersion < 0)
+                {
+                    await ProcessSnapshotAsync(fqTable, ct);
+                    continue;
+                }
+                // Never advance past a partially fetched commit. A commit can
+                // contain more than the former LIMIT 1000 row cap.
+                var next = await ExecuteStatementAsync(
+                    $"SELECT MIN(_commit_version) AS next_version FROM table_changes('{fqTable}', {since}) " +
+                    "WHERE _change_type IN ('insert', 'update_postimage')", ct);
+                var nextVersion = next.Count == 0 ? null : GetLong(next[0], "next_version");
+                if (nextVersion is null)
+                {
+                    await Task.Delay(pollInterval, ct);
+                    continue;
+                }
+                await ProcessVersionAsync(fqTable, nextVersion.Value, false, ct);
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 // Common cause for an "expected" failure is the warehouse being cold-started
@@ -144,6 +156,29 @@ public class DatabricksCdcWatcher : ISourceWatcher
     }
 
     // -------- Databricks REST helpers --------
+
+    internal async Task ProcessSnapshotAsync(string table, CancellationToken ct)
+    {
+        if (_snapshotVersion is null)
+        {
+            var history = await ExecuteStatementAsync($"DESCRIBE HISTORY {table} LIMIT 1", ct);
+            _snapshotVersion = history.Count > 0 ? GetLong(history[0], "version") : null;
+        }
+        if (_snapshotVersion is null) throw new InvalidOperationException("Databricks table has no snapshot version");
+        await ProcessVersionAsync(table, _snapshotVersion.Value, true, ct);
+        _snapshotVersion = null;
+    }
+
+    internal async Task ProcessVersionAsync(string table, long version, bool snapshot, CancellationToken ct)
+    {
+        var sql = snapshot ? $"SELECT * FROM {table} VERSION AS OF {version}"
+            : $"SELECT * FROM table_changes('{table}', {version}, {version}) " +
+              "WHERE _change_type IN ('insert', 'update_postimage')";
+        await ExecuteStatementCoreAsync(sql, ct, HandleChangesAsync);
+        _lastVersion = version;
+        _logger.LogInformation("Databricks source={SourceId}: completed {Kind}, cursor → v{Version}",
+            _source.Id, snapshot ? "snapshot" : "commit", version);
+    }
 
     private async Task<string> GetAuthHeaderAsync(CancellationToken ct)
     {
@@ -179,7 +214,11 @@ public class DatabricksCdcWatcher : ISourceWatcher
     /// and returns the result rows as a list of column-name → value dictionaries.
     /// Synchronous wait mode (max 50s); polls for SUCCEEDED if it returns PENDING/RUNNING.
     /// </summary>
-    private async Task<List<Dictionary<string, object?>>> ExecuteStatementAsync(string sql, CancellationToken ct)
+    private Task<List<Dictionary<string, object?>>> ExecuteStatementAsync(string sql, CancellationToken ct)
+        => ExecuteStatementCoreAsync(sql, ct, null);
+
+    private async Task<List<Dictionary<string, object?>>> ExecuteStatementCoreAsync(string sql, CancellationToken ct,
+        Func<List<Dictionary<string, object?>>, CancellationToken, Task>? consumePage)
     {
         var auth = await GetAuthHeaderAsync(ct);
 
@@ -188,7 +227,7 @@ public class DatabricksCdcWatcher : ISourceWatcher
             statement = sql,
             warehouse_id = ExtractWarehouseId(_source.DatabricksHttpPath!),
             wait_timeout = "50s",
-            disposition = "INLINE",
+            disposition = consumePage is null ? "INLINE" : "EXTERNAL_LINKS",
             format = "JSON_ARRAY",
         };
         var bodyJson = JsonSerializer.Serialize(body);
@@ -237,7 +276,103 @@ public class DatabricksCdcWatcher : ISourceWatcher
                 $"Databricks statement {statementId} terminal state {state}: {Truncate(err, 500)}");
         }
 
-        return ParseResult(final);
+        if (final.TryGetProperty("manifest", out var manifest)
+            && manifest.TryGetProperty("truncated", out var truncated) && truncated.GetBoolean())
+            throw new InvalidOperationException("Databricks result was truncated; refusing to advance the source version");
+        if (consumePage is not null)
+        {
+            await ConsumeExternalResultsAsync(final, statementId, auth, consumePage, ct);
+            return [];
+        }
+        var rows = ParseResult(final);
+        var result = final.GetProperty("result");
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        while (result.TryGetProperty("next_chunk_internal_link", out var link) && !string.IsNullOrEmpty(link.GetString()))
+        {
+            var path = link.GetString()!;
+            if (!path.StartsWith($"/api/2.0/sql/statements/{statementId}/", StringComparison.Ordinal)
+                || !visited.Add(path))
+                throw new InvalidOperationException("Invalid Databricks result continuation");
+            using var chunkRequest = new HttpRequestMessage(HttpMethod.Get, path);
+            chunkRequest.Headers.TryAddWithoutValidation("Authorization", auth);
+            using var chunkResponse = await _http.SendAsync(chunkRequest, ct);
+            chunkResponse.EnsureSuccessStatusCode();
+            using var chunkDocument = JsonDocument.Parse(await chunkResponse.Content.ReadAsStringAsync(ct));
+            result = chunkDocument.RootElement.Clone();
+            rows.AddRange(ParseResult(JsonSerializer.SerializeToElement(new { manifest, result })));
+        }
+        if (manifest.TryGetProperty("total_row_count", out var total) && total.GetInt64() != rows.Count)
+            throw new InvalidOperationException("Incomplete Databricks result; refusing to advance the source version");
+        return rows;
+    }
+
+    private async Task ConsumeExternalResultsAsync(JsonElement final, string statementId, string auth,
+        Func<List<Dictionary<string, object?>>, CancellationToken, Task> consumePage, CancellationToken ct)
+    {
+        var manifest = final.GetProperty("manifest");
+        var columns = ReadColumns(manifest);
+        var totalExpected = manifest.GetProperty("total_row_count").GetInt64();
+        var result = final.GetProperty("result");
+        var seenChunks = new HashSet<long>();
+        var seenLinks = new HashSet<string>(StringComparer.Ordinal);
+        long totalRead = 0;
+        while (true)
+        {
+            string? next = null;
+            if (!result.TryGetProperty("external_links", out var links))
+            {
+                if (totalExpected == 0) break;
+                throw new InvalidOperationException("Databricks external result links are missing");
+            }
+            foreach (var link in links.EnumerateArray())
+            {
+                if (!seenChunks.Add(link.GetProperty("chunk_index").GetInt64())
+                    || link.GetProperty("row_offset").GetInt64() != totalRead)
+                    throw new InvalidOperationException("Databricks external chunks are incomplete or repeated");
+                var uri = new Uri(link.GetProperty("external_link").GetString()!, UriKind.Absolute);
+                if (uri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(uri.UserInfo))
+                    throw new InvalidOperationException("Databricks external result requires HTTPS");
+                // Presigned URLs carry their own credentials. Never send the workspace token.
+                using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                readTimeout.CancelAfter(_externalHttp.Timeout);
+                using var download = await _externalHttp.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token);
+                download.EnsureSuccessStatusCode();
+                await using var stream = await download.Content.ReadAsStreamAsync(readTimeout.Token);
+                var page = new List<Dictionary<string, object?>>();
+                long chunkRead = 0;
+                await foreach (var row in JsonSerializer.DeserializeAsyncEnumerable<JsonElement>(stream, cancellationToken: readTimeout.Token))
+                {
+                    readTimeout.CancelAfter(Timeout.InfiniteTimeSpan);
+                    page.Add(ParseRow(row, columns));
+                    chunkRead++;
+                    if (page.Count >= Math.Max(1, _options.MaxItemsPerBatch))
+                    {
+                        await consumePage(page, ct);
+                        page = new();
+                    }
+                    readTimeout.CancelAfter(_externalHttp.Timeout);
+                }
+                if (chunkRead != link.GetProperty("row_count").GetInt64())
+                    throw new InvalidOperationException("Databricks external chunk row count mismatch");
+                if (page.Count > 0) await consumePage(page, ct);
+                totalRead += chunkRead;
+                if (link.TryGetProperty("next_chunk_internal_link", out var continuation))
+                    next = continuation.GetString();
+            }
+            if (string.IsNullOrEmpty(next)) break;
+            if (!next.StartsWith($"/api/2.0/sql/statements/{statementId}/result/chunks/", StringComparison.Ordinal)
+                || !seenLinks.Add(next))
+                throw new InvalidOperationException("Invalid Databricks external continuation");
+            using var request = new HttpRequestMessage(HttpMethod.Get, next);
+            request.Headers.TryAddWithoutValidation("Authorization", auth);
+            using var response = await _http.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            result = document.RootElement.Clone();
+        }
+        if (totalRead != totalExpected
+            || (manifest.TryGetProperty("total_chunk_count", out var count) && count.GetInt64() != seenChunks.Count))
+            throw new InvalidOperationException("Incomplete Databricks external result; retaining source version");
     }
 
     /// <summary>Extract warehouse id from an http_path like "/sql/1.0/warehouses/2ec9fdcc70a48b2f".</summary>
@@ -251,37 +386,32 @@ public class DatabricksCdcWatcher : ISourceWatcher
     {
         var rows = new List<Dictionary<string, object?>>();
         if (!final.TryGetProperty("manifest", out var manifest)) return rows;
-        if (!manifest.TryGetProperty("schema", out var schema)) return rows;
-        if (!schema.TryGetProperty("columns", out var cols)) return rows;
-
-        var colNames = new List<string>();
-        var colTypes = new List<string>();
-        foreach (var c in cols.EnumerateArray())
-        {
-            colNames.Add(c.GetProperty("name").GetString() ?? "");
-            colTypes.Add(c.TryGetProperty("type_name", out var tn) ? tn.GetString() ?? "STRING" : "STRING");
-        }
+        var columns = ReadColumns(manifest);
 
         if (!final.TryGetProperty("result", out var result)) return rows;
         if (!result.TryGetProperty("data_array", out var dataArr)) return rows;
 
-        foreach (var rowEl in dataArr.EnumerateArray())
-        {
-            var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            int i = 0;
-            foreach (var cell in rowEl.EnumerateArray())
-            {
-                var name = i < colNames.Count ? colNames[i] : $"col{i}";
-                var type = i < colTypes.Count ? colTypes[i] : "STRING";
-                object? value = cell.ValueKind == JsonValueKind.Null
-                    ? null
-                    : CoerceCell(cell.GetString(), type);
-                dict[name] = value;
-                i++;
-            }
-            rows.Add(dict);
-        }
+        foreach (var rowEl in dataArr.EnumerateArray()) rows.Add(ParseRow(rowEl, columns));
         return rows;
+    }
+
+    private static List<(string Name, string Type)> ReadColumns(JsonElement manifest)
+        => manifest.GetProperty("schema").GetProperty("columns").EnumerateArray()
+            .Select(column => (column.GetProperty("name").GetString()!,
+                column.TryGetProperty("type_name", out var type) ? type.GetString() ?? "STRING" : "STRING")).ToList();
+
+    private static Dictionary<string, object?> ParseRow(JsonElement row, List<(string Name, string Type)> columns)
+    {
+        if (row.GetArrayLength() != columns.Count)
+            throw new InvalidOperationException("Databricks row does not match result schema");
+        var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < columns.Count; index++)
+        {
+            var cell = row[index];
+            values[columns[index].Name] = cell.ValueKind == JsonValueKind.Null ? null
+                : CoerceCell(cell.ValueKind == JsonValueKind.String ? cell.GetString() : cell.GetRawText(), columns[index].Type);
+        }
+        return values;
     }
 
     private static object? CoerceCell(string? raw, string typeName)
@@ -330,7 +460,8 @@ public class DatabricksCdcWatcher : ISourceWatcher
         var relevantPipelines = pipelines
             .Where(p => p.Sources.Any(ps => ps.SourceId == _source.Id))
             .ToList();
-        if (relevantPipelines.Count == 0) return;
+        if (relevantPipelines.Count == 0)
+            throw new InvalidOperationException("No active pipeline; retaining Databricks checkpoint");
 
         // Databricks v1 supports queue mode only (inline would require UPDATE-back via SQL warehouse).
         var queuePipelines = relevantPipelines.Where(p => p.ProcessingMode != "inline").ToList();
@@ -339,14 +470,14 @@ public class DatabricksCdcWatcher : ISourceWatcher
             _logger.LogWarning(
                 "Databricks source {SourceId}: inline pipelines are not supported in v1; skipping {Count} changes",
                 _source.Id, changes.Count);
-            return;
+            throw new NotSupportedException("Databricks inline pipelines are not supported; retaining checkpoint");
         }
         if (_sbPublisher?.IsEnabled != true)
         {
             _logger.LogWarning(
                 "Databricks source {SourceId}: queue pipeline configured but ServiceBus publisher disabled; skipping",
                 _source.Id);
-            return;
+            throw new InvalidOperationException("Service Bus publisher is disabled; retaining Databricks checkpoint");
         }
 
         var pipelineSource = relevantPipelines[0].Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
@@ -389,7 +520,7 @@ public class DatabricksCdcWatcher : ISourceWatcher
         foreach (var pipeline in pipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-            if (dest is null) continue;
+            if (dest is null) throw new InvalidOperationException($"Destination {pipeline.DestinationId} not found");
 
             var messages = docs.Select(d => new EmbeddingMessage
             {
@@ -424,5 +555,6 @@ public class DatabricksCdcWatcher : ISourceWatcher
             try { await _pollTask; } catch { }
         _cts?.Dispose();
         _http.Dispose();
+        _externalHttp.Dispose();
     }
 }

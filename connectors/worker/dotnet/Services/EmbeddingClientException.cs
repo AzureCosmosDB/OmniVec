@@ -1,14 +1,9 @@
 namespace OmniVec.Worker.Services;
 
 /// <summary>
-/// Thrown by DocGrokClient when the embed endpoint returns a non-retryable
-/// 4xx response (e.g., 400 "maximum context length exceeded", 413 payload
-/// too large). The worker handles this by bisecting the batch and
-/// dead-lettering the offending message rather than abandoning the whole
-/// batch into an infinite redelivery loop.
-///
-/// 429 (Too Many Requests) is NOT mapped to this exception — it is retried
-/// transparently by the client.
+/// HTTP failure after bounded retries, or an immediate permanent response.
+/// Only input-specific 400/413/415/422 responses may trigger bisect/dead-letter.
+/// Exhausted 429/5xx and configuration/auth failures must not discard a batch.
 /// </summary>
 public class EmbeddingClientException : Exception
 {

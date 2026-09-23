@@ -34,7 +34,7 @@ builder.Services.AddHttpClient<DocGrokClient>((sp, client) =>
 {
     var opts = sp.GetRequiredService<IOptions<WorkerOptions>>().Value;
     client.BaseAddress = new Uri(opts.DocGrokBaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(120);
+    client.Timeout = opts.GetDocGrokRequestTimeout();
 });
 
 // Metrics reporter HTTP client
@@ -44,11 +44,19 @@ builder.Services.AddHttpClient<MetricsReporter>((sp, client) =>
     client.BaseAddress = new Uri(opts.OmniVecApiBaseUrl);
     client.Timeout = TimeSpan.FromSeconds(10);
 });
+builder.Services.AddHttpClient("FabricJobs", client => client.Timeout = TimeSpan.FromSeconds(30));
+
+builder.Services.AddHttpClient<SharePointContentClient>(client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
 
 // Destination writers
-builder.Services.AddSingleton<IDestinationWriter, CosmosDbDestinationWriter>();
+builder.Services.AddSingleton<CosmosDbDestinationWriter>();
+builder.Services.AddSingleton<IDestinationWriter>(sp => sp.GetRequiredService<CosmosDbDestinationWriter>());
 builder.Services.AddSingleton<IDestinationWriter, PostgresDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, MsSqlDestinationWriter>();
+builder.Services.AddSingleton<IDestinationWriter, OneLakeIcebergDestinationWriter>();
 
 // Health endpoint (must be a hosted service so it runs alongside the worker)
 builder.Services.AddHostedService<HealthEndpointService>();

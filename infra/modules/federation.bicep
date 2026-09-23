@@ -30,3 +30,15 @@ resource fedCredDocgrok 'Microsoft.ManagedIdentity/userAssignedIdentities/federa
   }
   dependsOn: [fedCredOmnivec]
 }
+
+// The agent uses its own service account; API/DocGrok federation does not cover it.
+resource fedCredAgent 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+  parent: identity
+  name: 'omnivec-agent-federation'
+  properties: {
+    issuer: oidcIssuerUrl
+    subject: 'system:serviceaccount:omnivec:omnivec-agent'
+    audiences: ['api://AzureADTokenExchange']
+  }
+  dependsOn: [fedCredDocgrok]
+}

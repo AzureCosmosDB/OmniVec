@@ -27,6 +27,15 @@ public class SourceWatcherManager : IAsyncDisposable
 
     private readonly ConcurrentDictionary<string, ISourceWatcher> _watchers = new();
 
+    private sealed record WatcherPlan(
+        string Key,
+        string LeaseId,
+        string StateScopeId,
+        Source Source,
+        List<Pipeline> Pipelines,
+        string Generation,
+        PipelineSource? SharePointSource);
+
     // Cached destinations for passing to watchers
     private List<Destination> _destinations = new();
 
@@ -81,6 +90,77 @@ public class SourceWatcherManager : IAsyncDisposable
         return Convert.ToHexString(bytes)[..8].ToLowerInvariant();
     }
 
+    internal static string GetSharePointWatcherKey(string sourceId, string pipelineId)
+        => $"{sourceId}::sharepoint::{pipelineId}";
+
+    internal static string GetSharePointStateScopeId(string sourceId, string pipelineId)
+    {
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(pipelineId));
+        return $"{sourceId}-sp-{Convert.ToHexString(hash)[..16].ToLowerInvariant()}";
+    }
+
+    private static List<WatcherPlan> BuildWatcherPlans(
+        List<Source> sources,
+        List<Pipeline> activePipelines)
+    {
+        var plans = new List<WatcherPlan>();
+        foreach (var source in sources)
+        {
+            if (!string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase))
+            {
+                plans.Add(new WatcherPlan(
+                    source.Id, source.Id, source.Id, source, activePipelines,
+                    GetGeneration(source.Id, activePipelines), null));
+                continue;
+            }
+
+            var bindings = activePipelines
+                .Select(pipeline => (
+                    Pipeline: pipeline,
+                    Binding: pipeline.Sources.FirstOrDefault(item => item.SourceId == source.Id)))
+                .Where(item => item.Binding is not null)
+                .Select(item => (item.Pipeline, Binding: item.Binding!))
+                .ToList();
+
+            var sameTenantPipelines = bindings
+                .Where(item => item.Binding.SharePointIdentity is null)
+                .Select(item => item.Pipeline)
+                .ToList();
+            if (sameTenantPipelines.Count > 0)
+            {
+                plans.Add(new WatcherPlan(
+                    source.Id,
+                    source.Id,
+                    source.Id,
+                    source,
+                    sameTenantPipelines,
+                    GetGeneration(source.Id, sameTenantPipelines),
+                    null));
+            }
+
+            foreach (var (pipeline, binding) in bindings.Where(
+                         item => item.Binding.SharePointIdentity is not null))
+            {
+                var key = GetSharePointWatcherKey(source.Id, pipeline.Id);
+                plans.Add(new WatcherPlan(
+                    key,
+                    key,
+                    GetSharePointStateScopeId(source.Id, pipeline.Id),
+                    source,
+                    [pipeline],
+                    GetGeneration(source.Id, [pipeline]),
+                    binding));
+            }
+        }
+        return plans;
+    }
+
+    internal static IReadOnlyList<string> GetDesiredWatcherKeys(
+        List<Source> sources,
+        List<Pipeline> activePipelines)
+        => BuildWatcherPlans(sources, activePipelines).Select(plan => plan.Key).ToList();
+
     /// <summary>
     /// Reconcile running watchers against desired state.
     /// Starts new watchers for added sources, stops watchers for removed/disabled sources,
@@ -92,6 +172,8 @@ public class SourceWatcherManager : IAsyncDisposable
         List<Pipeline> activePipelines,
         CancellationToken ct)
     {
+        var blocked = await RefuseInlineConflictsAsync(desiredSources, activePipelines);
+        desiredSources = desiredSources.Where(s => !blocked.Contains(s.Id)).ToList();
         // Filter by source-type toggles so each deployment owns a subset of sources.
         // Blob enumeration runs in its own single-replica deployment; Cosmos CFP scales independently;
         // Databricks Delta CDF runs in its own poll-only deployment.
@@ -100,54 +182,53 @@ public class SourceWatcherManager : IAsyncDisposable
             var t = (s.Type ?? "").ToLowerInvariant();
             if (t == "azure-blob") return _options.EnableBlobSources;
             if (t == "databricks") return _options.EnableDatabricksSources;
+            if (t == "sharepoint") return _options.EnableSharePointSources;
             return _options.EnableCosmosSources;
         }).ToList();
 
-        var desiredIds = desiredSources.Select(s => s.Id).ToHashSet();
+        var plans = BuildWatcherPlans(desiredSources, activePipelines);
+        var plansByKey = plans.ToDictionary(plan => plan.Key);
+        var desiredIds = plansByKey.Keys.ToHashSet();
         var currentIds = _watchers.Keys.ToHashSet();
 
         // Start watchers for new sources (or restart if generation changed)
-        foreach (var source in desiredSources)
+        foreach (var plan in plans)
         {
-            var generation = GetGeneration(source.Id, activePipelines);
-
-            // For azure-blob sources we partition across replicas with a Cosmos lease so
-            // only one pod enumerates a given container. Without this, all 15 replicas
-            // publish the same blobs → duplicate work and can blow past SB capacity.
-            // The same is true for databricks sources — only one pod should poll the
-            // SQL warehouse for CDF changes per source.
-            bool isBlob = string.Equals(source.Type, "azure-blob", StringComparison.OrdinalIgnoreCase);
-            bool isDatabricks = string.Equals(source.Type, "databricks", StringComparison.OrdinalIgnoreCase);
-            if (isBlob || isDatabricks)
+            var source = plan.Source;
+            // Every polling source needs one owner; only Cosmos CFP distributes
+            // its own partition leases. This also applies during explicit resets.
+            bool isSharePoint = string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase);
+            var generation = plan.Generation;
+            if (RequiresPollingLease(source.Type))
             {
-                var haveLease = await _blobLeaseManager.TryAcquireAsync(source.Id, ct);
+                var haveLease = await _blobLeaseManager.TryAcquireAsync(plan.LeaseId, ct);
                 if (!haveLease)
                 {
                     // Another pod owns this source. If we were running it, stop.
-                    if (_watchers.TryRemove(source.Id, out var old))
+                    if (_watchers.TryRemove(plan.Key, out var old))
                     {
                         _logger.LogInformation(
-                            "Lost lease for source {SourceId} ({Type}), stopping local watcher",
-                            source.Id, source.Type);
+                            "Lost lease for watcher {WatcherId} source={SourceId} ({Type}), stopping local watcher",
+                            plan.Key, source.Id, source.Type);
                         await old.DisposeAsync();
                     }
                     continue;
                 }
             }
 
-            if (currentIds.Contains(source.Id))
+            if (_watchers.TryGetValue(plan.Key, out var existing))
             {
                 // Check if generation changed — if so, stop old watcher, clear leases, start fresh
-                var existing = _watchers[source.Id];
                 if (existing.Generation != generation)
                 {
                     _logger.LogInformation(
-                        "Generation changed for source {SourceId} ({Name}): {Old} → {New}, restarting watcher",
-                        source.Id, source.Name, existing.Generation, generation);
-                    if (_watchers.TryRemove(source.Id, out var old))
+                        "Generation changed for watcher {WatcherId} source={SourceId} ({Name}): {Old} → {New}, restarting",
+                        plan.Key, source.Id, source.Name, existing.Generation, generation);
+                    if (_watchers.TryRemove(plan.Key, out var old))
                         await old.DisposeAsync();
                     // Clear leases so the single processorName starts fresh
-                    try { await _leaseManager.DeleteLeaseContainerAsync(source.Id, ct); }
+                    // SharePoint's outbox and revision high-water mark must survive resets.
+                    try { if (!isSharePoint) await _leaseManager.DeleteLeaseContainerAsync(source.Id, ct); }
                     catch (Exception ex) { _logger.LogWarning(ex, "Could not clear leases for {SourceId}", source.Id); }
                     // Fall through to create a new watcher below
                 }
@@ -157,21 +238,20 @@ public class SourceWatcherManager : IAsyncDisposable
                 }
             }
 
-            var watcher = CreateWatcher(source, generation);
-            watcher.UpdateDestinations(_destinations);
-
-            watcher.UpdatePipelines(activePipelines);
-
+            ISourceWatcher? watcher = null;
             try
             {
+                watcher = CreateWatcher(plan);
+                watcher.UpdateDestinations(_destinations);
+                watcher.UpdatePipelines(plan.Pipelines);
                 await watcher.StartAsync(ct);
-                _watchers.TryAdd(source.Id, watcher);
+                _watchers.TryAdd(plan.Key, watcher);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to start watcher for source {SourceId} ({Name})",
                     source.Id, source.Name);
-                await watcher.DisposeAsync();
+                if (watcher is not null) await watcher.DisposeAsync();
             }
         }
 
@@ -186,9 +266,11 @@ public class SourceWatcherManager : IAsyncDisposable
         }
 
         // Update pipeline references on existing watchers
-        foreach (var (_, watcher) in _watchers)
+        foreach (var (key, watcher) in _watchers)
         {
-            watcher.UpdatePipelines(activePipelines);
+            watcher.UpdateDestinations(_destinations);
+            if (plansByKey.TryGetValue(key, out var plan))
+                watcher.UpdatePipelines(plan.Pipelines);
         }
     }
 
@@ -198,8 +280,23 @@ public class SourceWatcherManager : IAsyncDisposable
     /// Old lease docs are abandoned in-place (harmless, can be cleaned up later).
     /// Called when a pipeline's reset_at changes.
     /// </summary>
-    public async Task ResetWatcherAsync(string sourceId, Source source, List<Pipeline> activePipelines, CancellationToken ct)
+    public async Task ResetWatcherAsync(string sourceId, Source source, List<Pipeline> activePipelines,
+        CancellationToken ct, List<Source>? knownSources = null)
     {
+        knownSources ??= await _apiClient.GetSourcesByTypesAsync(
+            new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks", "sharepoint" }, ct);
+        var blocked = await RefuseInlineConflictsAsync(knownSources, activePipelines);
+        if (blocked.Contains(sourceId)) return;
+        if (string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var entry in _watchers.Where(entry => entry.Value.SourceId == sourceId).ToList())
+            {
+                if (_watchers.TryRemove(entry.Key, out var removedWatcher))
+                    await removedWatcher.DisposeAsync();
+            }
+            await ReconcileAsync(knownSources, activePipelines, ct);
+            return;
+        }
         var generation = GetGeneration(sourceId, activePipelines);
         _logger.LogInformation("Resetting watcher for source {SourceId} ({Name}), new generation={Generation}",
             sourceId, source.Name, generation);
@@ -209,26 +306,33 @@ public class SourceWatcherManager : IAsyncDisposable
         {
             await existingWatcher.DisposeAsync();
         }
+        if (RequiresPollingLease(source.Type) && !await _blobLeaseManager.TryAcquireAsync(sourceId, ct))
+        {
+            _logger.LogInformation("Source {SourceId} reset will be handled by its polling lease owner", sourceId);
+            return;
+        }
 
         // Delete lease container to clear all checkpoints — forces replay from beginning.
         // This is critical: the processorName is fixed per source, so clearing leases
         // is the only way to force the CFP to start over.
         try
         {
-            await _leaseManager.DeleteLeaseContainerAsync(sourceId, ct);
+            if (!string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase))
+                await _leaseManager.DeleteLeaseContainerAsync(sourceId, ct);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not delete lease container for source {SourceId}, continuing anyway", sourceId);
         }
 
-        var watcher = CreateWatcher(source, generation);
-        watcher.UpdateDestinations(_destinations);
-        watcher.UpdatePipelines(activePipelines);
-        watcher.SkipContentHash = true; // After reset, reprocess all docs regardless of hash
-
+        ISourceWatcher? watcher = null;
         try
         {
+            watcher = CreateWatcher(new WatcherPlan(
+                sourceId, sourceId, sourceId, source, activePipelines, generation, null));
+            watcher.UpdateDestinations(_destinations);
+            watcher.UpdatePipelines(activePipelines);
+            watcher.SkipContentHash = true;
             await watcher.StartAsync(ct);
             _watchers.TryAdd(sourceId, watcher);
             _logger.LogInformation("Watcher reset complete for source {SourceId} gen={Generation} — replaying from beginning",
@@ -237,15 +341,34 @@ public class SourceWatcherManager : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to restart watcher for source {SourceId} after reset", sourceId);
-            await watcher.DisposeAsync();
+            if (watcher is not null) await watcher.DisposeAsync();
         }
     }
 
-    /// <summary>
-    /// Factory method: creates the right watcher type based on source.Type.
-    /// </summary>
-    private ISourceWatcher CreateWatcher(Source source, string generation)
+    private async Task<HashSet<string>> RefuseInlineConflictsAsync(List<Source> sources, List<Pipeline> pipelines)
     {
+        var blocked = InlineSourceOwnership.FindBlockedSourceIds(sources, pipelines);
+        foreach (var sourceId in blocked)
+        {
+            _logger.LogError(
+                "Refusing source {SourceId}: inline metadata ownership conflicts or cannot be determined. " +
+                "Pause competing inline pipelines or repair source configuration; checkpoints are retained.", sourceId);
+            foreach (var entry in _watchers.Where(entry => entry.Value.SourceId == sourceId).ToList())
+            {
+                if (_watchers.TryRemove(entry.Key, out var watcher))
+                    await watcher.DisposeAsync();
+            }
+        }
+        return blocked;
+    }
+
+    internal static bool RequiresPollingLease(string? type)
+        => type?.ToLowerInvariant() is "azure-blob" or "databricks" or "sharepoint" or "mssql" or "postgresql";
+
+    private ISourceWatcher CreateWatcher(WatcherPlan plan)
+    {
+        var source = plan.Source;
+        var generation = plan.Generation;
         return source.Type?.ToLowerInvariant() switch
         {
             "mssql" => new MsSqlCdcWatcher(
@@ -271,6 +394,14 @@ public class SourceWatcherManager : IAsyncDisposable
                 _loggerFactory.CreateLogger<DatabricksCdcWatcher>(),
                 generation: generation,
                 sbPublisher: _sbPublisher),
+
+            "sharepoint" => new SharePointSourceWatcher(
+                source, _options, _leaseManager, _hasher,
+                _loggerFactory.CreateLogger<SharePointSourceWatcher>(),
+                generation: generation,
+                sbPublisher: _sbPublisher,
+                pipelineSource: plan.SharePointSource,
+                stateScopeId: plan.StateScopeId),
 
             _ => new SourceWatcher(
                 source, _options, _apiClient, _leaseManager, _hasher,

@@ -21,6 +21,11 @@ public class PostgresCdcWatcher : ISourceWatcher
     private readonly ILogger<PostgresCdcWatcher> _logger;
     private readonly HttpClient _docGrokClient;
     private readonly ServiceBusPublisher? _sbPublisher;
+    internal Func<CancellationToken, Task<NpgsqlConnection>> OpenConnectionAsync { get; set; }
+    internal Func<NpgsqlCommand, CancellationToken, Task<object?>> ExecuteScalarAsync { get; set; }
+        = (command, ct) => command.ExecuteScalarAsync(ct);
+    internal Func<NpgsqlCommand, CancellationToken, Task<List<Dictionary<string, object?>>>> ReadPageAsync { get; set; }
+        = ReadRowsAsync;
 
     private CancellationTokenSource? _cts;
     private Task? _pollTask;
@@ -52,6 +57,12 @@ public class PostgresCdcWatcher : ISourceWatcher
         _sbPublisher = sbPublisher;
         _docGrokClient = new HttpClient { BaseAddress = new Uri(options.DocGrokBaseUrl), Timeout = TimeSpan.FromSeconds(120) };
         Generation = generation ?? "0";
+        OpenConnectionAsync = async ct =>
+        {
+            var connection = new NpgsqlConnection(_source.ConnectionString);
+            try { await connection.OpenAsync(ct); return connection; }
+            catch { await connection.DisposeAsync(); throw; }
+        };
     }
 
     public void UpdatePipelines(List<Pipeline> pipelines)
@@ -64,8 +75,7 @@ public class PostgresCdcWatcher : ISourceWatcher
     public async Task StartAsync(CancellationToken ct)
     {
         // Verify connection works
-        await using var conn = new NpgsqlConnection(_source.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await OpenConnectionAsync(ct);
 
         var table = _source.Table!;
         var schema = _source.SchemaName ?? "public";
@@ -92,11 +102,13 @@ public class PostgresCdcWatcher : ISourceWatcher
             SELECT column_name FROM information_schema.columns
             WHERE table_schema = @schema AND table_name = @table
             AND column_name = ANY(@candidates)
+            AND data_type IN ('timestamp with time zone', 'timestamp without time zone')
+            AND is_nullable = 'NO'
             LIMIT 1", conn);
         cmd.Parameters.AddWithValue("@schema", schema);
         cmd.Parameters.AddWithValue("@table", table);
         cmd.Parameters.AddWithValue("@candidates", candidates);
-        var result = await cmd.ExecuteScalarAsync(ct);
+        var result = await ExecuteScalarAsync(cmd, ct);
         return result?.ToString();
     }
 
@@ -112,10 +124,11 @@ public class PostgresCdcWatcher : ISourceWatcher
         {
             try
             {
-                await using var conn = new NpgsqlConnection(_source.ConnectionString);
-                await conn.OpenAsync(ct);
+                await using var conn = await OpenConnectionAsync(ct);
 
                 List<Dictionary<string, object?>> changes;
+                var nextCheckpoint = _lastCheckpoint;
+                var nextPk = _lastPkValue;
 
                 if (trackingColumn is not null && _lastCheckpoint > DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc))
                 {
@@ -127,14 +140,14 @@ public class PostgresCdcWatcher : ISourceWatcher
                         query = $@"SELECT * FROM ""{schema}"".""{table}""
                             WHERE (""{trackingColumn}"" > @checkpoint)
                                OR (""{trackingColumn}"" = @checkpoint AND ""{pk}""::text > @lastPk)
-                            ORDER BY ""{trackingColumn}"", ""{pk}""
+                            ORDER BY ""{trackingColumn}"", ""{pk}""::text
                             LIMIT @limit";
                     }
                     else
                     {
                         query = $@"SELECT * FROM ""{schema}"".""{table}""
                             WHERE ""{trackingColumn}"" > @checkpoint
-                            ORDER BY ""{trackingColumn}"", ""{pk}""
+                            ORDER BY ""{trackingColumn}"", ""{pk}""::text
                             LIMIT @limit";
                     }
 
@@ -144,15 +157,15 @@ public class PostgresCdcWatcher : ISourceWatcher
                     if (_lastPkValue is not null)
                         cmd.Parameters.AddWithValue("@lastPk", _lastPkValue);
 
-                    changes = await ReadRowsAsync(cmd, ct);
+                    changes = await ReadPageAsync(cmd, ct);
 
                     // Update checkpoint + PK cursor
                     if (changes.Count > 0)
                     {
                         var last = changes[^1];
                         if (last.TryGetValue(trackingColumn, out var tv) && tv is DateTime dt && dt >= _lastCheckpoint)
-                            _lastCheckpoint = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
-                        _lastPkValue = last.TryGetValue(pk, out var pv) ? pv?.ToString() : null;
+                            nextCheckpoint = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+                        nextPk = last.TryGetValue(pk, out var pv) ? pv?.ToString() : null;
                     }
                 }
                 else
@@ -161,36 +174,39 @@ public class PostgresCdcWatcher : ISourceWatcher
                     string query;
                     if (trackingColumn is not null)
                     {
-                        query = $@"SELECT * FROM ""{schema}"".""{table}"" ORDER BY ""{trackingColumn}"", ""{pk}"" LIMIT @limit";
+                        query = $@"SELECT * FROM ""{schema}"".""{table}"" ORDER BY ""{trackingColumn}"", ""{pk}""::text LIMIT @limit";
                     }
                     else
                     {
-                        query = $@"SELECT * FROM ""{schema}"".""{table}"" ORDER BY ""{pk}"" LIMIT @limit";
+                        query = $@"SELECT * FROM ""{schema}"".""{table}""
+                            WHERE (@lastPk IS NULL OR ""{pk}""::text > @lastPk)
+                            ORDER BY ""{pk}""::text LIMIT @limit";
                     }
                     await using var cmd = new NpgsqlCommand(query, conn);
                     cmd.Parameters.AddWithValue("@limit", _options.MaxItemsPerBatch);
-                    changes = await ReadRowsAsync(cmd, ct);
+                    if (trackingColumn is null)
+                        cmd.Parameters.AddWithValue("@lastPk", NpgsqlDbType.Text, (object?)_lastPkValue ?? DBNull.Value);
+                    changes = await ReadPageAsync(cmd, ct);
 
                     // Set checkpoint from results so next poll picks up remaining rows
                     if (trackingColumn is not null && changes.Count > 0)
                     {
                         var last = changes[^1];
                         if (last.TryGetValue(trackingColumn, out var tv) && tv is DateTime dt)
-                            _lastCheckpoint = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+                            nextCheckpoint = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
                         else
-                            _lastCheckpoint = DateTime.UtcNow;
-                        _lastPkValue = last.TryGetValue(pk, out var pv) ? pv?.ToString() : null;
+                            throw new InvalidOperationException("Tracking timestamps must be non-null DateTime values");
+                        nextPk = last.TryGetValue(pk, out var pv) ? pv?.ToString() : null;
                     }
-                    else if (trackingColumn is not null)
+                    else if (trackingColumn is null)
                     {
-                        _lastCheckpoint = DateTime.UtcNow;
+                        nextPk = changes.Count < _options.MaxItemsPerBatch ? null
+                            : changes[^1].GetValueOrDefault(pk)?.ToString()
+                                ?? throw new InvalidOperationException("Full scan requires a non-null primary key");
                     }
                 }
 
-                if (changes.Count > 0)
-                {
-                    await HandleChangesAsync(changes, pk, ct);
-                }
+                await ProcessPageAsync(changes, pk, nextCheckpoint, nextPk, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -201,6 +217,14 @@ public class PostgresCdcWatcher : ISourceWatcher
 
             await Task.Delay(_options.FeedPollIntervalSeconds * 1000, ct);
         }
+    }
+
+    internal async Task ProcessPageAsync(List<Dictionary<string, object?>> changes, string pk,
+        DateTime nextCheckpoint, string? nextPk, CancellationToken ct)
+    {
+        if (changes.Count > 0) await HandleChangesAsync(changes, pk, ct);
+        _lastCheckpoint = nextCheckpoint;
+        _lastPkValue = nextPk;
     }
 
     private static async Task<List<Dictionary<string, object?>>> ReadRowsAsync(
@@ -243,7 +267,8 @@ public class PostgresCdcWatcher : ISourceWatcher
         var relevantPipelines = pipelines
             .Where(p => p.Sources.Any(ps => ps.SourceId == _source.Id))
             .ToList();
-        if (relevantPipelines.Count == 0) return;
+        if (relevantPipelines.Count == 0)
+            throw new InvalidOperationException("No active pipeline; retaining PostgreSQL checkpoint");
 
         var inlinePipelines = relevantPipelines.Where(p => p.ProcessingMode == "inline").ToList();
         var queuePipelines = relevantPipelines.Where(p => p.ProcessingMode != "inline").ToList();
@@ -264,7 +289,8 @@ public class PostgresCdcWatcher : ISourceWatcher
 
             var contentHash = _hasher.ComputeHash(content);
 
-            if (!SkipContentHash)
+            if (!SkipContentHash && queuePipelines.Count == 0
+                && inlinePipelines.All(p => row.GetValueOrDefault("pipeline_id")?.ToString() == p.Id))
             {
                 var existingHash = row.TryGetValue("content_hash", out var h) ? h?.ToString() : null;
                 if (contentHash == existingHash)
@@ -302,75 +328,28 @@ public class PostgresCdcWatcher : ISourceWatcher
             await ProcessInlineAsync(eligible, inlinePipelines, pk, ct);
 
         // Queue: publish to Service Bus
-        if (queuePipelines.Count > 0 && _sbPublisher?.IsEnabled == true)
+        if (queuePipelines.Count > 0)
+        {
+            if (_sbPublisher?.IsEnabled != true)
+                throw new InvalidOperationException("Queue pipeline requires an enabled Service Bus publisher");
             await PublishToServiceBusAsync(eligible, queuePipelines, ct);
+        }
     }
-
-    private const int EmbedBatchSize = 50;
 
     private async Task<List<float[]>?> EmbedTextsAsync(string modelId, List<string> texts, CancellationToken ct)
     {
-        var allEmbeddings = new List<float[]>();
-        for (int offset = 0; offset < texts.Count; offset += EmbedBatchSize)
-        {
-            var chunk = texts.Skip(offset).Take(EmbedBatchSize).ToList();
-            List<float[]>? chunkEmbeddings = null;
-            for (int attempt = 1; ; attempt++)
-            {
-                try
-                {
-                    var payload = new { model_id = modelId, texts = chunk };
-                    var resp = await _docGrokClient.PostAsJsonAsync("/embed/batch", payload, ct);
-                    if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
-                    {
-                        var delay = Math.Min(1000 * Math.Pow(2, attempt), 60_000);
-                        _logger.LogWarning("DocGrok {Status}, attempt {Attempt}, retrying", resp.StatusCode, attempt);
-                        await Task.Delay((int)delay, ct);
-                        continue;
-                    }
-                    resp.EnsureSuccessStatusCode();
-
-                    // Parse response manually — outputs is an array of embeddings
-                    // Each element can be either [floats] or [[floats]] depending on model
-                    var json = await resp.Content.ReadAsStringAsync(ct);
-                    using var doc = System.Text.Json.JsonDocument.Parse(json);
-                    var outputs = doc.RootElement.GetProperty("outputs");
-                    chunkEmbeddings = new List<float[]>();
-                    foreach (var item in outputs.EnumerateArray())
-                    {
-                        // Handle nested array: outputs[i] might be [[f,f,...]] or [f,f,...]
-                        var target = item;
-                        if (target.GetArrayLength() > 0 && target[0].ValueKind == System.Text.Json.JsonValueKind.Array)
-                            target = target[0];
-                        var vec = new float[target.GetArrayLength()];
-                        int idx = 0;
-                        foreach (var f in target.EnumerateArray())
-                            vec[idx++] = f.GetSingle();
-                        chunkEmbeddings.Add(vec);
-                    }
-                    break;
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
-                {
-                    var delay = Math.Min(1000 * Math.Pow(2, attempt), 60_000);
-                    _logger.LogWarning(ex, "DocGrok error, attempt {Attempt}, retrying", attempt);
-                    await Task.Delay((int)delay, ct);
-                }
-            }
-            if (chunkEmbeddings is null || chunkEmbeddings.Count != chunk.Count)
-                return null;
-            allEmbeddings.AddRange(chunkEmbeddings);
-        }
-        return allEmbeddings;
+        return await InlineEmbeddingClient.EmbedAsync(_docGrokClient, modelId, texts, ct);
     }
 
     private async Task ProcessInlineAsync(
         List<(string docId, string content, string contentHash, Dictionary<string, object?> row)> docs,
         List<Pipeline> pipelines, string pk, CancellationToken ct)
     {
+        var sourceDocs = docs;
         foreach (var pipeline in pipelines)
         {
+            docs = sourceDocs.Where(doc => !InlineEmbeddingClient.HasCurrentEmbedding(doc.row, pipeline, doc.contentHash)).ToList();
+            if (docs.Count == 0) continue;
             var sw = Stopwatch.StartNew();
             var texts = docs.Select(d => d.content).ToList();
 
@@ -380,7 +359,7 @@ public class PostgresCdcWatcher : ISourceWatcher
             {
                 _logger.LogError("Embed count mismatch for {Pipeline}: sent {Sent}, got {Got}",
                     pipeline.Name, docs.Count, embeddings?.Count ?? 0);
-                continue;
+                throw new InvalidOperationException("Incomplete embeddings; retaining PostgreSQL checkpoint");
             }
 
             // UPDATE rows with embedding (pgvector format) + metadata
@@ -405,7 +384,7 @@ public class PostgresCdcWatcher : ISourceWatcher
             {
                 var (docId, _, contentHash, _) = docs[i];
                 // pgvector stores as float array: '[0.1, 0.2, ...]'
-                var vecStr = "[" + string.Join(",", embeddings[i].Select(f => f.ToString("G"))) + "]";
+                var vecStr = System.Text.Json.JsonSerializer.Serialize(embeddings[i]);
 
                 for (int attempt = 1; ; attempt++)
                 {
@@ -436,7 +415,7 @@ public class PostgresCdcWatcher : ISourceWatcher
                         break;
                     }
                     catch (OperationCanceledException) { throw; }
-                    catch (NpgsqlException ex) when (ex.IsTransient)
+                    catch (NpgsqlException ex) when (ex.IsTransient && attempt < 5)
                     {
                         var delay = Math.Min(500 * Math.Pow(2, attempt), 30_000);
                         _logger.LogWarning("PostgreSQL transient error patching {DocId}, attempt {Attempt}", docId, attempt);
@@ -462,7 +441,7 @@ public class PostgresCdcWatcher : ISourceWatcher
         foreach (var pipeline in pipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-            if (dest is null) continue;
+            if (dest is null) throw new InvalidOperationException($"Destination {pipeline.DestinationId} not found");
 
             var messages = docs.Select(d => new EmbeddingMessage
             {

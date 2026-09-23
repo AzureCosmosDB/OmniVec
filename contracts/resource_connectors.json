@@ -1,0 +1,36 @@
+{
+  "sources": {
+    "azure-blob": {
+      "required_fields": ["account_url", "container"]
+    },
+    "sharepoint": {
+      "required_fields": ["site_id", "drive_id"]
+    },
+    "onelake-iceberg": {
+      "required_fields": ["warehouse", "table"]
+    },
+    "cosmosdb": {
+      "required_fields": ["endpoint", "database", "container"]
+    },
+    "postgresql": {
+      "required_fields": ["host", "database", "table"]
+    }
+  },
+  "destinations": {
+    "cosmosdb-vector": {
+      "required_fields": ["endpoint", "database", "container"]
+    },
+    "pgvector": {
+      "required_fields": ["host", "database", "table"]
+    },
+    "onelake-iceberg": {
+      "required_fields": [
+        "workspace_id",
+        "lakehouse_item_id",
+        "spark_job_definition_item_id",
+        "staging_file_system",
+        "target_table"
+      ]
+    }
+  }
+}

@@ -12,6 +12,7 @@ All progress stored in CosmosDB for durability and querying.
 import logging
 import random
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from enum import Enum
@@ -71,37 +72,50 @@ class ProgressTracker:
         self._current_etag = doc.get("_etag")
         return {k: v for k, v in doc.items() if not k.startswith("_")}
 
-    def _save_with_etag(self, doc: Dict[str, Any], max_retries: int = 5) -> bool:
+    def _save_with_etag(self, doc: Dict[str, Any], max_retries: int = 5, *, paths=()) -> bool:
         """Save document with etag-based optimistic concurrency.
 
-        On etag conflicts, reloads the latest doc and retries with jittered
-        backoff. Returns False if we exhaust retries against a contended
-        document; raises on non-retryable errors (the underlying store decorator
+        On etag conflicts, reapplies only this operation's fields to the latest
+        document and retries with jittered backoff. Raises if we exhaust retries
+        against a contended document or encounter a non-retryable error (the underlying store decorator
         already retries transient 429/5xx at a lower layer).
         """
         store = get_store()
+        proposed = deepcopy(doc)
+
+        def rebase():
+            latest = self.get_progress()
+            if latest is None:
+                return deepcopy(proposed)
+            for path in paths:
+                target = latest
+                value = proposed
+                for key in path[:-1]:
+                    target = target.setdefault(key, {})
+                    value = value[key]
+                target[path[-1]] = deepcopy(value[path[-1]])
+            if any(path[:2] == ("backfill", "locations") for path in paths):
+                self._refresh_backfill_totals(latest)
+            return latest
 
         for attempt in range(1, max_retries + 1):
             try:
                 if self._current_etag:
-                    store.replace_with_etag(doc, self._current_etag)
+                    saved_doc = store.replace_with_etag(doc, self._current_etag)
                 else:
                     # Try create first to avoid race condition.
                     try:
-                        store.create(doc)
+                        saved_doc = store.create(doc)
                     except CosmosResourceExistsError:
                         # Another process created it — reload and retry with etag.
                         logger.debug(
                             "Progress doc %s created concurrently, reloading",
                             self.progress_id,
                         )
-                        self.get_progress()
+                        doc = rebase()
                         continue
 
-                # Refresh etag after successful save.
-                saved_doc = store.get(self.progress_id, partition_key="progress")
-                if saved_doc is not None:
-                    self._current_etag = saved_doc.get("_etag")
+                self._current_etag = saved_doc.get("_etag")
                 return True
 
             except CosmosAccessConditionFailedError:
@@ -113,14 +127,17 @@ class ProgressTracker:
                     self.progress_id, attempt, max_retries, delay,
                 )
                 time.sleep(delay)
-                self.get_progress()  # reload to get new etag
+                doc = rebase()
                 continue
 
         logger.warning(
             "Failed to save progress for %s after %d etag retries",
             self.progress_id, max_retries,
         )
-        return False
+        raise CosmosAccessConditionFailedError(
+            status_code=412,
+            message=f"Progress update for {self.source_id} exhausted {max_retries} etag retries",
+        )
 
     def _load_or_new(self, default_status: "SourceStatus", extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Load progress doc or return a freshly initialized one.
@@ -203,7 +220,13 @@ class ProgressTracker:
             "updated_at": datetime.utcnow().isoformat(),
         }
 
-        # Recalculate totals
+        self._refresh_backfill_totals(doc)
+        doc["updated_at"] = datetime.utcnow().isoformat()
+        self._save_with_etag(doc, paths=(("backfill", "locations", location), ("updated_at",)))
+
+    @staticmethod
+    def _refresh_backfill_totals(doc):
+        """Recompute aggregates after merging a location's progress."""
         totals = {
             "blobs_enumerated": 0,
             "jobs_created": 0,
@@ -226,18 +249,16 @@ class ProgressTracker:
         doc["backfill"]["totals"] = totals
 
         # Update status
-        if error:
+        errors = [loc.get("error") for loc in doc["backfill"]["locations"].values() if loc.get("error")]
+        if errors:
             doc["status"] = SourceStatus.ERROR.value
-            doc["status_reason"] = error
+            doc["status_reason"] = errors[0]
         elif totals["percent_complete"] >= 100 and totals["jobs_pending"] == 0:
             doc["status"] = SourceStatus.LIVE.value
             doc["status_reason"] = "Backfill complete"
         else:
             doc["status"] = SourceStatus.BACKFILLING.value
             doc["status_reason"] = f"Backfill {totals['percent_complete']}% complete"
-
-        doc["updated_at"] = datetime.utcnow().isoformat()
-        self._save_with_etag(doc)
 
     def update_live_progress(
         self,
@@ -277,7 +298,7 @@ class ProgressTracker:
             doc["status_reason"] = f"Live - lag {lag_seconds}s"
 
         doc["updated_at"] = datetime.utcnow().isoformat()
-        self._save_with_etag(doc)
+        self._save_with_etag(doc, paths=(("live",), ("status",), ("status_reason",), ("updated_at",)))
 
     def update_workers(
         self,
@@ -304,7 +325,7 @@ class ProgressTracker:
         }
 
         doc["updated_at"] = datetime.utcnow().isoformat()
-        self._save_with_etag(doc)
+        self._save_with_etag(doc, paths=(("workers", worker_type), ("updated_at",)))
 
     def set_status(self, status: SourceStatus, reason: str):
         """Set source status with reason."""
@@ -316,7 +337,7 @@ class ProgressTracker:
         doc["status"] = status.value
         doc["status_reason"] = reason
         doc["updated_at"] = datetime.utcnow().isoformat()
-        self._save_with_etag(doc)
+        self._save_with_etag(doc, paths=(("status",), ("status_reason",), ("updated_at",)))
 
 
 def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
@@ -336,7 +357,9 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
         return {"error": "Pipeline not found"}
 
     # Get all source progress
-    source_ids = pipeline.get("source_ids", [])
+    source_ids = list(dict.fromkeys(
+        source["source_id"] for source in pipeline.get("sources", [])
+    )) if "sources" in pipeline else pipeline.get("source_ids", [])
     sources_progress = {}
     totals = {
         "documents_indexed": 0,
@@ -345,6 +368,7 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
         "sources_active": 0,
         "sources_error": 0,
         "sources_paused": 0,
+        "sources_unknown": 0,
     }
 
     for source_id in source_ids:
@@ -359,6 +383,7 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
                 "status": "unknown",
                 "status_reason": f"Cosmos error ({getattr(exc, 'status_code', 'n/a')})",
             }
+            totals["sources_unknown"] += 1
             continue
 
         if progress is None:
@@ -366,6 +391,7 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
                 "status": "unknown",
                 "status_reason": "Progress not available",
             }
+            totals["sources_unknown"] += 1
             continue
 
         sources_progress[source_id] = {
@@ -375,11 +401,13 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
             "live_lag_seconds": progress.get("live", {}).get("lag_seconds", 0),
             "jobs_pending": progress.get("backfill", {}).get("totals", {}).get("jobs_pending", 0),
             "jobs_completed": progress.get("backfill", {}).get("totals", {}).get("jobs_completed", 0),
+            "jobs_failed": progress.get("backfill", {}).get("totals", {}).get("jobs_failed", 0),
         }
 
         # Aggregate totals
         totals["documents_indexed"] += sources_progress[source_id]["jobs_completed"]
         totals["documents_pending"] += sources_progress[source_id]["jobs_pending"]
+        totals["documents_failed"] += sources_progress[source_id]["jobs_failed"]
 
         status = progress.get("status", "")
         if status == SourceStatus.ERROR.value:
@@ -390,9 +418,15 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
             totals["sources_active"] += 1
 
     # Determine pipeline status
-    if totals["sources_error"] > 0:
+    if pipeline.get("status") == PipelineStatus.PAUSED.value:
+        status = PipelineStatus.PAUSED.value
+        status_reason = "Pipeline paused"
+    elif pipeline.get("status") == PipelineStatus.ERROR.value or totals["sources_error"] > 0:
         status = PipelineStatus.ERROR.value
         status_reason = f"{totals['sources_error']} source(s) have errors"
+    elif not source_ids or totals["sources_unknown"] > 0:
+        status = PipelineStatus.DEGRADED.value
+        status_reason = "Progress unavailable for one or more sources"
     elif totals["sources_paused"] == len(source_ids):
         status = PipelineStatus.PAUSED.value
         status_reason = "All sources paused"
@@ -404,7 +438,7 @@ def get_pipeline_progress(pipeline_id: str) -> Dict[str, Any]:
         status_reason = "Processing normally"
 
     # Calculate overall percent
-    total_docs = totals["documents_indexed"] + totals["documents_pending"]
+    total_docs = totals["documents_indexed"] + totals["documents_pending"] + totals["documents_failed"]
     overall_percent = 0
     if total_docs > 0:
         overall_percent = round((totals["documents_indexed"] / total_docs) * 100, 1)

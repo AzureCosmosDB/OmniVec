@@ -71,6 +71,7 @@ class TestRegistryShape:
             "count_docs_in_container", "get_doc_by_id", "query_diag",
             "get_queue_depth", "get_dlq_count", "list_topics",
             "recent_errors_last_n", "latency_p99_last_hour", "throughput_last_hour",
+            "get_troubleshooting_runbook",
         }
         missing = expected - names
         assert not missing, f"missing tools: {missing}"
@@ -99,6 +100,34 @@ class TestRegistryShape:
         # Phase 2: admin sees strictly more (mutating tools added).
         assert reader.issubset(admin)
         assert "restart_pod" in admin and "restart_pod" not in reader
+        assert "get_troubleshooting_runbook" in reader
+
+
+class TestTroubleshootingRunbooks:
+    @pytest.mark.asyncio
+    async def test_exact_failure_code_returns_safe_recovery_contract(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(failure_code="dead_letter_messages"))
+        match = result["matches"][0]
+        assert match["component"] == "messaging"
+        assert any("Never" in value or "purging" in value for value in match["avoid"])
+        assert match["authoritative_checks"]
+        assert match["recovery_verification"]
+
+    @pytest.mark.asyncio
+    async def test_search_finds_sharepoint_and_identity_failures(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(query="SharePoint Graph 403 Sites.Selected", limit=4))
+        codes = {match["failure_code"] for match in result["matches"]}
+        assert "sharepoint_permission_failure" in codes
+        assert all("safe_actions" in match and "avoid" in match for match in result["matches"])
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_fails_open_as_unknown_not_fake_advice(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(failure_code="unknown_new_failure"))
+        assert result["matches"] == []
+        assert "No exact runbook" in result["unknown"]
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +165,60 @@ class TestArgValidation:
 # HTTP wiring — replace _HTTP_CLIENT with FakeClient and assert URLs.
 # ---------------------------------------------------------------------------
 class TestOmnivecApiTools:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name,field,route", [
+        ("get_source", "source_id", "sources"),
+        ("get_destination", "destination_id", "destinations"),
+        ("get_pipeline", "pipeline_id", "pipelines"),
+        ("get_pipeline_status", "pipeline_id", "pipelines"),
+        ("get_pipeline_metrics", "pipeline_id", "pipelines"),
+        ("get_job", "job_id", "jobs"),
+    ])
+    @pytest.mark.parametrize("identifier", [
+        "../settings?token=example#fragment",
+        "https://example.invalid/path",
+        "//example.invalid/path",
+        "..\\settings",
+        "%2e%2e%2fsettings",
+    ])
+    async def test_resource_id_cannot_change_request_path(self, omnivec_api_mod, tools_mod, monkeypatch, tool_name, field, route, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        monkeypatch.setattr(omnivec_api_mod, "OMNIVEC_API_URL", "http://omnivec-api")
+        t = tools_mod.get_tool(tool_name)
+        with pytest.raises(ValueError, match="Resource identifiers"):
+            await t.callable(t.params(**{field: identifier}))
+        assert not fake.requests
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", [".", ".."])
+    async def test_relative_resource_id_is_rejected_before_request(self, omnivec_api_mod, tools_mod, monkeypatch, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        t = tools_mod.get_tool("get_source")
+        with pytest.raises(ValueError, match="Resource identifiers"):
+            await t.callable(t.params(source_id=identifier))
+        assert not fake.requests
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resource", ["sources", "destinations", "pipelines", "jobs", "docgrok_pipelines"])
+    @pytest.mark.parametrize("identifier", ["", ".", "..", "src?x=1", "src#x", "src/name", "src\\name", "src%2f", "src\n", "src-\u00e9", "a" * 513])
+    async def test_shared_resource_reader_rejects_invalid_identifiers(self, omnivec_api_mod, monkeypatch, resource, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        with pytest.raises(ValueError, match="Resource identifiers"):
+            await omnivec_api_mod._get_resource(resource, identifier)
+        assert not fake.requests
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("identifier", ["src-123", "pip_123.v2", "a" * 512])
+    async def test_shared_resource_reader_preserves_valid_identifiers(self, omnivec_api_mod, monkeypatch, identifier):
+        fake = FakeClient()
+        monkeypatch.setattr(omnivec_api_mod, "_HTTP_CLIENT", fake)
+        monkeypatch.setattr(omnivec_api_mod, "OMNIVEC_API_URL", "http://omnivec-api")
+        await omnivec_api_mod._get_resource("pipelines", identifier)
+        assert fake.requests[0][1] == f"http://omnivec-api/api/pipelines/{identifier}"
+
     @pytest.mark.asyncio
     async def test_list_pipelines_hits_expected_url(self, omnivec_api_mod, tools_mod, monkeypatch):
         fake = FakeClient()

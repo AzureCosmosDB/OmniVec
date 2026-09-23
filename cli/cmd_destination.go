@@ -82,11 +82,14 @@ func newDestCreateCmd() *cobra.Command {
 				exitErr("--name is required")
 			}
 			if dstType == "" {
-				exitErr("--type is required (cosmosdb-vector)")
+				exitErr("--type is required (%s)", connectorTypeHelp("destination"))
 			}
 			cfg, err := parseConfig(config, configFile)
 			if err != nil {
 				exitErr("invalid config: %v", err)
+			}
+			if err := validateConnectorConfig("destination", dstType, cfg); err != nil {
+				exitErr("%v", err)
 			}
 			body := map[string]any{
 				"name":   name,
@@ -122,7 +125,7 @@ func newDestCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Destination name")
-	cmd.Flags().StringVarP(&dstType, "type", "t", "", "Destination type (cosmosdb-vector)")
+	cmd.Flags().StringVarP(&dstType, "type", "t", "", "Destination type ("+connectorTypeHelp("destination")+")")
 	cmd.Flags().StringVarP(&config, "config", "c", "", "JSON config string")
 	cmd.Flags().StringVarP(&configFile, "file", "f", "", "JSON config file path")
 	return cmd
@@ -205,6 +208,11 @@ func newDestUpdateCmd() *cobra.Command {
 				}
 				body["config"] = cfg
 			}
+			finalType, _ := body["type"].(string)
+			finalConfig, _ := body["config"].(map[string]any)
+			if err := validateConnectorConfig("destination", finalType, finalConfig); err != nil {
+				exitErr("%v", err)
+			}
 			data, err := c.Put(fmt.Sprintf("/api/destinations/%s", id), body)
 			if err != nil {
 				exitErr("%v", err)
@@ -219,7 +227,7 @@ func newDestUpdateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Destination name")
-	cmd.Flags().StringVarP(&dstType, "type", "t", "", "Destination type")
+	cmd.Flags().StringVarP(&dstType, "type", "t", "", "Destination type ("+connectorTypeHelp("destination")+")")
 	cmd.Flags().StringVarP(&config, "config", "c", "", "JSON config string")
 	cmd.Flags().StringVarP(&configFile, "file", "f", "", "JSON config file path")
 	return cmd

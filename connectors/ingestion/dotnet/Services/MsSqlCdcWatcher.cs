@@ -31,7 +31,7 @@ public class MsSqlCdcWatcher : ISourceWatcher
 
     private byte[]? _lastLsn; // CDC checkpoint
     private bool _fullScanDone;
-    private long _lastFullScanPk; // PK tiebreaker for pagination
+    private object? _lastFullScanPk;
 
     public string SourceId => _source.Id;
     public string Generation { get; }
@@ -131,14 +131,12 @@ public class MsSqlCdcWatcher : ISourceWatcher
                     var scanQuery = $@"
                         SELECT TOP 500 *
                         FROM [{schema}].[{table}]
-                        WHERE [{pk}] > @lastPk
+                        {(_lastFullScanPk is null ? "" : $"WHERE [{pk}] > @lastPk")}
                         ORDER BY [{pk}]";
                     await using var scanCmd = new SqlCommand(scanQuery, conn);
                     scanCmd.CommandTimeout = 60;
-                    if (_lastFullScanPk > 0)
+                    if (_lastFullScanPk is not null)
                         scanCmd.Parameters.AddWithValue("@lastPk", _lastFullScanPk);
-                    else
-                        scanCmd.Parameters.AddWithValue("@lastPk", 0L);
 
                     var rows = new List<Dictionary<string, object?>>();
                     await using var reader = await scanCmd.ExecuteReaderAsync(ct);
@@ -155,20 +153,11 @@ public class MsSqlCdcWatcher : ISourceWatcher
 
                     if (rows.Count > 0)
                     {
-                        // Update PK bookmark
-                        var lastRow = rows[^1];
-                        if (lastRow.TryGetValue(pk, out var pkVal) && pkVal is not null)
-                        {
-                            if (pkVal is long l) _lastFullScanPk = l;
-                            else if (pkVal is int n) _lastFullScanPk = n;
-                            else if (long.TryParse(pkVal.ToString(), out var parsed)) _lastFullScanPk = parsed;
-                        }
-
                         _logger.LogInformation(
                             "CDC source={SourceId} ({Name}): full scan batch {Count} rows (pk>{LastPk})",
                             _source.Id, _source.Name, rows.Count, _lastFullScanPk);
 
-                        await HandleChangesAsync(rows, pk, ct);
+                        await ProcessFullScanPageAsync(rows, pk, ct);
                     }
 
                     if (rows.Count < 500)
@@ -192,6 +181,17 @@ public class MsSqlCdcWatcher : ISourceWatcher
                 }
 
                 // Get from LSN
+                await using var availableCmd = new SqlCommand(
+                    $"SELECT sys.fn_cdc_get_min_lsn('{captureInstance}')", conn);
+                var availableLsn = (byte[]?)await availableCmd.ExecuteScalarAsync(ct);
+                if (_lastLsn is not null && availableLsn is not null && CompareBytes(_lastLsn, availableLsn) < 0)
+                {
+                    _logger.LogWarning("CDC retention passed checkpoint for {Source}; replaying a full scan", _source.Id);
+                    _lastLsn = null;
+                    _lastFullScanPk = null;
+                    _fullScanDone = false;
+                    continue;
+                }
                 byte[] fromLsn;
                 if (_lastLsn is null)
                 {
@@ -260,6 +260,15 @@ public class MsSqlCdcWatcher : ISourceWatcher
         }
     }
 
+    internal async Task ProcessFullScanPageAsync(List<Dictionary<string, object?>> rows, string pk, CancellationToken ct)
+    {
+        if (rows.Count == 0) return;
+        if (!rows[^1].TryGetValue(pk, out var value) || value is null)
+            throw new InvalidOperationException("Full scan requires a non-null primary key");
+        await HandleChangesAsync(rows, pk, ct);
+        _lastFullScanPk = value;
+    }
+
     private async Task HandleChangesAsync(
         List<Dictionary<string, object?>> changes, string pk, CancellationToken ct)
     {
@@ -269,7 +278,8 @@ public class MsSqlCdcWatcher : ISourceWatcher
         var relevantPipelines = pipelines
             .Where(p => p.Sources.Any(ps => ps.SourceId == _source.Id))
             .ToList();
-        if (relevantPipelines.Count == 0) return;
+        if (relevantPipelines.Count == 0)
+            throw new InvalidOperationException("No active pipeline; retaining SQL checkpoint");
 
         var inlinePipelines = relevantPipelines.Where(p => p.ProcessingMode == "inline").ToList();
         var queuePipelines = relevantPipelines.Where(p => p.ProcessingMode != "inline").ToList();
@@ -291,7 +301,8 @@ public class MsSqlCdcWatcher : ISourceWatcher
 
             var contentHash = _hasher.ComputeHash(content);
 
-            if (!SkipContentHash)
+            if (!SkipContentHash && queuePipelines.Count == 0
+                && inlinePipelines.All(p => row.GetValueOrDefault("pipeline_id")?.ToString() == p.Id))
             {
                 var existingHash = row.TryGetValue("content_hash", out var h) ? h?.ToString() : null;
                 if (contentHash == existingHash)
@@ -333,67 +344,17 @@ public class MsSqlCdcWatcher : ISourceWatcher
         }
 
         // Queue mode: publish to Service Bus
-        if (queuePipelines.Count > 0 && _sbPublisher?.IsEnabled == true)
+        if (queuePipelines.Count > 0)
         {
+            if (_sbPublisher?.IsEnabled != true)
+                throw new InvalidOperationException("Queue pipeline requires an enabled Service Bus publisher");
             await PublishToServiceBusAsync(eligible, queuePipelines, ct);
         }
     }
 
-    private const int EmbedBatchSize = 50;
-
     private async Task<List<float[]>?> EmbedTextsAsync(string modelId, List<string> texts, CancellationToken ct)
     {
-        var allEmbeddings = new List<float[]>();
-        for (int offset = 0; offset < texts.Count; offset += EmbedBatchSize)
-        {
-            var chunk = texts.Skip(offset).Take(EmbedBatchSize).ToList();
-            List<float[]>? chunkEmbeddings = null;
-            for (int attempt = 1; ; attempt++)
-            {
-                try
-                {
-                    var payload = new { model_id = modelId, texts = chunk };
-                    var resp = await _docGrokClient.PostAsJsonAsync("/embed/batch", payload, ct);
-                    if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
-                    {
-                        var delay = Math.Min(1000 * Math.Pow(2, attempt), 60_000);
-                        _logger.LogWarning("DocGrok {Status}, attempt {Attempt}, retrying in {Delay}ms",
-                            resp.StatusCode, attempt, delay);
-                        await Task.Delay((int)delay, ct);
-                        continue;
-                    }
-                    resp.EnsureSuccessStatusCode();
-
-                    var json = await resp.Content.ReadAsStringAsync(ct);
-                    using var doc = System.Text.Json.JsonDocument.Parse(json);
-                    var outputs = doc.RootElement.GetProperty("outputs");
-                    chunkEmbeddings = new List<float[]>();
-                    foreach (var item in outputs.EnumerateArray())
-                    {
-                        var target = item;
-                        if (target.GetArrayLength() > 0 && target[0].ValueKind == System.Text.Json.JsonValueKind.Array)
-                            target = target[0];
-                        var vec = new float[target.GetArrayLength()];
-                        int idx = 0;
-                        foreach (var f in target.EnumerateArray())
-                            vec[idx++] = f.GetSingle();
-                        chunkEmbeddings.Add(vec);
-                    }
-                    break;
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (HttpRequestException ex)
-                {
-                    var delay = Math.Min(1000 * Math.Pow(2, attempt), 60_000);
-                    _logger.LogWarning(ex, "DocGrok error, attempt {Attempt}, retrying in {Delay}ms", attempt, delay);
-                    await Task.Delay((int)delay, ct);
-                }
-            }
-            if (chunkEmbeddings is null || chunkEmbeddings.Count != chunk.Count)
-                return null;
-            allEmbeddings.AddRange(chunkEmbeddings);
-        }
-        return allEmbeddings;
+        return await InlineEmbeddingClient.EmbedAsync(_docGrokClient, modelId, texts, ct);
     }
 
     private async Task ProcessInlineAsync(
@@ -402,8 +363,11 @@ public class MsSqlCdcWatcher : ISourceWatcher
         string pk,
         CancellationToken ct)
     {
+        var sourceDocs = docs;
         foreach (var pipeline in pipelines)
         {
+            docs = sourceDocs.Where(doc => !InlineEmbeddingClient.HasCurrentEmbedding(doc.row, pipeline, doc.contentHash)).ToList();
+            if (docs.Count == 0) continue;
             var sw = Stopwatch.StartNew();
             var texts = docs.Select(d => d.content).ToList();
 
@@ -413,7 +377,7 @@ public class MsSqlCdcWatcher : ISourceWatcher
             {
                 _logger.LogError("Embed count mismatch for {Pipeline}: sent {Sent}, got {Got}",
                     pipeline.Name, docs.Count, embeddings?.Count ?? 0);
-                continue;
+                throw new InvalidOperationException("Incomplete embeddings; retaining SQL checkpoint");
             }
 
             // UPDATE source rows with embedding, embedded_at, pipeline_id, content_hash
@@ -457,7 +421,7 @@ public class MsSqlCdcWatcher : ISourceWatcher
                         break;
                     }
                     catch (OperationCanceledException) { throw; }
-                    catch (SqlException ex) when (ex.Number == -2 || ex.Number == 1205) // timeout or deadlock
+                    catch (SqlException ex) when (attempt < 5 && (ex.Number == -2 || ex.Number == 1205))
                     {
                         var delay = Math.Min(500 * Math.Pow(2, attempt), 30_000);
                         _logger.LogWarning("SQL error {Number} patching {DocId}, attempt {Attempt}, retrying",
@@ -485,7 +449,7 @@ public class MsSqlCdcWatcher : ISourceWatcher
         foreach (var pipeline in pipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
-            if (dest is null) continue;
+            if (dest is null) throw new InvalidOperationException($"Destination {pipeline.DestinationId} not found");
 
             var messages = docs.Select(d => new EmbeddingMessage
             {

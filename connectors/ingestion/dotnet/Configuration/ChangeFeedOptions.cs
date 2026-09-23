@@ -72,6 +72,9 @@ public class ChangeFeedOptions
     /// <summary>When true, this process watches Databricks Delta Lake sources via Change Data Feed (default: false).</summary>
     public bool EnableDatabricksSources { get; set; } = false;
 
+    /// <summary>When true, this process watches SharePoint Online document libraries through Microsoft Graph.</summary>
+    public bool EnableSharePointSources { get; set; } = false;
+
     /// <summary>When true, BlobEventConsumer consumes blob events from the
     /// <see cref="BlobEventQueueName"/> Service Bus queue (default: false).</summary>
     public bool BlobEventConsumerEnabled { get; set; } = false;

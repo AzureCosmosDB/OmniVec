@@ -16,6 +16,7 @@ from azure.cosmos.exceptions import (  # lgtm[py/unused-import]
     CosmosResourceExistsError,
 )
 from azure.identity import DefaultAzureCredential
+from azure.core import MatchConditions
 
 from cosmos_retry import cosmos_retry
 
@@ -100,7 +101,8 @@ class MetadataStore:
         return self._container.replace_item(
             item=doc["id"],
             body=doc,
-            if_match=etag,
+            etag=etag,
+            match_condition=MatchConditions.IfNotModified,
         )
 
     @cosmos_retry()

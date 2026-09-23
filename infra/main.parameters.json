@@ -9,7 +9,7 @@
       "value": "${AZURE_LOCATION}"
     },
     "kubernetesVersion": {
-      "value": "1.33"
+      "value": "1.35"
     },
     "systemNodeVmSize": {
       "value": "${OMNIVEC_SYSTEM_NODE_VM_SIZE}"
