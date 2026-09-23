@@ -12,6 +12,7 @@ ACR_NAME=mock ACR_LOGIN_SERVER=mock.invalid
 CALLS=""
 image_exists() { return 0; }
 mark_image_update() { IMAGES_CHANGED=true; }
+add_changed_image() { mark_image_update; }
 az() { CALLS="$CALLS az:$*"; }
 docker() { CALLS="$CALLS docker:$1"; }
 build_image test Dockerfile .
@@ -115,6 +116,13 @@ _hint=$(print_deployment_remediation 'ImagePullBackOff: manifest unknown')
 case "$_hint" in *"environment ACR"*) ;; *) echo "FAIL image remediation guidance"; exit 1;; esac
 echo "OK terminal deployment failures include actionable recovery guidance"
 
+grep -q "src-%s" "$HOOK"
+grep -q 'OMNIVEC_BUILD_CONCURRENCY' "$HOOK"
+grep -q 'copy_minimal_build_tree' "$HOOK"
+grep -q 'DOCGROK_WORKER_IMAGE_TAG' "$HOOK"
+grep -q 'IMMUTABLE_SOURCE_BUILD' "$HOOK"
+echo "OK source builds use minimal contexts, immutable tags, bounded concurrency, and targeted rollout state"
+
 if ! grep -q 'OMNIVEC_RECOVER_PENDING_HELM' "$HOOK" ||
    ! grep -q 'pending-install' "$HOOK" ||
    ! grep -q 'helm uninstall omnivec' "$HOOK" ||
@@ -153,4 +161,4 @@ rc=$?
 set -e
 [ "$rc" = 19 ]
 echo "OK resource apply failures propagate"
-echo "17 deployment checks passed"
+echo "18 deployment checks passed"

@@ -85,6 +85,9 @@ cleanup_post_lock() {
     rm -f "$_post_lock/imports/"*
     rmdir "$_post_lock/imports"
   fi
+  if [ -d "$_post_lock/build-contexts" ]; then
+    rm -rf -- "$_post_lock/build-contexts"
+  fi
   rm -f "$_post_lock/pid"
   rmdir "$_post_lock"
   [ "$_rc" -ne 0 ] && command -v hb_slowest_summary >/dev/null 2>&1 && hb_slowest_summary || true
@@ -97,6 +100,12 @@ IMAGE_UPDATE_MARKER="$_lock_dir/${AZURE_ENV_NAME:-omnivec}.images-pending"
 mark_image_update() {
   : > "$IMAGE_UPDATE_MARKER"
   IMAGES_CHANGED=true
+}
+CHANGED_IMAGES=""
+IMMUTABLE_SOURCE_BUILD=false
+add_changed_image() {
+  case " $CHANGED_IMAGES " in *" $1 "*) ;; *) CHANGED_IMAGES="$CHANGED_IMAGES $1";; esac
+  mark_image_update
 }
 
 run_bounded_import() {
@@ -359,6 +368,44 @@ IMAGES="omnivec-api omnivec-search omnivec-web omnivec-changefeed omnivec-dotnet
 if [ "$ONELAKE_ICEBERG_ENABLED" = "true" ]; then
   IMAGES="$IMAGES omnivec-onelake-iceberg-watcher"
 fi
+API_IMAGE_TAG=latest
+SEARCH_IMAGE_TAG=latest
+WEB_IMAGE_TAG=latest
+CHANGEFEED_IMAGE_TAG=latest
+DOTNET_WORKER_IMAGE_TAG=latest
+ONELAKE_IMAGE_TAG=latest
+AGENT_SOURCE_IMAGE_TAG=latest
+DOCGROK_WORKER_IMAGE_TAG=latest
+DOCGROK_ROUTER_IMAGE_TAG=latest
+
+set_image_tag() {
+  case "$1" in
+    omnivec-api) API_IMAGE_TAG=$2 ;;
+    omnivec-search) SEARCH_IMAGE_TAG=$2 ;;
+    omnivec-web) WEB_IMAGE_TAG=$2 ;;
+    omnivec-changefeed) CHANGEFEED_IMAGE_TAG=$2 ;;
+    omnivec-dotnet-worker) DOTNET_WORKER_IMAGE_TAG=$2 ;;
+    omnivec-onelake-iceberg-watcher) ONELAKE_IMAGE_TAG=$2 ;;
+    omnivec-agent) AGENT_SOURCE_IMAGE_TAG=$2 ;;
+    docgrok-pipeline-worker) DOCGROK_WORKER_IMAGE_TAG=$2 ;;
+    docgrok-router) DOCGROK_ROUTER_IMAGE_TAG=$2 ;;
+  esac
+}
+
+get_image_tag() {
+  case "$1" in
+    omnivec-api) printf '%s' "$API_IMAGE_TAG" ;;
+    omnivec-search) printf '%s' "$SEARCH_IMAGE_TAG" ;;
+    omnivec-web) printf '%s' "$WEB_IMAGE_TAG" ;;
+    omnivec-changefeed) printf '%s' "$CHANGEFEED_IMAGE_TAG" ;;
+    omnivec-dotnet-worker) printf '%s' "$DOTNET_WORKER_IMAGE_TAG" ;;
+    omnivec-onelake-iceberg-watcher) printf '%s' "$ONELAKE_IMAGE_TAG" ;;
+    omnivec-agent) printf '%s' "$AGENT_SOURCE_IMAGE_TAG" ;;
+    docgrok-pipeline-worker) printf '%s' "$DOCGROK_WORKER_IMAGE_TAG" ;;
+    docgrok-router) printf '%s' "$DOCGROK_ROUTER_IMAGE_TAG" ;;
+    *) printf '%s' latest ;;
+  esac
+}
 
 # Release channel tag (stable / dev / sha-xxxxxxx / vX.Y.Z / latest).
 # Used for BOTH the acr import step AND the helm --set overrides so the
@@ -442,7 +489,7 @@ build_image() {
   fi
 
   printf "  ${CYAN}Building ${name}:${tag}...${NC}\n"
-  mark_image_update
+  add_changed_image "$name"
   if [ "$BUILD_MODE" = "docker" ]; then
     if [ "${DOCKER_LOGGED_IN:-false}" != "true" ]; then
       az acr login --name "$ACR_NAME" </dev/null
@@ -465,20 +512,142 @@ build_image() {
   printf "  ${GREEN}${name}:${tag} pushed.${NC}\n"
 }
 
+copy_minimal_build_tree() {
+  _source=$1
+  _destination=$2
+  mkdir -p "$_destination"
+  (
+    cd "$_source"
+    tar -cf - \
+      --exclude='.git' --exclude='.worktrees' --exclude='.venv' --exclude='venv' \
+      --exclude='node_modules' --exclude='bin' --exclude='obj' --exclude='target' \
+      --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.mypy_cache' \
+      --exclude='dist' --exclude='build' --exclude='*.pyc' --exclude='*.pdb' \
+      --exclude='*.rlib' --exclude='*.rmeta' --exclude='*.tmp' --exclude='*.log' .
+  ) | (cd "$_destination" && tar -xf -)
+}
+
+prepare_source_build_spec() {
+  _name=$1
+  _context="$_post_lock/build-contexts/$_name"
+  mkdir -p "$_context"
+  case "$_name" in
+    omnivec-api)
+      copy_minimal_build_tree "$ROOT_DIR/api" "$_context/api"
+      copy_minimal_build_tree "$ROOT_DIR/web" "$_context/web"
+      _dockerfile="$_context/api/Dockerfile" ;;
+    omnivec-search)
+      copy_minimal_build_tree "$ROOT_DIR/search" "$_context/search"
+      _dockerfile="$_context/search/Dockerfile" ;;
+    omnivec-agent)
+      copy_minimal_build_tree "$ROOT_DIR/agent" "$_context/agent"
+      _dockerfile="$_context/agent/Dockerfile" ;;
+    omnivec-web)
+      copy_minimal_build_tree "$ROOT_DIR/web" "$_context"
+      _dockerfile="$_context/Dockerfile" ;;
+    omnivec-changefeed)
+      copy_minimal_build_tree "$ROOT_DIR/connectors/ingestion/dotnet" "$_context"
+      _dockerfile="$_context/Dockerfile" ;;
+    omnivec-dotnet-worker)
+      copy_minimal_build_tree "$ROOT_DIR/connectors/worker/dotnet" "$_context"
+      _dockerfile="$_context/Dockerfile" ;;
+    omnivec-onelake-iceberg-watcher)
+      copy_minimal_build_tree "$ROOT_DIR/connectors/ingestion/onelake_iceberg" "$_context"
+      _dockerfile="$_context/Dockerfile" ;;
+    docgrok-pipeline-worker)
+      copy_minimal_build_tree "$ROOT_DIR/docgrok/pipeline-worker" "$_context"
+      _dockerfile="$_context/Dockerfile" ;;
+    docgrok-router)
+      copy_minimal_build_tree "$ROOT_DIR/docgrok/router" "$_context"
+      _dockerfile="$_context/Dockerfile" ;;
+    *) printf 'No source-build mapping exists for %s.\n' "$_name" >&2; return 1 ;;
+  esac
+  _fingerprint=$(cd "$_context" && find . -type f -exec sha256sum {} \; | LC_ALL=C sort | sha256sum | cut -c1-16)
+  printf '%s|%s|%s|src-%s\n' "$_name" "$_context" "$_dockerfile" "$_fingerprint"
+}
+
+wait_source_build_batch() {
+  _batch_failed=0
+  for _entry in $BUILD_BATCH_ENTRIES; do
+    _pid=${_entry%%:*}
+    _result=${_entry#*:}
+    if ! wait "$_pid"; then _batch_failed=1; fi
+    if [ ! -f "$_result" ] || [ "$(cat "$_result" 2>/dev/null || true)" != "OK" ]; then
+      _batch_failed=1
+      [ -f "$_result" ] && sed 's/^/    /' "$_result" >&2
+    fi
+  done
+  BUILD_BATCH_ENTRIES=""
+  BUILD_BATCH_COUNT=0
+  [ "$_batch_failed" -eq 0 ]
+}
+
+invoke_source_builds() {
+  _spec_file="$_post_lock/source-build-specs"
+  _build_file="$_post_lock/source-build-required"
+  : > "$_spec_file"
+  : > "$_build_file"
+  for _image in $IMAGES; do
+    _spec=$(prepare_source_build_spec "$_image")
+    printf '%s\n' "$_spec" >> "$_spec_file"
+    _tag=${_spec##*|}
+    set_image_tag "$_image" "$_tag"
+    if image_exists "$_image" "$_tag"; then
+      printf "  ${GREEN}%s:%s already matches source; reusing.${NC}\n" "$_image" "$_tag"
+    else
+      printf '%s\n' "$_spec" >> "$_build_file"
+    fi
+  done
+  if [ ! -s "$_build_file" ]; then
+    printf "  ${GREEN}All source fingerprints already exist in ACR; no builds required.${NC}\n"
+    IMMUTABLE_SOURCE_BUILD=true
+    return 0
+  fi
+
+  if [ "$BUILD_MODE" = "docker" ]; then
+    az acr login --name "$ACR_NAME" </dev/null
+    while IFS='|' read -r _name _context _dockerfile _tag; do
+      add_changed_image "$_name"
+      docker build -t "${ACR_LOGIN_SERVER}/${_name}:${_tag}" -t "${ACR_LOGIN_SERVER}/${_name}:latest" -f "$_dockerfile" "$_context"
+      docker push "${ACR_LOGIN_SERVER}/${_name}:${_tag}"
+      docker push "${ACR_LOGIN_SERVER}/${_name}:latest"
+    done < "$_build_file"
+  else
+    _concurrency=${OMNIVEC_BUILD_CONCURRENCY:-3}
+    case "$_concurrency" in ''|*[!0-9]*) printf 'OMNIVEC_BUILD_CONCURRENCY must be 1-5.\n' >&2; return 1;; esac
+    [ "$_concurrency" -ge 1 ] && [ "$_concurrency" -le 5 ] || {
+      printf 'OMNIVEC_BUILD_CONCURRENCY must be 1-5.\n' >&2; return 1;
+    }
+    BUILD_BATCH_ENTRIES=""
+    BUILD_BATCH_COUNT=0
+    while IFS='|' read -r _name _context _dockerfile _tag; do
+      add_changed_image "$_name"
+      _result="$_post_lock/build-${_name}.result"
+      printf "  ${CYAN}Queueing %s:%s from %s...${NC}\n" "$_name" "$_tag" "$_context"
+      (
+        _output=$(az acr build --registry "$ACR_NAME" \
+          --image "${_name}:${_tag}" --image "${_name}:latest" \
+          --file "$_dockerfile" "$_context" --timeout 3600 --no-logs --output none </dev/null 2>&1) && {
+          printf 'OK\n' > "$_result"
+          exit 0
+        }
+        printf '%s\n' "$_output" > "$_result"
+        exit 1
+      ) &
+      BUILD_BATCH_ENTRIES="$BUILD_BATCH_ENTRIES $!:$_result"
+      BUILD_BATCH_COUNT=$(( BUILD_BATCH_COUNT + 1 ))
+      if [ "$BUILD_BATCH_COUNT" -ge "$_concurrency" ]; then
+        wait_source_build_batch || return 1
+      fi
+    done < "$_build_file"
+    [ "$BUILD_BATCH_COUNT" -eq 0 ] || wait_source_build_batch || return 1
+  fi
+  IMAGES_CHANGED=true
+  IMMUTABLE_SOURCE_BUILD=true
+}
+
 build_all_images() {
-  build_image "omnivec-api" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest"
-  build_image "omnivec-search" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "latest"
-  build_image "omnivec-web" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest"
-  build_image "omnivec-changefeed" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest"
-  build_image "omnivec-dotnet-worker" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest"
-  build_image "omnivec-onelake-iceberg-watcher" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/Dockerfile" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/" "latest"
-  build_image "omnivec-agent" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest"
-  if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then
-    build_image "docgrok-pipeline-worker" "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" "${ROOT_DIR}/docgrok/pipeline-worker/" "latest"
-  fi
-  if [ -f "${ROOT_DIR}/docgrok/router/Dockerfile" ]; then
-    build_image "docgrok-router" "${ROOT_DIR}/docgrok/router/Dockerfile" "${ROOT_DIR}/docgrok/router/" "latest"
-  fi
+  invoke_source_builds
 }
 
 build_missing_images() {
@@ -596,7 +765,6 @@ if [ "$OMNIVEC_BUILD" = "true" ] || { [ "$ANON_OK" = "false" ] && [ "$TOKEN_OK" 
   # BUILD MODE: Build images from source
   printf "\n${YELLOW}Phase 1: Building images from source...${NC}\n"
   build_all_images
-  IMAGES_CHANGED=true
   printf "${GREEN}All images built and pushed.${NC}\n"
 else
   # IMPORT MODE: iterate every image. FIRST_IMAGE was handled by the auth
@@ -640,7 +808,7 @@ else
     fi
 
     printf "  ${CYAN}Importing ${image}:${IMG_TAG} as :latest...${NC}\n"
-    mark_image_update
+    add_changed_image "$image"
 
     # Run import in background (parallel)
     (
@@ -711,7 +879,6 @@ else
     printf "\n${YELLOW}Import provided no usable images. Falling back to source build mode...${NC}\n"
     BUILD_MODE=${BUILD_MODE:-acr}
     build_all_images
-    IMAGES_CHANGED=true
   fi
 fi
 
@@ -723,15 +890,20 @@ fi
 printf "\n${YELLOW}Verifying all required images exist in ACR...${NC}\n"
 MISSING_IMAGES=""
 for image in $IMAGES; do
-  if ! image_exists "$image" "latest"; then
-    printf "  ${RED}MISSING: ${image}:latest${NC}\n"
+  _required_tag=$(get_image_tag "$image")
+  if ! image_exists "$image" "$_required_tag"; then
+    printf "  ${RED}MISSING: ${image}:%s${NC}\n" "$_required_tag"
     MISSING_IMAGES="$MISSING_IMAGES $image"
   else
-    printf "  ${GREEN}OK: ${image}:latest${NC}\n"
+    printf "  ${GREEN}OK: ${image}:%s${NC}\n" "$_required_tag"
   fi
 done
 
 if [ -n "$MISSING_IMAGES" ]; then
+  if [ "$OMNIVEC_BUILD" = "true" ]; then
+    printf "${RED}Source-fingerprinted images disappeared after build:%s. Check ACR availability and rerun azd up.${NC}\n" "$MISSING_IMAGES" >&2
+    exit 1
+  fi
   printf "\n${YELLOW}Building missing images from source...${NC}\n"
   # shellcheck disable=SC2086
   build_missing_images $MISSING_IMAGES
@@ -884,7 +1056,12 @@ if [ -z "$SEARCH_INTERNAL_TOKEN" ]; then
   printf "  ${GREEN}Generated new search internal token.${NC}\n"
 fi
 
-IMAGE_TAG="latest"
+IMAGE_TAG="$API_IMAGE_TAG"
+if [ "$AGENT_IMAGE_TAG" = "latest" ]; then
+  AGENT_DEPLOY_TAG="$AGENT_SOURCE_IMAGE_TAG"
+else
+  AGENT_DEPLOY_TAG="$AGENT_IMAGE_TAG"
+fi
 
 # Write helm values to a temp file (avoids fragile eval + string concatenation)
 umask 077
@@ -899,34 +1076,47 @@ azure:
     endpoint: "${COSMOS_ENDPOINT}"
 api:
   image:
-    tag: "${IMAGE_TAG}"
+    tag: "${API_IMAGE_TAG}"
   adminToken: "${ADMIN_TOKEN}"
 search:
   image:
-    tag: "${IMAGE_TAG}"
+    tag: "${SEARCH_IMAGE_TAG}"
   bootstrapToken: "${SEARCH_BOOTSTRAP_TOKEN}"
   internalToken: "${SEARCH_INTERNAL_TOKEN}"
 controller:
   image:
-    tag: "${IMAGE_TAG}"
+    tag: "${API_IMAGE_TAG}"
+blobEnumerator:
+  image:
+    tag: "${API_IMAGE_TAG}"
+sourceWorker:
+  image:
+    tag: "${API_IMAGE_TAG}"
+blobWatcher:
+  image:
+    tag: "${API_IMAGE_TAG}"
 web:
   image:
-    tag: "${IMAGE_TAG}"
+    tag: "${WEB_IMAGE_TAG}"
   service:
     dnsLabel: "${WEB_DNS_LABEL}"
 changefeed:
   image:
-    tag: "${IMAGE_TAG}"
+    tag: "${CHANGEFEED_IMAGE_TAG}"
 dotnetWorker:
   enabled: true
+  image:
+    tag: "${DOTNET_WORKER_IMAGE_TAG}"
 sharepointWatcher:
   enabled: ${SHAREPOINT_ENABLED}
 onelakeIcebergWatcher:
   enabled: ${ONELAKE_ICEBERG_ENABLED}
+  image:
+    tag: "${ONELAKE_IMAGE_TAG}"
 agent:
   defaultModelId: "${AGENT_DEFAULT_MODEL_ID}"
   image:
-    tag: "${AGENT_IMAGE_TAG}"
+    tag: "${AGENT_DEPLOY_TAG}"
   allowKubernetesRemediation: ${AGENT_ALLOW_K8S_REMEDIATION}
 docgrok:
   global:
@@ -940,7 +1130,10 @@ docgrok:
       container: "metadata"
   docgrok:
     image:
-      tag: "${IMAGE_TAG}"
+      tag: "${DOCGROK_ROUTER_IMAGE_TAG}"
+  pipelineWorker:
+    image:
+      tag: "${DOCGROK_WORKER_IMAGE_TAG}"
 EOF
 
 if [ -n "$KEYVAULT_URI" ]; then
@@ -1181,10 +1374,22 @@ fi
 
 printf "${GREEN}Helm deployment complete.${NC}\n"
 
-# Force pod restart if images were updated (tag is always 'latest', so Helm won't restart on its own)
-if [ "$IMAGES_CHANGED" = "true" ]; then
+# Imported/mutable images still require a targeted restart. Immutable source
+# tags change the pod template through Helm and roll only affected workloads.
+if [ "$IMAGES_CHANGED" = "true" ] && [ "$IMMUTABLE_SOURCE_BUILD" != "true" ]; then
   printf "\n${YELLOW}Images updated — restarting pods to pull new images...${NC}\n"
-  kubectl_omnivec rollout restart deployment -n omnivec </dev/null
+  _restart_names=""
+  _deployments=$(kubectl_omnivec get deployment -n omnivec -o 'jsonpath={range .items[*]}{.metadata.name}{"|"}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}' </dev/null 2>/dev/null || true)
+  for _changed in $CHANGED_IMAGES; do
+    _matches=$(printf '%s\n' "$_deployments" | awk -F'|' -v image="/${_changed}:" 'index($2,image){print $1}')
+    _restart_names="$_restart_names $_matches"
+  done
+  if [ -z "$(printf '%s' "$_restart_names" | tr -d '[:space:]')" ] && [ -z "$(printf '%s' "$CHANGED_IMAGES" | tr -d '[:space:]')" ]; then
+    _restart_names=$(printf '%s\n' "$_deployments" | cut -d'|' -f1)
+  fi
+  printf '%s\n' "$_restart_names" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | while read -r _deployment; do
+    kubectl_omnivec rollout restart "deployment/${_deployment}" -n omnivec </dev/null
+  done
 fi
 
 # =============================================================================

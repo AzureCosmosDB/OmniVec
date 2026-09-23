@@ -136,6 +136,7 @@ $build = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDe
 Invoke-Expression $build.Extent.Text
 function Test-ImageExists { return $true }
 function Mark-ImageUpdate { $script:imagesChanged = $true }
+function Add-ChangedImage { param($Name) Mark-ImageUpdate }
 function az { $global:LASTEXITCODE = 0 }
 $script:dockerCalls = @()
 function docker { $script:dockerCalls += $args[0]; $global:LASTEXITCODE = 0 }
@@ -194,6 +195,38 @@ Check ($source -match 'rollout status deployment -n omnivec') 'all deployments a
 Check ($source -match 'Wait-DeploymentsReady') 'a timed-out rollout gets a bounded convergence recovery window'
 Check ($source -match 'forcibly closed' -and $source -match 'wsarecv') 'AKS transport resets are classified as transient'
 Check ($source -match 'Get-DeploymentRemediation') 'terminal deployment failures print actionable recovery guidance'
+Check ($source -match 'src-\$\(\$fingerprint\.Substring\(0,16\)\)') 'source builds use deterministic immutable fingerprint tags'
+Check ($source -match 'OMNIVEC_BUILD_CONCURRENCY' -and $source -match '\$concurrency -gt 5') 'parallel source builds have a bounded concurrency limit'
+Check ($source -match 'Copy-MinimalBuildTree' -and $source -match 'omnivec-build-') 'source builds use staged minimal contexts'
+Check ($source -match 'docgrok\.pipelineWorker\.image\.tag' -and
+       $source -match 'dotnetWorker\.image\.tag' -and
+       $source -match 'onelakeIcebergWatcher\.image\.tag') 'Helm receives per-component immutable image tags'
+Check ($source -match '\$script:immutableSourceBuild' -and
+       $source -match '\$script:changedImages') 'immutable source builds avoid blanket restarts and track changed images'
+
+$copyBuildTree = $ast.Find({
+    param($n)
+    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Copy-MinimalBuildTree'
+}, $true)
+$getBuildSpec = $ast.Find({
+    param($n)
+    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-SourceBuildSpec'
+}, $true)
+Invoke-Expression $copyBuildTree.Extent.Text
+Invoke-Expression $getBuildSpec.Extent.Text
+$RootDir = $root
+$script:buildContextRoot = Join-Path $env:TEMP ("omnivec-context-test-" + [guid]::NewGuid().ToString('N'))
+try {
+    $apiSpec = Get-SourceBuildSpec -Name 'omnivec-api'
+    $apiBytes = (Get-ChildItem $apiSpec.Context -File -Recurse | Measure-Object Length -Sum).Sum
+    Check (Test-Path $apiSpec.Dockerfile) 'staged API context contains its Dockerfile'
+    Check ($apiSpec.Tag -match '^src-[a-f0-9]{16}$') 'staged API context produces a valid immutable tag'
+    Check (-not (Test-Path (Join-Path $apiSpec.Context 'docgrok'))) 'staged API context excludes unrelated repository trees'
+    Check ($apiBytes -lt 100MB) 'staged API context remains below 100 MiB'
+} finally {
+    Remove-Item $script:buildContextRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $script:buildContextRoot = $null
+}
 
 # Native timeout responses stand in for stalls longer than a minute. Exercise
 # the hook's real command/guard and retry loop without sleeping or networking.
