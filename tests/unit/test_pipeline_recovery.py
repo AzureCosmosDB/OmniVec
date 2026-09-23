@@ -101,6 +101,30 @@ def test_store_uses_supported_cosmos_etag_contract(modules):
     )
 
 
+def test_connector_metrics_are_deduplicated_and_visible_in_pipeline_stats(modules, monkeypatch):
+    source = {
+        "id": "source", "doc_type": "source", "name": "OneLake",
+        "type": "onelake-iceberg", "config": {},
+    }
+    store = MemoryStore(pipeline(), source)
+    attach(monkeypatch, modules.api, store)
+    modules.api._pipeline_stats_cache.clear()
+
+    payload = {
+        "processed": 3, "failed": 0, "processing_time_ms": 300,
+        "batch_key": "worker:pipeline:stable",
+    }
+    assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True}
+    assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True, "dedup": True}
+
+    stats = modules.api._compute_pipeline_stats("pipeline")
+    assert stats.documents_processed == 3
+    assert stats.embedded_count == 3
+    assert stats.lifetime_embedded_count == 3
+    assert stats.avg_processing_time_ms == 100
+    assert stats.recent_throughput_docs_per_sec == 0.1
+
+
 def test_new_checkpoint_and_external_reset_clear_cached_state(modules, monkeypatch):
     store = MemoryStore()
     attach(monkeypatch, modules.checkpoint_manager, store)

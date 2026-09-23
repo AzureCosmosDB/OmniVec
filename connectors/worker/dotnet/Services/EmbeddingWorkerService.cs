@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Microsoft.Extensions.Options;
@@ -805,7 +807,7 @@ public class EmbeddingWorkerService : BackgroundService
                 batch.Count, batch[0].msg.PipelineName, sw.ElapsedMilliseconds);
 
             // Phase 5: Report metrics
-            var batchKey = $"worker:{batch[0].msg.SourceRef}:{batch.Count}:{sw.ElapsedMilliseconds}";
+            var batchKey = BuildMetricsBatchKey(pipelineId, batch.Select(item => item.msg));
             _ = _metrics.ReportInlineMetricsAsync(pipelineId, batch.Count, 0, sw.ElapsedMilliseconds, batchKey);
         }
         catch (OperationCanceledException) { throw; }
@@ -818,12 +820,26 @@ public class EmbeddingWorkerService : BackgroundService
                 await SettleFailureAsync(receiver, sbMsg, ex, ct);
             }
         }
+
         finally
         {
             renewalCts.Cancel();
             try { await renewalTask; }
             catch (OperationCanceledException) { }
         }
+    }
+
+    private static string BuildMetricsBatchKey(string pipelineId, IEnumerable<EmbeddingMessage> messages)
+    {
+        var identities = messages
+            .Select(message => string.IsNullOrWhiteSpace(message.MessageId)
+                ? $"{message.SourceId}:{message.SourceRef}:{message.ContentHash}:{message.PipelineGeneration}"
+                : message.MessageId)
+            .OrderBy(identity => identity, StringComparer.Ordinal);
+        var digest = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", identities))))
+            .ToLowerInvariant();
+        return $"worker:{pipelineId}:{digest}";
     }
 
     private async Task RenewLocksAsync(

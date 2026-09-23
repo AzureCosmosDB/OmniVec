@@ -36,6 +36,10 @@ internal static class ConnectorReliabilityTests
     private static object? Get(object value, string field) => value.GetType().GetField(field, Private)!.GetValue(value);
     private static Task Invoke(object value, string method, params object[] args)
         => (Task)value.GetType().GetMethod(method, Private)!.Invoke(value, args)!;
+    private static string InvokeWorkerString(string method, params object[] args)
+        => (string)typeof(EmbeddingWorkerService)
+            .GetMethod(method, BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, args)!;
     private static Pipeline PipelineFor(string id = "pipeline") => JsonSerializer.Deserialize<Pipeline>(
         $$"""{"id":"{{id}}","sources":[{"source_id":"source","content_fields":["content"]}],"processing_mode":"queue","destination_id":"dest","docgrok_pipeline":"mdl-test"}""")!;
     private static Source TestSource(string type = "postgres") => new()
@@ -135,6 +139,19 @@ internal static class ConnectorReliabilityTests
             await Invoke(worker, "ProcessBatchAsync", receiver, batch, CancellationToken.None);
             Check(calls == 4 && receiver.Abandoned == 2 && receiver.DeadLettered == 0 && receiver.Completed == 0);
             Check(first.Content == "hello world" && second.Content == "hello world");
+        });
+        Test("Worker metrics batch identity is stable across ordering and replay timing", () =>
+        {
+            var first = TextMessage();
+            first.MessageId = "message-1";
+            var second = TextMessage();
+            second.MessageId = "message-2";
+            var forward = InvokeWorkerString("BuildMetricsBatchKey", "pipeline", new Message[] { first, second });
+            var reverse = InvokeWorkerString("BuildMetricsBatchKey", "pipeline", new Message[] { second, first });
+            second.MessageId = "message-3";
+            var changed = InvokeWorkerString("BuildMetricsBatchKey", "pipeline", new Message[] { first, second });
+            Check(forward == reverse && forward != changed);
+            return Task.CompletedTask;
         });
         Test("Unknown destination and unsupported delete cannot be acknowledged", async () =>
         {
