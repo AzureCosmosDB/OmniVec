@@ -259,6 +259,9 @@ if ("$rgExists".Trim() -eq "true") {
             "omnivec-image-tag" = "OMNIVEC_IMAGE_TAG"
             "omnivec-sharepoint" = "OMNIVEC_SHAREPOINT_ENABLED"
             "omnivec-onelake-iceberg" = "OMNIVEC_ONELAKE_ICEBERG_ENABLED"
+            "omnivec-agent-model" = "OMNIVEC_AGENT_DEFAULT_MODEL_ID"
+            "omnivec-agent-image-tag" = "OMNIVEC_AGENT_IMAGE_TAG"
+            "omnivec-agent-k8s-remediation" = "OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION"
         }
         foreach ($tag in $tagMap.GetEnumerator()) {
             $val = $tags.PSObject.Properties[$tag.Key].Value

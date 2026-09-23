@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import math
 import re
 
 from pydantic import BaseModel, Field
@@ -30,6 +31,9 @@ RUNBOOKS = {
     "no_progress": "Compare job backlog, source/embedded counts and poller/worker evidence over a suitable source-specific window. A short quiet window is not proof of a dead poller. Fix the observed dependency first; allow one targeted restart only with evidence, otherwise escalate.",
     "paused": "If not intentional maintenance, approve resume_pipeline for this pipeline only. Verify downstream writes; active status alone is not success.",
     "agent_identity_federation": "The identity owner must configure federation for the dedicated agent service account using the approved AKS issuer and api://AzureADTokenExchange audience. Do not reuse a more privileged service account or bypass authentication; pipeline health remains unknown until required observations are available.",
+    "agent_observation_permissions": "The operator must check the agent's existing service authentication, namespaced read RBAC or scoped Azure read permissions for the named observation. An agent observation failure is not proof that ingestion is broken. Do not grant broad roles, switch identities or restart workers to hide it.",
+    "source_inventory_unavailable": "The control plane intentionally does not enumerate Blob containers, and its source count does not cover multiple sources. Use an authorized synthetic document and verify new destination writes with unchanged bindings. Do not restart workers just because an inventory counter is absent; processing proof does not establish complete source coverage.",
+    "telemetry_unavailable": "Inspect the named missing counters and control-plane/dependency health, then collect a fresh observation. Do not replace missing counters with zero or infer a stopped worker from missing telemetry.",
 }
 
 _SIGNALS = {
@@ -76,6 +80,10 @@ async def _observe(call) -> dict:
     except Exception as exc:
         # Exception text can contain signed URLs, tokens or connection strings.
         status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is None:
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        if not isinstance(status, int) or isinstance(status, bool):
+            status = None
         error = {"ok": False, "reason": type(exc).__name__, "http_status": status}
         if "AADSTS700213" in str(exc):
             error["error_code"] = "AADSTS700213"
@@ -100,7 +108,46 @@ def _finding(code: str, evidence: str, *, confidence: str = "high", severity: st
 
 
 def _number(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v if v >= 0 else None
+
+
+def _observation_finding(observation: dict, label: str) -> dict | None:
+    if observation.get("ok"):
+        return None
+    if observation.get("error_code") == "AADSTS700213":
+        return _finding("agent_identity_federation", f"Agent cannot observe {label}: AADSTS700213; pipeline health is not established.", severity="unknown")
+    if observation.get("http_status") in (401, 403):
+        return _finding("agent_observation_permissions", f"Agent cannot observe {label}: HTTP {observation['http_status']}; this is an observation permission failure.", severity="unknown")
+    return None
+
+
+def _repair_plan(findings: list[dict], unknown: list[str], scope: str | None) -> list[dict]:
+    priorities = {"blocked": 0, "unhealthy": 1, "unknown": 2}
+    plan, seen = [], set()
+    for finding in sorted(findings, key=lambda f: priorities.get(f["severity"], 3)):
+        key = (finding["code"], finding["evidence"])
+        if key in seen:
+            continue
+        seen.add(key)
+        action = finding.get("approved_tool_candidate")
+        plan.append({
+            "priority": len(plan) + 1, "scope": scope, "code": finding["code"],
+            "execution": "approval_required" if action else "operator_investigation",
+            "action": action, "instructions": finding["next_action"],
+            "precondition": "Confirm the evidence and intended operating state; resolve unknown dependencies before approving a mutation.",
+            "verification": "Fresh healthy dependencies and increased destination progress with unchanged source/model/destination/checkpoint bindings; idle alone is not repair.",
+        })
+    if not plan and unknown:
+        plan.append({
+            "priority": 1, "scope": scope, "code": "telemetry_unavailable",
+            "execution": "observe_only", "action": None,
+            "instructions": RUNBOOKS["telemetry_unavailable"], "missing_evidence": unknown,
+        })
+    return plan
 
 
 def _model_refs(value, depth=0) -> set[str]:
@@ -251,9 +298,19 @@ async def _collect(pipeline_id: str | None) -> dict:
     )
     health = health_obs.get("value", {}) if health_obs["ok"] else {}
     registry = models.get("value")
-    if not isinstance(registry, list) and not (isinstance(registry, dict) and isinstance(registry.get("models"), list)):
+    if models.get("ok") and not isinstance(registry, list) and not (isinstance(registry, dict) and isinstance(registry.get("models"), list)):
         models = {"ok": False, "reason": "Model registry shape invalid"}
     unknown = list(cluster["unknown"])
+    findings = []
+    for observation, label in (
+        (cluster["deployments"], "Kubernetes deployments"),
+        (cluster["pods"], "Kubernetes pods"),
+        (health_obs, "control-plane dependency health"),
+        (models, "model registry"),
+    ):
+        finding = _observation_finding(observation, label)
+        if finding:
+            findings.append(finding)
     if not health_obs["ok"]:
         unknown.append("Dependency health observations unavailable")
     if pipeline_id:
@@ -266,7 +323,7 @@ async def _collect(pipeline_id: str | None) -> dict:
         ids = ids[:MAX_PIPELINES]
     pipelines = await asyncio.gather(*(_pipeline_snapshot(pid, health, models) for pid in ids))
     return {"scope": pipeline_id or "system", "observed_at": _now(), "cluster": cluster,
-            "queues": queues, "pipelines": pipelines, "unknown": unknown}
+            "queues": queues, "pipelines": pipelines, "unknown": unknown, "findings": findings}
 
 
 async def collect_snapshot(pipeline_id: str | None = None) -> dict:
@@ -279,7 +336,8 @@ async def collect_snapshot(pipeline_id: str | None = None) -> dict:
 
 def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
     """Conservative state machine; only observed destination progress is processing proof."""
-    findings, unknown = [], list(snapshot.get("unknown", []))
+    findings, unknown = list(snapshot.get("findings", [])), list(snapshot.get("unknown", []))
+    limitations = []
     cluster = snapshot.get("cluster", {})
     deployments = {d["name"]: d for d in cluster.get("deployments", {}).get("value", [])}
     queues = snapshot.get("queues", {})
@@ -291,12 +349,9 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
         value = observation.get("value", {})
         if not observation.get("ok") or any(_number(value.get(k)) is None for k in ("active_message_count", "dead_letter_message_count")):
             unknown.append(f"Queue {name} counters unavailable")
-            if observation.get("error_code") == "AADSTS700213":
-                findings.append(_finding(
-                    "agent_identity_federation",
-                    f"Agent cannot observe {name}: Azure returned AADSTS700213 (no matching federated identity record); this does not prove the pipeline itself is broken.",
-                    severity="unknown",
-                ))
+            finding = _observation_finding(observation, f"Service Bus {name}")
+            if finding:
+                findings.append(finding)
             continue
         queue_depths.append(value["active_message_count"])
         if value["dead_letter_message_count"] or value.get("transfer_dead_letter_message_count", 0):
@@ -376,6 +431,18 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
         jobs = stats.get("jobs", {})
         pending, processing, failed = (_number(jobs.get(k)) for k in ("pending", "processing", "failed"))
         embedded, source_count = _number(stats.get("embedded_count")), _number(stats.get("source_doc_count"))
+        source_types = [s.get("type") for s in p.get("sources", [])]
+        source_ids = p.get("source_ids") or [s.get("id") for s in p.get("sources", [])]
+        inventory_not_collected = (
+            len(source_ids) > 1 or
+            bool(source_types) and all(t in ("azure_blob", "azure-blob", "blob") for t in source_types)
+            and stats.get("source_doc_count") is None
+        )
+        pl = []
+        if len(source_ids) > 1:
+            source_count = None
+        if inventory_not_collected:
+            pl.append("Complete source inventory is not collected for Blob/multi-source pipelines; source coverage and catch-up are not verified.")
         backlog = (pending or 0) + (processing or 0)
         if source_count is not None and embedded is not None:
             backlog = max(backlog, source_count - embedded)
@@ -399,8 +466,18 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
                 pf.append(_finding("no_progress", f"{pid}: outstanding work={backlog}, no destination-count increase across observations",
                                    confidence="low", severity="unknown"))
                 pu.append("No progress in bounded observation window; poller fault not proven")
-        if any(v is None for v in (pending, processing, failed, embedded, source_count)):
-            pu.append("Job/destination/source counters incomplete")
+        missing = [name for name, value in (
+            ("jobs.pending", pending), ("jobs.processing", processing),
+            ("jobs.failed", failed), ("embedded_count", embedded),
+        ) if value is None]
+        if source_count is None and not inventory_not_collected:
+            missing.append("source_doc_count")
+        if missing:
+            pu.append("Required counters unavailable: " + ", ".join(missing))
+            pf.append(_finding("telemetry_unavailable", f"{pid}: missing or invalid counters: {', '.join(missing)}", severity="unknown"))
+        if inventory_not_collected and not progress:
+            pu.append("Source inventory is not collected; no destination progress observed to verify processing.")
+            pf.append(_finding("source_inventory_unavailable", f"{pid}: source inventory not collected; known job backlog={backlog}, embedded_count={embedded}", severity="unknown"))
         idle = backlog == 0 and all(v is not None for v in (pending, processing, failed, embedded, source_count))
         if not inline and (not queue_depths or any(queue_depths)):
             idle = False
@@ -409,11 +486,20 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
             "UNKNOWN" if pu else "HEALTHY" if progress else "READY_IDLE" if idle else "UNKNOWN"
         )
         results.append({"pipeline_id": pid, "status": state, "processing_verified": progress and state == "HEALTHY",
-                        "outstanding_work": backlog, "findings": pf, "unknown": pu,
+                        "outstanding_work": backlog if not missing and source_count is not None else None,
+                        "outstanding_work_lower_bound": backlog, "findings": pf, "unknown": pu,
+                        "limitations": pl, "telemetry": {
+                            "missing_required_counters": missing,
+                            "source_inventory": "not_collected" if inventory_not_collected else
+                                                "available" if source_count is not None else "unavailable",
+                            "known_job_backlog": pending + processing if pending is not None and processing is not None else None,
+                            "destination_count": embedded,
+                        },
                         "progress": {"embedded_before": (old or {}).get("stats", {}).get("embedded_count"),
                                      "embedded_after": embedded, "last_run": stats.get("last_run")}})
         findings.extend(pf)
         unknown.extend(pu)
+        limitations.extend(pl)
     if not results:
         unknown.append("No pipelines observed; processing health is not established")
     statuses = {r["status"] for r in results}
@@ -426,7 +512,9 @@ def evaluate(snapshot: dict, baseline: dict | None = None) -> dict:
         "scope": snapshot.get("scope"), "status": status, "observed_at": snapshot.get("observed_at"),
         "baseline_at": (baseline or {}).get("observed_at"),
         "processing_verified": status == "HEALTHY" and any(r["processing_verified"] for r in results),
+        "repair_plan": _repair_plan(findings, unknown, snapshot.get("scope")),
         "pipelines": results, "findings": findings, "unknown": sorted(set(unknown)),
+        "limitations": sorted(set(limitations)),
         "evidence": {"queues": queues if bus_required else {
                          "required_for_scope": False,
                          "interpretation": "This inline pipeline does not use Service Bus; unrelated queue observations are excluded.",

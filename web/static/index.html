@@ -1146,6 +1146,8 @@
             background: var(--text-tertiary);
         }
     </style>
+    <link rel="stylesheet" href="/static/operations.css">
+    <script src="/static/operations.js" defer></script>
 </head>
 <body>
     <!-- Login Screen -->
@@ -1402,13 +1404,13 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="logo">
-                <h1>OmniVec</h1>
-                <span>Vector Ingestion Platform</span>
+                <div class="brand-symbol" aria-hidden="true">O<span>V</span></div>
+                <div><h1>OmniVec</h1><span>VECTOR OPERATIONS</span></div>
             </div>
 
             <nav class="nav">
                 <div class="nav-section">
-                    <div class="nav-section-title">Overview</div>
+                    <div class="nav-section-title">Workspace</div>
                     <a class="nav-item active" onclick="showSection('dashboard')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>
@@ -1419,39 +1421,39 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
                         </svg>
-                        Health
+                        Diagnostics
                         <span class="nav-badge" id="health-badge" style="display:none"></span>
                     </a>
                     <a class="nav-item" onclick="showSection('agent')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>
                         </svg>
-                        Agent
+                        Recovery Agent
                     </a>
                 </div>
 
                 <div class="nav-section">
-                    <div class="nav-section-title">Configuration</div>
+                    <div class="nav-section-title">Data infrastructure</div>
                     <a class="nav-item" onclick="showSection('sources')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
                         </svg>
                         Sources
-                        <span class="nav-badge" id="sources-count">0</span>
+                        <span class="nav-badge" id="sources-count">--</span>
                     </a>
                     <a class="nav-item" onclick="showSection('destinations')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/><path d="M12 4v2"/><path d="M12 18v2"/><path d="M4 12h2"/><path d="M18 12h2"/>
                         </svg>
                         Vector Stores
-                        <span class="nav-badge" id="destinations-count">0</span>
+                        <span class="nav-badge" id="destinations-count">--</span>
                     </a>
                     <a class="nav-item" onclick="showSection('pipelines')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M12 3v18"/><rect x="4" y="8" width="6" height="8" rx="1"/><rect x="14" y="4" width="6" height="16" rx="1"/>
                         </svg>
                         Pipelines
-                        <span class="nav-badge" id="pipelines-count">0</span>
+                        <span class="nav-badge" id="pipelines-count">--</span>
                     </a>
 
                 </div>
@@ -1484,13 +1486,13 @@
                 </div>
 
                 <div class="nav-section">
-                    <div class="nav-section-title">DocGrok</div>
+                    <div class="nav-section-title">AI processing</div>
                     <a class="nav-item" onclick="showSection('dg-models')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
                         </svg>
                         Models
-                        <span class="nav-badge" id="dg-models-count">0</span>
+                        <span class="nav-badge" id="dg-models-count">--</span>
                     </a>
                     <a class="nav-item" onclick="showSection('dg-pipelines')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1550,7 +1552,7 @@
             <!-- Dashboard Section -->
             <section id="section-dashboard" class="section">
                 <header class="header">
-                    <h2 class="header-title">Dashboard</h2>
+                    <div><p class="page-eyebrow">WORKSPACE / OVERVIEW</p><h2 class="header-title">Operations overview</h2></div>
                     <div class="header-actions">
                         <button class="btn btn-secondary" onclick="refreshData()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1562,11 +1564,31 @@
                 </header>
 
                 <div class="content">
-                    <div class="stats-grid">
+                    <div class="workspace-hero">
+                        <div>
+                            <span class="eyebrow">FROM RAW DATA TO RETRIEVAL</span>
+                            <h1>Your data.<br><span>One clear view.</span></h1>
+                            <p>Connect sources, follow processing, and investigate what needs attention.</p>
+                            <div class="hero-actions">
+                                <button class="btn btn-primary" onclick="OmniConsole.openDiagnostics()">Run diagnostics <span aria-hidden="true">&nearr;</span></button>
+                                <button class="btn btn-secondary" onclick="showSection('pipelines')">Explore pipelines</button>
+                            </div>
+                        </div>
+                        <div class="flow-map" aria-label="Configured data infrastructure">
+                            <div class="flow-node"><span class="flow-icon" aria-hidden="true">&#9671;</span><span>CONNECT</span><strong id="flow-sources">--</strong><small>Sources</small></div>
+                            <span class="flow-connector" aria-hidden="true">&rarr;</span>
+                            <div class="flow-node featured"><span class="flow-icon" aria-hidden="true">&#10022;</span><span>PROCESS</span><strong id="flow-pipelines">--</strong><small>Pipelines</small></div>
+                            <span class="flow-connector" aria-hidden="true">&rarr;</span>
+                            <div class="flow-node"><span class="flow-icon" aria-hidden="true">&#11041;</span><span>RETRIEVE</span><strong id="flow-destinations">--</strong><small>Vector stores</small></div>
+                            <p class="flow-caption">Configuration is not proof of processing.</p>
+                        </div>
+                    </div>
+                    <div id="workspace-freshness" class="workspace-freshness" role="status">Connecting to your workspace...</div>
+                    <div class="stats-grid overview-stats">
                         <div class="stat-card">
                             <div class="stat-label">Sources</div>
                             <div class="stat-value" id="stat-sources">0</div>
-                            <div class="stat-trend up">Connected</div>
+                            <div class="stat-trend">Registered sources</div>
                         </div>
                         <div class="stat-card">
                             <div class="stat-label">Destinations</div>
@@ -1576,17 +1598,17 @@
                         <div class="stat-card">
                             <div class="stat-label">Pipelines</div>
                             <div class="stat-value" id="stat-pipelines">0</div>
-                            <div class="stat-trend up">Active</div>
+                            <div class="stat-trend" id="stat-pipeline-states">Configured pipelines</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-label">Embedded / Total</div>
-                            <div class="stat-value" id="stat-events">0</div>
-                            <div class="stat-trend" id="stat-events-today">Today: 0</div>
+                            <div class="stat-label">Embedded documents</div>
+                            <div class="stat-value" id="stat-events">--</div>
+                            <div class="stat-trend" id="stat-events-today">Awaiting pipeline observations</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-label">Failed</div>
-                            <div class="stat-value" id="stat-failed" style="color: var(--error);">0</div>
-                            <div class="stat-trend" id="stat-failed-today">Today: 0</div>
+                            <div class="stat-label">Failed events</div>
+                            <div class="stat-value" id="stat-failed" style="color: var(--error);">--</div>
+                            <div class="stat-trend" id="stat-failed-today">Awaiting runtime events</div>
                         </div>
                         <div class="stat-card">
                             <div class="stat-label">Throughput</div>
@@ -1595,11 +1617,25 @@
                         </div>
                         <div class="stat-card" id="stat-insights-card">
                             <div class="stat-label">Avg Latency</div>
-                            <div class="stat-value" id="stat-insights-status" style="font-size:1rem;">—</div>
+                            <div class="stat-value" id="stat-insights-status">—</div>
                             <div class="stat-trend" id="stat-insights-link"></div>
                         </div>
                     </div>
 
+                    <div class="operations-grid">
+                        <div class="card">
+                            <div class="card-header"><div><p class="eyebrow">OBSERVABILITY</p><h3 class="card-title">Workspace pulse</h3></div><button class="btn btn-ghost btn-sm" onclick="showSection('metrics')">View metrics &rarr;</button></div>
+                            <div class="card-body" id="workspace-pulse"><p class="muted">Waiting for runtime observations.</p></div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header"><div><p class="eyebrow">INVESTIGATE, THEN ACT</p><h3 class="card-title">Your next move</h3></div></div>
+                            <div class="card-body action-stack">
+                                <button class="action-tile" onclick="OmniConsole.openDiagnostics()"><span class="action-symbol" aria-hidden="true">&#8982;</span><span><strong>Diagnose the workspace</strong><small>Correlate workloads, dependencies, queues and progress.</small></span><span aria-hidden="true">&rarr;</span></button>
+                                <button class="action-tile" onclick="OmniConsole.investigate()"><span class="action-symbol" aria-hidden="true">&#10022;</span><span><strong>Investigate with the agent</strong><small>Evidence first. Repairs require your approval.</small></span><span aria-hidden="true">&rarr;</span></button>
+                                <button class="action-tile" onclick="showSection('playground')"><span class="action-symbol" aria-hidden="true">&#9671;</span><span><strong>Verify retrieval quality</strong><small>Search real vectors, not just configuration.</small></span><span aria-hidden="true">&rarr;</span></button>
+                            </div>
+                        </div>
+                    </div>
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">Active Pipelines</h3>
@@ -1948,6 +1984,8 @@
                     </div>
                 </header>
                 <div class="content">
+                    <div class="section-intro"><div><p class="eyebrow">MEASURE WHAT MATTERS</p><h3>Throughput, latency, and processing signals.</h3><p>Current runtime observations below; historical charts retain their own selected time range.</p></div><button class="btn btn-secondary" onclick="OmniConsole.openDiagnostics()">Investigate signals &rarr;</button></div>
+                    <div id="runtime-metrics" class="runtime-metrics"><p class="muted">Runtime measurements have not loaded yet.</p></div>
                     <div id="metrics-section-content">
                         <div style="text-align: center; padding: 60px; color: var(--text-tertiary);">Loading metrics...</div>
                     </div>
@@ -1958,8 +1996,8 @@
             <!-- Playground Section -->
             <section id="section-agent" class="section" style="display: none;">
                 <header class="header">
-                    <h2 class="header-title">Agent</h2>
-                    <p class="header-subtitle">AI ops assistant — diagnose pipelines, query state, tail logs. Read-only.</p>
+                    <div><p class="page-eyebrow">WORKSPACE / ASSISTANT</p><h2 class="header-title">Recovery Agent</h2></div>
+                    <p class="header-subtitle">Diagnose. Propose. Approve. Verify.</p>
                 </header>
                 <div class="content" style="display:flex;flex-direction:column;gap:12px;height:calc(100vh - 140px);">
                     <div class="card" style="flex:0 0 auto;"><div class="card-body" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;">
@@ -1968,17 +2006,23 @@
                             <select id="agent-session-select" class="form-input" onchange="agentSelectSession(this.value)"></select>
                         </div>
                         <div class="form-group" style="min-width:240px;margin-bottom:0;">
-                            <label class="form-label">Model</label>
+                            <label class="form-label" for="agent-model">Chat model</label>
                             <select id="agent-model" class="form-input"></select>
                         </div>
                         <button class="btn btn-primary" onclick="agentNewSession()">+ New chat</button>
                         <button class="btn btn-secondary" onclick="agentRefreshSessions()" title="Refresh session list">↻</button>
                         <button class="btn btn-secondary" onclick="agentDeleteSession()" title="Delete current session">🗑</button>
                     </div></div>
+                    <div class="agent-starters">
+                        <button class="btn btn-secondary btn-sm" onclick="OmniConsole.prefillAgent('Diagnose the system using diagnose_system. Explain concrete blockers and missing evidence. Do not execute mutations.')">Diagnose system</button>
+                        <button class="btn btn-secondary btn-sm" onclick="OmniConsole.prefillAgent('Inspect queue backlog and dead letters. Explain their scope and likely causes without replaying or deleting messages.')">Inspect queues</button>
+                        <button class="btn btn-secondary btn-sm" onclick="OmniConsole.prefillAgent('Inspect workload readiness and recent restart signals. Recommend the smallest evidence-backed next step; do not restart anything automatically.')">Check workloads</button>
+                        <span class="muted">No mutation without approval</span>
+                    </div>
                     <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0;"><div class="card-body" style="flex:1;display:flex;flex-direction:column;min-height:0;">
                         <div id="agent-transcript" style="flex:1;overflow-y:auto;padding:16px;background:var(--bg-secondary);border-radius:8px;min-height:0;"></div>
                         <div style="display:flex;gap:8px;margin-top:12px;">
-                            <input id="agent-input" class="form-input" placeholder="Ask the agent (e.g. 'list pipelines', 'why is pipeline X failing?')" onkeydown="if(event.key==='Enter')agentSend()" style="flex:1;">
+                            <textarea id="agent-input" class="form-input" rows="2" aria-label="Message the recovery agent" placeholder="Describe what is wrong, or start with a diagnostic question..." onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();agentSend();}" style="flex:1;resize:vertical;"></textarea>
                             <button class="btn btn-primary" onclick="agentSend()">Send</button>
                         </div>
                     </div></div>
@@ -2052,7 +2096,7 @@
             <!-- ═══════════════ OPERATIONS ═══════════════ -->
             <section id="section-health" class="section" style="display: none;">
                 <header class="header">
-                    <h2 class="header-title">Health Checks</h2>
+                    <div><p class="page-eyebrow">WORKSPACE / OBSERVABILITY</p><h2 class="header-title">Diagnostics</h2></div>
                     <div class="header-actions">
                         <span id="health-overall-badge" style="padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-right: 12px;"></span>
                         <span id="health-last-check" style="color: var(--text-tertiary); font-size: 12px; margin-right: 12px;"></span>
@@ -2064,6 +2108,18 @@
                 </header>
 
                 <div class="content">
+                    <div class="section-intro">
+                        <div><p class="eyebrow">EVIDENCE, NOT ASSUMPTIONS</p><h3>Know what is healthy. Find what is not.</h3><p>Read-only snapshots correlate dependencies, queues, workload readiness and pipeline progress. No chat model required.</p></div>
+                    </div>
+                    <div class="diagnostic-toolbar">
+                        <div><label class="form-label" for="diagnostic-scope">Investigation scope</label><select id="diagnostic-scope" class="form-input" onchange="OmniConsole.changeScope()"><option value="">System overview (up to 6 pipelines)</option></select></div>
+                        <button id="diagnostic-run" class="btn btn-primary" onclick="OmniConsole.runDiagnostics()">Run diagnostics</button>
+                        <span class="muted">Read-only &middot; bounded snapshot</span>
+                    </div>
+                    <div id="diagnostic-results" class="diagnostic-results" aria-live="polite">
+                        <div class="diagnostic-empty"><span class="diagnostic-orb" aria-hidden="true">&#8982;</span><h3>Start with a clear picture.</h3><p>Choose a pipeline for focused evidence, or inspect the system. Missing telemetry stays unknown, never zero.</p></div>
+                    </div>
+                    <div class="section-intro compact"><div><p class="eyebrow">DEPENDENCY CHECKS</p><h3>Explore the underlying health signals</h3><p>Cached checks can lag a repair. Use Run Checks to refresh the selected category.</p></div></div>
                     <!-- Section tabs -->
                     <div style="display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:20px;">
                         <button class="health-tab active" data-tab="sources" onclick="switchHealthTab('sources')"
@@ -3434,7 +3490,17 @@
             return resp;
         }
 
+        let workspaceRefreshInterval = null;
         function showLoginScreen() {
+            if (workspaceRefreshInterval) { clearInterval(workspaceRefreshInterval); workspaceRefreshInterval = null; }
+            if (opsRefreshInterval) { clearInterval(opsRefreshInterval); opsRefreshInterval = null; }
+            OmniConsole.clear();
+            _agentUiVersion++;
+            _agentSessionId = '';
+            _agentModels = [];
+            _agentInitialization = null;
+            document.getElementById('agent-transcript').replaceChildren();
+            document.getElementById('agent-input').value = '';
             document.getElementById('login-screen').style.display = 'flex';
             document.getElementById('main-app').style.display = 'none';
             document.getElementById('login-error').style.display = 'none';
@@ -3445,6 +3511,7 @@
         function showMainApp() {
             document.getElementById('login-screen').style.display = 'none';
             document.getElementById('main-app').style.display = 'flex';
+            if (!workspaceRefreshInterval) workspaceRefreshInterval = setInterval(refreshData, 30000);
         }
 
         async function doLogin() {
@@ -3484,6 +3551,7 @@
 
         function doLogout() {
             clearAuthToken();
+            _agentInitialization = null;
             showLoginScreen();
         }
 
@@ -3499,11 +3567,12 @@
                 localStorage.setItem('omnivec-theme', 'dark');
                 document.getElementById('theme-toggle-label').textContent = 'Light Mode';
             }
+            if (document.getElementById('section-metrics').style.display !== 'none') loadMetricsSection();
         }
 
         function initTheme() {
             const saved = localStorage.getItem('omnivec-theme');
-            if (saved === 'dark') {
+            if (saved !== 'light') {
                 document.documentElement.setAttribute('data-theme', 'dark');
                 const label = document.getElementById('theme-toggle-label');
                 if (label) label.textContent = 'Light Mode';
@@ -3524,7 +3593,6 @@
                     if (resp.ok) {
                         showMainApp();
                         refreshData();
-                        setInterval(refreshData, 30000);
                     } else {
                         clearAuthToken();
                         showLoginScreen();
@@ -3537,11 +3605,16 @@
 
         // Navigation
         function showSection(section) {
+            const selected = document.getElementById(`section-${section}`);
+            if (!selected) { showNotification('Unknown workspace section.', 'error'); return; }
             document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
-            document.getElementById(`section-${section}`).style.display = 'block';
-
-            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-            event.target.closest('.nav-item').classList.add('active');
+            selected.style.display = 'block';
+            document.querySelectorAll('.nav-item').forEach(item => {
+                const active = item.getAttribute('onclick') === `showSection('${section}')`;
+                item.classList.toggle('active', active);
+                if (active) item.setAttribute('aria-current', 'page');
+                else item.removeAttribute('aria-current');
+            });
 
             // Auto-load and refresh operations
             if (opsRefreshInterval) { clearInterval(opsRefreshInterval); opsRefreshInterval = null; }
@@ -3553,6 +3626,7 @@
                 loadHealthChecks();
             }
             if (section === 'metrics') {
+                OmniConsole.renderPulse();
                 loadMetricsSection();
             }
             if (section === 'agent') {
@@ -3563,30 +3637,43 @@
         // ============================== Agent UI ==============================
         let _agentSessionId = '';
         let _agentModels = [];
+        let _agentUiVersion = 0;
+        let _agentInitialization = null;
         async function agentInit() {
-            await agentRefreshModels();
-            await agentRefreshSessions();
-            agentNewSession();
+            if (!_agentInitialization) {
+                _agentInitialization = (async () => {
+                    await agentRefreshModels();
+                    await agentRefreshSessions();
+                    if (!_agentSessionId) agentNewSession();
+                })().catch(error => {
+                    _agentInitialization = null;
+                    showNotification('Agent initialization failed: ' + error.message, 'error');
+                });
+            }
+            return _agentInitialization;
         }
         async function agentRefreshModels() {
             const sel = document.getElementById('agent-model');
-            sel.innerHTML = '<option value="">(default)</option>';
+            sel.innerHTML = '<option value="">Configured chat model</option>';
             try {
                 const r = await fetch('/api/models', { headers: authHeaders() });
-                if (!r.ok) return;
+                if (!r.ok) throw new Error('Chat model registry unavailable (HTTP ' + r.status + ').');
                 const data = await r.json();
                 const models = (data.models || data || []).filter(m =>
-                    (m.type === 'azure-openai' || m.type === 'openai' || m.kind === 'external')
+                    m.model_category === 'chat' && m.enabled !== false &&
+                    ['azure-openai', 'openai', 'openai-compatible'].includes(m.type)
                 );
                 _agentModels = models;
                 models.forEach(m => {
                     const o = document.createElement('option');
                     o.value = m.id;
-                    const chatHint = (m.embedding_dim === 0 || m.embedding_dim === undefined) ? ' • chat' : ' • embed';
-                    o.textContent = (m.name || m.id) + chatHint;
+                    o.textContent = (m.name || m.id) + ' / chat';
                     sel.appendChild(o);
                 });
-            } catch (e) { /* ignore */ }
+            } catch (e) {
+                showNotification('Unable to load chat models: ' + e.message, 'error');
+                throw e;
+            }
         }
         async function agentRefreshSessions() {
             try {
@@ -3611,6 +3698,7 @@
             } catch (e) { /* ignore */ }
         }
         function agentNewSession() {
+            _agentUiVersion++;
             _agentSessionId = '';
             document.getElementById('agent-session-select').value = '';
             const t = document.getElementById('agent-transcript');
@@ -3624,7 +3712,7 @@
             const bubble = document.createElement('div');
             bubble.style.cssText = 'max-width:80%;padding:10px 14px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word;font-size:14px;line-height:1.5;' +
                 (role === 'user'
-                    ? 'background:var(--accent,#2563eb);color:white;'
+                    ? 'background:var(--gradient-accent);color:white;'
                     : 'background:var(--bg-primary,#fff);border:1px solid var(--border,#e5e7eb);color:var(--text-primary);');
             bubble.textContent = text;
             wrap.appendChild(bubble);
@@ -3641,6 +3729,7 @@
             t.scrollTop = t.scrollHeight;
         }
         async function agentSelectSession(id) {
+            const version = ++_agentUiVersion;
             _agentSessionId = id || '';
             const t = document.getElementById('agent-transcript');
             t.innerHTML = '';
@@ -3649,6 +3738,7 @@
                 const r = await fetch('/api/agent/sessions/' + encodeURIComponent(id), { headers: authHeaders() });
                 if (!r.ok) return;
                 const d = await r.json();
+                if (version !== _agentUiVersion) return;
                 (d.messages || []).forEach(m => {
                     if (m.role === 'user' || m.role === 'assistant') _agentRenderMsg(m.role, m.content || '');
                 });
@@ -3664,30 +3754,9 @@
             agentNewSession();
         }
         function _agentRenderApproval(callId, tool, args, danger, summary) {
-            const t = document.getElementById('agent-transcript');
-            const wrap = document.createElement('div');
-            wrap.style.cssText = 'margin:8px 0; padding:12px; border-radius:10px; border:1px solid #f59e0b; background:#fffbeb; font-size:13px;';
-            wrap.setAttribute('data-call-id', callId);
-            const dangerColor = danger === 'high' ? '#dc2626' : danger === 'medium' ? '#d97706' : '#65a30d';
-            const argsStr = JSON.stringify(args || {}, null, 2);
-            wrap.innerHTML =
-                `<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">`
-                + `<span style="font-size:16px;">⚠️</span>`
-                + `<strong>Approval required</strong>`
-                + `<span style="padding:2px 8px; border-radius:10px; background:${dangerColor}; color:#fff; font-size:11px; text-transform:uppercase;">${danger || 'medium'}</span>`
-                + `</div>`
-                + `<div style="margin-bottom:6px;"><strong>${tool}</strong> — ${summary || ''}</div>`
-                + `<pre style="margin:6px 0; padding:8px; background:#fff; border:1px solid #fde68a; border-radius:6px; overflow:auto; font-size:11px;">${argsStr.replace(/</g, '&lt;')}</pre>`
-                + `<textarea id="approve-comment-${callId}" placeholder="Optional comment (sent to the LLM on deny)" style="width:100%; min-height:40px; margin-top:6px; padding:6px; border:1px solid #fde68a; border-radius:6px; font-family:inherit; font-size:12px; resize:vertical;"></textarea>`
-                + `<div style="display:flex; gap:8px; margin-top:8px; justify-content:flex-end;">`
-                + `<button class="btn-danger" onclick="agentDecide('${callId}', '${tool.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', 'deny')" style="padding:6px 12px;">Deny</button>`
-                + `<button class="btn-primary" onclick="agentDecide('${callId}', '${tool.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', 'approve')" style="padding:6px 12px; background:#16a34a; color:#fff; border:none; border-radius:6px; cursor:pointer;">Approve &amp; run</button>`
-                + `</div>`;
-            t.appendChild(wrap);
-            t.scrollTop = t.scrollHeight;
-            return wrap;
+            return OmniConsole.renderApproval({ callId, tool, args, danger, summary });
         }
-        async function _agentConsumeStream(resp, asstBubble) {
+        async function _agentConsumeStream(resp, asstBubble, version) {
             // Drains an SSE stream from /api/agent/chat or /api/agent/chat/approve
             // into the chat transcript. Returns when the server emits `done`.
             const reader = resp.body.getReader();
@@ -3696,6 +3765,7 @@
             const t = document.getElementById('agent-transcript');
             while (true) {
                 const { value, done } = await reader.read();
+                if (version !== _agentUiVersion) { await reader.cancel(); return; }
                 if (done) break;
                 buf += dec.decode(value, { stream: true });
                 let idx;
@@ -3721,7 +3791,8 @@
                                 _agentRenderApproval(obj.call_id, obj.tool, obj.args, obj.danger_level, obj.summary);
                             } else if (kind === 'approval_decision') {
                                 // intercept the disabled card if still present
-                                const card = t.querySelector(`div[data-call-id="${obj.call_id}"]`);
+                                const card = Array.from(t.querySelectorAll('[data-call-id]'))
+                                    .find(node => node.getAttribute('data-call-id') === String(obj.call_id));
                                 if (card) {
                                     card.style.opacity = '0.6';
                                     card.querySelectorAll('button').forEach(b => b.disabled = true);
@@ -3741,14 +3812,20 @@
                                 }
                                 return;
                             }
-                        } catch (e) { /* skip malformed */ }
+                        } catch (e) {
+                            asstBubble.textContent = '[error] The agent stream could not be processed. Inspect the session before retrying an approval.';
+                            await reader.cancel();
+                            return;
+                        }
                         t.scrollTop = t.scrollHeight;
                     }
                 }
             }
+            asstBubble.textContent += '\n[error] The stream ended before completion. Do not assume an action completed; inspect the session before retrying.';
         }
         async function agentDecide(callId, tool, decision) {
             if (!_agentSessionId) return;
+            const version = _agentUiVersion;
             const ta = document.getElementById(`approve-comment-${callId}`);
             const comment = (ta && ta.value || '').trim();
             const body = { session_id: _agentSessionId, call_id: callId, decision, comment };
@@ -3768,9 +3845,11 @@
                 asstBubble.textContent = `[error] HTTP ${resp.status}`;
                 return;
             }
-            await _agentConsumeStream(resp, asstBubble);
+            await _agentConsumeStream(resp, asstBubble, version);
         }
         async function agentSend() {
+            await agentInit();
+            const version = _agentUiVersion;
             const input = document.getElementById('agent-input');
             const message = input.value.trim();
             if (!message) return;
@@ -3798,7 +3877,7 @@
                 asstBubble.textContent = `[error] HTTP ${resp.status}`;
                 return;
             }
-            await _agentConsumeStream(resp, asstBubble);
+            await _agentConsumeStream(resp, asstBubble, version);
         }
         function authHeaders() {
             const h = {};
@@ -4458,6 +4537,9 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                 ]);
 
                 const health = dgHealthRes.ok ? await dgHealthRes.json() : {};
+                for (const response of [sourcesRes, destsRes, pipelinesRes]) {
+                    if (!response.ok) throw new Error('Workspace request failed (HTTP ' + response.status + ').');
+                }
                 sources = (await sourcesRes.json()).sources || [];
                 destinations = (await destsRes.json()).destinations || [];
                 pipelines = (await pipelinesRes.json()).pipelines || [];
@@ -4487,47 +4569,41 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                 document.getElementById('stat-pipelines').textContent = pipelines.length;
 
                 // Embedded count — use pipeline stats for unique docs (not cumulative batch events)
-                let totalSourceDocs = 0, totalEmbedded = 0;
-                let hasSourceData = false;
-                pipelines.filter(p => p.status === 'active').forEach(p => {
-                    if (p.stats?.source_doc_count != null) {
-                        totalSourceDocs += p.stats.source_doc_count;
-                        hasSourceData = true;
-                    }
-                    totalEmbedded += p.stats?.embedded_count || 0;
-                });
-                const overallPct = hasSourceData && totalSourceDocs > 0 ? (totalEmbedded / totalSourceDocs * 100).toFixed(1) : null;
-                document.getElementById('stat-events').textContent = hasSourceData
-                    ? totalEmbedded.toLocaleString() + ' / ' + totalSourceDocs.toLocaleString()
-                    : totalEmbedded > 0 ? totalEmbedded.toLocaleString() : '--';
-                document.getElementById('stat-events-today').textContent = overallPct != null ? overallPct + '% complete' : '';
+                const activePipelines = pipelines.filter(p => p.status === 'active');
+                const totalEmbedded = OmniConsole.total(activePipelines.map(p => p.stats?.embedded_count));
+                const totalSourceDocs = activePipelines.every(p => p.sources?.length === 1)
+                    ? OmniConsole.total(activePipelines.map(p => p.stats?.source_doc_count)) : null;
+                document.getElementById('stat-events').textContent = totalEmbedded === null ? '--' : totalEmbedded.toLocaleString();
+                document.getElementById('stat-events-today').textContent = totalSourceDocs === null
+                    ? 'Complete source inventory not observed'
+                    : totalSourceDocs.toLocaleString() + ' source documents observed';
 
                 // Failed — from live metrics
-                const totalFailed = metrics.events_failed || 0;
-                document.getElementById('stat-failed').textContent = totalFailed.toLocaleString();
+                const totalFailed = OmniConsole.number(metrics.events_failed);
+                document.getElementById('stat-failed').textContent = totalFailed === null ? '--' : totalFailed.toLocaleString();
                 const skipTotal = metrics.skipped?.total || 0;
                 document.getElementById('stat-failed-today').textContent = skipTotal > 0
                     ? skipTotal.toLocaleString() + ' skipped'
                     : '';
 
                 // Throughput — from live metrics (rolling 60s window)
-                const liveThroughput = metrics.throughput_docs_per_sec || 0;
-                document.getElementById('stat-throughput').textContent = liveThroughput > 0 ? liveThroughput.toFixed(1) : '--';
-                document.getElementById('stat-throughput-label').textContent = liveThroughput > 0 ? 'docs/sec (live)' : 'docs/sec';
+                const liveThroughput = OmniConsole.number(metrics.throughput_docs_per_sec);
+                document.getElementById('stat-throughput').textContent = liveThroughput === null ? '--' : liveThroughput.toFixed(1);
+                document.getElementById('stat-throughput-label').textContent = liveThroughput === null ? 'No runtime measurement' : 'docs/sec (rolling 60s)';
 
                 // Latency card — show avg embedding latency
-                const avgLatency = metrics.latency?.embedding?.avg;
+                const avgLatency = OmniConsole.number(metrics.latency?.embedding?.avg);
                 const latencyCard = document.getElementById('stat-insights-card');
                 if (latencyCard) {
                     latencyCard.style.display = '';
-                    const p95 = metrics.latency?.embedding?.p95;
+                    const p95 = OmniConsole.number(metrics.latency?.embedding?.p95);
                     document.getElementById('stat-insights-status').innerHTML = avgLatency != null
                         ? '<span style="color:var(--accent-primary);">' + avgLatency + 'ms</span>'
                         : '<span>—</span>';
                     document.getElementById('stat-insights-link').innerHTML = p95 != null
                         ? 'p95: ' + p95 + 'ms'
                         + (metrics.tokens?.total ? ' · ' + metrics.tokens.total.toLocaleString() + ' tokens' : '')
-                        : (metrics.tokens?.total ? metrics.tokens.total.toLocaleString() + ' tokens' : 'No data yet');
+                        : (metrics.tokens?.total ? metrics.tokens.total.toLocaleString() + ' tokens' : 'Percentiles not observed');
                 }
 
                 // Render tables
@@ -4551,12 +4627,13 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                         } else {
                             navBadge.style.display = 'none';
                         }
-                    }
-                } catch (e) {}
-
+                    } else { healthData = null; }
+                } catch (e) { healthData = null; }
+                OmniConsole.updateData({ sources, destinations, pipelines, metrics: metricsRes.ok ? metrics : null, health: healthData });
             } catch (err) {
                 console.error('Error refreshing data:', err);
                 document.getElementById('api-status').className = 'status-dot error';
+                OmniConsole.reportDataError();
             }
         }
 
@@ -12132,13 +12209,14 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             const container = document.getElementById('health-content');
             try {
                 const resp = await apiFetch('/api/health/checks');
+                if (!resp.ok) throw new Error('Health request failed (HTTP ' + resp.status + ').');
                 const data = await resp.json();
                 healthData = data;
                 updateHealthHeader(data);
                 updateHealthTabCounts(data);
                 renderHealthTab(activeHealthTab);
             } catch (e) {
-                container.innerHTML = `<div style="text-align:center;padding:60px;color:var(--text-tertiary);">Failed to load health checks: ${e.message}</div>`;
+                container.textContent = 'Failed to load health checks: ' + e.message;
             }
         }
 
@@ -12181,6 +12259,7 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             container.innerHTML = `<div style="text-align:center;padding:60px;color:var(--text-tertiary);"><svg style="animation:spin 1s linear infinite;margin-bottom:12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="32" height="32"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/></svg><div>Running ${activeHealthTab} checks...</div></div>`;
             try {
                 const resp = await apiFetch(`/api/health/checks/run?section=${activeHealthTab}`, { method: 'POST' });
+                if (!resp.ok) throw new Error('Health check failed (HTTP ' + resp.status + ').');
                 const data = await resp.json();
                 healthData = data;
                 updateHealthHeader(data);
@@ -12217,8 +12296,8 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             // Update last check time
             const lastCheck = document.getElementById('health-last-check');
             if (data.checked_at) {
-                const d = new Date(data.checked_at + 'Z');
-                lastCheck.textContent = 'Last checked: ' + d.toLocaleTimeString();
+                const checked = OmniConsole.timestamp(data.checked_at);
+                lastCheck.textContent = checked === null ? 'Observation time unavailable' : 'Last checked: ' + new Date(checked).toLocaleTimeString();
             } else {
                 lastCheck.textContent = 'No checks run yet';
             }
@@ -12428,10 +12507,12 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             if (metricsPipelineFilter) url += `&pipeline_id=${metricsPipelineFilter}`;
             try {
                 const resp = await apiFetch(url);
+                if (!resp.ok) throw new Error('Metrics request failed (HTTP ' + resp.status + ').');
                 const data = await resp.json();
+                if (!Array.isArray(data.buckets)) throw new Error('Metrics response did not include a time series.');
                 renderMetricsSection(data);
             } catch (e) {
-                container.innerHTML = `<div style="text-align:center;padding:60px;color:var(--text-tertiary);">Failed to load metrics: ${e.message}</div>`;
+                container.textContent = 'Failed to load metrics: ' + e.message;
             }
         }
 
@@ -12475,20 +12556,26 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             if (_metricsChartLatency) { _metricsChartLatency.destroy(); _metricsChartLatency = null; }
             if (!buckets.length) return;
             if (typeof Chart === 'undefined') {
-                const el = document.getElementById('metrics-chart-throughput');
-                if (el) el.parentElement.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:300px;color:var(--text-tertiary);">Chart.js not loaded (CDN may be blocked)</div>';
+                for (const id of ['metrics-chart-throughput', 'metrics-chart-latency']) {
+                    const el = document.getElementById(id);
+                    if (el) el.parentElement.textContent = 'Charts are unavailable (Chart.js could not load). Numerical metrics remain available.';
+                }
                 return;
             }
 
             const labels = buckets.map(b => _fmtBucketLabel(b.t, granularity));
+            const theme = getComputedStyle(document.documentElement);
+            const chartText = theme.getPropertyValue('--text-secondary').trim();
+            const chartTitle = theme.getPropertyValue('--text-primary').trim();
+            const chartGrid = theme.getPropertyValue('--border-subtle').trim();
             const chartDefaults = {
                 responsive: true,
                 maintainAspectRatio: false,
                 interaction: { intersect: false, mode: 'index' },
-                plugins: { legend: { labels: { color: '#9ca3af', font: { family: 'Inter', size: 12 } } } },
+                plugins: { legend: { labels: { color: chartText, font: { family: 'Inter', size: 12 } } } },
                 scales: {
-                    x: { ticks: { color: '#6b7280', font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 45 }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                    y: { ticks: { color: '#6b7280', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }
+                    x: { ticks: { color: chartText, font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 45 }, grid: { color: chartGrid } },
+                    y: { ticks: { color: chartText, font: { size: 11 } }, grid: { color: chartGrid }, beginAtZero: true }
                 }
             };
 
@@ -12500,14 +12587,14 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                     data: {
                         labels,
                         datasets: [
-                            { label: 'Processed', data: buckets.map(b => b.processed || 0), backgroundColor: 'rgba(16,185,129,0.7)', borderRadius: 4, order: 2, yAxisID: 'y' },
-                            { label: 'Failed', data: buckets.map(b => b.failed || 0), backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4, order: 2, yAxisID: 'y' },
-                            { label: 'Throughput (docs/s)', data: buckets.map(b => b.throughput || 0), type: 'line', borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)', fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2, order: 1, yAxisID: 'y1' },
+                            { label: 'Processed', data: buckets.map(b => OmniConsole.number(b.processed)), backgroundColor: 'rgba(16,185,129,0.7)', borderRadius: 4, order: 2, yAxisID: 'y' },
+                            { label: 'Failed', data: buckets.map(b => OmniConsole.number(b.failed)), backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4, order: 2, yAxisID: 'y' },
+                            { label: 'Throughput (docs/s)', data: buckets.map(b => OmniConsole.number(b.throughput)), type: 'line', borderColor: '#9575eb', backgroundColor: 'rgba(149,117,235,0.1)', fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2, order: 1, yAxisID: 'y1' },
                         ]
                     },
                     options: {
                         ...chartDefaults,
-                        plugins: { ...chartDefaults.plugins, title: { display: true, text: 'Events & Throughput', color: '#e5e7eb', font: { family: 'Inter', size: 14, weight: 600 } } },
+                        plugins: { ...chartDefaults.plugins, title: { display: true, text: 'Events & Throughput', color: chartTitle, font: { family: 'Inter', size: 14, weight: 600 } } },
                         scales: {
                             ...chartDefaults.scales,
                             y: { ...chartDefaults.scales.y, position: 'left', title: { display: true, text: 'Events', color: '#6b7280' }, stacked: true },
@@ -12527,7 +12614,7 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                         labels,
                         datasets: [{
                             label: 'Avg Latency (ms)',
-                            data: buckets.map(b => b.avg_latency_ms || 0),
+                            data: buckets.map(b => OmniConsole.number(b.avg_latency_ms)),
                             borderColor: '#f59e0b',
                             backgroundColor: 'rgba(245,158,11,0.1)',
                             fill: true,
@@ -12539,7 +12626,7 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                     },
                     options: {
                         ...chartDefaults,
-                        plugins: { ...chartDefaults.plugins, title: { display: true, text: 'Avg Latency', color: '#e5e7eb', font: { family: 'Inter', size: 14, weight: 600 } } },
+                        plugins: { ...chartDefaults.plugins, title: { display: true, text: 'Avg Latency', color: chartTitle, font: { family: 'Inter', size: 14, weight: 600 } } },
                         scales: {
                             ...chartDefaults.scales,
                             y: { ...chartDefaults.scales.y, title: { display: true, text: 'ms', color: '#6b7280' } }
@@ -12554,21 +12641,11 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             const buckets = data.buckets || [];
 
             // Aggregate summary
-            let totalProcessed = 0, totalFailed = 0, totalTimeMs = 0;
-            for (const b of buckets) {
-                totalProcessed += b.processed || 0;
-                totalFailed += b.failed || 0;
-                if (b.avg_latency_ms && b.processed) totalTimeMs += b.avg_latency_ms * b.processed;
-            }
-            const avgLatency = totalProcessed > 0 ? (totalTimeMs / totalProcessed).toFixed(1) : null;
-            let overallThroughput = null;
-            if (buckets.length >= 1 && totalProcessed > 0) {
-                const first = new Date(buckets[0].t);
-                const last = new Date(buckets[buckets.length - 1].t);
-                const granSec = { minute: 60, hour: 3600, day: 86400 }[data.granularity] || 3600;
-                const spanSec = (last - first) / 1000 + granSec;
-                overallThroughput = (totalProcessed / spanSec).toFixed(1);
-            }
+            const summary = OmniConsole.summarizeBuckets(buckets, data.granularity);
+            const avgLatency = summary.averageLatency === null ? null : summary.averageLatency.toFixed(1);
+            const processedObserved = summary.processed;
+            const failedObserved = summary.failed;
+            const overallThroughput = summary.throughput === null ? null : summary.throughput.toFixed(1);
 
             const pipOpts = pipelines.map(p => `<option value="${p.id}" ${metricsPipelineFilter === p.id ? 'selected' : ''}>${p.name}</option>`).join('');
 
@@ -12618,19 +12695,19 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             // Summary cards
             html += `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;">
                 <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:24px;text-align:center;">
-                    <div style="font-size:36px;font-weight:700;color:#10b981;">${totalProcessed.toLocaleString()}</div>
+                    <div style="font-size:36px;font-weight:700;color:var(--success);">${processedObserved === null ? '--' : processedObserved.toLocaleString()}</div>
                     <div style="font-size:13px;color:var(--text-tertiary);margin-top:6px;">Events Processed</div>
                 </div>
                 <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:24px;text-align:center;">
-                    <div style="font-size:36px;font-weight:700;color:#ef4444;">${totalFailed.toLocaleString()}</div>
+                    <div style="font-size:36px;font-weight:700;color:var(--error);">${failedObserved === null ? '--' : failedObserved.toLocaleString()}</div>
                     <div style="font-size:13px;color:var(--text-tertiary);margin-top:6px;">Events Failed</div>
                 </div>
                 <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:24px;text-align:center;">
-                    <div style="font-size:36px;font-weight:700;color:#6366f1;">${overallThroughput ? overallThroughput + '/s' : '--'}</div>
+                    <div style="font-size:36px;font-weight:700;color:var(--accent-primary);">${overallThroughput ? overallThroughput + '/s' : '--'}</div>
                     <div style="font-size:13px;color:var(--text-tertiary);margin-top:6px;">Throughput</div>
                 </div>
                 <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:24px;text-align:center;">
-                    <div style="font-size:36px;font-weight:700;color:#f59e0b;">${avgLatency ? avgLatency + 'ms' : '--'}</div>
+                    <div style="font-size:36px;font-weight:700;color:var(--warning);">${avgLatency ? avgLatency + 'ms' : '--'}</div>
                     <div style="font-size:13px;color:var(--text-tertiary);margin-top:6px;">Avg Latency</div>
                 </div>
             </div>`;
@@ -12638,10 +12715,10 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             // Charts
             html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;">
                 <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:20px;">
-                    <div style="height:300px;"><canvas id="metrics-chart-throughput"></canvas></div>
+                    <div style="height:300px;">${buckets.length ? '<canvas id="metrics-chart-throughput" role="img" aria-label="Observed events and throughput"></canvas>' : '<div class="diagnostic-empty"><h3>No throughput samples</h3><p>Choose a different time range or process an authorized workload. No activity has been invented.</p></div>'}</div>
                 </div>
                 <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:20px;">
-                    <div style="height:300px;"><canvas id="metrics-chart-latency"></canvas></div>
+                    <div style="height:300px;">${buckets.length ? '<canvas id="metrics-chart-latency" role="img" aria-label="Observed embedding latency"></canvas>' : '<div class="diagnostic-empty"><h3>No latency samples</h3><p>Latency appears after measured processing. An empty chart does not mean zero latency.</p></div>'}</div>
                 </div>
             </div>`;
 

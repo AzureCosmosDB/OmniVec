@@ -691,7 +691,7 @@ security:
 
 
 # --------------------------------------------------------------------------
-# OmniVec Agent (Phase 1: read-only diagnostic AI-ops agent)
+# OmniVec Agent: diagnostics and approval-gated, verified recovery
 # --------------------------------------------------------------------------
 agent:
   enabled: true
@@ -701,6 +701,7 @@ agent:
     tag: latest
     pullPolicy: Always
   defaultModelId: ""
+  allowKubernetesRemediation: false
   docgrokUrl: "http://docgrok"
   omnivecApiUrl: "http://omnivec-api"
   servicebusFqns: ""

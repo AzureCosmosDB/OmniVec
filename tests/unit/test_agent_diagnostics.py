@@ -170,6 +170,95 @@ def test_destination_regression_cannot_be_green(diag, snapshot):
     assert diag.evaluate(snapshot, before)["status"] == "UNKNOWN"
 
 
+def test_blob_inventory_gap_is_precise_and_never_a_zero_backlog(diag, snapshot):
+    pipe = snapshot["pipelines"][0]
+    pipe["sources"] = [{"id": "src-1", "type": "azure_blob"}]
+    pipe["stats"]["source_doc_count"] = None
+    result = diag.evaluate(snapshot)
+    row = result["pipelines"][0]
+    assert result["status"] == "UNKNOWN"
+    assert row["outstanding_work"] is None
+    assert row["telemetry"] == {
+        "missing_required_counters": [], "source_inventory": "not_collected",
+        "known_job_backlog": 0, "destination_count": 10,
+    }
+    assert "source_inventory_unavailable" in _codes(result)
+    assert result["repair_plan"][0]["action"] is None
+    assert "Do not restart" in result["repair_plan"][0]["instructions"]
+
+
+def test_blob_writes_prove_processing_but_not_complete_inventory(diag, snapshot):
+    pipe = snapshot["pipelines"][0]
+    pipe["sources"] = [{"id": "src-1", "type": "azure_blob"}]
+    pipe["stats"]["source_doc_count"] = None
+    before = copy.deepcopy(snapshot)
+    before["pipelines"][0]["stats"]["embedded_count"] = 9
+    result = diag.evaluate(snapshot, before)
+    assert result["status"] == "HEALTHY"
+    assert result["processing_verified"]
+    assert result["limitations"] and "source coverage" in result["limitations"][0]
+    assert result["pipelines"][0]["outstanding_work"] is None
+
+
+def test_missing_cosmos_inventory_is_not_treated_as_optional(diag, snapshot):
+    before = copy.deepcopy(snapshot)
+    before["pipelines"][0]["stats"]["embedded_count"] = 9
+    snapshot["pipelines"][0]["stats"]["source_doc_count"] = None
+    result = diag.evaluate(snapshot, before)
+    assert result["status"] == "UNKNOWN"
+    assert not result["processing_verified"]
+    assert result["pipelines"][0]["telemetry"]["missing_required_counters"] == ["source_doc_count"]
+    assert "telemetry_unavailable" in _codes(result)
+
+
+def test_first_source_count_does_not_prove_multi_source_catchup(diag, snapshot):
+    snapshot["pipelines"][0]["source_ids"] = ["src-1", "src-2"]
+    result = diag.evaluate(snapshot)
+    assert result["status"] == "UNKNOWN"
+    assert result["pipelines"][0]["outstanding_work"] is None
+    assert result["pipelines"][0]["telemetry"]["source_inventory"] == "not_collected"
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf"), -1, True])
+def test_invalid_destination_counters_never_verify_progress(diag, snapshot, invalid):
+    before = copy.deepcopy(snapshot)
+    before["pipelines"][0]["stats"]["embedded_count"] = 9
+    snapshot["pipelines"][0]["stats"]["embedded_count"] = invalid
+    result = diag.evaluate(snapshot, before)
+    assert not result["processing_verified"]
+    assert "embedded_count" in result["pipelines"][0]["telemetry"]["missing_required_counters"]
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_permission_failure_is_agent_observation_not_pipeline_fault(diag):
+    class PermissionDenied(Exception):
+        status = 403
+
+    async def denied():
+        raise PermissionDenied("private provider details")
+
+    observation = await diag._observe(denied())
+    finding = diag._observation_finding(observation, "Kubernetes deployments")
+    assert observation["http_status"] == 403
+    assert finding["code"] == "agent_observation_permissions"
+    assert finding["severity"] == "unknown"
+    assert finding["approved_tool_candidate"] is None
+    assert "private" not in json.dumps(finding)
+
+
+def test_repair_plan_prioritizes_real_blocker_over_inventory_gap(diag, snapshot):
+    pipe = snapshot["pipelines"][0]
+    pipe.update(status="paused", sources=[{"id": "src-1", "type": "azure_blob"}])
+    pipe["stats"]["source_doc_count"] = None
+    result = diag.evaluate(snapshot)
+    plan = result["repair_plan"]
+    assert plan[0]["code"] == "paused"
+    assert plan[0]["execution"] == "approval_required"
+    assert plan[0]["action"] == {"tool": "resume_pipeline", "args": {"pipeline_id": "pip-1"}}
+    assert "resolve unknown dependencies" in plan[0]["precondition"]
+    assert plan[1]["action"] is None
+
+
 @pytest.mark.asyncio
 async def test_failed_and_stub_adapters_never_return_zero_health(diag):
     async def failed():

@@ -96,6 +96,7 @@ scripts/cli-demo.ps1
 
 # Local azd logs
 .azd-logs/
+.azure/
 
 # Security scan results (uploaded to Security tab via workflow, not committed)
 *.sarif

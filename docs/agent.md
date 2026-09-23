@@ -58,6 +58,16 @@ signal codes are included in structured diagnostics, not raw secret-bearing
 logs/configuration. Credential-shaped fields are scrubbed from tool results.
 Counts cannot prove semantic embedding quality or every document's correctness.
 
+Diagnostics distinguish missing required telemetry from intentionally absent
+inventory. The control plane does not enumerate Blob containers, and its source
+count does not cover all sources of a multi-source pipeline. These scopes cannot
+claim complete catch-up or idle from a zero job count. Increasing destination
+counts can still prove processing with healthy dependencies and preserved
+bindings; the response retains an explicit source-coverage limitation. Invalid
+or missing required counters still prevent verification. `repair_plan` orders
+concrete blockers before observation gaps and never authorizes an action.
+Agent read-permission failures are identified separately from ingestion faults.
+
 ## Practical runbooks
 
 | Observed problem | Concrete response and verification |
@@ -80,8 +90,9 @@ retry/cancel use the real control-plane endpoints.
 ## Runtime configuration
 
 The agent reads model metadata from OmniVec's `/api/models` registry and invokes
-the registered provider's HTTPS chat-completion endpoint. **DocGrok handles
-embeddings; it does not expose the old assumed registry chat route.** Configure a
+the registered provider's HTTPS chat-completion endpoint. Older agent images
+instead use DocGrok's `/admin/models/registry/{model_id}/chat` proxy; that route
+exists, but is no longer the current agent's chat transport. Configure a
 **registered chat-capable model** using `agent.defaultModelId` /
 `AGENT_DEFAULT_MODEL_ID`, or select a chat model override in the UI/request.
 Embedding models, including `text-embedding-3-small`, are rejected for chat.
@@ -110,7 +121,7 @@ Liveness/readiness only describe agent service availability.
 | `agent.servicebusFqns` | Service Bus FQNS; defaults to `azure.serviceBus.namespace`. |
 | `agent.queueNames` | Comma-separated queue allowlist (`AGENT_QUEUE_NAMES`); default `blob-events`. |
 | `agent.servicebusSubscriptions` | Comma-separated `topic/subscription` allowlist (`AGENT_SB_SUBSCRIPTIONS`); default configured embeddings topic + `/worker`. |
-| `agent.allowKubernetesRemediation` | Default absent/false. Explicit opt-in grants pod delete and named deployment-scale patch permissions; approval/namespace/workload guards still apply. |
+| `agent.allowKubernetesRemediation` | Default `false`. Explicit opt-in grants pod delete and named deployment-scale patch permissions; approval/namespace/workload guards still apply. |
 
 The Service Bus read adapter uses workload identity and the management API.
 Set an entity allowlist explicitly to `""` when that entity type is not deployed.
@@ -146,9 +157,20 @@ Authenticated internal endpoints (same `INTERNAL_API_TOKEN` plus validated
 
 These read-only endpoints do not require a chat deployment and write a concise
 diagnostic audit record. They are internal service endpoints; do not expose
-the internal token or create a public ingress for them. The existing API proxy
-is unchanged; conversational use discovers the same functions as agent tools.
+the internal token or create a public ingress for them. The web **Diagnostics**
+view reaches them through authenticated `GET /api/agent/diagnostics/system` and
+`POST /api/agent/diagnostics/pipeline`. The proxy uses the validated caller's
+identity/role, validates pipeline IDs and response scope, and reports timeouts,
+missing services and malformed responses explicitly. It never sends the internal
+token to the browser. Conversational use discovers the same functions as tools.
 `verify_recovery` also works as a read-only tool with optional pipeline ID.
+
+The web view shows observed workload readiness, shared queue/DLQ counters,
+destination counts, prioritized guidance, evidence gaps and coverage limits.
+**Investigate with agent** drafts a scoped question; it does not send a message
+or approve a repair. Chat model selection excludes embedding deployments.
+Periodic model health checks do not send embedding requests to chat models or
+claim that registration proves chat inference; a real conversation verifies it.
 
 ### Supplying a permitted chat deployment
 
@@ -174,6 +196,28 @@ it does **not** provision a model, validate quota, grant identity permissions or
 prove tool-calling capability. After configuration, test an ordinary read-only
 chat question through the existing authenticated agent proxy, then verify a
 diagnostic tool call before considering conversational runtime ready.
+
+For `azd` installations, persist the selection rather than patching the running
+Deployment (which the next install would overwrite):
+
+```powershell
+azd env set OMNIVEC_AGENT_DEFAULT_MODEL_ID <returned-model-id>
+azd env set OMNIVEC_AGENT_IMAGE_TAG <published-agent-tag>
+azd env set OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION false
+azd hooks run postprovision
+```
+
+The image tag is optional and defaults to `latest`. A non-default tag must
+already exist as `omnivec-agent:<tag>` in this environment's ACR. The installer
+fails explicitly if it is missing, rather than falling back to an older shared
+image. These settings are applied by both platform hooks, included in the Helm
+configuration fingerprint, and saved as nonsecret resource-group tags for
+`azd up` recovery. The model setting is an ID, not an endpoint, token or key.
+Set the Kubernetes remediation opt-in to `true` only when the operator intends
+to allow scoped pod restarts/scaling; individual actions still require approval.
+Pipeline pause/resume and job operations do not require this Kubernetes opt-in.
+Model registration and role/federation configuration remain separate explicit
+operator steps; importing configuration never grants Azure inference access.
 
 If no permitted deployment exists, report the missing account/region,
 chat model/version, deployment SKU/capacity, quota and identity configuration.

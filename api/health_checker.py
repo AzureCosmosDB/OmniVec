@@ -394,6 +394,21 @@ async def check_model(model_id: str, client: httpx.AsyncClient) -> dict:
     }
 
     try:
+        metadata = get_store().get(model_id, "docgrok_model")
+    except Exception as error:
+        logger.warning("Model category lookup failed (%s)", type(error).__name__)
+        result["status"] = "warning"
+        result["checks"].append({"check": "model_category", "status": "warn",
+                                 "detail": "Model category unavailable; no inference probe was attempted."})
+        return result
+    if metadata and metadata.get("model_category") == "chat":
+        result["name"] = metadata.get("name", model_id)
+        result["status"] = "warning"
+        result["checks"].append({"check": "chat_inference", "status": "warn",
+                                 "detail": "Chat inference is not tested by embedding probes. Use a read-only conversation in Recovery Agent to verify the configured chat deployment."})
+        return result
+
+    try:
         # Check if DocGrok is reachable
         resp = await client.get(f"{DOCGROK_URL}/health", timeout=CHECK_TIMEOUT)
         if resp.status_code != 200:
