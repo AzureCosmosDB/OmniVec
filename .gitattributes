@@ -14,6 +14,7 @@ tests/emu/bin/azd     text eol=lf
 tests/emu/bin/docker  text eol=lf
 tests/emu/bin/helm    text eol=lf
 tests/emu/bin/kubectl text eol=lf
+tests/emu/bin/curl    text eol=lf
 scripts/*.sh    text eol=lf
 Dockerfile*     text eol=lf
 *.yaml          text eol=lf
