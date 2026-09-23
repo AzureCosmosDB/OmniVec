@@ -1,0 +1,104 @@
+{
+  "run_id": "443a8a3989524b9dbb22a04b60b6634e",
+  "result": "failed",
+  "fault_injected": [
+    {
+      "fault": "worker_outage",
+      "status": "confirmed",
+      "max_seconds": 180
+    },
+    {
+      "fault": "rollout_restart",
+      "deployment": "docgrok",
+      "status": "submitted"
+    },
+    {
+      "fault": "rollout_restart",
+      "deployment": "docgrok-controller",
+      "status": "submitted"
+    },
+    {
+      "fault": "rollout_restart",
+      "deployment": "omnivec-api",
+      "status": "submitted"
+    },
+    {
+      "fault": "rollout_restart",
+      "deployment": "omnivec-blob-ingestor",
+      "status": "submitted"
+    }
+  ],
+  "observed_failure": [
+    {
+      "failure": "owned_work_queued_without_processing",
+      "evidence": {
+        "owned_message_peeked": true,
+        "processing_absent_during_outage": true
+      }
+    }
+  ],
+  "repair_actor": [
+    "harness_finally_replica_restore"
+  ],
+  "readiness": "restored_all_original_replicas_and_rollouts",
+  "processing_recovery": "not_checked",
+  "data_model_identity_and_duplicates": "not_checked",
+  "cleanup": "failed_owned_fixture_only; lock_retained",
+  "watchdog": "pr183-chaos-watchdog-443a8a398952",
+  "lock": "pr183-recovery-chaos-lock",
+  "autonomous_conversational_repair": "blocked: no configured chat deployment",
+  "diagnostic_recovery_tools": "not_integrated: awaiting verified entrypoint contract",
+  "not_covered": [
+    "production message replay",
+    "out-of-order Cosmos chunk race",
+    "network denial",
+    "model deletion",
+    "multi-chunk update/deletion"
+  ],
+  "last_operation": "kubectl get",
+  "original_replicas": {
+    "omnivec-dotnet-worker": 2,
+    "docgrok": 1,
+    "docgrok-controller": 1,
+    "omnivec-api": 2,
+    "omnivec-blob-ingestor": 1
+  },
+  "baseline": {
+    "snapshot": [
+      [
+        "azure-blob-storage.txt",
+        "azure-blob-storage.txt",
+        "1055fcad3dace5dc7a9f42d7415e1f949588d1bff84cf571e0c2aed5922aa849",
+        "df58b6e934f2096b5b7b704191d61de9ab5f89070c67663e8aa97a9c83e2dc88"
+      ],
+      [
+        "azure-cosmos-db.txt",
+        "azure-cosmos-db.txt",
+        "dd2efb1c03400882f3b49ba80c439a81d7807ce470d724fca9c91f73cda4c078",
+        "5ff0ade1deecbc9ac477874e325b42d6394176050cc202f73e777591b1f496c7"
+      ],
+      [
+        "azure-kubernetes-service.txt",
+        "azure-kubernetes-service.txt",
+        "b7020385a55ca70d919f4cb963335f4d1f75050b88aa04422d0bccf02409e1d2",
+        "e33c672b73324c9c90f56a9c33dc5f4ecd68eb128ca8649832921395ef19d697"
+      ],
+      [
+        "chaos-backlog.txt",
+        "chaos-backlog.txt",
+        "dd47eded6f54613184e81e7bee2972ce9462e6b92a9b0e4c91ad01b3fca207c1",
+        "3a7c5b5f5954176a7add41c471a941a5d6d4e4c4088fffd6d96946bf8cb86f42"
+      ]
+    ],
+    "identity": {
+      "model": "mdl-ext-52423101",
+      "routes": [
+        "trp-34a1c7fa",
+        "trp-e0728ae8"
+      ],
+      "dimensions": 1536
+    },
+    "documents": 4
+  },
+  "error_type": "RuntimeError"
+}
