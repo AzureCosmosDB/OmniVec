@@ -34,6 +34,14 @@ OperationTimedOut
 Service Unavailable
 Temporary failure
 Connection reset
+forcibly closed
+wsarecv
+connection refused
+unexpected EOF
+transport is closing
+client connection lost
+stream error
+another operation (install/upgrade/rollback) is in progress
 TLS handshake
 InternalServerError
 i/o timeout

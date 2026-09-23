@@ -54,6 +54,65 @@ function Test-DeploymentsReady {
     } catch { return $false }
 }
 
+function Wait-DeploymentsReady {
+    param(
+        [string]$Context,
+        [string]$KubeConfig,
+        [int]$TimeoutSeconds = 600,
+        [int]$PollSeconds = 10
+    )
+    if ($TimeoutSeconds -lt 0 -or $TimeoutSeconds -gt 3600 -or
+        $PollSeconds -lt 1 -or $PollSeconds -gt 60) {
+        throw 'Deployment convergence timeout must be 0-3600 seconds and poll interval 1-60 seconds.'
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $json = & kubectl --context $Context --kubeconfig $KubeConfig `
+            --request-timeout=30s get deployment -n omnivec -o json 2>$null
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0 -and (Test-DeploymentsReady ($json -join "`n"))) {
+            return $true
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Seconds $PollSeconds
+    } while ($true)
+    return $false
+}
+
+function Get-DeploymentRemediation {
+    param([string]$Evidence)
+    $hints = [Collections.Generic.List[string]]::new()
+    if ($Evidence -match 'Too many pods|max pods') {
+        $hints.Add('Node pod capacity is exhausted. Scale the AKS node pool or increase its maximum pods, then rerun azd up.')
+    }
+    if ($Evidence -match 'Insufficient (cpu|memory)|insufficient (cpu|memory)') {
+        $hints.Add('AKS compute capacity is insufficient. Scale the affected node pool or reduce workload requests, then rerun azd up.')
+    }
+    if ($Evidence -match 'ImagePullBackOff|ErrImagePull|pull access denied|manifest unknown') {
+        $hints.Add('A workload image cannot be pulled. Verify the required tag exists in the environment ACR and that the AKS kubelet identity has AcrPull, then rerun azd up.')
+    }
+    if ($Evidence -match 'Unauthorized|Forbidden|authorization failed|AuthorizationFailed') {
+        $hints.Add('Azure or Kubernetes authorization failed. Refresh az login/azd auth login and verify AKS plus resource-group permissions before rerunning azd up.')
+    }
+    if ($Evidence -match 'invalid ownership metadata|already exists|cannot re-use a name') {
+        $hints.Add('A pre-existing resource conflicts with the Helm release. Review its ownership before deleting or relabeling it; the installer will not adopt unrelated resources automatically.')
+    }
+    if ($Evidence -match 'pending-(install|upgrade|rollback)|another operation \(install/upgrade/rollback\) is in progress') {
+        $hints.Add('Helm has an interrupted operation. Rerun azd up with OMNIVEC_RECOVER_PENDING_HELM enabled (the default), or inspect helm history before manual recovery.')
+    }
+    if ($Evidence -match 'CrashLoopBackOff|Back-off restarting failed container') {
+        $hints.Add('A container is repeatedly crashing. Inspect the pod logs and events printed above, correct its configuration or dependency failure, then rerun azd up.')
+    }
+    if ($Evidence -match 'wsarecv|forcibly closed|Connection reset|context deadline exceeded|i/o timeout') {
+        $hints.Add('The Azure/AKS connection was interrupted. Confirm cluster API reachability and rerun azd up; completed image and deployment work will be reused.')
+    }
+    if ($hints.Count -eq 0) {
+        $hints.Add('No safe automatic repair matched. Review the pod events and logs above, run helm status/history for release omnivec, correct the reported blocker, and rerun azd up.')
+    }
+    return $hints
+}
+
 function Wait-ImageImports {
     param([object[]]$Entries, [int]$TimeoutSeconds = 900)
     if ($Entries.Count -eq 0) { return }

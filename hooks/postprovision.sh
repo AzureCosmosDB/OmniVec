@@ -1133,9 +1133,35 @@ _events=$($KC get events --sort-by=.lastTimestamp -o "jsonpath={range .items[?(@
 
 fi
 
+print_deployment_remediation() {
+  _evidence=$1
+  _matched=false
+  printf "\n${YELLOW}Recommended next action:${NC}\n"
+  case "$_evidence" in *"Too many pods"*|*"max pods"*)
+    printf "  - Node pod capacity is exhausted. Scale the AKS node pool or increase its maximum pods, then rerun azd up.\n"; _matched=true;; esac
+  case "$_evidence" in *"Insufficient cpu"*|*"Insufficient memory"*|*"insufficient cpu"*|*"insufficient memory"*)
+    printf "  - AKS compute capacity is insufficient. Scale the affected node pool or reduce workload requests, then rerun azd up.\n"; _matched=true;; esac
+  case "$_evidence" in *"ImagePullBackOff"*|*"ErrImagePull"*|*"pull access denied"*|*"manifest unknown"*)
+    printf "  - A workload image cannot be pulled. Verify the tag exists in the environment ACR and the AKS kubelet identity has AcrPull, then rerun azd up.\n"; _matched=true;; esac
+  case "$_evidence" in *"Unauthorized"*|*"Forbidden"*|*"AuthorizationFailed"*|*"authorization failed"*)
+    printf "  - Azure or Kubernetes authorization failed. Refresh az login/azd auth login and verify AKS plus resource-group permissions before rerunning azd up.\n"; _matched=true;; esac
+  case "$_evidence" in *"invalid ownership metadata"*|*"already exists"*|*"cannot re-use a name"*)
+    printf "  - A resource conflicts with the Helm release. Review its ownership before deletion or relabeling; the installer will not adopt unrelated resources.\n"; _matched=true;; esac
+  case "$_evidence" in *"pending-install"*|*"pending-upgrade"*|*"pending-rollback"*|*"another operation (install/upgrade/rollback) is in progress"*)
+    printf "  - Helm has an interrupted operation. Rerun azd up with OMNIVEC_RECOVER_PENDING_HELM enabled (the default), or inspect helm history first.\n"; _matched=true;; esac
+  case "$_evidence" in *"CrashLoopBackOff"*|*"Back-off restarting failed container"*)
+    printf "  - A container is repeatedly crashing. Inspect the logs and events above, correct its configuration or dependency failure, then rerun azd up.\n"; _matched=true;; esac
+  case "$_evidence" in *"wsarecv"*|*"forcibly closed"*|*"Connection reset"*|*"context deadline exceeded"*|*"i/o timeout"*)
+    printf "  - The Azure/AKS connection was interrupted. Confirm cluster API reachability and rerun azd up; completed work will be reused.\n"; _matched=true;; esac
+  if [ "$_matched" = "false" ]; then
+    printf "  - No safe automatic repair matched. Review the diagnostics above and helm status/history, correct the blocker, and rerun azd up.\n"
+  fi
+}
+
 if [ "$helm_rc" -ne 0 ]; then
   printf "${RED}Helm deploy failed. Collecting pod diagnostics...${NC}\n"
   kubectl_omnivec get pods -n omnivec -o wide </dev/null || true
+  _failure_events=$(kubectl_omnivec get events -n omnivec --field-selector type=Warning --sort-by=.lastTimestamp </dev/null 2>&1 | tail -30 || true)
   kubectl_omnivec get pods -n omnivec --no-headers </dev/null 2>/dev/null | while read -r line; do
     pod=$(echo "$line" | awk '{print $1}')
     status=$(echo "$line" | awk '{print $3}')
@@ -1149,6 +1175,7 @@ if [ "$helm_rc" -ne 0 ]; then
         ;;
     esac
   done
+  print_deployment_remediation "${_failure_events}"
   exit "$helm_rc"
 fi
 
@@ -1173,9 +1200,43 @@ printf "\n${CYAN}DocGrok pods:${NC}\n"
 kubectl_omnivec get pods -n omnivec -l app=docgrok --no-headers </dev/null 2>/dev/null || true
 kubectl_omnivec get pods -n omnivec -l app=docgrok-controller --no-headers </dev/null 2>/dev/null || true
 
+wait_deployments_ready() {
+  _timeout=${1:-600}
+  _poll=${2:-10}
+  case "$_timeout:$_poll" in *[!0-9:]*|:*|*:) return 2;; esac
+  if [ "$_timeout" -gt 3600 ] || [ "$_poll" -lt 1 ] || [ "$_poll" -gt 60 ]; then
+    return 2
+  fi
+  _max_checks=$(( _timeout / _poll + 2 ))
+  _check=1
+  while [ "$_check" -le "$_max_checks" ]; do
+    set +e
+    _rows=$(kubectl_omnivec get deploy -n omnivec -o 'jsonpath={range .items[*]}{.metadata.generation}{" "}{.status.observedGeneration}{" "}{.spec.replicas}{" "}{.status.updatedReplicas}{" "}{.status.availableReplicas}{" "}{.status.replicas}{"\n"}{end}' </dev/null 2>/dev/null)
+    _rc=$?
+    set -e
+    if [ "$_rc" -eq 0 ] && printf '%s\n' "$_rows" |
+      awk 'NF != 6 || $2 < $1 || $3 != $4 || $3 != $5 || $3 != $6 {bad=1} END {exit (NR == 0 || bad)}'; then
+      return 0
+    fi
+    [ "$_check" -ge "$_max_checks" ] && return 1
+    sleep "$_poll"
+    _check=$(( _check + 1 ))
+  done
+  return 1
+}
+
 if ! kubectl_omnivec rollout status deployment -n omnivec --timeout=5m --request-timeout=5m </dev/null; then
-  printf "${RED}One or more deployments did not become ready.${NC}\n"
-  exit 1
+  ROLLOUT_RECOVERY_SEC=${OMNIVEC_ROLLOUT_RECOVERY_SEC:-600}
+  printf "${YELLOW}Initial rollout watch timed out; checking actual deployment convergence for up to %ss...${NC}\n" "$ROLLOUT_RECOVERY_SEC"
+  if ! wait_deployments_ready "$ROLLOUT_RECOVERY_SEC" 10; then
+    printf "${RED}One or more deployments did not converge after the recovery window.${NC}\n"
+    kubectl_omnivec get deployment -n omnivec </dev/null || true
+    _failure_events=$(kubectl_omnivec get events -n omnivec --field-selector type=Warning --sort-by=.lastTimestamp </dev/null 2>&1 | tail -20 || true)
+    printf '%s\n' "$_failure_events"
+    print_deployment_remediation "$_failure_events"
+    exit 1
+  fi
+  printf "  ${GREEN}All deployments converged after the initial rollout watch timed out.${NC}\n"
 fi
 
 printf "\n${YELLOW}Waiting for external IP...${NC}\n"

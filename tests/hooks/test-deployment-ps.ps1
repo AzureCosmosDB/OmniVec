@@ -54,6 +54,33 @@ Check (-not (Test-DeploymentsReady (@{items=@($ready)} | ConvertTo-Json -Depth 5
 $ready.status.updatedReplicas = 2
 $ready.status.observedGeneration = 1
 Check (-not (Test-DeploymentsReady (@{items=@($ready)} | ConvertTo-Json -Depth 5))) 'unobserved generation cannot be skipped'
+$ready.status.observedGeneration = 2
+
+$script:deploymentReads = 0
+function kubectl {
+    $script:deploymentReads++
+    $global:LASTEXITCODE = 0
+    if ($script:deploymentReads -eq 1) {
+        $pending = $ready.Clone()
+        $pending.status = $ready.status.Clone()
+        $pending.status.availableReplicas = 1
+        @{items=@($pending)} | ConvertTo-Json -Depth 5
+    } else {
+        @{items=@($ready)} | ConvertTo-Json -Depth 5
+    }
+}
+function Start-Sleep { }
+Check (Wait-DeploymentsReady -Context mock -KubeConfig isolated -TimeoutSeconds 1 -PollSeconds 1) 'rollout recovery waits for actual convergence'
+Check ($script:deploymentReads -eq 2) 'rollout recovery rechecks deployments after a transient incomplete state'
+Remove-Item Function:\Start-Sleep
+Remove-Item Function:\kubectl
+
+$capacityHints = Get-DeploymentRemediation 'FailedScheduling: Too many pods'
+Check (($capacityHints -join ' ') -match 'Scale the AKS node pool') 'capacity failures include a concrete recovery action'
+$imageHints = Get-DeploymentRemediation 'ImagePullBackOff: manifest unknown'
+Check (($imageHints -join ' ') -match 'environment ACR') 'image pull failures include registry and identity guidance'
+$unknownHints = Get-DeploymentRemediation 'unclassified failure'
+Check (($unknownHints -join ' ') -match 'No safe automatic repair matched') 'unknown failures fail closed with manual diagnostic guidance'
 
 & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -Command 'exit 17'
 Must-Throw { Assert-NativeSuccess 'native failure' } 'native nonzero exit is fatal'
@@ -158,9 +185,15 @@ Check $failedAsExpected 'skip-import fails on a missing image without starting i
 Remove-Item Function:\Start-Job
 
 $source = Get-Content "$root\hooks\postprovision.ps1" -Raw
-Check ($source -notmatch 'helm (rollback|uninstall) omnivec') 'pending release recovery never uninstalls a deployment'
+Check ($source -match 'OMNIVEC_RECOVER_PENDING_HELM' -and
+       $source -match 'pending-install' -and $source -match 'helm uninstall omnivec' -and
+       $source -match 'helm rollback omnivec 0') 'interrupted Helm recovery is explicit, guarded, and state-specific'
+Check ($source -notmatch 'adopt_orphaned_resources|cp -f .*HOME/.kube/config') 'recovery never takes ownership or overwrites the default kubeconfig'
 Check ($source -notmatch 'Remove-Item \$lockFile') 'hook cleanup cannot delete Chart.lock'
 Check ($source -match 'rollout status deployment -n omnivec') 'all deployments are verified rather than only the API'
+Check ($source -match 'Wait-DeploymentsReady') 'a timed-out rollout gets a bounded convergence recovery window'
+Check ($source -match 'forcibly closed' -and $source -match 'wsarecv') 'AKS transport resets are classified as transient'
+Check ($source -match 'Get-DeploymentRemediation') 'terminal deployment failures print actionable recovery guidance'
 
 # Native timeout responses stand in for stalls longer than a minute. Exercise
 # the hook's real command/guard and retry loop without sleeping or networking.
@@ -177,14 +210,18 @@ $rolloutGuard = $ast.Find({
 }, $true)
 $script:rolloutArguments = @()
 function kubectl {
-    $script:rolloutArguments = @($args)
+    if ($args -contains 'rollout') {
+        $script:rolloutArguments = @($args)
+    }
     $global:LASTEXITCODE = 1
     'error: timed out waiting for the condition (simulated 301s elapsed)'
 }
+$env:OMNIVEC_ROLLOUT_RECOVERY_SEC = '0'
 $rolloutCheck = $rollout.Extent.Text + "`n" + ($rolloutGuard.Extent.Text -replace '\bexit 1\b', 'throw "rollout deadline reached"')
 Must-Throw { Invoke-Expression $rolloutCheck } 'a rollout stalled over one minute fails rather than reporting success'
 Check (($script:rolloutArguments -contains '--timeout=5m') -and
        ($script:rolloutArguments -contains '--request-timeout=5m')) 'rollout watch and Kubernetes requests both have explicit deadlines'
+Remove-Item Env:\OMNIVEC_ROLLOUT_RECOVERY_SEC
 Remove-Item Function:\kubectl
 
 $helmLoop = $ast.Find({

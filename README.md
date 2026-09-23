@@ -109,6 +109,14 @@ do not run both stacks against the same resources. The examples below use the
 maintained Bicep/azd path. POSIX image imports use a portable watchdog; no GNU
 `timeout` or macOS coreutils installation is required.
 
+`azd up` is resumable and safe to rerun after an interrupted attempt. The hooks
+preserve successfully built images, recover stale local locks, reconcile pending
+Helm operations, retry transient Azure/AKS transport failures, and verify actual
+deployment convergence after an initial rollout timeout. A rerun never adopts
+unrelated Kubernetes resources or overwrites the default kubeconfig. Genuine
+configuration, authorization, image, or workload failures still stop explicitly
+with diagnostics instead of being reported as a successful deployment.
+
 ### Save these values
 
 When deployment finishes, the console prints two important values. **Copy them now:**
