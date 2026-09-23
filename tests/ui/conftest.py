@@ -18,6 +18,11 @@ class QuietStaticHandler(SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         pass
 
+    def translate_path(self, path: str) -> str:
+        if path.startswith("/static/"):
+            path = path[len("/static"):]
+        return super().translate_path(path)
+
 
 @pytest.fixture(scope="module")
 def static_server_url() -> Iterator[str]:

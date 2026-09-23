@@ -1383,6 +1383,22 @@
   dict({
     'components': dict({
       'schemas': dict({
+        'AgentDiagnosticRequest': dict({
+          'properties': dict({
+            'pipeline_id': dict({
+              'maxLength': 160,
+              'minLength': 1,
+              'pattern': '^[A-Za-z0-9][A-Za-z0-9_.-]*$',
+              'title': 'Pipeline Id',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'pipeline_id',
+          ]),
+          'title': 'AgentDiagnosticRequest',
+          'type': 'object',
+        }),
         'AssistantChatRequest': dict({
           'properties': dict({
             'conversation': dict({
@@ -2388,6 +2404,60 @@
             }),
           }),
           'summary': 'Agent Chat Approve Proxy',
+        }),
+      }),
+      '/api/agent/diagnostics/pipeline': dict({
+        'post': dict({
+          'operationId': 'agent_pipeline_diagnostics_api_agent_diagnostics_pipeline_post',
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/AgentDiagnosticRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Agent Pipeline Diagnostics',
+        }),
+      }),
+      '/api/agent/diagnostics/system': dict({
+        'get': dict({
+          'operationId': 'agent_system_diagnostics_api_agent_diagnostics_system_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Agent System Diagnostics',
         }),
       }),
       '/api/agent/sessions': dict({
@@ -6647,6 +6717,25 @@
     tuple(
       'post',
       '/api/agent/chat/approve',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/api/agent/diagnostics/pipeline',
+      list([
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/agent/diagnostics/system',
       list([
       ]),
       list([
