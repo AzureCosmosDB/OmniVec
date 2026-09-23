@@ -93,6 +93,26 @@ def test_stopped_workers_with_backlog_offer_bounded_scale(diag, snapshot):
     assert action == {"tool": "scale_deployment", "args": {"deployment": "omnivec-dotnet-worker", "replicas": 1, "pipeline_id": "pip-1"}}
 
 
+def test_stopped_onelake_watcher_offers_scoped_bounded_scale(diag, snapshot):
+    snapshot["pipelines"][0]["sources"] = [{"id": "src-1", "type": "onelake-iceberg"}]
+    snapshot["pipelines"][0]["stats"]["source_doc_count"] = None
+    snapshot["cluster"]["deployments"]["value"].append({
+        "name": "omnivec-onelake-iceberg-watcher", "desired": 0, "ready": 0,
+        "generation": 1, "observed_generation": 1, "flags": {},
+    })
+    result = diag.evaluate(snapshot)
+    assert result["status"] == "BLOCKED"
+    action = next(f for f in result["findings"] if f["code"] == "workers_stopped")["approved_tool_candidate"]
+    assert action == {
+        "tool": "scale_deployment",
+        "args": {
+            "deployment": "omnivec-onelake-iceberg-watcher",
+            "replicas": 1,
+            "pipeline_id": "pip-1",
+        },
+    }
+
+
 @pytest.mark.parametrize("change,code", [
     ({"exists": False}, "missing_model"),
     ({"category": "chat"}, "missing_model"),
@@ -198,6 +218,35 @@ def test_blob_writes_prove_processing_but_not_complete_inventory(diag, snapshot)
     assert result["processing_verified"]
     assert result["limitations"] and "source coverage" in result["limitations"][0]
     assert result["pipelines"][0]["outstanding_work"] is None
+
+
+@pytest.mark.parametrize(("source_type", "deployment"), [
+    ("onelake-iceberg", "omnivec-onelake-iceberg-watcher"),
+    ("sharepoint", "omnivec-sharepoint-watcher"),
+])
+def test_connector_writes_prove_processing_without_claiming_complete_inventory(
+    diag, snapshot, source_type, deployment,
+):
+    pipe = snapshot["pipelines"][0]
+    pipe["sources"] = [{"id": "src-1", "type": source_type}]
+    pipe["stats"]["source_doc_count"] = None
+    snapshot["cluster"]["deployments"]["value"].append({
+        "name": deployment, "desired": 1, "ready": 1,
+        "generation": 1, "observed_generation": 1, "flags": {},
+    })
+    before = copy.deepcopy(snapshot)
+    before["pipelines"][0]["stats"]["embedded_count"] = 9
+    result = diag.evaluate(snapshot, before)
+    assert result["status"] == "HEALTHY"
+    assert result["processing_verified"]
+    assert result["pipelines"][0]["telemetry"]["source_inventory"] == "not_collected"
+    assert result["pipelines"][0]["outstanding_work"] is None
+    assert any("source coverage" in limitation for limitation in result["limitations"])
+
+
+def test_onelake_watcher_is_in_kubernetes_repair_allowlist():
+    from agent.tools import k8s
+    assert "omnivec-onelake-iceberg-watcher" in k8s.DEPLOYMENTS
 
 
 def test_missing_cosmos_inventory_is_not_treated_as_optional(diag, snapshot):

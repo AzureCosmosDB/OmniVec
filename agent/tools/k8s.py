@@ -14,7 +14,8 @@ NAMESPACE = os.environ.get("OMNIVEC_NAMESPACE", "omnivec")
 DEPLOYMENTS = {
     "omnivec-api", "omnivec-controller", "omnivec-dotnet-worker",
     "omnivec-blob-ingestor", "omnivec-cosmos-changefeed",
-    "omnivec-sharepoint-watcher", "omnivec-search",
+    "omnivec-onelake-iceberg-watcher", "omnivec-sharepoint-watcher",
+    "omnivec-search",
     "docgrok", "docgrok-controller", "docgrok-pipeline-worker",
 }
 

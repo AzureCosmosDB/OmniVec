@@ -38,6 +38,7 @@ rules:
       - omnivec-dotnet-worker
       - omnivec-blob-ingestor
       - omnivec-cosmos-changefeed
+      - omnivec-onelake-iceberg-watcher
       - omnivec-sharepoint-watcher
       - omnivec-search
       - docgrok
