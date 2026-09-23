@@ -44,6 +44,13 @@ openia.7m.key
 openia.7m.key
 
 scripts/bench_embedding_rs/target/
+docgrok/router/target/
+
+# Local linked worktrees
+.worktrees/
+
+# Pytest temporary directories
+pytest-of-*/
 
 # .NET build output
 bin/
