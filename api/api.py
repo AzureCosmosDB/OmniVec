@@ -4423,6 +4423,7 @@ def report_inline_metrics(pipeline_id: str, payload: dict):
     pip["processed"] = pip.get("processed", 0) + processed
     pip["failed"] = pip.get("failed", 0) + failed
     pip["total_time_ms"] = pip.get("total_time_ms", 0.0) + processing_time_ms
+    pip["updated_at"] = datetime.utcnow().isoformat()
 
     # Keep a rolling window of recent reports for throughput calculation
     now = datetime.utcnow().isoformat()
@@ -4434,6 +4435,7 @@ def report_inline_metrics(pipeline_id: str, payload: dict):
     pip["recent"] = recent
 
     store.upsert(doc)
+    _pipeline_stats_cache.pop(pipeline_id, None)
 
     return {"ok": True}
 
@@ -7493,7 +7495,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                             pip_m = (m_doc.get("pipelines") or {}).get(pipeline_id) or {}
                             inline_processed = int(pip_m.get("processed", 0))
                             # Treat metrics as fresh if updated within the last 90s.
-                            from datetime import datetime, timezone
+                            from datetime import timezone
                             updated_at = pip_m.get("updated_at")
                             if updated_at:
                                 try:
@@ -7624,6 +7626,44 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
     except Exception as e:
         import traceback
         logger.error(f"Error computing pipeline stats for {pipeline_id}: {e}\n{traceback.format_exc()}")  # lgtm[py/log-injection]
+
+    # Connector-driven queue pipelines (for example OneLake and SharePoint)
+    # do not create metadata-store job documents. Their workers report
+    # deduplicated batch metrics after destination writes complete, so use
+    # those counters whenever source-specific inventory is unavailable.
+    try:
+        metrics_doc = store.get("global", "metrics")
+        reported = ((metrics_doc or {}).get("pipelines") or {}).get(pipeline_id) or {}
+        reported_processed = max(0, int(reported.get("processed", 0)))
+        reported_failed = max(0, int(reported.get("failed", 0)))
+        reported_time_ms = max(0.0, float(reported.get("total_time_ms", 0.0)))
+
+        if reported_processed > embedded_count:
+            embedded_count = reported_processed
+        if reported_processed > docs_processed:
+            docs_processed = reported_processed
+        if reported_processed > lifetime_embedded_count:
+            lifetime_embedded_count = reported_processed
+        if reported_failed > jobs.failed:
+            jobs.failed = reported_failed
+        if avg_time is None and reported_processed > 0:
+            avg_time = round(reported_time_ms / reported_processed, 1)
+
+        cutoff = datetime.utcnow() - timedelta(seconds=60)
+        recent_processed = 0
+        for sample in reported.get("recent", []):
+            try:
+                timestamp = datetime.fromisoformat(str(sample.get("t", "")).replace("Z", "+00:00"))
+                if timestamp.tzinfo is not None:
+                    timestamp = timestamp.replace(tzinfo=None)
+                if timestamp >= cutoff:
+                    recent_processed += max(0, int(sample.get("n", 0)))
+            except (TypeError, ValueError):
+                continue
+        if recent_processed > 0:
+            recent_throughput = round(recent_processed / 60.0, 1)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring malformed reported metrics for pipeline %s", pipeline_id)
 
     # Cap embedded/processed counts at source_doc_count so the dashboard never
     # shows >100% (e.g. 10,634 / 10,000) when streaming metrics double-count
