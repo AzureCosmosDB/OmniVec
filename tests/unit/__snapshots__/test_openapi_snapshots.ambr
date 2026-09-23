@@ -1934,6 +1934,17 @@
               'title': 'Destination Ids',
               'type': 'array',
             }),
+            'fts_field': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Fts Field',
+            }),
             'merge_strategy': dict({
               'default': 'rrf',
               'title': 'Merge Strategy',
@@ -1960,6 +1971,11 @@
                 }),
               ]),
               'title': 'Query Image B64',
+            }),
+            'search_mode': dict({
+              'default': 'vector',
+              'title': 'Search Mode',
+              'type': 'string',
             }),
             'top_k': dict({
               'default': 5,
@@ -9494,6 +9510,18 @@
               ]),
               'description': "Document path to full-text search (e.g. 'content' or 'body.text'). When omitted, defaults to the first entry in `content_fields`. Only used when mode='fts'.",
               'title': 'Fts Field',
+            }),
+            'fusion_group': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'description': 'Optional grouping key for rank fusion. Indexes sharing the same fusion_group are treated as one logical source during RRF merge, so a document returned by several of them (e.g. a vector spec and an fts spec over the same container in hybrid search) is fused into a single result with combined RRF score instead of appearing once per index.',
+              'title': 'Fusion Group',
             }),
             'id': dict({
               'description': 'Caller-supplied label; echoed in results',
