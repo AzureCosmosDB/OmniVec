@@ -75,6 +75,11 @@ case "$verb" in
             esac
         done
         [ -z "$name" ] && name=omnivec
+        revision=0
+        if [ -f "$RELEASES/$name" ]; then
+            revision=$(sed -n 's/^revision=//p' "$RELEASES/$name")
+        fi
+        revision=$((revision + 1))
 
         # Record release
         cat > "$RELEASES/$name" <<EOF
@@ -82,7 +87,7 @@ name=$name
 namespace=$ns
 chart=$chart
 status=deployed
-revision=1
+revision=$revision
 EOF
 
         # Synthesise deployments + pods in emulated kubernetes state so
@@ -120,12 +125,14 @@ replicas=$replicas
 readyReplicas=$ready
 availableReplicas=$avail
 updatedReplicas=$replicas
+statusReplicas=$replicas
+generation=$revision
+observedGeneration=$revision
 image=emu/$comp:latest
 D_EOF
             i=0
             while [ $i -lt "$replicas" ]; do
-                suffix=$(printf '%s-%x%x%x%x%x' "$comp" \
-                    $((RANDOM % 16)) $((RANDOM % 16)) $((RANDOM % 16)) $((RANDOM % 16)) $((RANDOM % 16)) 2>/dev/null || echo "$comp-$i")
+                suffix="$comp-$revision-$i"
                 cat > "$nsdir/pods/$suffix" <<P_EOF
 name=$suffix
 namespace=$ns
@@ -182,7 +189,7 @@ NAME: $name
 LAST DEPLOYED: $(date 2>/dev/null || echo "now")
 NAMESPACE: $ns
 STATUS: deployed
-REVISION: 1
+REVISION: $revision
 TEST SUITE: None
 BANNER
         ;;

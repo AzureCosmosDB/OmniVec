@@ -556,6 +556,24 @@ pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName my-omnivec
 | `-FromStep` / `--from-step` | Resume from step N (1–11) |
 | `-Cleanup` / `--cleanup` | Delete test resources |
 
+For an already-registered embedding model, the PowerShell Blob-to-Cosmos demo
+accepts `-ModelId` instead of requesting an Azure OpenAI key:
+
+```powershell
+pwsh scripts\e2e-blob-demo.ps1 -Env my-omnivec -ModelId <registered-model-id> `
+  -ServerUrl http://127.0.0.1:18082 -KubeConfig <dedicated-kubeconfig> `
+  -FileType txt -NoSearch
+```
+
+This example expects a localhost-only port-forward to `service/omnivec-web`
+on port 18082. `-NoSearch` deliberately limits this script run to ingestion;
+verify retrieval separately through the web app's Vector Search playground.
+For keyless model access, grant the OmniVec workload identity **Cognitive
+Services OpenAI User** on the embedding account, then register the model with
+managed-identity authentication under **Models**. The model and destination must
+use the same embedding dimensions. SharePoint and OneLake source permissions
+are separate prerequisites; a healthy model does not establish source access.
+
 ---
 
 ## Diagnostics
