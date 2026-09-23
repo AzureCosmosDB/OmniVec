@@ -12,6 +12,7 @@ for hook in "$ROOT/hooks/postprovision.sh" "$ROOT/hooks/postprovision.ps1"; do
   grep -q 'src-' "$hook"
   grep -q 'docgrok-pipeline-worker' "$hook"
   grep -q 'omnivec-onelake-iceberg-watcher' "$hook"
+  grep -q 'mcp_servers.*cosmos' "$hook"
 done
 
 if grep -q 'Build-Image -Name "omnivec-api".*-Context \$RootDir' "$ROOT/hooks/postprovision.ps1"; then
@@ -23,4 +24,4 @@ if grep -q 'build_image "omnivec-api".*"\$ROOT_DIR"' "$ROOT/hooks/postprovision.
   exit 1
 fi
 
-echo "11 fast deployment contracts passed"
+echo "13 fast deployment contracts passed"

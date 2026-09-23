@@ -59,6 +59,8 @@ $ACR_LOGIN_SERVER = Get-AzdValue "AZURE_ACR_LOGIN_SERVER"
 $ACR_NAME = Get-AzdValue "AZURE_ACR_NAME"
 $COSMOS_ENDPOINT = Get-AzdValue "AZURE_COSMOS_ENDPOINT"
 $IDENTITY_CLIENT_ID = Get-AzdValue "AZURE_IDENTITY_CLIENT_ID"
+$IDENTITY_PRINCIPAL_ID = Get-AzdValue "AZURE_IDENTITY_PRINCIPAL_ID"
+$SUBSCRIPTION_ID = Get-AzdValue "AZURE_SUBSCRIPTION_ID"
 $RESOURCE_GROUP = Get-AzdValue "AZURE_RESOURCE_GROUP"
 $BUILD_MODE = Get-AzdValue "OMNIVEC_BUILD_MODE"
 if (-not $BUILD_MODE) {
@@ -348,6 +350,7 @@ function Get-SourceBuildSpec {
         "omnivec-api" {
             Copy-MinimalBuildTree "$RootDir\api" (Join-Path $context "api")
             Copy-MinimalBuildTree "$RootDir\web" (Join-Path $context "web")
+            Copy-MinimalBuildTree "$RootDir\mcp_servers\cosmos" (Join-Path $context "mcp_servers\cosmos")
             $dockerfile = Join-Path $context "api\Dockerfile"
         }
         "omnivec-search" {
@@ -869,6 +872,8 @@ $helmArgs = @(
     "--namespace", "omnivec",
     "--set", "global.imageRegistry=$ACR_LOGIN_SERVER",
     "--set", "azure.workloadIdentity.clientId=$IDENTITY_CLIENT_ID",
+    "--set", "azure.workloadIdentity.principalId=$IDENTITY_PRINCIPAL_ID",
+    "--set", "azure.subscriptionId=$SUBSCRIPTION_ID",
     "--set", "azure.cosmos.endpoint=$COSMOS_ENDPOINT",
     "--set", "api.image.tag=$IMAGE_TAG",
     "--set", "controller.image.tag=$IMAGE_TAG",

@@ -50,6 +50,7 @@ nul
 # Ignore large files
 *.tar.gz
 *.json
+!mcp_servers/cosmos/host.json
 docgrok/
 **/target/
 web/static/lib/

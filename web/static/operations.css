@@ -223,3 +223,66 @@ tbody tr:hover { background: var(--accent-muted); }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+.inventory-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.inventory-table {
+    height: 788px;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.inventory-table table {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 700px;
+}
+
+#section-pipelines .inventory-table table { min-width: 1050px; }
+.inventory-table thead tr { height: 48px; }
+.inventory-table tbody td:not([colspan]) { padding: 0; }
+.inventory-cell {
+    height: 72px;
+    box-sizing: border-box;
+    padding: 12px 16px;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+.inventory-cell .pipeline-flow { flex-wrap: nowrap; }
+.inventory-card-body > [id^="pagination-"] { flex-wrap: wrap; gap: 8px; }
+@media (max-width: 700px) {
+    .inventory-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+}
+.cloud-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+}
+.cloud-field { display: flex; flex-direction: column; gap: 6px; }
+.cloud-field input, .cloud-field select {
+    padding: 10px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    width: 100%;
+}
+.cloud-field small { color: var(--text-secondary); }
+.cloud-job, .cloud-review {
+    padding: 16px;
+    margin: 12px 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    overflow-wrap: anywhere;
+}
+.cloud-job button { margin-left: 12px; }
+.cloud-review pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 12px 0; }
+.cloud-review details { margin: 16px 0; }
+.cloud-review label { display: block; margin: 16px 0; }
+.cloud-error { color: var(--error); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cloud-answer { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }

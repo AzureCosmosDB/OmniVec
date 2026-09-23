@@ -105,6 +105,57 @@ class TestRegistryShape:
 
 class TestTroubleshootingRunbooks:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("query,code", [
+        ("InsufficientVCPUQuota SKUNotAvailable", "azure_quota_or_sku_unavailable"),
+        ("pending-upgrade pending-install", "helm_pending_release"),
+        ("wsarecv unexpected EOF", "deployment_transport_interruption"),
+        ("ACR build import denied", "acr_build_or_import_failure"),
+        ("client ID principal ID wrong subscription", "permission_identity_or_scope_mismatch"),
+        ("serverless autopilot throughput", "cosmos_serverless_throughput_rejected"),
+        ("Cosmos RequestRateTooLarge hot partition", "cosmos_request_throttling"),
+        ("UNKNOWN sampled logs omit changefeed", "agent_diagnostic_coverage_gap"),
+        ("embedding provider Retry-After OpenAI", "model_provider_throttling_or_auth"),
+        ("obsolete chunks source shrink", "chunk_update_cleanup_failure"),
+        ("index-level errors wrong semantic result", "search_empty_or_wrong_results"),
+        ("browser nonexistent chat option", "e2e_fixture_or_assertion_mismatch"),
+    ])
+    async def test_expanded_catalog_is_discoverable(self, tools_mod, query, code):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(query=query, limit=4))
+        assert code in {match["failure_code"] for match in result["matches"]}
+
+    def test_every_runbook_has_complete_recovery_contract(self, tools_mod):
+        from agent.tools.runbooks import RUNBOOKS
+
+        for code, entry in RUNBOOKS.items():
+            assert entry["component"], code
+            for key in ("symptoms", "authoritative_checks", "likely_causes",
+                        "safe_actions", "avoid", "recovery_verification"):
+                assert isinstance(entry[key], list) and entry[key], (code, key)
+                assert all(isinstance(value, str) and value.strip() for value in entry[key]), (code, key)
+
+    @pytest.mark.asyncio
+    async def test_snat_search_requires_metrics_and_approval(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(query="SNAT Cosmos TCP timeout", limit=4))
+        entry = next(item for item in result["matches"] if item["failure_code"] == "aks_snat_exhaustion")
+        assert "SnatConnectionCount" in " ".join(entry["authoritative_checks"])
+        assert "approval" in " ".join(entry["safe_actions"])
+        assert "maximum autoscaled nodes plus surge" in " ".join(entry["safe_actions"])
+        assert "missing metric samples as zero" in " ".join(entry["avoid"])
+        assert t.readonly
+
+    @pytest.mark.asyncio
+    async def test_cosmos_provisioning_is_not_a_data_role_fix(self, tools_mod):
+        t = tools_mod.get_tool("get_troubleshooting_runbook")
+        result = await t.callable(t.params(failure_code="cosmos_entra_container_provisioning"))
+        entry = result["matches"][0]
+        assert "management APIs" in " ".join(entry["safe_actions"])
+        assert "serverless" in " ".join(entry["safe_actions"])
+        assert "broader data roles" in " ".join(entry["avoid"])
+        assert "not a clean-install pass" in " ".join(entry["recovery_verification"])
+
+    @pytest.mark.asyncio
     async def test_exact_failure_code_returns_safe_recovery_contract(self, tools_mod):
         t = tools_mod.get_tool("get_troubleshooting_runbook")
         result = await t.callable(t.params(failure_code="dead_letter_messages"))

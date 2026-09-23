@@ -1782,6 +1782,130 @@
           'title': 'CreateTokenRequest',
           'type': 'object',
         }),
+        'DeploymentApproval': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'approve_cost_and_permissions': dict({
+              'const': True,
+              'title': 'Approve Cost And Permissions',
+              'type': 'boolean',
+            }),
+            'plan_hash': dict({
+              'title': 'Plan Hash',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'plan_hash',
+            'approve_cost_and_permissions',
+          ]),
+          'title': 'DeploymentApproval',
+          'type': 'object',
+        }),
+        'DeploymentPlanRequest': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'chat_deployment': dict({
+              'default': '',
+              'maxLength': 128,
+              'pattern': '^[A-Za-z0-9_.-]*$',
+              'title': 'Chat Deployment',
+              'type': 'string',
+            }),
+            'container': dict({
+              'default': '',
+              'maxLength': 128,
+              'pattern': '^[A-Za-z0-9_-]*$',
+              'title': 'Container',
+              'type': 'string',
+            }),
+            'cosmos_account_id': dict({
+              'default': '',
+              'title': 'Cosmos Account Id',
+              'type': 'string',
+            }),
+            'database': dict({
+              'default': '',
+              'maxLength': 128,
+              'pattern': '^[A-Za-z0-9_-]*$',
+              'title': 'Database',
+              'type': 'string',
+            }),
+            'destination_id': dict({
+              'default': '',
+              'title': 'Destination Id',
+              'type': 'string',
+            }),
+            'embedding_account_id': dict({
+              'default': '',
+              'title': 'Embedding Account Id',
+              'type': 'string',
+            }),
+            'embedding_model_id': dict({
+              'default': '',
+              'title': 'Embedding Model Id',
+              'type': 'string',
+            }),
+            'fields': dict({
+              'default': 'id,title,text,source_ref',
+              'title': 'Fields',
+              'type': 'string',
+            }),
+            'foundry_deployment_id': dict({
+              'default': '',
+              'title': 'Foundry Deployment Id',
+              'type': 'string',
+            }),
+            'kind': dict({
+              'enum': list([
+                'mcp',
+                'foundry',
+                'cosmos_container',
+                'verification',
+              ]),
+              'title': 'Kind',
+              'type': 'string',
+            }),
+            'location': dict({
+              'pattern': '^[a-z0-9]{2,40}$',
+              'title': 'Location',
+              'type': 'string',
+            }),
+            'mcp_deployment_id': dict({
+              'default': '',
+              'title': 'Mcp Deployment Id',
+              'type': 'string',
+            }),
+            'project_resource_id': dict({
+              'default': '',
+              'title': 'Project Resource Id',
+              'type': 'string',
+            }),
+            'question': dict({
+              'default': '',
+              'maxLength': 4000,
+              'title': 'Question',
+              'type': 'string',
+            }),
+            'resource_group_id': dict({
+              'title': 'Resource Group Id',
+              'type': 'string',
+            }),
+            'vector_field': dict({
+              'default': 'embedding',
+              'pattern': '^[A-Za-z_][A-Za-z0-9_]{0,127}$',
+              'title': 'Vector Field',
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'kind',
+            'resource_group_id',
+            'location',
+          ]),
+          'title': 'DeploymentPlanRequest',
+          'type': 'object',
+        }),
         'DestinationEnableRequest': dict({
           'properties': dict({
             'enabled': dict({
@@ -1846,6 +1970,58 @@
             'client_id',
           ]),
           'title': 'OneLakePipelineIdentity',
+          'type': 'object',
+        }),
+        'PermissionCheckRequest': dict({
+          'properties': dict({
+            'config': dict({
+              'additionalProperties': True,
+              'title': 'Config',
+              'type': 'object',
+            }),
+            'connector_type': dict({
+              'default': '',
+              'title': 'Connector Type',
+              'type': 'string',
+            }),
+            'kind': dict({
+              'enum': list([
+                'source',
+                'destination',
+              ]),
+              'title': 'Kind',
+              'type': 'string',
+            }),
+            'principal_id': dict({
+              'default': '',
+              'maxLength': 36,
+              'title': 'Principal Id',
+              'type': 'string',
+            }),
+            'resource_id': dict({
+              'default': '',
+              'maxLength': 1024,
+              'title': 'Resource Id',
+              'type': 'string',
+            }),
+            'resource_ref': dict({
+              'anyOf': list([
+                dict({
+                  'maxLength': 160,
+                  'pattern': '^[A-Za-z0-9_.-]+$',
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Resource Ref',
+            }),
+          }),
+          'required': list([
+            'kind',
+          ]),
+          'title': 'PermissionCheckRequest',
           'type': 'object',
         }),
         'PipelineSource': dict({
@@ -3156,6 +3332,108 @@
             }),
           }),
           'summary': 'Get Capabilities',
+        }),
+      }),
+      '/api/cloud-deployments': dict({
+        'get': dict({
+          'operationId': 'list_cloud_deployments_api_cloud_deployments_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'List Cloud Deployments',
+        }),
+      }),
+      '/api/cloud-deployments/plan': dict({
+        'post': dict({
+          'operationId': 'plan_cloud_deployment_api_cloud_deployments_plan_post',
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/DeploymentPlanRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Plan Cloud Deployment',
+        }),
+      }),
+      '/api/cloud-deployments/{job_id}/approve': dict({
+        'post': dict({
+          'operationId': 'approve_cloud_deployment_api_cloud_deployments__job_id__approve_post',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'job_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Job Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/DeploymentApproval',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Approve Cloud Deployment',
         }),
       }),
       '/api/destinations': dict({
@@ -5324,6 +5602,44 @@
           'summary': 'Scale Deployment',
         }),
       }),
+      '/api/permissions/check': dict({
+        'post': dict({
+          'description': "Read-only diagnosis; returned commands are executed by the customer's administrator.",
+          'operationId': 'check_resource_permissions_api_permissions_check_post',
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/PermissionCheckRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Check Resource Permissions',
+        }),
+      }),
       '/api/pipelines': dict({
         'get': dict({
           'description': '''
@@ -6935,6 +7251,36 @@
     ),
     tuple(
       'get',
+      '/api/cloud-deployments',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/api/cloud-deployments/plan',
+      list([
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/api/cloud-deployments/{job_id}/approve',
+      list([
+        'job_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
       '/api/destinations',
       list([
       ]),
@@ -7565,6 +7911,16 @@
       '/api/operations/deployments/{name}/scale',
       list([
         'name',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/api/permissions/check',
+      list([
       ]),
       list([
         '200',

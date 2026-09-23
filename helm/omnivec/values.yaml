@@ -41,6 +41,9 @@ web:
 # =============================================================================
 api:
   enabled: true
+  cloudDeployments:
+    enabled: false
+    allowedScopes: []
   replicaCount: 2
   image:
     repository: omnivec-api
@@ -356,10 +359,12 @@ blobWatcher:
 # AZURE CONFIGURATION
 # =============================================================================
 azure:
+  subscriptionId: "" # Optional resource discovery; customer resources may be in another subscription.
   # Managed Identity
   workloadIdentity:
     enabled: true
     clientId: "" # Set via --set azure.workloadIdentity.clientId=<from azd/bicep output>
+    principalId: "" # Object ID, distinct from clientId; used for customer-executed access grants.
 
   # CosmosDB
   cosmos:

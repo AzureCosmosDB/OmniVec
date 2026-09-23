@@ -1,0 +1,12 @@
+Northstar Demo Travel Policy
+Synthetic test data for the OmniVec SharePoint-to-Foundry example.
+This is not a real company policy.
+
+Policy identifier: NORTHSTAR-DEMO-TRAVEL-2026
+For a domestic trip, the daily meal reimbursement limit is 47 USD.
+Receipts are required for an individual meal costing more than 18 USD.
+Meal reimbursements must be submitted within 12 calendar days after the trip ends.
+The travel policy owner is the Demo Travel Desk.
+
+Airfare is reimbursed at economy class for flights shorter than seven hours.
+Premium cabin airfare requires written approval before booking.

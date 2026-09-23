@@ -240,6 +240,7 @@ output AZURE_STORAGE_QUEUE_ENDPOINT string = storage.outputs.queueEndpoint
 output AZURE_SERVICEBUS_NAMESPACE string = servicebus.outputs.namespaceName
 output AZURE_SERVICEBUS_ENDPOINT string = servicebus.outputs.endpoint
 output AZURE_IDENTITY_CLIENT_ID string = identity.outputs.clientId
+output AZURE_IDENTITY_PRINCIPAL_ID string = identity.outputs.principalId
 output AZURE_KEYVAULT_URI string = keyvault.outputs.vaultUri
 output AZURE_APPINSIGHTS_CONNECTION_STRING string = appinsights.outputs.connectionString
 output AZURE_LOG_ANALYTICS_WORKSPACE_ID string = appinsights.outputs.workspaceId

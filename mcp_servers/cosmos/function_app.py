@@ -309,6 +309,7 @@ def _handle_mcp_message(message: object) -> tuple[dict | None, int]:
                     "serverInfo": {
                         "name": "omnivec-cosmos",
                         "version": "1.0.0",
+                        "deployment_id": os.getenv("OMNIVEC_DEPLOYMENT_ID", ""),
                     },
                 },
             ),

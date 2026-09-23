@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>
         :root {
             /* Light theme (default) */
@@ -1149,6 +1149,27 @@
     <link rel="stylesheet" href="/static/operations.css">
 </head>
 <body>
+    <div id="startup-screen" role="status" aria-live="polite" aria-busy="true"
+         style="position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:var(--bg-primary,#ffffff);color:var(--text-primary,#1a1a2e);">
+        <div style="text-align:center;padding:32px;max-width:480px;">
+            <h1 style="font-size:24px;">OmniVec</h1>
+            <progress id="startup-progress" aria-label="Loading OmniVec" style="width:180px;"></progress>
+            <p id="startup-message">Loading OmniVec...</p>
+            <button id="startup-retry" type="button" class="btn btn-primary" hidden onclick="window.location.reload()">Retry loading</button>
+            <noscript><p>JavaScript is required. Enable it, then reload this page.</p></noscript>
+        </div>
+    </div>
+    <script>
+        window.omnivecStartupWatchdog = setTimeout(() => {
+            const screen = document.getElementById('startup-screen');
+            if (screen && !screen.hidden) {
+                screen.setAttribute('aria-busy', 'false');
+                document.getElementById('startup-progress').hidden = true;
+                document.getElementById('startup-message').textContent = 'OmniVec is taking longer than expected to load. Check your connection and retry.';
+                document.getElementById('startup-retry').hidden = false;
+            }
+        }, 20000);
+    </script>
     <!-- Login Screen -->
     <div id="login-screen" style="display: none; min-height: 100vh; background: #0a0a0b; color: #fafafa;">
         <style>
@@ -1465,6 +1486,8 @@
                         </svg>
                         Vector Search
                     </a>
+                    <a class="nav-item" onclick="showSection('mcp')">MCP servers</a>
+                    <a class="nav-item" onclick="showSection('foundry')">Foundry agents</a>
 
                 </div>
 
@@ -1548,6 +1571,14 @@
 
         <!-- Main Content -->
         <main class="main">
+            <section id="section-mcp" class="section" style="display:none">
+                <header class="header"><h2 class="header-title">MCP servers</h2></header>
+                <div class="content" id="mcp-workspace"></div>
+            </section>
+            <section id="section-foundry" class="section" style="display:none">
+                <header class="header"><h2 class="header-title">Foundry agents</h2></header>
+                <div class="content" id="foundry-workspace"></div>
+            </section>
             <!-- Dashboard Section -->
             <section id="section-dashboard" class="section">
                 <header class="header">
@@ -3387,6 +3418,8 @@
     </div>
 
     <script src="/static/operations.js"></script>
+    <script src="/static/permissions.js"></script>
+    <script src="/static/cloud-deployments.js"></script>
     <script>
         // Simple toast notification
         function showNotification(msg, type) {
@@ -3409,18 +3442,57 @@
         let itemsPerPage = parseInt(localStorage.getItem('omnivec_per_page') || '10');
 
         function paginate(items, key) {
-            const page = pageState[key] || 1;
-            const start = (page - 1) * itemsPerPage;
-            return items.slice(start, start + itemsPerPage);
+            const size = inventoryPageSize(key);
+            const page = Math.max(1, Math.min(pageState[key] || 1, Math.ceil(items.length / size) || 1));
+            pageState[key] = page;
+            const start = (page - 1) * size;
+            return items.slice(start, start + size);
+        }
+
+        function renderInventorySummary(kind, items) {
+            let summary = document.getElementById(`${kind}-summary`);
+            if (!summary) {
+                summary = document.createElement('div');
+                summary.id = `${kind}-summary`;
+                summary.className = 'inventory-summary';
+                summary.setAttribute('aria-label', `${kind} summary`);
+                document.querySelector(`#section-${kind} > .content`).prepend(summary);
+            }
+            const active = items.filter(item => kind === 'pipelines' ? item.status === 'active' : item.enabled !== false).length;
+            const attention = items.filter(item => ['warning', 'unhealthy', 'error'].includes(getHealthFor(kind, item.id)?.status)).length;
+            const unknown = items.filter(item => !['healthy', 'warning', 'unhealthy', 'error'].includes(getHealthFor(kind, item.id)?.status)).length;
+            summary.replaceChildren();
+            for (const [label, value] of [
+                ['Total', items.length], [kind === 'pipelines' ? 'Active' : 'Enabled', active],
+                ['Needs attention', attention], ['Health not established', unknown],
+            ]) {
+                const card = document.createElement('div');
+                card.className = 'stat-card';
+                const heading = document.createElement('div');
+                heading.className = 'stat-label';
+                heading.textContent = label;
+                const count = document.createElement('div');
+                count.className = 'stat-value';
+                count.textContent = value.toLocaleString();
+                card.append(heading, count);
+                summary.appendChild(card);
+            }
+        }
+
+        function inventoryPageSize(key) {
+            return ['sources', 'destinations', 'pipelines'].includes(key) ? 10 : itemsPerPage;
         }
 
         function renderPaginationControls(containerId, key, totalItems) {
             const existing = document.getElementById(`pagination-${key}`);
             if (existing) existing.remove();
-            if (totalItems <= itemsPerPage) return;
+            const inventory = ['sources', 'destinations', 'pipelines'].includes(key);
+            const size = inventoryPageSize(key);
+            if (!inventory && totalItems <= size) return;
 
-            const totalPages = Math.ceil(totalItems / itemsPerPage);
-            const page = pageState[key] || 1;
+            const totalPages = Math.max(1, Math.ceil(totalItems / size));
+            const page = Math.max(1, Math.min(pageState[key] || 1, totalPages));
+            pageState[key] = page;
             const container = document.getElementById(containerId);
             if (!container) return;
             const tableContainer = container.closest('.card-body') || container.closest('.card');
@@ -3431,23 +3503,34 @@
             nav.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--border-subtle); font-size: 13px;';
             nav.innerHTML = `
                 <div style="color: var(--text-tertiary);">
-                    Showing ${(page-1)*itemsPerPage + 1}-${Math.min(page*itemsPerPage, totalItems)} of ${totalItems}
+                    Showing ${totalItems ? (page-1)*size + 1 : 0}-${Math.min(page*size, totalItems)} of ${totalItems}
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px;">
-                    <select onchange="setPerPage(this.value)" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-primary); background: var(--bg-secondary); color: var(--text-primary); font-size: 12px;">
+                    ${inventory ? '<span>10/page</span>' : `<select onchange="setPerPage(this.value)" style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-primary); background: var(--bg-secondary); color: var(--text-primary); font-size: 12px;">
                         ${[10,50].map(n => `<option value="${n}" ${n === itemsPerPage ? 'selected' : ''}>${n}/page</option>`).join('')}
-                    </select>
+                    </select>`}
                     <button onclick="goPage('${key}', ${page - 1})" ${page <= 1 ? 'disabled' : ''} style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-primary); background: var(--bg-secondary); color: var(--text-primary); cursor: ${page <= 1 ? 'default' : 'pointer'}; opacity: ${page <= 1 ? '0.4' : '1'};">Prev</button>
                     <span style="color: var(--text-secondary);">Page ${page} of ${totalPages}</span>
                     <button onclick="goPage('${key}', ${page + 1})" ${page >= totalPages ? 'disabled' : ''} style="padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-primary); background: var(--bg-secondary); color: var(--text-primary); cursor: ${page >= totalPages ? 'default' : 'pointer'}; opacity: ${page >= totalPages ? '0.4' : '1'};">Next</button>
                 </div>
             `;
             tableContainer.appendChild(nav);
+            if (inventory) {
+                tableContainer.classList.add('inventory-card-body');
+                container.closest('.table-container').classList.add('inventory-table');
+                for (const cell of container.querySelectorAll('td:not([colspan])')) {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'inventory-cell';
+                    wrapper.title = cell.textContent.trim();
+                    wrapper.append(...cell.childNodes);
+                    cell.appendChild(wrapper);
+                }
+            }
         }
 
         function goPage(key, page) {
             const items = key === 'sources' ? sources : key === 'destinations' ? destinations : key === 'pipelines' ? pipelines : [];
-            const totalPages = Math.ceil(items.length / itemsPerPage);
+            const totalPages = Math.ceil(items.length / inventoryPageSize(key));
             if (page < 1 || page > totalPages) return;
             pageState[key] = page;
             if (key === 'sources') renderSources();
@@ -3492,6 +3575,22 @@
         }
 
         let workspaceRefreshInterval = null;
+        function finishStartup() {
+            clearTimeout(window.omnivecStartupWatchdog);
+            const screen = document.getElementById('startup-screen');
+            screen.hidden = true;
+            screen.style.display = 'none';
+            screen.setAttribute('aria-busy', 'false');
+        }
+
+        function failStartup(message) {
+            clearTimeout(window.omnivecStartupWatchdog);
+            document.getElementById('startup-screen').setAttribute('aria-busy', 'false');
+            document.getElementById('startup-progress').hidden = true;
+            document.getElementById('startup-message').textContent = message;
+            document.getElementById('startup-retry').hidden = false;
+        }
+
         function showLoginScreen() {
             if (workspaceRefreshInterval) { clearInterval(workspaceRefreshInterval); workspaceRefreshInterval = null; }
             if (opsRefreshInterval) { clearInterval(opsRefreshInterval); opsRefreshInterval = null; }
@@ -3504,6 +3603,7 @@
             document.getElementById('agent-input').value = '';
             document.getElementById('login-screen').style.display = 'flex';
             document.getElementById('main-app').style.display = 'none';
+            finishStartup();
             document.getElementById('login-error').style.display = 'none';
             document.getElementById('login-token').value = '';
             document.getElementById('login-token').focus();
@@ -3512,6 +3612,7 @@
         function showMainApp() {
             document.getElementById('login-screen').style.display = 'none';
             document.getElementById('main-app').style.display = 'flex';
+            finishStartup();
             if (!workspaceRefreshInterval) workspaceRefreshInterval = setInterval(refreshData, 30000);
         }
 
@@ -3582,25 +3683,37 @@
         initTheme();
 
         // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
-            const token = getAuthToken();
-            if (token) {
-                // Verify stored token is still valid
-                fetch('/api/auth/login', {
+        document.addEventListener('DOMContentLoaded', async () => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            try {
+                const token = getAuthToken();
+                if (!token) {
+                    showLoginScreen();
+                    return;
+                }
+                document.getElementById('startup-message').textContent = 'Checking your session...';
+                const resp = await fetch('/api/auth/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
-                }).then(resp => {
-                    if (resp.ok) {
-                        showMainApp();
-                        refreshData();
-                    } else {
-                        clearAuthToken();
-                        showLoginScreen();
-                    }
-                }).catch(() => showLoginScreen());
-            } else {
-                showLoginScreen();
+                    body: JSON.stringify({ token }),
+                    signal: controller.signal,
+                });
+                if (resp.ok) {
+                    showMainApp();
+                    refreshData();
+                } else if (resp.status === 401 || resp.status === 403) {
+                    clearAuthToken();
+                    showLoginScreen();
+                } else {
+                    failStartup(`Unable to check your session (HTTP ${resp.status}). Your saved token has been kept. Retry loading.`);
+                }
+            } catch (error) {
+                failStartup(error.name === 'AbortError'
+                    ? 'The session check timed out. Your saved token has been kept. Check your connection and retry.'
+                    : 'Unable to initialize OmniVec. Check your connection and browser storage settings, then retry.');
+            } finally {
+                clearTimeout(timeout);
             }
         });
 
@@ -3608,6 +3721,7 @@
         function showSection(section) {
             const selected = document.getElementById(`section-${section}`);
             if (!selected) { showNotification('Unknown workspace section.', 'error'); return; }
+            CloudDeployments.leave();
             document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
             selected.style.display = 'block';
             document.querySelectorAll('.nav-item').forEach(item => {
@@ -3632,6 +3746,9 @@
             }
             if (section === 'agent') {
                 agentInit();
+            }
+            if (section === 'mcp' || section === 'foundry') {
+                CloudDeployments.enter(section);
             }
         }
 
@@ -4050,121 +4167,6 @@
                     <strong>${escapeHtml(value)}</strong>
                 </div>
             `).join('');
-        }
-
-        function renderPermissionPreflight(kind) {
-            const form = document.getElementById(`${kind}-form`);
-            const type = form.elements.type.value;
-            const authName = kind === 'source' ? 'auth_type' : 'dest_auth_type';
-            const authType = form.elements[authName]?.value || 'managed-identity';
-            const identityId = escapeHtml(window.OMNIVEC_IDENTITY_ID || 'YOUR_OMNIVEC_PRINCIPAL_ID');
-            const identityName = 'omnivec-identity';
-            const target = document.getElementById(`${kind}-permission-preflight`);
-
-            if (authType !== 'managed-identity') {
-                target.innerHTML = `
-                    <div class="permission-card">
-                        <div class="permission-card-header">
-                            <div><div class="permission-card-title">Credential-based access</div><div class="permission-card-subtitle">OmniVec cannot preflight administrative permissions without contacting the service.</div></div>
-                            <span class="permission-status">Runtime test required</span>
-                        </div>
-                        <p style="margin:0;color:var(--text-secondary);font-size:12px;">Use a secret reference where supported, rotate the credential regularly, and run the connection test before creating.</p>
-                    </div>`;
-                return;
-            }
-
-            if (kind === 'source' && type === 'sharepoint') {
-                const siteId = wizardValue(form, 'site_id', 'SITE_ID');
-                target.innerHTML = `
-                    <div class="permission-card">
-                        <div class="permission-card-header">
-                            <div><div class="permission-card-title">Microsoft Graph application permission</div><div class="permission-card-subtitle">No separate app registration is required for same-tenant access.</div></div>
-                            <span class="permission-status">Admin approval required</span>
-                        </div>
-                        <dl class="permission-details">
-                            <dt>Identity</dt><dd>${identityName} (${identityId})</dd>
-                            <dt>Required permission</dt><dd>Microsoft Graph <strong>Sites.Selected</strong> (Application)</dd>
-                            <dt>Site scope</dt><dd>${siteId}</dd>
-                            <dt>Site grant</dt><dd><strong>read</strong> only</dd>
-                            <dt>Why</dt><dd>Read files from this site without tenant-wide SharePoint access.</dd>
-                        </dl>
-                        <pre class="permission-command">Connect-MgGraph -Scopes "Sites.FullControl.All"
-$body = @{
-  roles = @("read")
-  grantedToIdentities = @(
-    @{ application = @{ id = "${identityId}"; displayName = "${identityName}" } }
-  )
-} | ConvertTo-Json -Depth 5
-Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/${siteId}/permissions" -Body $body -ContentType "application/json"</pre>
-                        <div style="margin-top:12px;padding:10px;background:var(--warning-muted);border-radius:var(--radius-sm);color:var(--warning);font-size:12px;">If this identity also has Files.Read.All or Sites.Read.All, remove the broad permission after Sites.Selected is verified; otherwise the site-specific grant does not restrict effective access.</div>
-                    </div>`;
-                return;
-            }
-
-            if ((kind === 'source' && type === 'cosmosdb') || (kind === 'destination' && type === 'cosmosdb-vector')) {
-                const endpoint = form.elements.endpoint?.value || '';
-                const account = escapeHtml(endpoint.replace('https://', '').split('.')[0] || 'ACCOUNT_NAME');
-                const database = wizardValue(form, 'database', 'DATABASE');
-                const container = wizardValue(form, 'container', 'CONTAINER');
-                const role = kind === 'destination' ? 'Cosmos DB Built-in Data Contributor' : 'Cosmos DB Built-in Data Reader';
-                const roleId = kind === 'destination'
-                    ? '00000000-0000-0000-0000-000000000002'
-                    : '00000000-0000-0000-0000-000000000001';
-                target.innerHTML = `
-                    <div class="permission-card">
-                        <div class="permission-card-header">
-                            <div><div class="permission-card-title">${role}</div><div class="permission-card-subtitle">Data-plane role at the narrowest container scope.</div></div>
-                            <span class="permission-status">Verify with test</span>
-                        </div>
-                        <dl class="permission-details">
-                            <dt>Identity</dt><dd>${identityName} (${identityId})</dd>
-                            <dt>Role</dt><dd>${role}</dd>
-                            <dt>Scope</dt><dd>/dbs/${database}/colls/${container}</dd>
-                            <dt>Why</dt><dd>${kind === 'destination' ? 'Create and update vector documents.' : 'Read source documents without account keys.'}</dd>
-                        </dl>
-                        <pre class="permission-command">az cosmosdb sql role assignment create \`
-  --account-name "${account}" \`
-  --resource-group "RESOURCE_GROUP" \`
-  --role-definition-id "${roleId}" \`
-  --principal-id "${identityId}" \`
-  --scope "/dbs/${database}/colls/${container}"</pre>
-                    </div>`;
-                return;
-            }
-
-            if (kind === 'source' && type === 'azure-blob') {
-                const accountUrl = form.elements.account_url?.value || '';
-                const account = escapeHtml(accountUrl.replace('https://', '').split('.')[0] || 'STORAGE_ACCOUNT');
-                const container = wizardValue(form, 'container', 'CONTAINER');
-                target.innerHTML = `
-                    <div class="permission-card">
-                        <div class="permission-card-header">
-                            <div><div class="permission-card-title">Storage Blob Data Reader</div><div class="permission-card-subtitle">Read-only access scoped to the selected container.</div></div>
-                            <span class="permission-status">Verify with test</span>
-                        </div>
-                        <dl class="permission-details"><dt>Identity</dt><dd>${identityName} (${identityId})</dd><dt>Role</dt><dd>Storage Blob Data Reader</dd><dt>Container</dt><dd>${container}</dd></dl>
-                        <pre class="permission-command">az role assignment create \`
-  --role "Storage Blob Data Reader" \`
-  --assignee-object-id "${identityId}" \`
-  --assignee-principal-type ServicePrincipal \`
-  --scope "/subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}"</pre>
-                    </div>`;
-                return;
-            }
-
-            const guidance = kind === 'destination' && type === 'onelake-iceberg'
-                ? 'Grant the workload identity access to the Fabric workspace, lakehouse, staging path, and Spark Job Definition. If Garnet mirroring is enabled, separately verify its TLS and authentication settings.'
-                : kind === 'source' && type === 'onelake-iceberg'
-                    ? 'Grant the workload identity read access to the Fabric workspace and selected lakehouse table. Same-tenant access uses the existing OmniVec identity; a separate app registration is not required.'
-                    : 'This connector uses service-specific permissions. Apply least privilege to the selected database, table, index, or namespace.';
-            target.innerHTML = `
-                <div class="permission-card">
-                    <div class="permission-card-header">
-                        <div><div class="permission-card-title">Service-specific access</div><div class="permission-card-subtitle">Confirm the exact data scope with the service administrator.</div></div>
-                        <span class="permission-status">Runtime test required</span>
-                    </div>
-                    <dl class="permission-details"><dt>Identity</dt><dd>${identityName} (${identityId})</dd><dt>Guidance</dt><dd>${guidance}</dd></dl>
-                </div>`;
         }
 
         // -------- Export / Import --------
@@ -4639,6 +4641,8 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
         }
 
         function renderSources() {
+            renderInventorySummary('sources', sources);
+            if (!sources.length) renderPaginationControls('sources-table', 'sources', 0);
             const tbody = document.getElementById('sources-table');
             if (!sources.length) {
                 tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">
@@ -4740,6 +4744,7 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                 </div>
 
                 <nav style="display: flex; flex-direction: column; gap: 4px;">
+                    <button type="button" class="btn btn-secondary" onclick="showResourcePermissions('source', currentSourceId)">Check access / fix permissions</button>
                     <button class="detail-tab active" data-tab="general" onclick="switchDetailTab('general')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--accent-primary); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                         General
@@ -5054,26 +5059,9 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
 
                     <h4 style="margin: 0 0 16px 0; font-size: 14px; color: var(--text-secondary);">Troubleshooting Connection Issues</h4>
                     ${authType === 'managed-identity' ? `
-                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 20px; font-size: 13px;">
-                            <p style="margin: 0 0 16px 0; font-weight: 500;">If connection fails with Managed Identity:</p>
-                            <ol style="margin: 0; padding-left: 20px; color: var(--text-secondary); line-height: 2;">
-                                <li>Verify the service account has correct identity annotations</li>
-                                <li>Check storage account firewall allows AKS subnet</li>
-                                <li style="margin-top: 8px;">Assign RBAC role:
-                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Bash / Linux:</div>
-                                    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin: 4px 0 8px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \\
-  --assignee &lt;managed-identity-client-id&gt; \\
-  --role "Storage Blob Data Reader" \\
-  --scope /subscriptions/.../storageAccounts/&lt;name&gt;</div>
-                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">PowerShell / Windows:</div>
-                                    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin: 4px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az role assignment create \`
-  --assignee &lt;managed-identity-client-id&gt; \`
-  --role "Storage Blob Data Reader" \`
-  --scope /subscriptions/.../storageAccounts/&lt;name&gt;</div>
-                                </li>
-                                <li style="margin-top: 8px;"><strong>Azure Portal:</strong> Storage Account → Access Control (IAM) → Add role assignment → Select "Storage Blob Data Reader" → Assign to your managed identity</li>
-                            </ol>
-                        </div>
+                        <p>Check the actual workload identity, resource access and network evidence before changing permissions.</p>
+                        <p>Expected read-only role: ${source.type === 'cosmosdb' ? 'Cosmos DB Built-in Data Reader' : 'Storage Blob Data Reader'}. A failed connection alone does not prove this role is missing.</p>
+                        <button type="button" class="btn btn-secondary" onclick="showResourcePermissions('source', currentSourceId)">Check access / fix permissions</button>
                     ` : `
                         <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 20px; font-size: 13px;">
                             <p style="margin: 0 0 16px 0; font-weight: 500;">If connection fails with Connection String:</p>
@@ -5437,6 +5425,8 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
         }
 
         function renderDestinations() {
+            renderInventorySummary('destinations', destinations);
+            if (!destinations.length) renderPaginationControls('destinations-table', 'destinations', 0);
             const tbody = document.getElementById('destinations-table');
             if (!destinations.length) {
                 tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state">
@@ -5537,6 +5527,7 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
                 </div>
 
                 <nav style="display: flex; flex-direction: column; gap: 4px;">
+                    <button type="button" class="btn btn-secondary" onclick="showResourcePermissions('destination', currentDestinationId)">Check access / fix permissions</button>
                     <button class="dest-detail-tab active" data-tab="general" onclick="switchDestDetailTab('general')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--accent-primary); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                         General
@@ -5766,32 +5757,8 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
 
                     <h4 style="margin: 0 0 16px 0; font-size: 14px; color: var(--text-secondary);">Troubleshooting Connection Issues</h4>
                     ${dest.type === 'cosmosdb-vector' && authType === 'managed-identity' ? `
-                        <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 20px; font-size: 13px;">
-                            <p style="margin: 0 0 16px 0; font-weight: 500;">If connection fails with Managed Identity:</p>
-                            <ol style="margin: 0; padding-left: 20px; color: var(--text-secondary); line-height: 2;">
-                                <li>Verify the managed identity has <strong>Cosmos DB Built-in Data Contributor</strong> role on the target account</li>
-                                <li>Check that the CosmosDB account firewall allows AKS subnet</li>
-                                <li style="margin-top: 8px;">Find resource group:
-                                    <div style="background: var(--bg-secondary); padding: 8px; border-radius: 6px; margin: 6px 0; font-family: 'JetBrains Mono', monospace; font-size: 11px;">az cosmosdb list --query "[?name=='ACCOUNT'].resourceGroup" -o tsv</div>
-                                </li>
-                                <li style="margin-top: 8px;">Assign RBAC role:
-                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">Bash / Linux:</div>
-                                    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin: 4px 0 8px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az cosmosdb sql role assignment create \\
-  --account-name "ACCOUNT" \\
-  --resource-group "RG_NAME" \\
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \\
-  --principal-id "PRINCIPAL_ID" \\
-  --scope "/dbs"</div>
-                                    <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 4px;">PowerShell / Windows:</div>
-                                    <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin: 4px 0; font-family: var(--font-mono), monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap;">az cosmosdb sql role assignment create \`
-  --account-name "ACCOUNT" \`
-  --resource-group "RG_NAME" \`
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \`
-  --principal-id "PRINCIPAL_ID" \`
-  --scope "/dbs"</div>
-                                </li>
-                            </ol>
-                        </div>
+                        <p>Check the actual workload identity, resource access and network evidence before changing permissions.</p>
+                        <button type="button" class="btn btn-secondary" onclick="showResourcePermissions('destination', currentDestinationId)">Check access / fix permissions</button>
                     ` : `
                         <div style="background: var(--bg-tertiary); border-radius: 8px; padding: 20px; font-size: 13px;">
                             <p style="margin: 0 0 16px 0; font-weight: 500;">If connection fails:</p>
@@ -6135,6 +6102,8 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
         }
 
         function renderPipelines() {
+            renderInventorySummary('pipelines', pipelines);
+            if (!pipelines.length) renderPaginationControls('pipelines-table', 'pipelines', 0);
             const tbody = document.getElementById('pipelines-table');
             if (!pipelines.length) {
                 tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
@@ -9794,83 +9763,9 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             }
         }
 
-        function getAccessGuidance(type, config, error) {
-            // Extract principal ID from error message if available
-            const principalMatch = error ? error.match(/principal \[([a-f0-9-]+)\]/i) : null;
-            const identityId = principalMatch ? principalMatch[1] : 'YOUR_PRINCIPAL_ID';
-
-            // Extract account name from error if available (e.g., "Auth <account-name>")
-            const accountMatch = error ? error.match(/Auth ([a-zA-Z0-9-]+)\s*:/) : null;
-
-            if (type === 'azure-blob') {
-                const accountName = config.account_url ? config.account_url.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME';
-                return `
-                    <div style="background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px;">
-                        <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access via Azure CLI:</div>
-                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 12px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az role assignment create \\
-  --role "Storage Blob Data Reader" \\
-  --assignee-object-id "${identityId}" \\
-  --assignee-principal-type ServicePrincipal \\
-  --scope "/subscriptions/YOUR_SUB/resourceGroups/YOUR_RG/providers/Microsoft.Storage/storageAccounts/${accountName}"</code></pre>
-                        <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Or via Azure Portal:</div>
-                        <ol style="font-size: 12px; padding-left: 20px; color: var(--text-secondary);">
-                            <li>Go to Storage Account <strong>${accountName}</strong> → Access Control (IAM)</li>
-                            <li>Click "Add role assignment"</li>
-                            <li>Select role: <strong>Storage Blob Data Reader</strong></li>
-                            <li>Assign to managed identity with ID: <strong>${identityId}</strong></li>
-                        </ol>
-                    </div>
-                `;
-            } else if (type === 'sharepoint') {
-                const siteId = escapeHtml(config.site_id || 'SITE_ID');
-                return `
-                    <div style="background:var(--bg-tertiary);padding:12px;border-radius:var(--radius-md);margin-top:8px;">
-                        <div style="font-weight:500;margin-bottom:8px;color:var(--text-primary);">Grant least-privilege SharePoint access:</div>
-                        <ol style="font-size:12px;padding-left:20px;color:var(--text-secondary);">
-                            <li>Grant the OmniVec managed identity Microsoft Graph <strong>Sites.Selected</strong> application permission and admin consent.</li>
-                            <li>Grant that identity <strong>read</strong> permission on site <strong>${siteId}</strong>.</li>
-                            <li>Remove broad <strong>Files.Read.All</strong> or <strong>Sites.Read.All</strong> after the site grant is verified.</li>
-                            <li>Wait for permission propagation, then run this test again.</li>
-                        </ol>
-                        <pre style="background:var(--bg-secondary);color:var(--text-primary);padding:10px;border-radius:6px;font-size:11px;overflow-x:auto;margin:8px 0 0;"><code>Connect-MgGraph -Scopes "Sites.FullControl.All"
-$body = @{ roles = @("read"); grantedToIdentities = @(@{ application = @{ id = "${identityId}"; displayName = "omnivec-identity" } }) } | ConvertTo-Json -Depth 5
-Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/${siteId}/permissions" -Body $body -ContentType "application/json"</code></pre>
-                    </div>
-                `;
-            } else if (type === 'cosmosdb') {
-                const accountName = accountMatch ? accountMatch[1] : (config.endpoint ? config.endpoint.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME');
-                const database = escapeHtml(config.database || 'DATABASE');
-                const container = escapeHtml(config.container || 'CONTAINER');
-                return `
-                    <div style="background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px;">
-                        <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access — Bash / Linux:</div>
-                        <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 6px;">First, find the resource group:</div>
-                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 8px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb list --query "[?name=='${accountName}'].resourceGroup" -o tsv</code></pre>
-                        <div style="font-size: 11px; color: var(--text-tertiary); margin-bottom: 6px;">Then run (replace RG_NAME with result above):</div>
-                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
-  --account-name "${accountName}" \\
-  --resource-group "RG_NAME" \\
-  --role-definition-id "00000000-0000-0000-0000-000000000001" \\
-  --principal-id "${identityId}" \\
-  --scope "/dbs/${database}/colls/${container}"</code></pre>
-                        <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">PowerShell / Windows:</div>
-                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
-  --account-name "${accountName}" \`
-  --resource-group "RG_NAME" \`
-  --role-definition-id "00000000-0000-0000-0000-000000000001" \`
-  --principal-id "${identityId}" \`
-  --scope "/dbs/${database}/colls/${container}"</code></pre>
-                        <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Or via Azure Portal:</div>
-                        <ol style="font-size: 12px; padding-left: 20px; color: var(--text-secondary);">
-                            <li>Go to CosmosDB Account <strong>${accountName}</strong> → Access Control (IAM)</li>
-                            <li>Click "Add role assignment"</li>
-                            <li>Add: <strong>Cosmos DB Built-in Data Reader</strong></li>
-                            <li>Assign to managed identity with principal ID: <strong>${identityId}</strong></li>
-                        </ol>
-                    </div>
-                `;
-            }
-            return '';
+        function getAccessGuidance() {
+            return `<p>A failed connection does not necessarily mean missing permissions. Run the access diagnosis before granting a role.</p>
+                <button type="button" class="btn btn-secondary" onclick="showResourceWizardStep('source', 2)">Diagnose access / get fix instructions</button>`;
         }
 
         function getSuccessTips(type, config, authType) {
@@ -10284,34 +10179,9 @@ Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/
             }
         }
 
-        function getDestAccessGuidance(type, config) {
-            const identityId = (window.OMNIVEC_IDENTITY_ID || '<your-omnivec-identity-client-id>');
-            if (type === 'cosmosdb-vector') {
-                const accountName = config.endpoint ? config.endpoint.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME';
-                const database = escapeHtml(config.database || 'DATABASE');
-                const container = escapeHtml(config.container || 'CONTAINER');
-                return `
-                    <div style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px; font-size: 12px;">
-                        <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access:</div>
-                        <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 4px;">Find RG: <code style="background:var(--bg-secondary); color:var(--text-primary);padding:2px 6px;border-radius:3px;">az cosmosdb list --query "[?name=='${accountName}'].resourceGroup" -o tsv</code></div>
-                        <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 2px;">Bash / Linux:</div>
-                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0 0 8px 0;"><code>az cosmosdb sql role assignment create \\
-  --account-name "${accountName}" \\
-  --resource-group "RG_NAME" \\
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \\
-  --principal-id "${identityId}" \\
-  --scope "/dbs/${database}/colls/${container}"</code></pre>
-                        <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 2px;">PowerShell / Windows:</div>
-                        <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0;"><code>az cosmosdb sql role assignment create \`
-  --account-name "${accountName}" \`
-  --resource-group "RG_NAME" \`
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \`
-  --principal-id "${identityId}" \`
-  --scope "/dbs/${database}/colls/${container}"</code></pre>
-                    </div>
-                `;
-            }
-            return '';
+        function getDestAccessGuidance() {
+            return `<p>A failed connection does not necessarily mean missing permissions. Run the access diagnosis before granting a role.</p>
+                <button type="button" class="btn btn-secondary" onclick="showResourceWizardStep('destination', 2)">Diagnose access / get fix instructions</button>`;
         }
 
         // =========================================
