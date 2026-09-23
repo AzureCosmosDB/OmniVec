@@ -25,6 +25,24 @@ Create a source with `type: "onelake-iceberg"`:
 }
 ```
 
+Same-tenant pipelines use the deployment workload identity. For cross-tenant
+OneLake access, set the federated application on the individual pipeline source:
+
+```json
+{
+  "source_id": "src-onelake",
+  "onelake_identity": {
+    "tenant_id": "11111111-1111-1111-1111-111111111111",
+    "client_id": "22222222-2222-2222-2222-222222222222"
+  }
+}
+```
+
+Cross-tenant pipelines use isolated credentials and checkpoint files. The
+deployment identity continues to send Service Bus messages in the OmniVec
+tenant. OneLake sources can target either a `cosmosdb-vector` destination or
+the same-lakehouse `onelake-iceberg` write-back destination described below.
+
 The watcher hashes only `content_fields`; managed fields such as `embedding`,
 `content_hash`, `pipeline_id`, `pipeline_generation`, and
 `omnivec_writer_marker` are never hashed. Checkpoints are stored at

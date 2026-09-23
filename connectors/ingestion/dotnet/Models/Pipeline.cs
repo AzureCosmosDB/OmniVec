@@ -79,6 +79,18 @@ public class PipelineSource
 
     [JsonPropertyName("file_types")]
     public List<string> FileTypes { get; set; } = new() { "txt", "json", "pdf", "docx", "md", "csv" };
+
+    [JsonPropertyName("sharepoint_identity")]
+    public SharePointPipelineIdentity? SharePointIdentity { get; set; }
+}
+
+public class SharePointPipelineIdentity
+{
+    [JsonPropertyName("tenant_id")]
+    public string TenantId { get; set; } = "";
+
+    [JsonPropertyName("client_id")]
+    public string ClientId { get; set; } = "";
 }
 
 public class PipelinesResponse

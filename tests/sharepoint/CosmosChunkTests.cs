@@ -35,11 +35,18 @@ internal static class CosmosChunkTests
             var pipeline = JsonSerializer.Deserialize<OmniVec.ChangeFeed.Models.Pipeline>(
                 """{"content_strategy":"chunk","chunk_config":{"chunk_size":300,"chunk_overlap":50,"chunk_unit":"tokens","store_text":true,"text_field":"body","doc_id_pattern":"{pipeline}-{source_hash}-{chunk}"}}""")!;
             var message = new OmniVec.ChangeFeed.Models.EmbeddingMessage
-            { ContentStrategy = pipeline.ContentStrategy, ChunkConfig = pipeline.ChunkConfig };
+            {
+                ContentStrategy = pipeline.ContentStrategy,
+                ChunkConfig = pipeline.ChunkConfig,
+                SharePointGraphTenantId = "11111111-1111-1111-1111-111111111111",
+                SharePointGraphClientId = "22222222-2222-2222-2222-222222222222",
+            };
             var worker = JsonSerializer.Deserialize<EmbeddingMessage>(JsonSerializer.Serialize(message))!;
             Check(worker.ContentStrategy == "chunk" && worker.ChunkConfig!.Size == 300
                 && worker.ChunkConfig.Overlap == 50 && worker.ChunkConfig.Unit == "tokens"
-                && worker.ChunkConfig.StoreText && worker.ChunkConfig.TextField == "body");
+                && worker.ChunkConfig.StoreText && worker.ChunkConfig.TextField == "body"
+                && worker.SharePointGraphTenantId == message.SharePointGraphTenantId
+                && worker.SharePointGraphClientId == message.SharePointGraphClientId);
             Check(new EmbeddingMessage().ContentStrategy == "truncate"
                 && new OmniVec.ChangeFeed.Models.Pipeline().ContentStrategy == "truncate");
         });

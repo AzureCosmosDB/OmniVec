@@ -49,6 +49,9 @@ docgrok/router/target/
 # Local linked worktrees
 .worktrees/
 
+# Pytest temporary directories
+pytest-of-*/
+
 # .NET build output
 bin/
 obj/

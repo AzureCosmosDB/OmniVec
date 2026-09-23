@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Net;
 using System.Text.Json;
@@ -12,6 +13,7 @@ public sealed class SharePointContentClient
     private static readonly string[] GraphScopes = ["https://graph.microsoft.com/.default"];
     private readonly HttpClient _http;
     private readonly DefaultAzureCredential _credential = new();
+    private readonly ConcurrentDictionary<string, TokenCredential> _pipelineCredentials = new();
 
     public SharePointContentClient(HttpClient http)
     {
@@ -24,11 +26,15 @@ public sealed class SharePointContentClient
         string itemId,
         long maxBytes,
         CancellationToken ct,
-        string? expectedETag = null)
+        string? expectedETag = null,
+        string? graphTenantId = null,
+        string? graphClientId = null,
+        string? pipelineId = null)
     {
         if (maxBytes <= 0 || maxBytes > 50L * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maxBytes), "SharePoint files must be limited to at most 50 MiB");
-        var token = await _credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
+        var credential = GetCredential(graphTenantId, graphClientId, pipelineId);
+        var token = await credential.GetTokenAsync(new TokenRequestContext(GraphScopes), ct);
         var url =
             $"https://graph.microsoft.com/v1.0/sites/{Uri.EscapeDataString(siteId)}" +
             $"/drives/{Uri.EscapeDataString(driveId)}/items/{Uri.EscapeDataString(itemId)}";
@@ -60,6 +66,17 @@ public sealed class SharePointContentClient
         // ETag matching Graph's eTag, or on If-Match being forwarded on redirect.
         if (expectedETag is not null) await VerifyVersionAsync(url, token.Token, expectedETag, ct);
         return buffer.ToArray();
+    }
+
+    private TokenCredential GetCredential(string? tenantId, string? clientId, string? pipelineId)
+    {
+        if (string.IsNullOrWhiteSpace(tenantId) && string.IsNullOrWhiteSpace(clientId))
+            return _credential;
+        if (string.IsNullOrWhiteSpace(pipelineId))
+            throw new InvalidOperationException("Cross-tenant SharePoint messages require a pipeline ID");
+        var key = $"{pipelineId.Trim()}|{tenantId?.Trim()}|{clientId?.Trim()}";
+        return _pipelineCredentials.GetOrAdd(
+            key, _ => SharePointGraphCredentialFactory.Create(tenantId, clientId));
     }
 
     private async Task VerifyVersionAsync(string url, string token, string expected, CancellationToken ct)

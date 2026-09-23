@@ -255,6 +255,10 @@ if ("$rgExists".Trim() -eq "true") {
             "omnivec-gpu-count"  = "OMNIVEC_GPU_NODE_COUNT"
             "omnivec-metadata"   = "OMNIVEC_METADATA_STORE"
             "omnivec-build"      = "OMNIVEC_BUILD_MODE"
+            "omnivec-build-source" = "OMNIVEC_BUILD"
+            "omnivec-image-tag" = "OMNIVEC_IMAGE_TAG"
+            "omnivec-sharepoint" = "OMNIVEC_SHAREPOINT_ENABLED"
+            "omnivec-onelake-iceberg" = "OMNIVEC_ONELAKE_ICEBERG_ENABLED"
         }
         foreach ($tag in $tagMap.GetEnumerator()) {
             $val = $tags.PSObject.Properties[$tag.Key].Value

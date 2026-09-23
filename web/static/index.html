@@ -616,6 +616,226 @@
             gap: 12px;
         }
 
+        .resource-wizard-form {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .resource-wizard {
+            display: grid;
+            grid-template-columns: 220px minmax(0, 1fr);
+            height: 100%;
+        }
+
+        .resource-wizard-sidebar {
+            padding: 20px 14px;
+            background: var(--bg-tertiary);
+            border-right: 1px solid var(--border-subtle);
+        }
+
+        .resource-wizard-sidebar-title {
+            padding: 0 10px 12px;
+            color: var(--text-tertiary);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .resource-wizard-step {
+            width: 100%;
+            display: grid;
+            grid-template-columns: 26px 1fr;
+            align-items: center;
+            gap: 10px;
+            padding: 11px 10px;
+            border: 0;
+            border-radius: var(--radius-md);
+            background: transparent;
+            color: var(--text-secondary);
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .resource-wizard-step + .resource-wizard-step {
+            margin-top: 4px;
+        }
+
+        .resource-wizard-step-number {
+            width: 26px;
+            height: 26px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--border-default);
+            border-radius: 50%;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .resource-wizard-step.active {
+            background: var(--accent-muted);
+            color: var(--text-primary);
+        }
+
+        .resource-wizard-step.active .resource-wizard-step-number {
+            border-color: var(--accent-primary);
+            background: var(--accent-primary);
+            color: white;
+        }
+
+        .resource-wizard-step.complete .resource-wizard-step-number {
+            border-color: var(--success);
+            background: var(--success-muted);
+            color: var(--success);
+        }
+
+        .resource-wizard-main {
+            min-width: 0;
+            padding: 28px 32px 36px;
+            overflow-y: auto;
+        }
+
+        .resource-wizard-panel {
+            display: none;
+            max-width: 860px;
+            margin: 0 auto;
+        }
+
+        .resource-wizard-panel.active {
+            display: block;
+        }
+
+        .resource-wizard-panel h4 {
+            margin: 0 0 6px;
+            font-size: 18px;
+        }
+
+        .resource-wizard-intro {
+            margin: 0 0 24px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .permission-card {
+            padding: 16px;
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            background: var(--bg-primary);
+        }
+
+        .permission-card + .permission-card {
+            margin-top: 12px;
+        }
+
+        .permission-card-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 12px;
+        }
+
+        .permission-card-title {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .permission-card-subtitle {
+            margin-top: 3px;
+            color: var(--text-tertiary);
+            font-size: 12px;
+        }
+
+        .permission-status {
+            flex: 0 0 auto;
+            padding: 4px 9px;
+            border-radius: 999px;
+            background: var(--warning-muted);
+            color: var(--warning);
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .permission-status.ready {
+            background: var(--success-muted);
+            color: var(--success);
+        }
+
+        .permission-details {
+            display: grid;
+            grid-template-columns: 130px minmax(0, 1fr);
+            gap: 7px 14px;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .permission-details dt {
+            color: var(--text-tertiary);
+        }
+
+        .permission-details dd {
+            margin: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .permission-command {
+            margin-top: 14px;
+            padding: 12px;
+            overflow-x: auto;
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font: 11px/1.55 var(--font-mono);
+            white-space: pre-wrap;
+        }
+
+        .wizard-review {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .wizard-review-item {
+            padding: 12px 14px;
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+        }
+
+        .wizard-review-item small {
+            display: block;
+            margin-bottom: 4px;
+            color: var(--text-tertiary);
+        }
+
+        .wizard-review-item strong {
+            font-size: 13px;
+            overflow-wrap: anywhere;
+        }
+
+        .verification-gate {
+            margin-top: 16px;
+            padding: 14px;
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .verification-gate label {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            cursor: pointer;
+        }
+
+        .verification-gate input {
+            margin-top: 2px;
+        }
+
         /* Empty State */
         .empty-state {
             text-align: center;
@@ -854,6 +1074,46 @@
         }
 
         @media (max-width: 768px) {
+            .resource-wizard {
+                grid-template-columns: 1fr;
+            }
+
+            .resource-wizard-sidebar {
+                display: flex;
+                overflow-x: auto;
+                border-right: 0;
+                border-bottom: 1px solid var(--border-subtle);
+            }
+
+            .resource-wizard-sidebar-title {
+                display: none;
+            }
+
+            .resource-wizard-step {
+                min-width: 145px;
+            }
+
+            .resource-wizard-step + .resource-wizard-step {
+                margin-top: 0;
+            }
+
+            .resource-wizard-main {
+                padding: 22px 18px 30px;
+            }
+
+            .wizard-review {
+                grid-template-columns: 1fr;
+            }
+
+            .permission-details {
+                grid-template-columns: 1fr;
+                gap: 2px;
+            }
+
+            .permission-details dd {
+                margin-bottom: 7px;
+            }
+
             .sidebar {
                 transform: translateX(-100%);
             }
@@ -1727,7 +1987,7 @@
 
             <section id="section-playground" class="section" style="display: none;">
                 <header class="header">
-                    <h2 class="header-title">Vector Search Playground</h2>
+                    <h2 class="header-title">Search Playground</h2>
                 </header>
 
                 <div class="content">
@@ -1755,19 +2015,20 @@
                             </div>
                             <div style="margin-top: 16px; display: flex; gap: 16px; align-items: center;">
                                 <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
+                                    <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Mode:</label>
+                                    <select class="form-input" id="playground-search-mode" style="width: 130px; padding: 6px 10px;" onchange="onPlaygroundModeChange()">
+                                        <option value="vector" selected>Vector</option>
+                                        <option value="fts">Full-Text</option>
+                                        <option value="hybrid">Hybrid</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
                                     <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Top K:</label>
                                     <input type="number" class="form-input" id="playground-topk" value="5" min="1" max="20" style="width: 70px; text-align: center;">
                                 </div>
                                 <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
-                                    <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Merge:</label>
-                                    <select class="form-input" id="playground-merge-strategy" style="width: 170px; padding: 6px 10px;">
-                                        <option value="interleave" selected>Interleave by Score</option>
-                                        <option value="round_robin">Round Robin</option>
-                                        <option value="per_index">Per-Index Cap</option>
-                                    </select>
-                                </div>
-                                <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 8px;">
                                     <label class="form-label" style="margin-bottom: 0; white-space: nowrap;">Image:</label>
+                                    <input type="hidden" id="playground-merge-strategy" value="rrf">
                                     <input type="file" id="playground-image-file" accept="image/*" style="font-size: 12px;" onchange="onPlaygroundImageChange(event)">
                                     <span id="playground-image-status" style="font-size: 12px; color: var(--text-tertiary);"></span>
                                     <button type="button" class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;" onclick="clearPlaygroundImage()">Clear</button>
@@ -2078,7 +2339,10 @@
     <div class="modal-overlay" id="source-modal">
         <div class="modal modal-full">
             <div class="modal-header">
-                <h3 class="modal-title">Add Source</h3>
+                <div>
+                    <h3 class="modal-title">Add Source</h3>
+                    <div style="font-size:12px;color:var(--text-tertiary);margin-top:3px;">Configure access, verify permissions, and test before creating.</div>
+                </div>
                 <button class="modal-close" onclick="closeModal('source-modal')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
                         <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
@@ -2086,12 +2350,19 @@
                 </button>
             </div>
             <div class="modal-body" style="padding: 0; flex: 1; max-height: none; overflow: hidden;">
-                <form id="source-form" style="height: 100%;">
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; height: 100%;">
-                        <!-- Left Side: Configuration -->
-                        <div style="padding: 24px; border-right: 1px solid var(--border-subtle); overflow-y: auto;">
-                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Configuration</div>
-
+                <form id="source-form" class="resource-wizard-form" data-test-success="false">
+                    <div class="resource-wizard">
+                        <aside class="resource-wizard-sidebar" aria-label="Source setup steps">
+                            <div class="resource-wizard-sidebar-title">Source setup</div>
+                            <button type="button" class="resource-wizard-step active" data-resource-wizard="source" data-step="0" onclick="goToResourceWizardStep('source', 0)"><span class="resource-wizard-step-number">1</span><span>Source type</span></button>
+                            <button type="button" class="resource-wizard-step" data-resource-wizard="source" data-step="1" onclick="goToResourceWizardStep('source', 1)"><span class="resource-wizard-step-number">2</span><span>Configuration</span></button>
+                            <button type="button" class="resource-wizard-step" data-resource-wizard="source" data-step="2" onclick="goToResourceWizardStep('source', 2)"><span class="resource-wizard-step-number">3</span><span>Permissions</span></button>
+                            <button type="button" class="resource-wizard-step" data-resource-wizard="source" data-step="3" onclick="goToResourceWizardStep('source', 3)"><span class="resource-wizard-step-number">4</span><span>Test &amp; review</span></button>
+                        </aside>
+                        <div class="resource-wizard-main">
+                            <section class="resource-wizard-panel active" id="source-wizard-panel-0">
+                                <h4>Choose the source</h4>
+                                <p class="resource-wizard-intro">Start with a recognizable name and the service that owns the data.</p>
                             <div class="form-group">
                                 <label class="form-label">Name</label>
                                 <input type="text" class="form-input" name="name" placeholder="My Blob Storage" required>
@@ -2106,35 +2377,15 @@
                                     <option value="postgresql">PostgreSQL</option>
                                 </select>
                             </div>
-                            <div id="source-config-fields">
-                                <div class="form-group">
-                                    <label class="form-label">Account URL</label>
-                                    <input type="text" class="form-input" name="account_url" placeholder="https://account.blob.core.windows.net">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Container</label>
-                                    <input type="text" class="form-input" name="container" placeholder="documents">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Prefix (optional)</label>
-                                    <input type="text" class="form-input" name="prefix" placeholder="uploads/">
-                                </div>
-                            </div>
-                            <div style="display: flex; align-items: center; gap: 10px; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); border: 1px solid var(--border-primary);">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="20" height="20">
-                                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                                </svg>
-                                <div style="font-size: 13px;">
-                                    <div style="font-weight: 500; color: var(--text-primary);">Real-Time Processing</div>
-                                    <div style="color: var(--text-tertiary);">Changes are detected and processed automatically</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Right Side: Authentication & Testing -->
-                        <div style="padding: 24px; background: var(--bg-tertiary); display: flex; flex-direction: column; overflow-y: auto;">
-                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Authentication & Access</div>
-
+                            </section>
+                            <section class="resource-wizard-panel" id="source-wizard-panel-1">
+                                <h4>Configure the connection</h4>
+                                <p class="resource-wizard-intro">Enter the exact resource and data scope OmniVec should read.</p>
+                                <div id="source-config-fields"></div>
+                            </section>
+                            <section class="resource-wizard-panel" id="source-wizard-panel-2">
+                                <h4>Grant the minimum permissions</h4>
+                                <p class="resource-wizard-intro">OmniVec checks access at runtime. Use managed identity when the source supports it.</p>
                             <div class="form-group">
                                 <label class="form-label">Authentication Method</label>
                                 <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -2161,24 +2412,34 @@
                             <div id="auth-fields" style="margin-bottom: 16px;">
                                 <!-- Dynamic auth fields -->
                             </div>
-
-                            <!-- Test Connection Button -->
+                                <div id="source-permission-preflight"></div>
+                            </section>
+                            <section class="resource-wizard-panel" id="source-wizard-panel-3">
+                                <h4>Test and review</h4>
+                                <p class="resource-wizard-intro">Run the same runtime access check the source will use after creation.</p>
+                                <div id="source-review" class="wizard-review"></div>
                             <button type="button" class="btn btn-secondary" onclick="testSourceConnection()" id="test-source-btn" style="width: 100%; justify-content: center; padding: 12px;">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
                                     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
                                 </svg>
                                 Test Connection
                             </button>
-
-                            <!-- Test Connection Result -->
                             <div id="source-test-result" style="margin-top: 16px; flex: 1; overflow-y: auto;"></div>
+                                <div class="verification-gate">
+                                    <label><input type="checkbox" name="create_without_test" onchange="updateResourceWizardButtons('source')"><span>Create without a successful test. I understand the source may remain unavailable until permissions or configuration are fixed.</span></label>
+                                </div>
+                            </section>
                         </div>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="justify-content:space-between;">
                 <button class="btn btn-secondary" onclick="closeModal('source-modal')">Cancel</button>
-                <button class="btn btn-primary" onclick="saveSource()">Add Source</button>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-secondary" id="source-wizard-prev" onclick="previousResourceWizardStep('source')" style="display:none;">Previous</button>
+                    <button class="btn btn-primary" id="source-wizard-next" onclick="nextResourceWizardStep('source')">Next</button>
+                    <button class="btn btn-primary" id="source-wizard-create" onclick="saveSource()" style="display:none;" disabled>Add Source</button>
+                </div>
             </div>
         </div>
     </div>
@@ -2187,12 +2448,10 @@
     <div class="modal-overlay" id="destination-modal">
         <div class="modal modal-full">
             <div class="modal-header">
-                <h3 class="modal-title" style="display: flex; align-items: center; gap: 10px;">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="22" height="22" style="color: var(--accent-primary);">
-                        <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M2 12h2"/><path d="M20 12h2"/>
-                    </svg>
-                    Add Vector Destination
-                </h3>
+                <div>
+                    <h3 class="modal-title">Add Vector Destination</h3>
+                    <div style="font-size:12px;color:var(--text-tertiary);margin-top:3px;">Validate write access and vector compatibility before creating.</div>
+                </div>
                 <button class="modal-close" onclick="closeModal('destination-modal')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
                         <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
@@ -2200,12 +2459,19 @@
                 </button>
             </div>
             <div class="modal-body" style="padding: 0; flex: 1; max-height: none; overflow: hidden;">
-                <form id="destination-form" style="height: 100%;">
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; height: 100%;">
-                        <!-- Left Side: Configuration -->
-                        <div style="padding: 24px; border-right: 1px solid var(--border-subtle); overflow-y: auto;">
-                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Vector Store Configuration</div>
-
+                <form id="destination-form" class="resource-wizard-form" data-test-success="false">
+                    <div class="resource-wizard">
+                        <aside class="resource-wizard-sidebar" aria-label="Vector destination setup steps">
+                            <div class="resource-wizard-sidebar-title">Destination setup</div>
+                            <button type="button" class="resource-wizard-step active" data-resource-wizard="destination" data-step="0" onclick="goToResourceWizardStep('destination', 0)"><span class="resource-wizard-step-number">1</span><span>Store type</span></button>
+                            <button type="button" class="resource-wizard-step" data-resource-wizard="destination" data-step="1" onclick="goToResourceWizardStep('destination', 1)"><span class="resource-wizard-step-number">2</span><span>Configuration</span></button>
+                            <button type="button" class="resource-wizard-step" data-resource-wizard="destination" data-step="2" onclick="goToResourceWizardStep('destination', 2)"><span class="resource-wizard-step-number">3</span><span>Permissions</span></button>
+                            <button type="button" class="resource-wizard-step" data-resource-wizard="destination" data-step="3" onclick="goToResourceWizardStep('destination', 3)"><span class="resource-wizard-step-number">4</span><span>Test &amp; review</span></button>
+                        </aside>
+                        <div class="resource-wizard-main">
+                            <section class="resource-wizard-panel active" id="destination-wizard-panel-0">
+                                <h4>Choose the vector destination</h4>
+                                <p class="resource-wizard-intro">Name the destination and choose the service that will hold vectors.</p>
                             <div class="form-group">
                                 <label class="form-label">Name</label>
                                 <input type="text" class="form-input" name="name" placeholder="My Vector Store" required>
@@ -2218,26 +2484,15 @@
                                     <option value="onelake-iceberg">OneLake Iceberg + Garnet</option>
                                 </select>
                             </div>
-                            <div id="destination-config-fields">
-                                <div class="form-group">
-                                    <label class="form-label">Endpoint</label>
-                                    <input type="text" class="form-input" name="endpoint" placeholder="https://account.documents.azure.com">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Database</label>
-                                    <input type="text" class="form-input" name="database" placeholder="vectors">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Container</label>
-                                    <input type="text" class="form-input" name="container" placeholder="embeddings">
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Right Side: Authentication & Testing -->
-                        <div style="padding: 24px; background: var(--bg-tertiary); display: flex; flex-direction: column; overflow-y: auto;">
-                            <div style="font-size: 12px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Authentication & Access</div>
-
+                            </section>
+                            <section class="resource-wizard-panel" id="destination-wizard-panel-1">
+                                <h4>Configure storage and vectors</h4>
+                                <p class="resource-wizard-intro">Select the exact write target. Existing vector policies are inspected during the connection test.</p>
+                                <div id="destination-config-fields"></div>
+                            </section>
+                            <section class="resource-wizard-panel" id="destination-wizard-panel-2">
+                                <h4>Grant write access</h4>
+                                <p class="resource-wizard-intro">The ingestion runtime needs data-plane write access; control-plane Contributor is not sufficient.</p>
                             <div class="form-group">
                                 <label class="form-label">Authentication Method</label>
                                 <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -2264,24 +2519,34 @@
                             <div id="dest-auth-fields" style="margin-bottom: 16px;">
                                 <!-- Dynamic auth fields -->
                             </div>
-
-                            <!-- Test Connection Button -->
+                                <div id="destination-permission-preflight"></div>
+                            </section>
+                            <section class="resource-wizard-panel" id="destination-wizard-panel-3">
+                                <h4>Test and review</h4>
+                                <p class="resource-wizard-intro">Verify write access and inspect vector policy compatibility before creating.</p>
+                                <div id="destination-review" class="wizard-review"></div>
                             <button type="button" class="btn btn-secondary" onclick="testDestinationConnection()" id="test-dest-btn" style="width: 100%; justify-content: center; padding: 12px;">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
                                     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
                                 </svg>
                                 Test Connection
                             </button>
-
-                            <!-- Test Connection Result -->
                             <div id="dest-test-result" style="margin-top: 16px; flex: 1; overflow-y: auto;"></div>
+                                <div class="verification-gate">
+                                    <label><input type="checkbox" name="create_without_test" onchange="updateResourceWizardButtons('destination')"><span>Create without a successful test. I understand ingestion may fail until access and vector configuration are corrected.</span></label>
+                                </div>
+                            </section>
                         </div>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer" style="justify-content:space-between;">
                 <button class="btn btn-secondary" onclick="closeModal('destination-modal')">Cancel</button>
-                <button class="btn btn-primary" onclick="saveDestination()">Add Destination</button>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-secondary" id="destination-wizard-prev" onclick="previousResourceWizardStep('destination')" style="display:none;">Previous</button>
+                    <button class="btn btn-primary" id="destination-wizard-next" onclick="nextResourceWizardStep('destination')">Next</button>
+                    <button class="btn btn-primary" id="destination-wizard-create" onclick="saveDestination()" style="display:none;" disabled>Add Destination</button>
+                </div>
             </div>
         </div>
     </div>
@@ -3553,13 +3818,274 @@
         }
 
         function showAddSourceModal() {
-            document.getElementById('source-form').reset();
+            const form = document.getElementById('source-form');
+            form.reset();
+            updateSourceConfig(form.elements.type.value);
+            updateAuthFields();
+            resetResourceWizard('source');
             showModal('source-modal');
         }
 
         function showAddDestinationModal() {
-            document.getElementById('destination-form').reset();
+            const form = document.getElementById('destination-form');
+            form.reset();
+            updateDestinationConfig(form.elements.type.value);
+            updateDestAuthFields();
+            resetResourceWizard('destination');
             showModal('destination-modal');
+        }
+
+        const resourceWizardState = {
+            source: 0,
+            destination: 0,
+        };
+
+        function resetResourceWizard(kind) {
+            const form = document.getElementById(`${kind}-form`);
+            resourceWizardState[kind] = 0;
+            form.dataset.testSuccess = 'false';
+            const override = form.elements.create_without_test;
+            if (override) override.checked = false;
+            const result = document.getElementById(kind === 'source' ? 'source-test-result' : 'dest-test-result');
+            if (result) {
+                result.innerHTML = '';
+                if (kind === 'source') result.style.display = 'none';
+            }
+            form.oninput = event => {
+                if (event.target.name !== 'create_without_test') {
+                    setResourceTestSuccess(kind, false);
+                }
+            };
+            showResourceWizardStep(kind, 0);
+        }
+
+        function setResourceTestSuccess(kind, success) {
+            const form = document.getElementById(`${kind}-form`);
+            if (!form) return;
+            form.dataset.testSuccess = success ? 'true' : 'false';
+            updateResourceWizardButtons(kind);
+        }
+
+        function showResourceWizardStep(kind, step) {
+            resourceWizardState[kind] = Math.max(0, Math.min(3, step));
+            document.querySelectorAll(`[data-resource-wizard="${kind}"]`).forEach(item => {
+                const itemStep = Number(item.dataset.step);
+                item.classList.toggle('active', itemStep === resourceWizardState[kind]);
+                item.classList.toggle('complete', itemStep < resourceWizardState[kind]);
+                item.setAttribute('aria-current', itemStep === resourceWizardState[kind] ? 'step' : 'false');
+            });
+            for (let index = 0; index < 4; index++) {
+                document.getElementById(`${kind}-wizard-panel-${index}`).classList.toggle('active', index === resourceWizardState[kind]);
+            }
+            if (resourceWizardState[kind] === 2) renderPermissionPreflight(kind);
+            if (resourceWizardState[kind] === 3) renderResourceReview(kind);
+            updateResourceWizardButtons(kind);
+        }
+
+        function updateResourceWizardButtons(kind) {
+            const step = resourceWizardState[kind];
+            const form = document.getElementById(`${kind}-form`);
+            const previous = document.getElementById(`${kind}-wizard-prev`);
+            const next = document.getElementById(`${kind}-wizard-next`);
+            const create = document.getElementById(`${kind}-wizard-create`);
+            previous.style.display = step === 0 ? 'none' : 'inline-flex';
+            next.style.display = step === 3 ? 'none' : 'inline-flex';
+            create.style.display = step === 3 ? 'inline-flex' : 'none';
+            const override = form.elements.create_without_test?.checked;
+            create.disabled = form.dataset.testSuccess !== 'true' && !override;
+        }
+
+        function nextResourceWizardStep(kind) {
+            if (!validateResourceWizardStep(kind, resourceWizardState[kind])) return;
+            showResourceWizardStep(kind, resourceWizardState[kind] + 1);
+        }
+
+        function goToResourceWizardStep(kind, targetStep) {
+            if (targetStep <= resourceWizardState[kind]) {
+                showResourceWizardStep(kind, targetStep);
+                return;
+            }
+            for (let step = resourceWizardState[kind]; step < targetStep; step++) {
+                if (!validateResourceWizardStep(kind, step)) return;
+            }
+            showResourceWizardStep(kind, targetStep);
+        }
+
+        function previousResourceWizardStep(kind) {
+            showResourceWizardStep(kind, resourceWizardState[kind] - 1);
+        }
+
+        function validateResourceWizardStep(kind, step) {
+            const form = document.getElementById(`${kind}-form`);
+            if (step === 0 && !form.elements.name.value.trim()) {
+                alert(`Enter a name for this ${kind === 'source' ? 'source' : 'destination'}.`);
+                form.elements.name.focus();
+                return false;
+            }
+            if (step !== 1) return true;
+
+            const type = form.elements.type.value;
+            const requiredByType = kind === 'source'
+                ? {
+                    'azure-blob': ['account_url', 'container'],
+                    sharepoint: ['site_id', 'drive_id'],
+                    'onelake-iceberg': ['warehouse', 'table'],
+                    cosmosdb: ['endpoint', 'database', 'container'],
+                    postgresql: ['host', 'database', 'table'],
+                }
+                : {
+                    'cosmosdb-vector': ['endpoint', 'database', 'container'],
+                    pgvector: ['host', 'database', 'table'],
+                    'onelake-iceberg': ['workspace_id', 'lakehouse_item_id', 'spark_job_definition_item_id', 'staging_file_system', 'target_table'],
+                };
+            const missing = (requiredByType[type] || []).find(name => !String(form.elements[name]?.value || '').trim());
+            if (missing) {
+                const field = form.elements[missing];
+                alert(`Complete ${field?.closest('.form-group')?.querySelector('.form-label')?.textContent || missing} before continuing.`);
+                field?.focus();
+                return false;
+            }
+            return true;
+        }
+
+        function wizardValue(form, name, fallback = 'Not configured') {
+            const value = String(form.elements[name]?.value || '').trim();
+            return escapeHtml(value || fallback);
+        }
+
+        function renderResourceReview(kind) {
+            const form = document.getElementById(`${kind}-form`);
+            const type = form.elements.type.value;
+            const authName = kind === 'source' ? 'auth_type' : 'dest_auth_type';
+            const target = kind === 'source'
+                ? (form.elements.site_id?.value || form.elements.account_url?.value || form.elements.endpoint?.value || form.elements.warehouse?.value || form.elements.host?.value)
+                : (form.elements.endpoint?.value || form.elements.host?.value || form.elements.workspace_id?.value);
+            document.getElementById(`${kind}-review`).innerHTML = [
+                ['Name', form.elements.name.value],
+                ['Type', form.elements.type.options[form.elements.type.selectedIndex].text],
+                ['Target', target || 'Not configured'],
+                ['Authentication', form.elements[authName]?.value || 'Service-specific'],
+            ].map(([label, value]) => `
+                <div class="wizard-review-item">
+                    <small>${escapeHtml(label)}</small>
+                    <strong>${escapeHtml(value)}</strong>
+                </div>
+            `).join('');
+        }
+
+        function renderPermissionPreflight(kind) {
+            const form = document.getElementById(`${kind}-form`);
+            const type = form.elements.type.value;
+            const authName = kind === 'source' ? 'auth_type' : 'dest_auth_type';
+            const authType = form.elements[authName]?.value || 'managed-identity';
+            const identityId = escapeHtml(window.OMNIVEC_IDENTITY_ID || 'YOUR_OMNIVEC_PRINCIPAL_ID');
+            const identityName = 'omnivec-identity';
+            const target = document.getElementById(`${kind}-permission-preflight`);
+
+            if (authType !== 'managed-identity') {
+                target.innerHTML = `
+                    <div class="permission-card">
+                        <div class="permission-card-header">
+                            <div><div class="permission-card-title">Credential-based access</div><div class="permission-card-subtitle">OmniVec cannot preflight administrative permissions without contacting the service.</div></div>
+                            <span class="permission-status">Runtime test required</span>
+                        </div>
+                        <p style="margin:0;color:var(--text-secondary);font-size:12px;">Use a secret reference where supported, rotate the credential regularly, and run the connection test before creating.</p>
+                    </div>`;
+                return;
+            }
+
+            if (kind === 'source' && type === 'sharepoint') {
+                const siteId = wizardValue(form, 'site_id', 'SITE_ID');
+                target.innerHTML = `
+                    <div class="permission-card">
+                        <div class="permission-card-header">
+                            <div><div class="permission-card-title">Microsoft Graph application permission</div><div class="permission-card-subtitle">No separate app registration is required for same-tenant access.</div></div>
+                            <span class="permission-status">Admin approval required</span>
+                        </div>
+                        <dl class="permission-details">
+                            <dt>Identity</dt><dd>${identityName} (${identityId})</dd>
+                            <dt>Required permission</dt><dd>Microsoft Graph <strong>Sites.Selected</strong> (Application)</dd>
+                            <dt>Site scope</dt><dd>${siteId}</dd>
+                            <dt>Site grant</dt><dd><strong>read</strong> only</dd>
+                            <dt>Why</dt><dd>Read files from this site without tenant-wide SharePoint access.</dd>
+                        </dl>
+                        <pre class="permission-command">Connect-MgGraph -Scopes "Sites.FullControl.All"
+$body = @{
+  roles = @("read")
+  grantedToIdentities = @(
+    @{ application = @{ id = "${identityId}"; displayName = "${identityName}" } }
+  )
+} | ConvertTo-Json -Depth 5
+Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/${siteId}/permissions" -Body $body -ContentType "application/json"</pre>
+                        <div style="margin-top:12px;padding:10px;background:var(--warning-muted);border-radius:var(--radius-sm);color:var(--warning);font-size:12px;">If this identity also has Files.Read.All or Sites.Read.All, remove the broad permission after Sites.Selected is verified; otherwise the site-specific grant does not restrict effective access.</div>
+                    </div>`;
+                return;
+            }
+
+            if ((kind === 'source' && type === 'cosmosdb') || (kind === 'destination' && type === 'cosmosdb-vector')) {
+                const endpoint = form.elements.endpoint?.value || '';
+                const account = escapeHtml(endpoint.replace('https://', '').split('.')[0] || 'ACCOUNT_NAME');
+                const database = wizardValue(form, 'database', 'DATABASE');
+                const container = wizardValue(form, 'container', 'CONTAINER');
+                const role = kind === 'destination' ? 'Cosmos DB Built-in Data Contributor' : 'Cosmos DB Built-in Data Reader';
+                const roleId = kind === 'destination'
+                    ? '00000000-0000-0000-0000-000000000002'
+                    : '00000000-0000-0000-0000-000000000001';
+                target.innerHTML = `
+                    <div class="permission-card">
+                        <div class="permission-card-header">
+                            <div><div class="permission-card-title">${role}</div><div class="permission-card-subtitle">Data-plane role at the narrowest container scope.</div></div>
+                            <span class="permission-status">Verify with test</span>
+                        </div>
+                        <dl class="permission-details">
+                            <dt>Identity</dt><dd>${identityName} (${identityId})</dd>
+                            <dt>Role</dt><dd>${role}</dd>
+                            <dt>Scope</dt><dd>/dbs/${database}/colls/${container}</dd>
+                            <dt>Why</dt><dd>${kind === 'destination' ? 'Create and update vector documents.' : 'Read source documents without account keys.'}</dd>
+                        </dl>
+                        <pre class="permission-command">az cosmosdb sql role assignment create \`
+  --account-name "${account}" \`
+  --resource-group "RESOURCE_GROUP" \`
+  --role-definition-id "${roleId}" \`
+  --principal-id "${identityId}" \`
+  --scope "/dbs/${database}/colls/${container}"</pre>
+                    </div>`;
+                return;
+            }
+
+            if (kind === 'source' && type === 'azure-blob') {
+                const accountUrl = form.elements.account_url?.value || '';
+                const account = escapeHtml(accountUrl.replace('https://', '').split('.')[0] || 'STORAGE_ACCOUNT');
+                const container = wizardValue(form, 'container', 'CONTAINER');
+                target.innerHTML = `
+                    <div class="permission-card">
+                        <div class="permission-card-header">
+                            <div><div class="permission-card-title">Storage Blob Data Reader</div><div class="permission-card-subtitle">Read-only access scoped to the selected container.</div></div>
+                            <span class="permission-status">Verify with test</span>
+                        </div>
+                        <dl class="permission-details"><dt>Identity</dt><dd>${identityName} (${identityId})</dd><dt>Role</dt><dd>Storage Blob Data Reader</dd><dt>Container</dt><dd>${container}</dd></dl>
+                        <pre class="permission-command">az role assignment create \`
+  --role "Storage Blob Data Reader" \`
+  --assignee-object-id "${identityId}" \`
+  --assignee-principal-type ServicePrincipal \`
+  --scope "/subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}"</pre>
+                    </div>`;
+                return;
+            }
+
+            const guidance = kind === 'destination' && type === 'onelake-iceberg'
+                ? 'Grant the workload identity access to the Fabric workspace, lakehouse, staging path, and Spark Job Definition. If Garnet mirroring is enabled, separately verify its TLS and authentication settings.'
+                : kind === 'source' && type === 'onelake-iceberg'
+                    ? 'Grant the workload identity read access to the Fabric workspace and selected lakehouse table. Same-tenant access uses the existing OmniVec identity; a separate app registration is not required.'
+                    : 'This connector uses service-specific permissions. Apply least privilege to the selected database, table, index, or namespace.';
+            target.innerHTML = `
+                <div class="permission-card">
+                    <div class="permission-card-header">
+                        <div><div class="permission-card-title">Service-specific access</div><div class="permission-card-subtitle">Confirm the exact data scope with the service administrator.</div></div>
+                        <span class="permission-status">Runtime test required</span>
+                    </div>
+                    <dl class="permission-details"><dt>Identity</dt><dd>${identityName} (${identityId})</dd><dt>Guidance</dt><dd>${guidance}</dd></dl>
+                </div>`;
         }
 
         // -------- Export / Import --------
@@ -4082,6 +4608,7 @@
         let sourceDetailDirty = false;
 
         let currentDetailTab = 'general';
+        const defaultSharePointFileTypes = ['txt', 'json', 'pdf', 'docx', 'md', 'csv', 'html', 'xml'];
 
         function markSourceDetailDirty() {
             sourceDetailDirty = true;
@@ -4113,7 +4640,10 @@
             const config = source.config || {};  // lgtm[js/unused-local-variable]
 
             const sourceTypeDisplay = source.type === 'azure-blob' ? 'Azure Blob Storage' :
-                                      source.type === 'cosmosdb' ? 'CosmosDB' : source.type;
+                                      source.type === 'sharepoint' ? 'SharePoint Online' :
+                                      source.type === 'onelake-iceberg' ? 'OneLake Apache Iceberg' :
+                                      source.type === 'cosmosdb' ? 'Cosmos DB' :
+                                      source.type === 'postgresql' ? 'PostgreSQL' : source.type;
 
             // Left Panel: Navigation Tabs
             infoPanel.innerHTML = `
@@ -4121,6 +4651,8 @@
                     <div style="width: 64px; height: 64px; background: var(--bg-secondary); border-radius: 12px; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px;">
                         ${source.type === 'azure-blob'
                             ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" width="32" height="32"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>'
+                            : source.type === 'sharepoint'
+                            ? '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" width="32" height="32"><path d="M4 4h10v16H4z"/><path d="M14 7h6v10h-6"/><path d="M7 8.5c.8-.7 3.5-.8 3.5.8 0 1.8-3.5.8-3.5 2.7 0 1.7 2.8 1.5 3.7.7"/></svg>'
                             : '<svg viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" width="32" height="32"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>'
                         }
                     </div>
@@ -4179,6 +4711,13 @@
             const configPanel = document.getElementById('source-detail-config');
             const config = source.config || {};
             const authType = config.auth_type || 'managed-identity';
+            const sharePointFileTypes = Array.isArray(config.file_types) && config.file_types.length
+                ? config.file_types
+                : defaultSharePointFileTypes;
+            const sharePointMaxFileSizeMiB = Math.max(
+                1,
+                Math.min(50, Math.round((config.max_file_size_bytes || 50 * 1024 * 1024) / (1024 * 1024)))
+            );
 
             if (currentDetailTab === 'general') {
                 configPanel.innerHTML = `
@@ -4209,6 +4748,48 @@
                             <label class="form-label">Prefix (optional)</label>
                             <input type="text" class="form-input" id="detail-prefix" value="${config.prefix || ''}" placeholder="folder/subfolder/" oninput="markSourceDetailDirty()">
                         </div>
+                    ` : source.type === 'sharepoint' ? `
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;">
+                            <div class="form-group">
+                                <label class="form-label">SharePoint Site ID</label>
+                                <input type="text" class="form-input" id="detail-sp-site-id" value="${config.site_id || ''}" placeholder="contoso.sharepoint.com,site-guid,web-guid" oninput="markSourceDetailDirty()">
+                                <div style="font-size:12px;color:var(--text-tertiary);margin-top:6px;">Microsoft Graph composite site identifier.</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Document Library Drive ID</label>
+                                <input type="text" class="form-input" id="detail-sp-drive-id" value="${config.drive_id || ''}" placeholder="b!..." oninput="markSourceDetailDirty()">
+                                <div style="font-size:12px;color:var(--text-tertiary);margin-top:6px;">Drive ID for the target document library.</div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Folder Path</label>
+                            <input type="text" class="form-input" id="detail-sp-folder-path" value="${config.folder_path || ''}" placeholder="Policies/Published" oninput="markSourceDetailDirty()">
+                            <div style="font-size:12px;color:var(--text-tertiary);margin-top:6px;">Leave empty to ingest from the document library root.</div>
+                        </div>
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;">
+                            <div class="form-group">
+                                <label class="form-label">Poll Interval (seconds)</label>
+                                <input type="number" class="form-input" id="detail-sp-poll-interval" value="${config.poll_interval_seconds || 60}" min="10" max="86400" oninput="markSourceDetailDirty()">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Maximum File Size (MiB)</label>
+                                <input type="number" class="form-input" id="detail-sp-max-file-size" value="${sharePointMaxFileSizeMiB}" min="1" max="50" oninput="markSourceDetailDirty()">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Included File Types</label>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;padding:14px;background:var(--bg-tertiary);border-radius:8px;">
+                                ${defaultSharePointFileTypes.map(ft => `
+                                    <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;">
+                                        <input type="checkbox" class="detail-sp-file-type" value="${ft}" ${sharePointFileTypes.includes(ft) ? 'checked' : ''} onchange="markSourceDetailDirty()">
+                                        <span>.${ft}</span>
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                        <div style="padding:14px 16px;background:var(--accent-muted);border:1px solid var(--accent-primary);border-radius:8px;font-size:12px;color:var(--text-secondary);">
+                            OmniVec reads this library through Microsoft Graph using its workload identity. Use the Authentication tab to review the required <strong>Sites.Selected</strong> grant.
+                        </div>
                     ` : source.type === 'onelake-iceberg' ? `
                         <div class="form-group"><label class="form-label">Warehouse</label>
                             <input type="text" class="form-input" value="${config.warehouse || ''}" disabled></div>
@@ -4216,6 +4797,12 @@
                             <input type="text" class="form-input" value="${Array.isArray(config.namespace) ? config.namespace.join('.') : (config.namespace || '')}" disabled></div>
                         <div class="form-group"><label class="form-label">Table</label>
                             <input type="text" class="form-input" value="${config.table || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Content Fields</label>
+                            <input type="text" class="form-input" value="${Array.isArray(config.content_fields) ? config.content_fields.join(', ') : (config.content_fields || 'content')}" disabled></div>
+                        <div class="form-group"><label class="form-label">ID Field</label>
+                            <input type="text" class="form-input" value="${config.id_field || 'id'}" disabled></div>
+                        <div class="form-group"><label class="form-label">Poll Interval</label>
+                            <input type="text" class="form-input" value="${config.poll_interval_seconds || 60} seconds" disabled></div>
                         <p style="font-size:12px;color:var(--text-tertiary);">Edit OneLake catalog and table settings by recreating the source. Name and enabled state can be changed here without altering the saved configuration.</p>
                     ` : source.type === 'postgresql' ? `
                         <div class="form-group">
@@ -4258,7 +4845,81 @@
                     `}
                 `;
             } else if (currentDetailTab === 'auth') {
-                if (source.type === 'postgresql' || source.type === 'mssql') {
+                if (source.type === 'sharepoint') {
+                    const siteId = config.site_id || 'SITE_ID';
+                    configPanel.innerHTML = `
+                        <h4 style="margin:0 0 20px;font-size:16px;">SharePoint Authentication</h4>
+                        <div style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--success-muted);border:1px solid var(--success);border-radius:8px;margin-bottom:20px;">
+                            <div style="width:48px;height:48px;background:rgba(34,197,94,.12);border-radius:12px;display:flex;align-items:center;justify-content:center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="24" height="24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                            </div>
+                            <div>
+                                <div style="font-weight:600;font-size:16px;">Managed Identity</div>
+                                <div style="font-size:13px;color:var(--text-secondary);">Microsoft Graph access through the OmniVec workload identity</div>
+                            </div>
+                            <span class="badge badge-success" style="margin-left:auto;">Recommended</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-bottom:20px;">
+                            <div style="padding:16px;background:var(--bg-tertiary);border-radius:8px;">
+                                <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:6px;">Graph permission</div>
+                                <div style="font-weight:600;">Sites.Selected</div>
+                            </div>
+                            <div style="padding:16px;background:var(--bg-tertiary);border-radius:8px;">
+                                <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:6px;">Site role</div>
+                                <div style="font-weight:600;">read</div>
+                            </div>
+                        </div>
+                        <div style="padding:18px;background:var(--bg-tertiary);border-radius:8px;font-size:13px;">
+                            <div style="font-weight:600;margin-bottom:10px;">Least-privilege setup</div>
+                            <ol style="margin:0;padding-left:20px;color:var(--text-secondary);line-height:1.8;">
+                                <li>Grant the OmniVec managed identity the Microsoft Graph <strong>Sites.Selected</strong> application permission.</li>
+                                <li>Grant <strong>read</strong> access only to this SharePoint site.</li>
+                                <li>Remove broad <strong>Files.Read.All</strong> or <strong>Sites.Read.All</strong> permissions after validating the site-specific grant.</li>
+                            </ol>
+                            <div style="margin-top:14px;font-size:12px;color:var(--text-tertiary);word-break:break-all;">Configured site: ${siteId}</div>
+                        </div>
+                    `;
+                } else if (source.type === 'cosmosdb') {
+                    const endpoint = config.endpoint || '';
+                    const account = endpoint.replace('https://', '').split('.')[0] || 'ACCOUNT_NAME';
+                    configPanel.innerHTML = `
+                        <h4 style="margin:0 0 20px;font-size:16px;">Cosmos DB Authentication</h4>
+                        <div style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--success-muted);border:1px solid var(--success);border-radius:8px;margin-bottom:20px;">
+                            <div style="width:48px;height:48px;background:rgba(34,197,94,.12);border-radius:12px;display:flex;align-items:center;justify-content:center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="24" height="24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                            </div>
+                            <div><div style="font-weight:600;font-size:16px;">Managed Identity</div><div style="font-size:13px;color:var(--text-secondary);">Cosmos DB data-plane access without account keys</div></div>
+                        </div>
+                        <div style="padding:18px;background:var(--bg-tertiary);border-radius:8px;font-size:13px;">
+                            <div style="font-weight:600;margin-bottom:10px;">Required permission</div>
+                            <dl class="permission-details">
+                                <dt>Role</dt><dd><strong>Cosmos DB Built-in Data Reader</strong></dd>
+                                <dt>Scope</dt><dd>/dbs/${config.database || 'DATABASE'}/colls/${config.container || 'CONTAINER'}</dd>
+                                <dt>Account</dt><dd>${account}</dd>
+                            </dl>
+                            <div style="margin-top:12px;color:var(--text-secondary);">Assign the data-plane role to the OmniVec workload identity at the narrowest container scope, then test the connection.</div>
+                        </div>
+                    `;
+                } else if (source.type === 'onelake-iceberg') {
+                    configPanel.innerHTML = `
+                        <h4 style="margin:0 0 20px;font-size:16px;">OneLake Authentication</h4>
+                        <div style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--success-muted);border:1px solid var(--success);border-radius:8px;margin-bottom:20px;">
+                            <div style="width:48px;height:48px;background:rgba(34,197,94,.12);border-radius:12px;display:flex;align-items:center;justify-content:center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="24" height="24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                            </div>
+                            <div><div style="font-weight:600;font-size:16px;">Managed Identity</div><div style="font-size:13px;color:var(--text-secondary);">Fabric and OneLake access through the OmniVec workload identity</div></div>
+                        </div>
+                        <div style="padding:18px;background:var(--bg-tertiary);border-radius:8px;font-size:13px;">
+                            <div style="font-weight:600;margin-bottom:10px;">Required access</div>
+                            <ol style="margin:0;padding-left:20px;color:var(--text-secondary);line-height:1.8;">
+                                <li>Add the OmniVec identity to the Fabric workspace with read access.</li>
+                                <li>Grant access to the selected lakehouse and Iceberg table.</li>
+                                <li>Confirm the OneLake endpoint is reachable from the AKS cluster.</li>
+                            </ol>
+                            <div style="margin-top:12px;font-size:12px;color:var(--text-tertiary);">Warehouse: ${config.warehouse || 'Not configured'}</div>
+                        </div>
+                    `;
+                } else if (source.type === 'postgresql' || source.type === 'mssql') {
                     const isPg = source.type === 'postgresql';
                     configPanel.innerHTML = `
                         <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
@@ -4499,6 +5160,14 @@
                 config.account_url = editedSourceData.account_url || source.config.account_url;
                 config.container = editedSourceData.container || source.config.container;
                 config.prefix = editedSourceData.prefix || source.config.prefix || '';
+            } else if (source.type === 'sharepoint') {
+                config.auth_type = source.config?.auth_type || 'managed-identity';
+                config.site_id = editedSourceData.site_id || source.config?.site_id || '';
+                config.drive_id = editedSourceData.drive_id || source.config?.drive_id || '';
+                config.folder_path = editedSourceData.folder_path ?? source.config?.folder_path ?? '';
+                config.poll_interval_seconds = editedSourceData.poll_interval_seconds || source.config?.poll_interval_seconds || 60;
+                config.file_types = editedSourceData.file_types || source.config?.file_types || defaultSharePointFileTypes;
+                config.max_file_size_bytes = editedSourceData.max_file_size_bytes || source.config?.max_file_size_bytes || 50 * 1024 * 1024;
             } else if (source.type === 'cosmosdb') {
                 config.endpoint = editedSourceData.endpoint || source.config.endpoint;
                 config.database = editedSourceData.database || source.config.database;
@@ -4561,6 +5230,23 @@
                 if (urlEl) editedSourceData.account_url = urlEl.value;
                 if (containerEl) editedSourceData.container = containerEl.value;
                 if (prefixEl) editedSourceData.prefix = prefixEl.value;
+            } else if (source.type === 'sharepoint') {
+                const siteIdEl = document.getElementById('detail-sp-site-id');
+                const driveIdEl = document.getElementById('detail-sp-drive-id');
+                const folderPathEl = document.getElementById('detail-sp-folder-path');
+                const pollIntervalEl = document.getElementById('detail-sp-poll-interval');
+                const maxFileSizeEl = document.getElementById('detail-sp-max-file-size');
+                if (siteIdEl) editedSourceData.site_id = siteIdEl.value;
+                if (driveIdEl) editedSourceData.drive_id = driveIdEl.value;
+                if (folderPathEl) editedSourceData.folder_path = folderPathEl.value;
+                if (pollIntervalEl) editedSourceData.poll_interval_seconds = parseInt(pollIntervalEl.value) || 60;
+                if (maxFileSizeEl) editedSourceData.max_file_size_bytes = (parseInt(maxFileSizeEl.value) || 50) * 1024 * 1024;
+                const fileTypeInputs = document.querySelectorAll('.detail-sp-file-type');
+                if (fileTypeInputs.length) {
+                    editedSourceData.file_types = [...fileTypeInputs]
+                        .filter(input => input.checked)
+                        .map(input => input.value);
+                }
             } else if (source.type === 'cosmosdb') {
                 const endpointEl = document.getElementById('detail-endpoint');
                 const dbEl = document.getElementById('detail-database');
@@ -4609,6 +5295,13 @@
                 config.account_url = editedSourceData.account_url || source.config?.account_url || '';
                 config.container = editedSourceData.container || source.config?.container || '';
                 config.prefix = editedSourceData.prefix || source.config?.prefix || '';
+            } else if (source.type === 'sharepoint') {
+                config.site_id = editedSourceData.site_id || source.config?.site_id || '';
+                config.drive_id = editedSourceData.drive_id || source.config?.drive_id || '';
+                config.folder_path = editedSourceData.folder_path ?? source.config?.folder_path ?? '';
+                config.poll_interval_seconds = editedSourceData.poll_interval_seconds || source.config?.poll_interval_seconds || 60;
+                config.file_types = editedSourceData.file_types || source.config?.file_types || defaultSharePointFileTypes;
+                config.max_file_size_bytes = editedSourceData.max_file_size_bytes || source.config?.max_file_size_bytes || 50 * 1024 * 1024;
             } else if (source.type === 'cosmosdb') {
                 config.endpoint = editedSourceData.endpoint || source.config?.endpoint || '';
                 config.database = editedSourceData.database || source.config?.database || '';
@@ -4748,6 +5441,7 @@
 
             const destTypeDisplay = dest.type === 'cosmosdb-vector' ? 'CosmosDB Vector' :
                                     dest.type === 'pgvector' ? 'pgvector' :
+                                    dest.type === 'onelake-iceberg' ? 'OneLake Apache Iceberg' :
                                     dest.type === 'mssql' ? 'MSSQL' : dest.type;
 
             const destIcon = dest.type === 'cosmosdb-vector'
@@ -4776,7 +5470,7 @@
                     </button>
                     <button class="dest-detail-tab" data-tab="vector" onclick="switchDestDetailTab('vector')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                        Vector Config
+                        ${dest.type === 'onelake-iceberg' ? 'Mirror Config' : 'Vector Config'}
                     </button>
                     <button class="dest-detail-tab" data-tab="health" onclick="switchDestDetailTab('health')" style="display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 16px; background: var(--bg-secondary); color: var(--text-primary); border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
@@ -4865,13 +5559,24 @@
                         </div>
                     `;
                 } else if (dest.type === 'onelake-iceberg') {
+                    const mirror = config.mirror?.config || {};
                     configFields = `
                         <div class="form-group"><label class="form-label">Workspace ID</label>
                             <input type="text" class="form-input" value="${config.workspace_id || ''}" disabled></div>
                         <div class="form-group"><label class="form-label">Lakehouse Item ID</label>
                             <input type="text" class="form-input" value="${config.lakehouse_item_id || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Spark Job Definition Item ID</label>
+                            <input type="text" class="form-input" value="${config.spark_job_definition_item_id || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Staging File System</label>
+                            <input type="text" class="form-input" value="${config.staging_file_system || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Staging Path</label>
+                            <input type="text" class="form-input" value="${config.staging_path || ''}" disabled></div>
                         <div class="form-group"><label class="form-label">Target Table</label>
                             <input type="text" class="form-input" value="${config.target_table || ''}" disabled></div>
+                        <div class="form-group"><label class="form-label">Garnet Endpoint</label>
+                            <input type="text" class="form-input" value="${mirror.endpoint || 'Not configured'}" disabled></div>
+                        <div class="form-group"><label class="form-label">Garnet Vector Set</label>
+                            <input type="text" class="form-input" value="${mirror.vector_set || 'omnivec-vectors'}" disabled></div>
                         <p style="font-size:12px;color:var(--text-tertiary);">Edit Fabric, staging, and Garnet settings by recreating the destination. Name and enabled state can be changed here without altering the saved configuration.</p>
                     `;
                 }
@@ -4903,7 +5608,26 @@
                     </div>
                 `;
             } else if (currentDestDetailTab === 'auth') {
-                if (dest.type === 'pgvector') {
+                if (dest.type === 'onelake-iceberg') {
+                    configPanel.innerHTML = `
+                        <h4 style="margin:0 0 20px;font-size:16px;">OneLake Authentication</h4>
+                        <div style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--success-muted);border:1px solid var(--success);border-radius:8px;margin-bottom:20px;">
+                            <div style="width:48px;height:48px;background:rgba(34,197,94,.12);border-radius:12px;display:flex;align-items:center;justify-content:center;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" width="24" height="24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                            </div>
+                            <div><div style="font-weight:600;font-size:16px;">Managed Identity</div><div style="font-size:13px;color:var(--text-secondary);">Fabric workspace, lakehouse, and Spark Job access</div></div>
+                        </div>
+                        <div style="padding:18px;background:var(--bg-tertiary);border-radius:8px;font-size:13px;">
+                            <div style="font-weight:600;margin-bottom:10px;">Required access</div>
+                            <ol style="margin:0;padding-left:20px;color:var(--text-secondary);line-height:1.8;">
+                                <li>Grant the OmniVec identity contributor access to the Fabric workspace.</li>
+                                <li>Grant write access to the lakehouse staging path and target table.</li>
+                                <li>Allow the identity to execute the configured Spark Job Definition.</li>
+                                <li>If Garnet mirroring is enabled, verify its TLS and authentication separately.</li>
+                            </ol>
+                        </div>
+                    `;
+                } else if (dest.type === 'pgvector') {
                     configPanel.innerHTML = `
                         <h4 style="margin: 0 0 20px 0; font-size: 16px;">Authentication</h4>
                         <div style="display: flex; align-items: center; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 24px;">
@@ -5005,14 +5729,26 @@
                 } // end else (non-pgvector dest auth)
             } else if (currentDestDetailTab === 'vector') {
                 const isPgVector = dest.type === 'pgvector';
-                const vecTitle = isPgVector ? 'Vector Columns' : 'Vector Configuration';
-                const vecDesc = isPgVector
+                const isOneLake = dest.type === 'onelake-iceberg';
+                const vecTitle = isOneLake ? 'Garnet Vector Mirror' : (isPgVector ? 'Vector Columns' : 'Vector Configuration');
+                const vecDesc = isOneLake
+                    ? 'Review the optional Garnet mirror used for low-latency vector search.'
+                    : isPgVector
                     ? 'Discover vector columns in your PostgreSQL table. Columns with the <code>vector</code> type will be listed.'
                     : 'Vector index details are read from the destination when you test the connection.';
-                const btnLabel = isPgVector ? 'Discover Vector Columns' : 'Fetch Embedding Policies';
+                const btnLabel = isOneLake ? 'Test OneLake and Mirror' : (isPgVector ? 'Discover Vector Columns' : 'Fetch Embedding Policies');
+                const mirror = dest.config?.mirror?.config || {};
                 configPanel.innerHTML = `
                     <h4 style="margin: 0 0 20px 0; font-size: 16px;">${vecTitle}</h4>
                     <p style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 20px;">${vecDesc}</p>
+                    ${isOneLake ? `
+                        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-bottom:16px;">
+                            <div style="padding:14px;background:var(--bg-tertiary);border-radius:8px;"><div style="font-size:12px;color:var(--text-tertiary);">Endpoint</div><strong>${mirror.endpoint || 'Not configured'}</strong></div>
+                            <div style="padding:14px;background:var(--bg-tertiary);border-radius:8px;"><div style="font-size:12px;color:var(--text-tertiary);">Vector set</div><strong>${mirror.vector_set || 'omnivec-vectors'}</strong></div>
+                            <div style="padding:14px;background:var(--bg-tertiary);border-radius:8px;"><div style="font-size:12px;color:var(--text-tertiary);">TLS</div><strong>${mirror.tls === false ? 'Disabled' : 'Enabled'}</strong></div>
+                            <div style="padding:14px;background:var(--bg-tertiary);border-radius:8px;"><div style="font-size:12px;color:var(--text-tertiary);">Authentication</div><strong>${mirror.use_entra_auth ? 'Microsoft Entra' : (mirror.username ? 'ACL credentials' : 'Service default')}</strong></div>
+                        </div>
+                    ` : ''}
                     <button type="button" class="btn btn-secondary" onclick="testDestinationFromDetail()" style="width: 100%; justify-content: center; padding: 12px;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
@@ -5126,6 +5862,8 @@
                 config.user = editedDestData.user || dest.config?.user || '';
                 config.password = editedDestData.password || dest.config?.password || '';
                 config.ssl_mode = editedDestData.ssl_mode || dest.config?.ssl_mode || 'require';
+            } else if (dest.type === 'onelake-iceberg') {
+                config = { ...dest.config };
             }
 
             try {
@@ -8013,6 +8751,44 @@
                         <strong>Container:</strong> ${source.config.container || 'N/A'}
                     </div>
                 `;
+            } else if (source.type === 'sharepoint') {
+                sourceSpecificHtml = `
+                    <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Pipeline SharePoint Identity</div>
+                    <div class="form-group">
+                        <label class="form-label">Directory (tenant) ID</label>
+                        <input class="form-input" name="sharepoint_tenant_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Application (client) ID</label>
+                        <input class="form-input" name="sharepoint_client_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <small style="color: var(--text-tertiary); font-size: 11px;">
+                        Optional for same-tenant access. Configure both for a pipeline-specific cross-tenant federated identity.
+                    </small>
+                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); font-size: 12px; color: var(--text-tertiary);">
+                        <strong>Site:</strong> ${source.config.site_id || 'N/A'}<br>
+                        <strong>Drive:</strong> ${source.config.drive_id || 'N/A'}
+                    </div>
+                `;
+            } else if (source.type === 'onelake-iceberg') {
+                sourceSpecificHtml = `
+                    <div style="font-size: 13px; font-weight: 500; margin-bottom: 12px;">Pipeline OneLake Identity</div>
+                    <div class="form-group">
+                        <label class="form-label">Directory (tenant) ID</label>
+                        <input class="form-input" name="onelake_tenant_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Application (client) ID</label>
+                        <input class="form-input" name="onelake_client_id" placeholder="00000000-0000-0000-0000-000000000000">
+                    </div>
+                    <small style="color: var(--text-tertiary); font-size: 11px;">
+                        Optional for same-tenant access. Configure both for a pipeline-specific cross-tenant federated identity.
+                    </small>
+                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); font-size: 12px; color: var(--text-tertiary);">
+                        <strong>Warehouse:</strong> ${source.config.warehouse || 'N/A'}<br>
+                        <strong>Table:</strong> ${source.config.namespace || 'dbo'}.${source.config.table || 'N/A'}
+                    </div>
+                `;
             } else if (source.type === 'postgresql') {
                 sourceSpecificHtml = `
                     <div style="margin-bottom: 12px; font-size: 12px; color: var(--text-tertiary);">
@@ -8061,6 +8837,11 @@
         // API calls
         async function saveSource() {
             const form = document.getElementById('source-form');
+            if (form.dataset.testSuccess !== 'true' && !form.elements.create_without_test?.checked) {
+                alert('Test the connection successfully, or explicitly choose to create without a successful test.');
+                showResourceWizardStep('source', 3);
+                return;
+            }
             const formData = new FormData(form);
             const sourceType = formData.get('type');
 
@@ -8138,6 +8919,11 @@
 
         async function saveDestination() {
             const form = document.getElementById('destination-form');
+            if (form.dataset.testSuccess !== 'true' && !form.elements.create_without_test?.checked) {
+                alert('Test the connection successfully, or explicitly choose to create without a successful test.');
+                showResourceWizardStep('destination', 3);
+                return;
+            }
             const formData = new FormData(form);
             const destType = formData.get('type');
 
@@ -8220,6 +9006,7 @@
 
             let sourceId = null;
             let sourceConfig = {};
+            let sourceType = null;
 
             // --- Resolve Source ---
             if (pipelineSourceMode === 'existing') {
@@ -8229,6 +9016,9 @@
                     showPipelineStep('source');
                     return;
                 }
+                sourceType = typeof sources !== 'undefined'
+                    ? sources.find(source => source.id === sourceId)?.type || null
+                    : null;
                 // File type overrides are collected below for the pipeline source entry
             } else {
                 // Create new source first
@@ -8238,6 +9028,7 @@
                     showPipelineStep('source');
                     return;
                 }
+                sourceType = srcData.type;
                 try {
                     const srcRes = await apiFetch('/api/sources', {
                         method: 'POST',
@@ -8362,6 +9153,35 @@
             };
             if (urlContentTypes.length > 0) pipelineSourceEntry.url_content_types = urlContentTypes;
             if (fileTypes.length > 0) pipelineSourceEntry.file_types = fileTypes;
+            if (sourceType === 'sharepoint') {
+                const tenantId = (formData.get('sharepoint_tenant_id') || '').trim();
+                const clientId = (formData.get('sharepoint_client_id') || '').trim();
+                if ((tenantId && !clientId) || (!tenantId && clientId)) {
+                    alert('SharePoint tenant ID and client ID must be configured together.');
+                    showPipelineStep('source');
+                    return;
+                }
+                if (tenantId) {
+                    pipelineSourceEntry.sharepoint_identity = {
+                        tenant_id: tenantId,
+                        client_id: clientId,
+                    };
+                }
+            } else if (sourceType === 'onelake-iceberg') {
+                const tenantId = (formData.get('onelake_tenant_id') || '').trim();
+                const clientId = (formData.get('onelake_client_id') || '').trim();
+                if ((tenantId && !clientId) || (!tenantId && clientId)) {
+                    alert('OneLake tenant ID and client ID must be configured together.');
+                    showPipelineStep('source');
+                    return;
+                }
+                if (tenantId) {
+                    pipelineSourceEntry.onelake_identity = {
+                        tenant_id: tenantId,
+                        client_id: clientId,
+                    };
+                }
+            }
 
             const data = {
                 name: formData.get('name'),
@@ -8597,7 +9417,7 @@
                         <label class="form-label">Maximum File Size (MiB)</label>
                         <input type="number" class="form-input" name="max_file_size_mib" value="50" min="1" max="50">
                     </div>
-                    <p style="font-size: 12px; color: var(--text-tertiary);">Uses workload identity with Microsoft Graph Sites.Selected or Files.Read.All. Maximum 50 MiB raw bytes (70 MiB router JSON limit); files are buffered in memory. Requires queue mode and a Cosmos vector destination partitioned by a dedicated field such as /document_id, not /id.</p>
+                    <p style="font-size: 12px; color: var(--text-tertiary);">Uses the OmniVec workload identity. Microsoft Graph Sites.Selected plus site-specific read is recommended; avoid broad Files.Read.All. Maximum 50 MiB raw bytes (70 MiB router JSON limit); files are buffered in memory. Requires queue mode and a Cosmos vector destination partitioned by a dedicated field such as /document_id, not /id.</p>
                 `;
             } else if (type === 'onelake-iceberg') {
                 container.innerHTML = `
@@ -8683,8 +9503,21 @@
                     </div>
                 `;
             }
+            const managedIdentityOnly = type === 'sharepoint' || type === 'onelake-iceberg';
+            const managedIdentityInput = document.querySelector('input[name="auth_type"][value="managed-identity"]');
+            const connectionStringInput = document.querySelector('input[name="auth_type"][value="connection-string"]');
+            connectionStringInput.disabled = managedIdentityOnly;
+            document.getElementById('auth-cs-option').style.opacity = managedIdentityOnly ? '0.5' : '1';
+            document.getElementById('auth-cs-option').title = managedIdentityOnly
+                ? 'This connector uses workload identity. No separate connection string is required.'
+                : '';
+            if (managedIdentityOnly) managedIdentityInput.checked = true;
+            updateAuthFields();
             // Reset test result when config changes
-            document.getElementById('source-test-result').style.display = 'none';
+            const sourceResult = document.getElementById('source-test-result');
+            sourceResult.innerHTML = '';
+            sourceResult.style.display = 'none';
+            setResourceTestSuccess('source', false);
         }
 
         // Content field tag helpers (multi-field support)
@@ -8749,10 +9582,12 @@
             }
             // Reset test result when auth changes
             document.getElementById('source-test-result').innerHTML = '';
+            setResourceTestSuccess('source', false);
         }
 
         async function testSourceConnection() {
             const form = document.getElementById('source-form');
+            setResourceTestSuccess('source', false);
             const formData = new FormData(form);
             const resultDiv = document.getElementById('source-test-result');
             const testBtn = document.getElementById('test-source-btn');
@@ -8831,6 +9666,7 @@
                 const data = await res.json();
 
                 if (data.success) {
+                    setResourceTestSuccess('source', true);
                     const successTips = getSuccessTips(type, config, authType);
                     resultDiv.innerHTML = `
                         <div style="background: var(--success-muted); border: 1px solid var(--success); padding: 12px; border-radius: var(--radius-md);">
@@ -8908,8 +9744,26 @@
                         </ol>
                     </div>
                 `;
+            } else if (type === 'sharepoint') {
+                const siteId = escapeHtml(config.site_id || 'SITE_ID');
+                return `
+                    <div style="background:var(--bg-tertiary);padding:12px;border-radius:var(--radius-md);margin-top:8px;">
+                        <div style="font-weight:500;margin-bottom:8px;color:var(--text-primary);">Grant least-privilege SharePoint access:</div>
+                        <ol style="font-size:12px;padding-left:20px;color:var(--text-secondary);">
+                            <li>Grant the OmniVec managed identity Microsoft Graph <strong>Sites.Selected</strong> application permission and admin consent.</li>
+                            <li>Grant that identity <strong>read</strong> permission on site <strong>${siteId}</strong>.</li>
+                            <li>Remove broad <strong>Files.Read.All</strong> or <strong>Sites.Read.All</strong> after the site grant is verified.</li>
+                            <li>Wait for permission propagation, then run this test again.</li>
+                        </ol>
+                        <pre style="background:var(--bg-secondary);color:var(--text-primary);padding:10px;border-radius:6px;font-size:11px;overflow-x:auto;margin:8px 0 0;"><code>Connect-MgGraph -Scopes "Sites.FullControl.All"
+$body = @{ roles = @("read"); grantedToIdentities = @(@{ application = @{ id = "${identityId}"; displayName = "omnivec-identity" } }) } | ConvertTo-Json -Depth 5
+Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/${siteId}/permissions" -Body $body -ContentType "application/json"</code></pre>
+                    </div>
+                `;
             } else if (type === 'cosmosdb') {
                 const accountName = accountMatch ? accountMatch[1] : (config.endpoint ? config.endpoint.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME');
+                const database = escapeHtml(config.database || 'DATABASE');
+                const container = escapeHtml(config.container || 'CONTAINER');
                 return `
                     <div style="background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px;">
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access — Bash / Linux:</div>
@@ -8919,21 +9773,21 @@
                         <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
   --account-name "${accountName}" \\
   --resource-group "RG_NAME" \\
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \\
+  --role-definition-id "00000000-0000-0000-0000-000000000001" \\
   --principal-id "${identityId}" \\
-  --scope "/dbs"</code></pre>
+  --scope "/dbs/${database}/colls/${container}"</code></pre>
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">PowerShell / Windows:</div>
                         <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
   --account-name "${accountName}" \`
   --resource-group "RG_NAME" \`
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \`
+  --role-definition-id "00000000-0000-0000-0000-000000000001" \`
   --principal-id "${identityId}" \`
-  --scope "/dbs"</code></pre>
+  --scope "/dbs/${database}/colls/${container}"</code></pre>
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Or via Azure Portal:</div>
                         <ol style="font-size: 12px; padding-left: 20px; color: var(--text-secondary);">
                             <li>Go to CosmosDB Account <strong>${accountName}</strong> → Access Control (IAM)</li>
                             <li>Click "Add role assignment"</li>
-                            <li>Add: <strong>Cosmos DB Built-in Data Contributor</strong></li>
+                            <li>Add: <strong>Cosmos DB Built-in Data Reader</strong></li>
                             <li>Assign to managed identity with principal ID: <strong>${identityId}</strong></li>
                         </ol>
                     </div>
@@ -8978,6 +9832,8 @@
                     `;
                 } else if (type === 'cosmosdb') {
                     const accountName = config.endpoint ? config.endpoint.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME';
+                    const database = escapeHtml(config.database || 'DATABASE');
+                    const container = escapeHtml(config.container || 'CONTAINER');
                     return `
                         <div style="background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-md); margin-top: 12px;">
                             <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
@@ -8985,7 +9841,7 @@
                                 How Managed Identity Access Works
                             </div>
                             <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px;">
-                                OmniVec uses <strong>omnivec-identity</strong> with <strong>Cosmos DB Built-in Data Contributor</strong> role.
+                                OmniVec uses <strong>omnivec-identity</strong> with the <strong>Cosmos DB Built-in Data Reader</strong> role.
                             </div>
                             <details style="font-size: 12px;">
                                 <summary style="cursor: pointer; color: var(--accent-primary); margin-bottom: 8px;">How to grant access to another identity</summary>
@@ -8993,17 +9849,17 @@
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">Bash / Linux:</div>
                                     <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \\
   --account-name ${accountName} --resource-group RG \\
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \\
-  --principal-id "YOUR_IDENTITY_ID" --scope "/"</code></pre>
+  --role-definition-id "00000000-0000-0000-0000-000000000001" \\
+  --principal-id "YOUR_IDENTITY_ID" --scope "/dbs/${database}/colls/${container}"</code></pre>
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">PowerShell / Windows:</div>
                                     <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-bottom: 8px;"><code>az cosmosdb sql role assignment create \`
   --account-name ${accountName} --resource-group RG \`
-  --role-definition-id "00000000-0000-0000-0000-000000000002" \`
-  --principal-id "YOUR_IDENTITY_ID" --scope "/"</code></pre>
+  --role-definition-id "00000000-0000-0000-0000-000000000001" \`
+  --principal-id "YOUR_IDENTITY_ID" --scope "/dbs/${database}/colls/${container}"</code></pre>
                                     <div style="font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">Azure Portal:</div>
                                     <ol style="padding-left: 16px; color: var(--text-secondary); margin: 0;">
                                         <li>CosmosDB → Access Control (IAM) → Add role assignment</li>
-                                        <li>Add Cosmos DB Built-in Data Contributor</li>
+                                        <li>Add Cosmos DB Built-in Data Reader</li>
                                         <li>Select your Managed Identity</li>
                                     </ol>
                                 </div>
@@ -9178,6 +10034,7 @@
             }
             // Reset test result
             document.getElementById('dest-test-result').innerHTML = '';
+            setResourceTestSuccess('destination', false);
         }
 
         function updateDestAuthFields() {
@@ -9201,10 +10058,12 @@
                 `;
             }
             document.getElementById('dest-test-result').innerHTML = '';
+            setResourceTestSuccess('destination', false);
         }
 
         async function testDestinationConnection() {
             const form = document.getElementById('destination-form');
+            setResourceTestSuccess('destination', false);
             const formData = new FormData(form);
             const resultDiv = document.getElementById('dest-test-result');
             const testBtn = document.getElementById('test-dest-btn');
@@ -9281,6 +10140,7 @@
                 const data = await res.json();
 
                 if (data.success) {
+                    setResourceTestSuccess('destination', true);
                     let vectorGrid = '';
                     if (data.vector_indexes && data.vector_indexes.length > 0) {
                         vectorGrid = `
@@ -9351,6 +10211,8 @@
             const identityId = (window.OMNIVEC_IDENTITY_ID || '<your-omnivec-identity-client-id>');
             if (type === 'cosmosdb-vector') {
                 const accountName = config.endpoint ? config.endpoint.replace('https://', '').split('.')[0] : 'ACCOUNT_NAME';
+                const database = escapeHtml(config.database || 'DATABASE');
+                const container = escapeHtml(config.container || 'CONTAINER');
                 return `
                     <div style="background: var(--bg-secondary); padding: 12px; border-radius: var(--radius-md); margin-top: 8px; font-size: 12px;">
                         <div style="font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Grant Access:</div>
@@ -9361,14 +10223,14 @@
   --resource-group "RG_NAME" \\
   --role-definition-id "00000000-0000-0000-0000-000000000002" \\
   --principal-id "${identityId}" \\
-  --scope "/dbs"</code></pre>
+  --scope "/dbs/${database}/colls/${container}"</code></pre>
                         <div style="font-size: 10px; color: var(--text-tertiary); margin-bottom: 2px;">PowerShell / Windows:</div>
                         <pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin: 0;"><code>az cosmosdb sql role assignment create \`
   --account-name "${accountName}" \`
   --resource-group "RG_NAME" \`
   --role-definition-id "00000000-0000-0000-0000-000000000002" \`
   --principal-id "${identityId}" \`
-  --scope "/dbs"</code></pre>
+  --scope "/dbs/${database}/colls/${container}"</code></pre>
                     </div>
                 `;
             }
@@ -12267,12 +13129,27 @@
             });
         }
 
+        function onPlaygroundModeChange() {
+            const mode = document.getElementById('playground-search-mode').value;
+            const mergeEl = document.getElementById('playground-merge-strategy');
+            const imageEl = document.getElementById('playground-image-file');
+            // Hybrid fuses vector + full-text rankings; RRF is the right merge.
+            if (mode === 'hybrid' && mergeEl) {
+                mergeEl.value = 'rrf';
+            }
+            // Full-text search is text-only; disable the image input.
+            if (imageEl) {
+                imageEl.disabled = (mode === 'fts');
+            }
+        }
+
         async function performVectorSearch() {
             const query = document.getElementById('playground-query').value.trim();
             const destIds = getSelectedDestIds();
             const destInfo = getSelectedDestInfo();
             const topK = parseInt(document.getElementById('playground-topk').value) || 5;
             const mergeStrategy = document.getElementById('playground-merge-strategy').value;
+            const searchMode = document.getElementById('playground-search-mode').value;
             const statusEl = document.getElementById('playground-status');
             const resultsEl = document.getElementById('playground-results');
 
@@ -12280,8 +13157,12 @@
                 alert('Please enter a search query or upload an image');
                 return;
             }
+            if (searchMode === 'fts' && !query) {
+                alert('Full-Text mode requires a text query');
+                return;
+            }
             if (destIds.length === 0) {
-                alert('Please select at least one vector index');
+                alert('Please select at least one index');
                 return;
             }
 
@@ -12298,7 +13179,8 @@
                         query_image_b64: _playgroundImageB64,
                         destination_ids: destIds,
                         top_k: topK,
-                        merge_strategy: mergeStrategy
+                        merge_strategy: mergeStrategy,
+                        search_mode: searchMode
                     })
                 });
 
@@ -12336,11 +13218,13 @@
                 }
 
                 // Per-index breakdown (if multiple indexes)
+                const baseIndexId = (id) => String(id || '').split('::')[0];
                 let breakdownHtml = '';
                 if (searched.length > 1) {
                     breakdownHtml = `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">` +
                         searched.map(idx => {
-                            const info = indexColorMap[idx.index_id] || { color: '#6b7280', name: idx.index_name };
+                            const base = indexColorMap[baseIndexId(idx.index_id)];
+                            const info = { color: (base && base.color) || '#6b7280', name: idx.index_name || (base && base.name) || idx.index_id };
                             const statusBadge = idx.error
                                 ? `<span style="color:var(--error);font-size:11px;">Failed</span>`
                                 : `<span style="font-size:11px;color:var(--text-tertiary);">${idx.result_count} results, ${idx.search_time_ms}ms</span>`;
@@ -12353,7 +13237,10 @@
 
                 const multiIndex = searched.length > 1;
                 resultsEl.innerHTML = breakdownHtml + data.results.map((r, i) => {
-                    const idxInfo = indexColorMap[r.index_id] || { color: '#6b7280', name: r.index_name || 'Unknown' };
+                    const idxInfo = (() => {
+                        const base = indexColorMap[baseIndexId(r.index_id)];
+                        return { color: (base && base.color) || '#6b7280', name: r.index_name || (base && base.name) || 'Unknown' };
+                    })();
                     const indexBadge = multiIndex
                         ? `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;background:${idxInfo.color}20;color:${idxInfo.color};border:1px solid ${idxInfo.color}40;">
                             <span style="width:6px;height:6px;border-radius:50%;background:${idxInfo.color};"></span>

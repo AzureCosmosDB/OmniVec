@@ -546,7 +546,8 @@ public class EmbeddingWorkerService : BackgroundService
                     throw new InvalidOperationException("SharePoint upsert has no Graph eTag");
                 var bytes = await _sharePoint.DownloadAsync(
                     msg.SharePointSiteId!, msg.SharePointDriveId!, msg.SharePointItemId!,
-                    msg.SharePointMaxFileSizeBytes, ct, msg.SharePointETag);
+                    msg.SharePointMaxFileSizeBytes, ct, msg.SharePointETag,
+                    msg.SharePointGraphTenantId, msg.SharePointGraphClientId, msg.PipelineId);
                 // A zero-byte file is an explicit empty document, not a malformed processor response.
                 if (bytes.Length > 0)
                     chunks = await _docGrok.EmbedDataAsync(

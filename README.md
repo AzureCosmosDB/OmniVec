@@ -447,15 +447,22 @@ before running it. Do not run concurrent deployments against the same environmen
 2. Bicep runs — unchanged resources are not modified.
 3. By default, existing local ACR `:latest` images are preserved, **not** compared with the shared registry. Set `OMNIVEC_FORCE_IMPORT=true` in your shell to refresh them, or explicitly request a source build.
 4. Updated images trigger `kubectl rollout restart`. Every deployment, including ingestion workers, must complete its rollout before the hook reports success. Kubernetes readiness is not an end-to-end pipeline test.
-5. Interrupted image updates leave a local recovery marker so the next hook run still restarts workloads. Partial import failures stop deployment instead of silently using a mixture of old and new images.
+5. Interrupted image updates leave a local recovery marker so the next hook run still restarts workloads. Partial import failures stop deployment instead of silently using a mixture of old and new images. ACR existence checks retry transient failures instead of treating them as missing images.
+6. Helm dependencies are packaged in a disposable isolated cache, so stale global repositories and generated subchart archives cannot break or dirty the source checkout.
+7. Success requires every deployment to roll out, the load balancer to receive an external IP, and the public `/health` endpoint to report healthy.
 
-Hooks fail closed on a Helm `pending-*` release; they never automatically
-uninstall it or take ownership of unrelated resources. Inspect `helm status` and
-`helm history` with the environment's kubeconfig, confirm no deployment is still
-running, and explicitly choose recovery before retrying. Windows hook locks are
-released by the OS; a POSIX lock directory left after a hard crash must be removed
-only after verifying its owner has stopped. These are local hook locks, not a
-distributed lock covering the entire Bicep deployment.
+After the per-environment hook lock is acquired, retries automatically recover a
+Helm release left in `pending-install`, `pending-upgrade`, or `pending-rollback`
+by an interrupted prior run. Set `OMNIVEC_RECOVER_PENDING_HELM=false` to require
+manual recovery instead. Windows hook locks are released by the OS. POSIX hooks
+remove a stale same-host lock only when its recorded PID is no longer running;
+they refuse to take over a lock recorded on another host. These remain local
+hook locks, not a distributed lock covering the entire Bicep deployment.
+
+Deployment configuration needed for retries from another checkout is copied to
+resource-group tags, including image channel/build settings and optional
+SharePoint/OneLake watcher flags. Authentication tokens remain in the local azd
+environment and are deliberately omitted from deployment output.
 
 Image imports have a 15-minute deadline (POSIX imports may retry once); ACR source
 builds have a one-hour server-side limit. A timeout stops the hook but does not
@@ -523,6 +530,24 @@ pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName my-omnivec
 | `-AoaiKey` / `--key` | Azure OpenAI API key |
 | `-FromStep` / `--from-step` | Resume from step N (1–11) |
 | `-Cleanup` / `--cleanup` | Delete test resources |
+
+For an already-registered embedding model, the PowerShell Blob-to-Cosmos demo
+accepts `-ModelId` instead of requesting an Azure OpenAI key:
+
+```powershell
+pwsh scripts\e2e-blob-demo.ps1 -Env my-omnivec -ModelId <registered-model-id> `
+  -ServerUrl http://127.0.0.1:18082 -KubeConfig <dedicated-kubeconfig> `
+  -FileType txt -NoSearch
+```
+
+This example expects a localhost-only port-forward to `service/omnivec-web`
+on port 18082. `-NoSearch` deliberately limits this script run to ingestion;
+verify retrieval separately through the web app's Vector Search playground.
+For keyless model access, grant the OmniVec workload identity **Cognitive
+Services OpenAI User** on the embedding account, then register the model with
+managed-identity authentication under **Models**. The model and destination must
+use the same embedding dimensions. SharePoint and OneLake source permissions
+are separate prerequisites; a healthy model does not establish source access.
 
 ---
 

@@ -259,7 +259,7 @@ Test("Rename publication failure retains checkpoint references and replays exact
     await using var watcher = new SharePointSourceWatcher(source, new(), null!, new(),
         NullLogger<SharePointSourceWatcher>.Instance, sbPublisher: publisher);
     var pipeline = JsonSerializer.Deserialize<Pipeline>(
-        """{"id":"pipeline","sources":[{"source_id":"source"}],"destination_id":"dest"}""")!;
+        """{"id":"pipeline","sources":[{"source_id":"source","sharepoint_identity":{"tenant_id":"11111111-1111-1111-1111-111111111111","client_id":"22222222-2222-2222-2222-222222222222"}}],"destination_id":"dest"}""")!;
     watcher.UpdatePipelines([pipeline]);
     watcher.UpdateDestinations([new Destination { Id = "dest", Type = "cosmosdb-vector" }]);
     var known = (Dictionary<string, string>)typeof(SharePointSourceWatcher).GetField("_knownRefs", Private)!.GetValue(watcher)!;
@@ -281,6 +281,8 @@ Test("Rename publication failure retains checkpoint references and replays exact
     var message = JsonSerializer.Deserialize<EmbeddingMessage>(sender.Sent.Single().Body)!;
     Assert(message.PartitionKeyValue == SharePointIdentity.Create(message));
     Assert(message.SharePointRevision > 0 && message.MessageType == "upsert");
+    Assert(message.SharePointGraphTenantId == "11111111-1111-1111-1111-111111111111"
+        && message.SharePointGraphClientId == "22222222-2222-2222-2222-222222222222");
     Assert(sender.AttemptedIds[0] == sender.AttemptedIds[1]);
 });
 Test("Initial scan, new pipeline replay, reset and expired delta preserve increasing revisions", async () =>
@@ -346,6 +348,65 @@ Test("Unknown deletion retains stable item identity without guessing display pat
     var change = JsonSerializer.SerializeToElement(changes[0]);
     Assert(changes.Count == 1 && change.GetProperty("Deleted").GetBoolean()
         && change.GetProperty("ItemId").GetString() == "unknown");
+});
+Test("SharePoint pipeline identities produce isolated watchers, state and credentials", async () =>
+{
+    var firstKey = SourceWatcherManager.GetSharePointWatcherKey("source", "pipeline-one");
+    var secondKey = SourceWatcherManager.GetSharePointWatcherKey("source", "pipeline-two");
+    Assert(firstKey != secondKey);
+    Assert(SourceWatcherManager.GetSharePointStateScopeId("source", "pipeline-one")
+        != SourceWatcherManager.GetSharePointStateScopeId("source", "pipeline-two"));
+    var source = new Source { Id = "source", Type = "sharepoint" };
+    Pipeline PipelineFor(string id, bool crossTenant) => new()
+    {
+        Id = id,
+        Sources =
+        [
+            new OmniVec.ChangeFeed.Models.PipelineSource
+            {
+                SourceId = source.Id,
+                SharePointIdentity = crossTenant
+                    ? new()
+                    {
+                        TenantId = "11111111-1111-1111-1111-111111111111",
+                        ClientId = "22222222-2222-2222-2222-222222222222",
+                    }
+                    : null,
+            },
+        ],
+    };
+    var keys = SourceWatcherManager.GetDesiredWatcherKeys(
+        [source], [PipelineFor("pipeline-one", true), PipelineFor("pipeline-two", true)]);
+    Assert(keys.SequenceEqual([firstKey, secondKey]));
+    keys = SourceWatcherManager.GetDesiredWatcherKeys(
+        [source], [PipelineFor("same-one", false), PipelineFor("same-two", false)]);
+    Assert(keys.SequenceEqual(["source"]));
+
+    var previous = Environment.GetEnvironmentVariable("AZURE_FEDERATED_TOKEN_FILE");
+    Environment.SetEnvironmentVariable("AZURE_FEDERATED_TOKEN_FILE", "pipeline-token");
+    try
+    {
+        var identity = new OmniVec.ChangeFeed.Models.SharePointPipelineIdentity
+        {
+            TenantId = "11111111-1111-1111-1111-111111111111",
+            ClientId = "22222222-2222-2222-2222-222222222222",
+        };
+        Assert(OmniVec.ChangeFeed.Services.SharePointGraphCredentialFactory.Create(identity)
+            is WorkloadIdentityCredential);
+        Assert(OmniVec.Worker.Services.SharePointGraphCredentialFactory.Create(
+            identity.TenantId, identity.ClientId) is WorkloadIdentityCredential);
+        var graphClient = new SharePointContentClient(new HttpClient());
+        var getCredential = typeof(SharePointContentClient).GetMethod("GetCredential", Private)!;
+        var first = getCredential.Invoke(graphClient, [identity.TenantId, identity.ClientId, "pipeline-one"]);
+        var firstAgain = getCredential.Invoke(graphClient, [identity.TenantId, identity.ClientId, "pipeline-one"]);
+        var second = getCredential.Invoke(graphClient, [identity.TenantId, identity.ClientId, "pipeline-two"]);
+        Assert(ReferenceEquals(first, firstAgain) && !ReferenceEquals(first, second));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("AZURE_FEDERATED_TOKEN_FILE", previous);
+    }
+    await Task.CompletedTask;
 });
 
 var graphBytes = Encoding.UTF8.GetBytes("example text");

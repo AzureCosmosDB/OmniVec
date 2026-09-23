@@ -1,8 +1,8 @@
 # OmniVec service emulator
 
-Stateful in-process fakes of **az**, **azd**, **kubectl**, **helm** and **docker**
+Stateful fakes of **az**, **azd**, **kubectl**, **helm**, **docker**, and **curl**
 that let the real `hooks/preprovision.sh` + `hooks/postprovision.sh` run
-end-to-end in seconds — **no Azure subscription, no AKS cluster, no
+end-to-end locally — **no Azure subscription, no AKS cluster, no
 docker daemon required**.
 
 ## Why
@@ -20,6 +20,10 @@ This emulator:
   subsequent `kubectl get deploy/pods/svc` returns ready workloads.
 - **Supports fault injection** (delay, transient, hard-fail) via env vars
   so we can unit-test retry/skip/heartbeat logic deterministically.
+- **Exercises readiness gates** using stored deployment generations and replica
+  counts. Public `/health` is emulated locally; no request reaches a real host.
+- **Preserves CLI contracts** for ACR tag filtering/JSON/TSV and Kubernetes
+  namespace/secret dry-run manifests followed by idempotent apply.
 
 ## Quick start
 
@@ -89,7 +93,7 @@ $OMNIVEC_EMU_STATE/
   azd-env/<KEY>                     # azd env vars
   arm/
     groups/<rg>                     # resource groups
-    acr/<name>/images/<repo>_<tag>  # ACR images (built or imported)
+    acr/<name>/images/<ref-hash>    # repository|tag|digest records, isolated by registry
   docker/
     images/<tag>                    # local docker images
     registry/<tag>                  # pushed images
@@ -105,6 +109,8 @@ $OMNIVEC_EMU_STATE/
 
 ## Tests
 
+- `tests/hooks/test-emu-contracts.sh` - CLI response shapes, tag persistence and
+  filtering, dry-run/apply, generation/replica readiness, and offline health.
 - `tests/hooks/test-emu-e2e.sh` — happy-path: full azd up completes, helm
   release recorded, 7 deployments synthesised, event log populated.
 - `tests/hooks/test-emu-faults.sh` — fault scenarios: transient recovery,
@@ -114,6 +120,7 @@ Run manually:
 ```sh
 bash tests/hooks/test-emu-e2e.sh
 bash tests/hooks/test-emu-faults.sh
+bash tests/hooks/test-emu-contracts.sh
 ```
 
 Or as part of the normal suite:
@@ -124,7 +131,7 @@ bash tests/run.sh --shell bash
 ## Limitations
 
 - **Not a real Kubernetes API.** JSONPath support is limited to the
-  specific patterns the hooks use (availableReplicas, readyReplicas,
+  specific patterns the hooks use (generation/observedGeneration, replica counts,
   LoadBalancer external IP, Warning events). Extending is straightforward
   — add a case in `tests/emu/bin/kubectl` `_handle_jsonpath`.
 - **Bicep is not executed.** `run-azd-up.sh` seeds the ARM resources Bicep
@@ -133,3 +140,7 @@ bash tests/run.sh --shell bash
   `run-azd-up.sh`.
 - **No admission webhooks / CRDs.** Helm upgrade always "succeeds"
   structurally; fault injection is the way to simulate failures.
+- **Not a general Azure CLI or HTTP client.** ACR tag queries support the exact
+  tag-equality filter used by the hooks, not arbitrary JMESPath. Unsupported tag
+  queries and HTTP destinations fail explicitly. Synthetic digests are not real
+  image-content digests.
