@@ -26,7 +26,11 @@ def run_js(code):
 
 
 def test_all_inline_scripts_parse():
-    scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", HTML, re.S)
+    scripts = re.findall(
+        r"<script(?:\s[^>]*)?>(.*?)</script>",
+        HTML,
+        re.IGNORECASE | re.DOTALL,
+    )
     result = run_js("const vm = require('vm'); const scripts = " + json.dumps(scripts) +
                     "; scripts.forEach(source => new vm.Script(source)); console.log(JSON.stringify(scripts.length));")
     assert result >= 1
