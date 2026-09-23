@@ -45,6 +45,61 @@ _arg() {
     printf '%s' "$PARGS" | tr ' ' '\n' | awk -F= -v k="$1" '$1==k {print $2; exit}'
 }
 
+_acr_key() {
+    printf '%s' "$1" | sha256sum | cut -d' ' -f1
+}
+
+_acr_record_image() {
+    _image=$1
+    case "$_image" in
+        *:*) _repository=${_image%:*}; _tag=${_image##*:} ;;
+        *) _repository=$_image; _tag=latest ;;
+    esac
+    if ! printf '%s\n' "$_repository" | grep -Eq '^[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$' \
+        || ! printf '%s\n' "$_tag" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+        printf 'az emulator: invalid image reference: %s\n' "$_image" >&2
+        exit 2
+    fi
+    _key=$(_acr_key "$_repository:$_tag")
+    _digest="sha256:$(_acr_key "$_repository:$_tag:$2")"
+    emu_set "arm/acr/$acr_name/images" "$_key" "$_repository|$_tag|$_digest"
+}
+
+_acr_repositories() {
+    for _file in "$OMNIVEC_EMU_STATE/arm/acr/$acr_name/images"/*; do
+        [ -f "$_file" ] || continue
+        IFS='|' read -r _repository _tag _digest < "$_file" || true
+        printf '%s\n' "$_repository"
+    done | LC_ALL=C sort -u
+}
+
+_acr_tags() {
+    _repository_wanted=$(_arg --repository)
+    _found=false
+    for _file in "$OMNIVEC_EMU_STATE/arm/acr/$acr_name/images"/*; do
+        [ -f "$_file" ] || continue
+        IFS='|' read -r _repository _tag _digest < "$_file" || true
+        [ "$_repository" = "$_repository_wanted" ] || continue
+        _found=true
+        printf '%s\n' "$_tag"
+    done
+    if [ "$_found" != true ]; then
+        printf 'Error: repository %s not found in registry %s (NAME_UNKNOWN)\n' "$_repository_wanted" "$acr_name" >&2
+        return 1
+    fi
+}
+
+_acr_emit_list() {
+    case "$_out" in
+        tsv) [ -z "$1" ] || printf '%s\n' "$1" ;;
+        json|'')
+            printf '['
+            printf '%s\n' "$1" | awk 'NF {printf "%s\"%s\"", separator, $0; separator=","}'
+            printf ']\n' ;;
+        *) printf 'az emulator: unsupported ACR output: %s\n' "$_out" >&2; return 2 ;;
+    esac
+}
+
 # Dispatch on positional verbs recorded while parsing flags:
 set -- $PARGS
 # $1 may be "--flag=val" entries; strip those to find first positional verb.
@@ -122,12 +177,12 @@ case "${1:-}" in
         case "${2:-}" in
             build)
                 img=$(_arg --image)
-                [ -n "$img" ] && emu_set "arm/acr/$acr_name/images" "$(emu_safe "$img")" "built"
+                _acr_record_image "$img" built
                 echo "Run ID: emu-$(date +%s)" ;;
             import)
                 img=$(_arg --image)
                 src=$(_arg --source)
-                [ -n "$img" ] && emu_set "arm/acr/$acr_name/images" "$(emu_safe "$img")" "imported-from-$src"
+                _acr_record_image "$img" "imported-from-$src"
                 ;;
             login)
                 echo "Login Succeeded" ;;
@@ -136,16 +191,38 @@ case "${1:-}" in
             repository)
                 case "${3:-}" in
                     list)
-                        # List unique repos from imported/built images
-                        _d="$OMNIVEC_EMU_STATE/arm/acr/$acr_name/images"
-                        if [ -d "$_d" ]; then
-                            ls "$_d" 2>/dev/null | awk -F_ '{print $1}' | sort -u
-                        else
-                            printf '[]\n'
-                        fi ;;
-                    show-manifests|show-tags)
+                        _acr_emit_list "$(_acr_repositories)" ;;
+                    show-tags)
+                        _tags=$(_acr_tags) || exit $?
+                        if [ -n "$_q" ]; then
+                            _filter=$(printf '%s\n' "$_q" | sed -n "s/^\[?@ *== *'\([^']*\)'\]$/\1/p")
+                            if [ -z "$_filter" ]; then
+                                printf 'az emulator: unsupported show-tags query: %s\n' "$_q" >&2
+                                exit 2
+                            fi
+                            _tags=$(printf '%s\n' "$_tags" | grep -Fx -- "$_filter" || true)
+                        fi
+                        _acr_emit_list "$(printf '%s\n' "$_tags" | LC_ALL=C sort -u)" ;;
+                    show-manifests)
                         printf '[{"digest":"sha256:deadbeef","tags":["latest"]}]\n' ;;
-                    *) exit 0 ;;
+                    *) printf 'az emulator: unsupported repository command: %s\n' "${3:-}" >&2; exit 2 ;;
+                esac ;;
+            manifest)
+                if [ "${3:-}" != show-metadata ]; then
+                    printf 'az emulator: unsupported manifest command: %s\n' "${3:-}" >&2
+                    exit 2
+                fi
+                img=$(_arg --name)
+                case "$img" in *:*) : ;; *) img="$img:latest" ;; esac
+                _record=$(emu_get "arm/acr/$acr_name/images" "$(_acr_key "$img")") || {
+                    printf 'Error: manifest %s not found (NAME_UNKNOWN)\n' "$img" >&2
+                    exit 1
+                }
+                _digest=${_record##*|}
+                case "$_q" in
+                    digest) _emit "$_digest" ;;
+                    '') printf '{"digest":"%s","tags":["%s"]}\n' "$_digest" "${img##*:}" ;;
+                    *) printf 'az emulator: unsupported manifest query: %s\n' "$_q" >&2; exit 2 ;;
                 esac ;;
             check-health)
                 echo "health ok" ;;

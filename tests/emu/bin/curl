@@ -1,0 +1,31 @@
+#!/bin/sh
+# Only emulate the deployed test service; never forward requests to a real host.
+_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$_DIR/../lib/_common.sh"
+emu_enter curl "$@"
+
+url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fail|--silent|--show-error) shift ;;
+        --max-time) shift 2 ;;
+        http://*) url=$1; shift ;;
+        *) printf 'curl emulator: unsupported argument: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+
+nsdir="$OMNIVEC_EMU_STATE/k8s/ns/omnivec"
+service="$nsdir/services/omnivec-web"
+[ -f "$service" ] || { echo 'curl: service is not deployed' >&2; exit 7; }
+ip=$(sed -n 's/^externalIP=//p' "$service")
+if [ -z "$ip" ] || [ "$url" != "http://$ip/health" ]; then
+    printf 'curl emulator: unsupported URL: %s\n' "$url" >&2
+    exit 22
+fi
+for component in omnivec-api omnivec-web; do
+    if ! emu_deployment_ready "$nsdir/deployments/$component"; then
+        printf 'curl: %s is unavailable (HTTP 503)\n' "$component" >&2
+        exit 22
+    fi
+done
+printf '{"status":"healthy"}\n'

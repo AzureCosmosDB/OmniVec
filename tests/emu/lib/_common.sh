@@ -54,6 +54,21 @@ emu_safe() {
     printf '%s' "$1" | tr '/:@ ' '____'
 }
 
+emu_deployment_ready() {
+    [ -f "$1" ] || return 1
+    awk -F= '
+        { value[$1]=$2 }
+        END {
+            for (key in value) if (value[key] == "") exit 1
+            exit !(value["generation"] != "" && value["observedGeneration"] >= value["generation"] &&
+                value["replicas"] != "" && value["readyReplicas"] == value["replicas"] &&
+                value["updatedReplicas"] == value["replicas"] &&
+                value["availableReplicas"] == value["replicas"] &&
+                value["statusReplicas"] == value["replicas"])
+        }
+    ' "$1"
+}
+
 # ── Fault injection ─────────────────────────────────────────────────────────
 emu_match() {
     printf '%s' "$2" | grep -Eq -- "$1" 2>/dev/null
