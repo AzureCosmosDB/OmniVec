@@ -561,6 +561,41 @@ async def test_queue_paths_remain_allowed_with_inline_source_owner(modules, monk
 
 
 @pytest.mark.asyncio
+async def test_eventgrid_auto_provision_failure_does_not_expose_internal_error(
+    modules, monkeypatch, caplog
+):
+    internal_detail = "sensitive-eventgrid-detail"
+    source = {
+        "id": "source", "doc_type": "source", "name": "blob",
+        "type": "azure-blob", "enabled": True, "config": {},
+    }
+    destination = inline_destination()
+    store = MemoryStore(source, destination)
+    attach(monkeypatch, modules.api, store)
+    monkeypatch.setattr(modules.api, "_require_blob_source_enabled", lambda *_: None)
+    monkeypatch.setattr(modules.api, "_validate_docgrok_ref", AsyncMock(return_value="model"))
+    monkeypatch.setattr(modules.api, "_enforce_pipeline_dim_match", AsyncMock())
+    monkeypatch.setattr(
+        modules.api,
+        "_provision_blob_eventgrid",
+        AsyncMock(side_effect=RuntimeError(internal_detail)),
+    )
+    request = modules.api.CreatePipelineRequest(**pipeline(
+        name="blob-queue",
+        processing_mode="queue",
+    ))
+
+    result = await modules.api.create_pipeline(request)
+
+    provisioning = result["eventgrid_provisioning"]
+    assert len(provisioning) == 1
+    assert provisioning[0]["success"] is False
+    assert internal_detail not in str(result)
+    assert internal_detail not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_paused_inline_configuration_can_be_edited_without_claiming_source(modules, monkeypatch):
     candidate = pipeline(name="candidate", processing_mode="inline", status="paused")
     other = pipeline(id="other", name="other", processing_mode="inline")

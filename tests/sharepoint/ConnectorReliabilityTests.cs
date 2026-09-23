@@ -418,9 +418,11 @@ internal static class ConnectorReliabilityTests
             using var ct = new CancellationTokenSource();
             var idle = EmbeddingWorkerService.RunIdleAsync(ct.Token, TimeSpan.FromMilliseconds(5));
             var field = typeof(WorkerHeartbeat).GetField("_lastBeatTicks", BindingFlags.Static | BindingFlags.NonPublic)!;
-            field.SetValue(null, DateTime.UtcNow.AddMinutes(-10).Ticks);
-            await Task.Delay(30);
-            Check((long)field.GetValue(null)! > DateTime.UtcNow.AddSeconds(-1).Ticks);
+            var staleTicks = DateTime.UtcNow.AddMinutes(-10).Ticks;
+            field.SetValue(null, staleTicks);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+            while ((long)field.GetValue(null)! == staleTicks)
+                await Task.Delay(5, timeout.Token);
             ct.Cancel();
             await Fails(() => idle);
         });
