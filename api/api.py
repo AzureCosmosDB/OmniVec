@@ -6103,6 +6103,7 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
 
             dtype = dest_doc.get("type")
             cfg = dest_doc.get("config", {}) or {}
+            model_dims = await _model_embedding_dims(store, model_ref)
             if dtype == "cosmosdb-vector":
                 vf = (matched_pip.get("vector_index_path") or "").lstrip("/") or cfg.get("vector_field", "embedding")
                 indexes.append({
@@ -6114,7 +6115,7 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
                         "container": cfg.get("container", ""),
                         "auth": {"mode": "managed_identity"},
                     },
-                    "vector": {"field": vf, "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                    "vector": {"field": vf, "dims": cfg.get("vector_dimensions") or model_dims or 1024, "metric": "cosine"},
                     "embedding": embedding,
                     "content_fields": cf,
                 })
@@ -6133,7 +6134,7 @@ async def assistant_chat(assistant_id: str, req: AssistantChatRequest):
                         "id_column": cfg.get("id_column", "id"),
                         "content_column": cfg.get("content_column", "content"),
                     },
-                    "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                    "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions") or model_dims or 1024, "metric": "cosine"},
                     "embedding": embedding,
                     "content_fields": cf,
                 })
@@ -6246,6 +6247,17 @@ class PlaygroundSearchRequest(BaseModel):
     fts_field: Optional[str] = None  # full-text path; defaults to first content field
 
 
+async def _model_embedding_dims(store, model_ref: Optional[str]) -> Optional[int]:
+    """embedding_dim of a registered model, used when a destination doesn't record its dimensions."""
+    if not model_ref or not model_ref.startswith("mdl-"):
+        return None
+    try:
+        mdoc = await asyncio.to_thread(store.get, model_ref, "docgrok_model")
+        return int((mdoc or {}).get("embedding_dim") or 0) or None
+    except Exception:  # lgtm[py/empty-except]
+        return None
+
+
 async def _build_index_specs(
     destination_ids: List[str],
     search_mode: str = "vector",
@@ -6301,6 +6313,7 @@ async def _build_index_specs(
 
         dtype = dest_doc.get("type")
         cfg = dest_doc.get("config", {}) or {}
+        model_dims = await _model_embedding_dims(store, model_ref)
         # Inline processing writes embeddings to the SOURCE container in-place;
         # the destination container stays empty. Redirect the search at the source.
         pmode = (matched_pip.get("processing_mode") or "").lower()
@@ -6335,7 +6348,7 @@ async def _build_index_specs(
                             dims = d
                             if vi_path == vf:
                                 break
-            dims = dims or 1024
+            dims = dims or model_dims or 1024
             cosmos_store = {
                 "type": "cosmosdb",
                 "endpoint": inline_override_endpoint or cfg.get("endpoint", ""),
@@ -6385,7 +6398,7 @@ async def _build_index_specs(
                     "content_column": cfg.get("content_column", "content"),
                 },
                 "mode": "vector",
-                "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions", 1024), "metric": "cosine"},
+                "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions") or model_dims or 1024, "metric": "cosine"},
                 "embedding": embedding,
                 "content_fields": cf,
                 "pipeline_id": matched_pip.get("id"),
