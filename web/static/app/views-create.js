@@ -42,8 +42,8 @@ function canNext(i) { return i===0 ? !!W.sourceId : i===1 ? (W.strategy!=='chunk
 route('new', { needs:[...X.CORE, 'transforms'], live:false, render() {
   const qp = X.query();
   if (!W || qp.get('reset')) W = fresh();
-  if (qp.get('source') && M.SRC[qp.get('source')]) { W.sourceId = qp.get('source'); if (W.step < 1) W.step = 1; }
-  if (qp.get('store') && M.DST[qp.get('store')]) { W.storeId = qp.get('store'); W.indexes = null; W.step = Math.max(W.step, 3); }
+  if (qp.get('source') && M.SRC[qp.get('source')]) { W.sourceId = M.SRC[qp.get('source')].id; if (W.step < 1) W.step = 1; }
+  if (qp.get('store') && M.DST[qp.get('store')]) { W.storeId = M.DST[qp.get('store')].id; W.indexes = null; W.step = Math.max(W.step, 3); }
   if (!W.modelId && !W.recipe && embModels().length === 1) W.modelId = embModels()[0].id;
   const html = `<div class="page"><div class="ph"><div><h1>New pipeline</h1><p>Keep a vector store in sync with a source. You can change names and tuning later; the source, model and store define the index.</p></div>
     <div class="acts"><button class="btn ghost" id="wreset">${icon('rotate','sm')}Start over</button></div></div>
@@ -202,7 +202,7 @@ function bind(v) {
     tb.onclick = e => { const b = e.target.closest('[data-tag]'); if (b) { b.remove(); captureInputs(v); drawSide(v); } else inp.focus(); };
     inp.onkeydown = e => { if ((e.key==='Enter' || e.key===',') && inp.value.trim()) { e.preventDefault(); const t = inp.value.trim().replace(/^\./,''); inp.insertAdjacentHTML('beforebegin', `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`); inp.value=''; captureInputs(v); drawSide(v); } }; });
   const smp = $('#wsample', v); if (smp) smp.onclick = async () => { $('#wsampleout', v).innerHTML = spinner('Loading…');
-    try { const r = await api(`/api/sources/${W.sourceId}/sample?limit=5`); W.sample = r.documents || r.samples || r.items || r.blobs || r.files || (Array.isArray(r) ? r : []); captureInputs(v); draw(v); }
+    try { const r = await api(`/api/sources/${encodeURIComponent(W.sourceId)}/sample?limit=5`); W.sample = r.documents || r.samples || r.items || r.blobs || r.files || (Array.isArray(r) ? r : []); captureInputs(v); draw(v); }
     catch (e) { $('#wsampleout', v).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span> · <a class="link" href="#/connections/source/${esc(encodeURIComponent(W.sourceId||''))}/access">Check access</a>`; } };
   const prev = $('#wprev', v); if (prev) prev.onclick = async () => { captureInputs(v); const out = $('#wprevout', v); out.innerHTML = spinner('Rendering…');
     try { const r = await api('/api/pipelines/identity-preview', { method:'POST', body:{ document_id_pattern:W.docId, partition_key_pattern:W.pk, chunk_id_pattern:W.chunkId, source_ref:'folder/example-document.pdf', source_partition:'tenant-a', source_id:W.sourceId, destination_id:W.storeId, model_id:W.modelId || W.recipe } });

@@ -178,8 +178,8 @@ function addPage(kind, editId) {
   const existing = editId ? (kind==='source' ? M.SRC : M.DST)[editId] : null;
   const caps = (D.caps || {}).allowed_source_types;
   const types = Object.keys(FORMS[kind]).filter(t => kind!=='source' || !caps || caps.includes(t));
-  const qp = X.query(); const then = qp.get('then');
-  const st = { type: existing ? existing.type : qp.get('type') || null, tested:null, perm:null };
+  const qp = X.query(); const then = qp.get('then'); const qType = qp.get('type');
+  const st = { type: existing ? existing.type : types.find(t => t === qType) || null, tested:null, perm:null };
   const html = `<div class="page"><div class="ph"><div><h1>${existing ? 'Edit '+esc(existing.name) : 'Add '+noun}</h1><p>${kind==='source' ? 'Connect where your content lives. OmniVec reads it with its managed identity, so no keys are stored for Azure services.' : 'Choose where embeddings are written. Pipelines can share one vector store.'}</p></div></div>
    <div class="grid" style="grid-template-columns:minmax(0,1fr) 380px;align-items:start">
     <div class="stack" id="aform"></div>
