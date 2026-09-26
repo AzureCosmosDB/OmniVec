@@ -25,9 +25,10 @@ def test_sharepoint_source_wizard_guides_permissions_and_tests_runtime(ui_page):
 
     guidance = page.locator("#source-permission-preflight").inner_text()
     assert "Sites.Selected" in guidance
-    assert "No separate app registration is required" in guidance
+    assert "no separate app registration is required" in guidance
     assert "Files.Read.All" in guidance
-    assert 'roles = @("read")' in guidance
+    assert "Exact Graph grant commands are not yet supported" in guidance
+    assert "YOUR_" not in guidance
 
     page.click("#source-wizard-next")
     assert page.locator("#source-wizard-create").is_disabled()

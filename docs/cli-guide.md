@@ -93,6 +93,41 @@ The CLI auto-detects ID prefixes: `omnivec source show abc123` is the same as `o
 
 ## Sources
 
+### Understand and fix access failures
+
+Use `omnivec source permissions <id>` or `omnivec destination permissions <id>`
+to run a **read-only** access diagnosis. Add `--shell bash` for Bash/Azure Cloud
+Shell commands; PowerShell is the default. `--output json` returns the same
+structured report used by the portal.
+
+The report distinguishes authentication failures, denied access, missing
+resources, network failures, and operations requiring resource provisioning.
+For a service access denial, supported connectors provide a scoped grant command
+with the actual account resource ID, subscription, resource group and workload
+principal ID. Commands are displayed, **never executed** by OmniVec. They use
+deterministic assignment IDs for repeat execution and do not remove existing roles.
+An administrator with the indicated role-assignment authority must review and run
+them; being an OmniVec administrator alone is not sufficient.
+
+If discovery is unavailable or the resource is in another subscription, use
+`--resource-id` with the full **account** ARM resource ID from Azure Portal's JSON
+View. Older deployments may also need `--principal-id` with the workload managed
+identity's **Object/principal ID**, not its client ID. Incomplete or mismatched
+details produce no executable grant command. Updated `azd up` deployments supply
+the workload principal ID automatically; Helm users set
+`azure.workloadIdentity.principalId` and `azure.subscriptionId`.
+
+Exact Azure grant templates currently support managed-identity Cosmos DB sources,
+Cosmos DB vector destinations, and Azure Blob sources in Azure public cloud.
+Other connectors return explicit limitations and administrator guidance, not
+guessed commands. A successful destination metadata read does **not** prove write,
+delete, changefeed or checkpoint access. These checks run from the API workload,
+not every worker pod. Only `read_verified` returns exit code 0; all other statuses
+return a nonzero exit code, including unsupported or incomplete checks.
+
+After granting access, rerun the same command. Propagation can take several minutes;
+checks have bounded waits and do not retry permission grants.
+
 A source is a connection to a data store. Sources store **connection info only** — content extraction config is on the pipeline.
 
 ```bash

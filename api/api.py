@@ -13,7 +13,7 @@ import httpx
 from azure.core.exceptions import AzureError
 import concurrent.futures
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
 from fastapi.staticfiles import StaticFiles
@@ -101,6 +101,10 @@ app = FastAPI(
     redoc_url="/redoc" if _DEBUG else None,
     openapi_url="/openapi.json" if _DEBUG else None,
 )
+
+from cloud_deployments import install_routes as _install_cloud_routes, deployment_worker
+_install_cloud_routes(app, get_store)
+_cloud_deployment_task = None
 
 # =============================================================================
 # AUTHENTICATION â€” Bearer Token
@@ -996,7 +1000,7 @@ http_client: Optional[httpx.AsyncClient] = None
 
 @app.on_event("startup")
 async def startup():
-    global http_client, EVENT_QUEUE
+    global http_client, EVENT_QUEUE, _cloud_deployment_task
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(120.0, connect=10.0),
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=10, keepalive_expiry=30),
@@ -1010,12 +1014,19 @@ async def startup():
         print(f"WARNING: CosmosDB store init failed ({e}). API will fail on data operations.")
     # Start the event processor worker
     asyncio.create_task(event_processor_worker())
+    _cloud_deployment_task = asyncio.create_task(deployment_worker(get_store))
     print("OmniVec API started - Event processor initialized")
 
 
 @app.on_event("shutdown")
 async def shutdown():
     global http_client
+    if _cloud_deployment_task:
+        _cloud_deployment_task.cancel()
+        try:
+            await _cloud_deployment_task
+        except asyncio.CancelledError:
+            pass
     if http_client:
         await http_client.aclose()
     print("OmniVec API shutdown")
@@ -1095,6 +1106,29 @@ def _agent_headers(request: Request) -> dict:
 
 class AgentDiagnosticRequest(BaseModel):
     pipeline_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+class PermissionCheckRequest(BaseModel):
+    kind: Literal["source", "destination"]
+    connector_type: str = ""
+    config: dict = Field(default_factory=dict)
+    resource_ref: Optional[str] = Field(default=None, max_length=160, pattern=r"^[A-Za-z0-9_.-]+$")
+    resource_id: str = Field(default="", max_length=1024)
+    principal_id: str = Field(default="", max_length=36)
+
+
+@app.post("/api/permissions/check")
+async def check_resource_permissions(body: PermissionCheckRequest):
+    """Read-only diagnosis; returned commands are executed by the customer's administrator."""
+    from permission_guidance import check_access
+
+    config, connector_type = body.config, body.connector_type
+    if body.resource_ref:
+        doc = get_store().get(body.resource_ref, body.kind)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Source or destination not found")
+        config, connector_type = doc.get("config", {}), doc["type"]
+    return await check_access(body.kind, connector_type, config, body.resource_id, body.principal_id)
 
 
 async def _agent_diagnostics_proxy(request: Request, pipeline_id: str | None = None):

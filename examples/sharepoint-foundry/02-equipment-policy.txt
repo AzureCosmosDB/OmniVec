@@ -1,0 +1,11 @@
+Northstar Demo Equipment Policy
+Synthetic test data for the OmniVec SharePoint-to-Foundry example.
+This is not a real company policy.
+
+Policy identifier: NORTHSTAR-DEMO-EQUIPMENT-2026
+The annual home-office equipment allowance is 325 USD.
+Equipment purchases require approval before the order is placed.
+Monitors, keyboards and ergonomic chairs are eligible.
+Mobile phone subscriptions and meal expenses are not covered by this policy.
+
+The equipment policy owner is the Demo Equipment Desk.

@@ -219,6 +219,8 @@ ACR_LOGIN_SERVER=$(get_azd_value "AZURE_ACR_LOGIN_SERVER")
 ACR_NAME=$(get_azd_value "AZURE_ACR_NAME")
 COSMOS_ENDPOINT=$(get_azd_value "AZURE_COSMOS_ENDPOINT")
 IDENTITY_CLIENT_ID=$(get_azd_value "AZURE_IDENTITY_CLIENT_ID")
+IDENTITY_PRINCIPAL_ID=$(get_azd_value "AZURE_IDENTITY_PRINCIPAL_ID")
+SUBSCRIPTION_ID=$(get_azd_value "AZURE_SUBSCRIPTION_ID")
 RESOURCE_GROUP=$(get_azd_value "AZURE_RESOURCE_GROUP")
 BUILD_MODE=$(get_azd_value "OMNIVEC_BUILD_MODE")
 SHAREPOINT_ENABLED=$(get_azd_value "OMNIVEC_SHAREPOINT_ENABLED")
@@ -535,6 +537,7 @@ prepare_source_build_spec() {
     omnivec-api)
       copy_minimal_build_tree "$ROOT_DIR/api" "$_context/api"
       copy_minimal_build_tree "$ROOT_DIR/web" "$_context/web"
+      copy_minimal_build_tree "$ROOT_DIR/mcp_servers/cosmos" "$_context/mcp_servers/cosmos"
       _dockerfile="$_context/api/Dockerfile" ;;
     omnivec-search)
       copy_minimal_build_tree "$ROOT_DIR/search" "$_context/search"
@@ -1070,8 +1073,10 @@ cat > "$HELM_VALUES_FILE" <<EOF
 global:
   imageRegistry: "${ACR_LOGIN_SERVER}"
 azure:
+  subscriptionId: "${SUBSCRIPTION_ID}"
   workloadIdentity:
     clientId: "${IDENTITY_CLIENT_ID}"
+    principalId: "${IDENTITY_PRINCIPAL_ID}"
   cosmos:
     endpoint: "${COSMOS_ENDPOINT}"
 api:

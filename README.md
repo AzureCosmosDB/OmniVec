@@ -33,6 +33,18 @@ coverage gaps and prioritized next steps. **Recovery Agent** uses registered cha
 models for investigation and approval-gated repairs; readiness is not processing
 proof. See [the agent operational contract](docs/agent.md).
 
+Startup now shows loading/session-check progress instead of a blank screen, with
+bounded waits and a retry action. Temporary service failures preserve the saved
+session token. Sources, Destinations and Pipelines include whole-inventory
+summary cards and fixed-height, ten-row paginated tables without an internal
+vertical scrollbar.
+
+**MCP servers** prepares destination-specific Azure Functions deployments using
+the shared Cosmos MCP implementation. **Foundry agents** connects a successfully
+deployed server to an existing Foundry project. Both use explicit administrator
+approval, persistent deployment jobs and bounded recovery. Provisioning is
+**disabled by default**; see [cloud deployment setup and limits](docs/cloud-deployments.md).
+
 Desktop browser regressions are in `tests\e2e\test_operations_console.py`. They
 are opt-in: provide `OMNIVEC_E2E_BASE_URL` for a localhost Kubernetes tunnel and
 `OMNIVEC_E2E_TOKEN` through the process environment, then run
@@ -623,6 +635,27 @@ Pipeline diagnostics detects: paused, error state, 0 source docs, changefeed not
 ---
 
 ## Troubleshooting
+
+### Guided source and destination access checks
+
+In the source/destination setup wizard, open the permissions step and select
+**Check access**. For an existing resource, open its details and select
+**Check access / fix permissions**. Failed wizard connection tests also link back
+to the access diagnosis.
+
+The result explains what failed, the required scope, who can grant access, and
+what remains unverified. Supported Azure connectors provide **Copy PowerShell**,
+**Copy Bash**, and **Copy administrator instructions** actions using actual IDs.
+If discovery cannot resolve the account or workload identity, enter the missing
+resource/principal ID; the UI never substitutes an executable placeholder.
+Permission changes remain customer-executed. Use **Check again** after granting
+access; a network timeout is not evidence that more permissions are needed.
+
+The same report is available through the [CLI permissions commands](docs/cli-guide.md#understand-and-fix-access-failures).
+Exact grant templates cover managed-identity Cosmos DB and Azure Blob connectors;
+SharePoint, Fabric and other connectors retain service-specific guidance without
+unverified grant scripts. Destination write/delete and internal checkpoint access
+are explicitly not established by these read-only checks.
 
 ### Missed the URL or admin token after deploy
 

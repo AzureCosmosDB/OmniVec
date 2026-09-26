@@ -30,6 +30,7 @@ func newSourceCmd() *cobra.Command {
 		newSourceUpdateCmd(),
 		newSourceDeleteCmd(),
 		newSourceTestCmd(),
+		newPermissionsCmd("source"),
 		newSourceSyncCmd(),
 	)
 	return cmd
@@ -224,7 +225,7 @@ func newSourceTestCmd() *cobra.Command {
 				}
 			} else {
 				errMsg, _ := resp["error"].(string)
-				exitErr("Connection failed: %s", errMsg)
+				exitErr("Connection failed: %s\nRun `omnivec source permissions %s` for an access diagnosis and scoped fix instructions.", errMsg, id)
 			}
 			return nil
 		},

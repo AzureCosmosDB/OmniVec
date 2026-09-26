@@ -1,0 +1,11 @@
+Northstar Demo Leave Policy
+Synthetic test data for the OmniVec SharePoint-to-Foundry example.
+This is not a real company policy.
+
+Policy identifier: NORTHSTAR-DEMO-LEAVE-2026
+Employees in this fictional example receive 23 days of annual leave.
+Planned leave requests must be submitted at least nine calendar days in advance.
+At most four unused leave days may be carried into the next calendar year.
+Carried leave must be used by March 15.
+
+The leave policy owner is the Demo Leave Desk.

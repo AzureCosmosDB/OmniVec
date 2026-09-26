@@ -28,6 +28,7 @@ func newDestinationCmd() *cobra.Command {
 		newDestUpdateCmd(),
 		newDestDeleteCmd(),
 		newDestTestCmd(),
+		newPermissionsCmd("destination"),
 		newDestEnableCmd(),
 		newDestDisableCmd(),
 	)
@@ -278,7 +279,7 @@ func newDestTestCmd() *cobra.Command {
 				}
 			} else {
 				errMsg, _ := resp["error"].(string)
-				exitErr("Connection failed: %s", errMsg)
+				exitErr("Connection failed: %s\nRun `omnivec destination permissions %s` for an access diagnosis and scoped fix instructions.", errMsg, id)
 			}
 			return nil
 		},

@@ -34,6 +34,10 @@ spec:
             - containerPort: 8080
               protocol: TCP
           env:
+            - name: OMNIVEC_CLOUD_DEPLOYMENTS_ENABLED
+              value: {{ .Values.api.cloudDeployments.enabled | quote }}
+            - name: OMNIVEC_DEPLOYMENT_SCOPES
+              value: {{ join "," .Values.api.cloudDeployments.allowedScopes | quote }}
             - name: AGENT_URL
               value: {{ .Values.agent.serviceUrl | default "http://omnivec-agent:8000" | quote }}
             {{- if .Values.agent.enabled }}
@@ -52,6 +56,8 @@ spec:
               value: {{ .Values.azure.cosmos.database | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            - name: AZURE_PRINCIPAL_ID
+              value: {{ .Values.azure.workloadIdentity.principalId | quote }}
             - name: ENABLE_BLOB_SOURCE
               value: {{ .Values.blobIngestor.enabled | default false | quote }}
             {{- if .Values.azure.subscriptionId }}
