@@ -1508,6 +1508,32 @@ def _get_logs_client():
         return None, None
 
 
+# Workspace-based App Insights stores metrics in AppMetrics; the classic
+# customMetrics table only exists on the App Insights query endpoint. Expose
+# AppMetrics under the classic schema so the queries below work unchanged.
+# Latency/wait rows are pre-aggregated, so value is their per-row mean.
+_APPMETRICS_AS_CUSTOM_METRICS = """let customMetrics = AppMetrics
+    | extend _n = todouble(ItemCount)
+    | project timestamp = TimeGenerated, name = Name,
+        value = iff((Name endswith '.latency' or Name endswith '.wait') and _n > 0, Sum / _n, Sum),
+        valueSum = Sum, valueCount = ItemCount, valueMin = Min, valueMax = Max,
+        customDimensions = Properties, cloud_RoleName = AppRoleName;
+"""
+
+
+def _kql_cell(v):
+    """Unions of mixed numeric columns come back as strings, and empty
+    aggregates as NaN; normalize to float / None so callers can round()."""
+    if isinstance(v, str):
+        try:
+            v = float(v)
+        except ValueError:
+            return v
+    if isinstance(v, float) and v != v:
+        return None
+    return v
+
+
 def _run_kql(kql: str, timespan=None):
     """Run a KQL query against Log Analytics. Returns rows or None."""
     client, ws_id = _get_logs_client()
@@ -1515,9 +1541,11 @@ def _run_kql(kql: str, timespan=None):
         return None
     try:
         from azure.monitor.query import LogsQueryStatus
+        if "customMetrics" in kql:
+            kql = _APPMETRICS_AS_CUSTOM_METRICS + kql
         resp = client.query_workspace(ws_id, kql, timespan=timespan)
         if resp.status == LogsQueryStatus.SUCCESS and resp.tables:
-            return resp.tables[0].rows
+            return [[_kql_cell(c) for c in row] for row in resp.tables[0].rows]
         return []
     except Exception as e:
         logger.warning(f"KQL query failed: {e}")
@@ -1621,7 +1649,8 @@ async def get_metrics():
 
     m = {}
     for row in rows:
-        m[row[0]] = row[1] or 0
+        # union of real and long values splits "val" into val_real / val_long
+        m[row[0]] = next((c for c in row[1:] if c is not None), 0) or 0
 
     throughput_1m = m.get("throughput_1m", 0)
 
