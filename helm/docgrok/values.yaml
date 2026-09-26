@@ -122,24 +122,26 @@ models:
 
     bge-small:
       enabled: false
+      cpuOnly: true
       description: "Text embeddings using BAAI/bge-small-en-v1.5 (384 dims)"
       image:
         repository: docgrok-bge-small
         tag: v1
-      replicaCount: 4
+      replicaCount: 1
       service:
         name: bge-small-svc
         port: 8000
         targetPort: 8000
+      env:
+        BGE_MODEL_NAME: "BAAI/bge-small-en-v1.5"
+        BGE_EMBEDDING_DIM: "384"
       resources:
         requests:
           memory: "2Gi"
           cpu: "1"
-          nvidia.com/gpu: 1
         limits:
           memory: "4Gi"
           cpu: "2"
-          nvidia.com/gpu: 1
       probes:
         liveness:
           path: /health

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BGE-Large Text Embedding Service."""
+"""BGE text embedding service."""
 
 import asyncio
 import gc
@@ -25,9 +25,9 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-MODEL_NAME = "BAAI/bge-large-en-v1.5"
+MODEL_NAME = os.getenv("BGE_MODEL_NAME", "BAAI/bge-large-en-v1.5")
 MODEL_VERSION = "1.0.0"
-EMBEDDING_DIM = 1024
+EMBEDDING_DIM = int(os.getenv("BGE_EMBEDDING_DIM", "1024"))
 DOWNLOAD_TIMEOUT_SECONDS = 120
 
 model = None
@@ -113,7 +113,7 @@ def load_model():
     from transformers import AutoTokenizer, AutoModel
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    print(f"Loading BGE-Large model on: {device}")
+    print(f"Loading {MODEL_NAME} on: {device}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -124,7 +124,7 @@ def load_model():
         low_cpu_mem_usage=True
     ).to(device).eval()
 
-    print(f"BGE-Large model loaded! Embedding dim: {EMBEDDING_DIM}")
+    print(f"{MODEL_NAME} loaded! Embedding dim: {EMBEDDING_DIM}")
 
 
 @asynccontextmanager
@@ -143,7 +143,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="BGE-Large Text Embedding API",
+    title="BGE Text Embedding API",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -200,7 +200,7 @@ def download_azure_blob(url: str) -> bytes:
 
 
 def get_text_embedding(texts: List[str]) -> torch.Tensor:
-    """Get normalized text embeddings using BGE-Large."""
+    """Get normalized text embeddings using the configured BGE model."""
     # BGE models work best with a query prefix for retrieval
     # For general embedding, we use texts as-is
     inputs = tokenizer(

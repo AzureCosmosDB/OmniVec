@@ -27,6 +27,7 @@ public class EmbeddingWorkerService : BackgroundService
     private readonly SemaphoreSlim _documentGate;
     private readonly SemaphoreSlim _sharePointGate;
     private readonly SemaphoreSlim _textGate;
+    private readonly PipelineFairScheduler _pipelineScheduler;
 
     public EmbeddingWorkerService(
         IOptions<WorkerOptions> options,
@@ -48,6 +49,7 @@ public class EmbeddingWorkerService : BackgroundService
         _documentGate = new(_options.BlobConcurrency, _options.BlobConcurrency);
         _sharePointGate = new(_options.SharePointConcurrency, _options.SharePointConcurrency);
         _textGate = new(_options.MaxConcurrentCalls, _options.MaxConcurrentCalls);
+        _pipelineScheduler = new(_options.MaxConcurrentCalls);
         _sbClient = sbClient;
         _docGrok = docGrok;
         _sharePoint = sharePoint;
@@ -166,7 +168,13 @@ public class EmbeddingWorkerService : BackgroundService
                                 $"No writer for {msg.DestinationType}", ct);
                             continue;
                         }
+                        msg.PartitionKeyValue = IdentityTemplateRenderer.RenderPartitionKey(msg);
                         items.Add((msg, sbMsg));
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        _logger.LogWarning(ex, "Invalid identity policy on message {MessageId}", sbMsg.MessageId);
+                        await DeadLetterWithMetricsAsync(receiver, sbMsg, "InvalidIdentityPolicy", ex.Message, ct);
                     }
                     catch (JsonException ex)
                     {
@@ -179,7 +187,20 @@ public class EmbeddingWorkerService : BackgroundService
                 // A slow/unavailable pipeline must not hold unrelated pipelines in
                 // the same receive batch behind its retries.
                 await Task.WhenAll(items.GroupBy(item => (item.msg.PipelineId, item.msg.DestinationId))
-                    .Select(group => ProcessItemsAsync(receiver, group.ToList(), ct)));
+                    .Select(async group =>
+                    {
+                        var groupedItems = group.ToList();
+                        var head = groupedItems[0].msg;
+                        await using var admission = await _pipelineScheduler.AcquireAsync(
+                            head.PipelineId,
+                            head.ResourceWeight,
+                            head.MaxConcurrencyPerWorker,
+                            head.ResourcePriority,
+                            head.WorkloadClass,
+                            groupedItems.Count,
+                            ct);
+                        await ProcessItemsAsync(receiver, groupedItems, ct);
+                    }));
     }
 
     private async Task ProcessItemsAsync(ServiceBusReceiver receiver,
@@ -329,7 +350,9 @@ public class EmbeddingWorkerService : BackgroundService
                     inputs.Add(text);
                     budget += tokens;
                 }
-                var vectors = await _docGrok.EmbedBatchAsync(msg.DocgrokPipeline, inputs, ct);
+                var vectors = await _docGrok.EmbedBatchAsync(
+                    msg.DocgrokPipeline, inputs, ct, msg.PipelineId,
+                    msg.SourceId, msg.DestinationId, msg.SourceRef);
                 if (vectors.Count != inputs.Count)
                     throw new InvalidOperationException("Chunk embedding count mismatch");
                 for (var i = 0; i < inputs.Count; i++)
@@ -343,7 +366,15 @@ public class EmbeddingWorkerService : BackgroundService
             await receiver.CompleteMessageAsync(item.sbMsg, ct);
             _logger.LogInformation("Cosmos text chunked source={SourceId}/{SourceRef} pipeline={Pipeline}: {Count} chunks",
                 msg.SourceId, msg.SourceRef, msg.PipelineId, results.Count);
-            _ = _metrics.ReportInlineMetricsAsync(msg.PipelineId, 1, 0, 0, $"chunk:{msg.MessageId}");
+            await _metrics.ReportInlineMetricsAsync(
+                msg.PipelineId, 1, 0, 0, $"chunk:{msg.MessageId}", ct,
+                sourceId: msg.SourceId, destinationId: msg.DestinationId,
+                modelId: msg.DocgrokPipeline,
+                tokensUsed: TokenEstimator.Estimate(msg.Content),
+                inputBytes: Encoding.UTF8.GetByteCount(msg.Content),
+                queueWaitMs: Math.Max(
+                    0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds),
+                lastDocument: msg.SourceRef);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -359,17 +390,26 @@ public class EmbeddingWorkerService : BackgroundService
         await receiver.DeadLetterMessageAsync(message, reason, description, ct);
         _logger.LogError("Dead-lettered message {MessageId}: {Reason}: {Description}",
             message.MessageId, reason, description);
-        string? pipelineId = null;
+        EmbeddingMessage? failedMessage = null;
         try
         {
-            pipelineId = JsonSerializer.Deserialize<EmbeddingMessage>(message.Body.ToString())?.PipelineId;
+            failedMessage = JsonSerializer.Deserialize<EmbeddingMessage>(message.Body.ToString());
         }
         catch (JsonException) { }
         // Only confirmed explicit DLQ settlement is counted as a terminal failure.
         // Broker-automatic dead-lettering still requires Service Bus monitoring.
-        if (!string.IsNullOrWhiteSpace(pipelineId))
-            await _metrics.ReportInlineMetricsAsync(pipelineId, 0, 1, 0,
-                $"worker-dlq:{message.MessageId}", ct);
+        if (failedMessage is not null && !string.IsNullOrWhiteSpace(failedMessage.PipelineId))
+            await _metrics.ReportInlineMetricsAsync(
+                failedMessage.PipelineId, 0, 1, 0,
+                $"worker-dlq:{message.MessageId}", ct,
+                sourceId: failedMessage.SourceId,
+                destinationId: failedMessage.DestinationId,
+                modelId: failedMessage.DocgrokPipeline,
+                inputBytes: Encoding.UTF8.GetByteCount(failedMessage.Content),
+                queueWaitMs: Math.Max(
+                    0, (DateTimeOffset.UtcNow - message.EnqueuedTime).TotalMilliseconds),
+                errorCategory: reason,
+                lastDocument: failedMessage.SourceRef);
     }
 
     private async Task SettleFailureAsync(ServiceBusReceiver receiver,
@@ -417,7 +457,8 @@ public class EmbeddingWorkerService : BackgroundService
                 PartitionKeyValue: string.IsNullOrEmpty(i.msg.PartitionKeyValue) ? i.msg.SourceRef : i.msg.PartitionKeyValue,
                 PipelineId: i.msg.PipelineId,
                 SourceVersion: i.msg.SourceVersion,
-                PipelineRevision: i.msg.PipelineRevision)).ToList();
+                PipelineRevision: i.msg.PipelineRevision,
+                DocumentId: RenderDocumentId(i.msg))).ToList();
 
             try
             {
@@ -461,7 +502,10 @@ public class EmbeddingWorkerService : BackgroundService
                 msg.BlobConnectionString,
                 msg.BlobContainer ?? "",
                 msg.BlobName ?? "",
-                ct);
+                ct,
+                msg.PipelineId,
+                msg.SourceId,
+                msg.DestinationId);
 
             if (chunks.Count == 0)
             {
@@ -475,9 +519,10 @@ public class EmbeddingWorkerService : BackgroundService
             for (int i = 0; i < chunks.Count; i++)
             {
                 var (chunkText, embedding) = chunks[i];
+                var baseDocId = RenderDocumentId(msg);
                 var docId = chunks.Count == 1
-                    ? msg.SourceRef
-                    : $"{msg.SourceRef}#chunk{i}";
+                    ? baseDocId
+                    : ValidateDocumentId($"{baseDocId}-chunk-{i}");
 
                 results.Add(new EmbeddingResult(
                     DocId: docId,
@@ -515,9 +560,14 @@ public class EmbeddingWorkerService : BackgroundService
                 "Blob processed: {BlobName} → {ChunkCount} chunks for pipeline={Pipeline} in {Elapsed}ms",
                 msg.BlobName, chunks.Count, msg.PipelineName, sw.ElapsedMilliseconds);
 
-            _ = _metrics.ReportInlineMetricsAsync(
+            await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, chunks.Count, 0, sw.ElapsedMilliseconds,
-                $"blob:{msg.SourceRef}:{chunks.Count}");
+                $"blob:{msg.SourceRef}:{chunks.Count}", ct,
+                sourceId: msg.SourceId, destinationId: msg.DestinationId,
+                modelId: msg.DocgrokPipeline,
+                queueWaitMs: Math.Max(
+                    0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds),
+                lastDocument: msg.SourceRef);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -553,7 +603,8 @@ public class EmbeddingWorkerService : BackgroundService
                 // A zero-byte file is an explicit empty document, not a malformed processor response.
                 if (bytes.Length > 0)
                     chunks = await _docGrok.EmbedDataAsync(
-                        msg.DocgrokPipeline, bytes, msg.SharePointFileName ?? msg.SourceRef, ct);
+                        msg.DocgrokPipeline, bytes, msg.SharePointFileName ?? msg.SourceRef, ct,
+                        msg.PipelineId, msg.SourceId, msg.DestinationId);
             }
 
             var results = chunks.Select((chunk, index) => new EmbeddingResult(
@@ -582,9 +633,14 @@ public class EmbeddingWorkerService : BackgroundService
             _logger.LogInformation("SharePoint {Identity} revision={Revision}: {Outcome}, chunks={Count}",
                 identity, msg.SharePointRevision, !applied ? "superseded" : deleted ? "deleted" : results.Count == 0 ? "skipped (empty/filtered)" : "indexed",
                 results.Count);
-            _ = _metrics.ReportInlineMetricsAsync(
+            await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, applied ? results.Count : 0, 0, 0,
-                $"sharepoint:{identity}:{msg.SharePointRevision}");
+                $"sharepoint:{identity}:{msg.SharePointRevision}", ct,
+                sourceId: msg.SourceId, destinationId: msg.DestinationId,
+                modelId: msg.DocgrokPipeline,
+                queueWaitMs: Math.Max(
+                    0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds),
+                lastDocument: msg.SourceRef);
         }
         catch (OperationCanceledException) { throw; }
         catch (SharePointVersionChangedException ex)
@@ -625,7 +681,10 @@ public class EmbeddingWorkerService : BackgroundService
                 head.BlobAccountUrl ?? "",
                 head.BlobContainer ?? "",
                 blobNames,
-                ct);
+                ct,
+                head.PipelineId,
+                head.SourceId,
+                head.DestinationId);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -648,7 +707,7 @@ public class EmbeddingWorkerService : BackgroundService
             var msg = batch[i].msg;
             var emb = embeddings[i];
             var res = new EmbeddingResult(
-                DocId: msg.SourceRef,
+                DocId: RenderDocumentId(msg),
                 SourceRef: msg.SourceRef,
                 Embedding: emb,
                 ContentHash: msg.ContentHash,
@@ -705,10 +764,21 @@ public class EmbeddingWorkerService : BackgroundService
             batch.Count, head.PipelineName, sw.ElapsedMilliseconds,
             batch.Count * 1000.0 / Math.Max(sw.ElapsedMilliseconds, 1));
 
-        _ = _metrics.ReportInlineMetricsAsync(
+        await _metrics.ReportInlineMetricsAsync(
             head.PipelineId, batch.Count, 0, sw.ElapsedMilliseconds,
-            $"blobbatch:{head.PipelineId}:{Guid.NewGuid()}");
+            $"blobbatch:{head.PipelineId}:{Guid.NewGuid()}", ct,
+            sourceId: head.SourceId, destinationId: head.DestinationId,
+            modelId: head.DocgrokPipeline,
+            queueWaitMs: batch.Average(item =>
+                Math.Max(0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds)),
+            lastDocument: batch[^1].msg.SourceRef);
     }
+
+    private static string RenderDocumentId(EmbeddingMessage message)
+        => IdentityTemplateRenderer.RenderDocumentId(message);
+
+    private static string ValidateDocumentId(string rendered)
+        => IdentityTemplateRenderer.ValidateDocumentId(rendered);
 
     private async Task ProcessBatchAsync(
         ServiceBusReceiver receiver,
@@ -720,11 +790,6 @@ public class EmbeddingWorkerService : BackgroundService
         var sw = Stopwatch.StartNew();
         var modelKey = batch[0].msg.DocgrokPipeline;
         var pipelineId = batch[0].msg.PipelineId;
-        using var renewalCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var renewalTask = RenewLocksAsync(
-            receiver,
-            batch.Select(item => item.sbMsg).ToArray(),
-            renewalCts.Token);
 
         try
         {
@@ -759,7 +824,7 @@ public class EmbeddingWorkerService : BackgroundService
                 var embedding = embeddings[i];
 
                 var result = new EmbeddingResult(
-                    DocId: msg.SourceRef,
+                    DocId: RenderDocumentId(msg),
                     SourceRef: msg.SourceRef,
                     Embedding: embedding,
                     ContentHash: msg.ContentHash,
@@ -808,7 +873,23 @@ public class EmbeddingWorkerService : BackgroundService
 
             // Phase 5: Report metrics
             var batchKey = BuildMetricsBatchKey(pipelineId, batch.Select(item => item.msg));
-            _ = _metrics.ReportInlineMetricsAsync(pipelineId, batch.Count, 0, sw.ElapsedMilliseconds, batchKey);
+            var tokensUsed = texts.Sum(TokenEstimator.Estimate);
+            var inputBytes = texts.Sum(text => Encoding.UTF8.GetByteCount(text));
+            var queueWaitMs = batch.Average(item =>
+                Math.Max(0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds));
+            await _metrics.ReportInlineMetricsAsync(
+                pipelineId, batch.Count, 0, sw.ElapsedMilliseconds, batchKey, ct,
+                sourceId: batch[0].msg.SourceId,
+                destinationId: batch[0].msg.DestinationId,
+                modelId: modelKey,
+                tokensUsed: tokensUsed,
+                inputBytes: inputBytes,
+                queueWaitMs: queueWaitMs,
+                lastDocument: batch[^1].msg.SourceRef,
+                resourceWeight: batch[0].msg.ResourceWeight,
+                maxConcurrencyPerWorker: batch[0].msg.MaxConcurrencyPerWorker,
+                resourcePriority: batch[0].msg.ResourcePriority,
+                workloadClass: batch[0].msg.WorkloadClass);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -819,13 +900,6 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 await SettleFailureAsync(receiver, sbMsg, ex, ct);
             }
-        }
-
-        finally
-        {
-            renewalCts.Cancel();
-            try { await renewalTask; }
-            catch (OperationCanceledException) { }
         }
     }
 
@@ -840,39 +914,6 @@ public class EmbeddingWorkerService : BackgroundService
             SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", identities))))
             .ToLowerInvariant();
         return $"worker:{pipelineId}:{digest}";
-    }
-
-    private async Task RenewLocksAsync(
-        ServiceBusReceiver receiver,
-        IReadOnlyList<ServiceBusReceivedMessage> messages,
-        CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(20), ct);
-            foreach (var sbMsg in messages)
-            {
-                try
-                {
-                    await receiver.RenewMessageLockAsync(sbMsg, ct);
-                }
-                catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessageLockLost)
-                {
-                    // The message was already settled or its lock expired before renewal.
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(
-                        "Could not renew lock for message {MessageId}: {Error}",
-                        sbMsg.MessageId,
-                        ex.Message);
-                }
-            }
-        }
     }
 
     /// <summary>
@@ -982,7 +1023,10 @@ public class EmbeddingWorkerService : BackgroundService
 
         try
         {
-            return await _docGrok.EmbedBatchAsync(modelKey, texts, ct);
+            var head = batch[0].msg;
+            return await _docGrok.EmbedBatchAsync(
+                modelKey, texts, ct, head.PipelineId,
+                head.SourceId, head.DestinationId, head.SourceRef);
         }
         catch (EmbeddingClientException ex) when (DocGrokClient.IsInputError(ex.StatusCode))
         {
@@ -1002,7 +1046,10 @@ public class EmbeddingWorkerService : BackgroundService
                         only.msg.SourceRef, ex.StatusCode, orig.Length, only.msg.Content.Length);
                     try
                     {
-                        return await _docGrok.EmbedBatchAsync(modelKey, new List<string> { only.msg.Content }, ct);
+                        return await _docGrok.EmbedBatchAsync(
+                            modelKey, new List<string> { only.msg.Content }, ct,
+                            only.msg.PipelineId, only.msg.SourceId,
+                            only.msg.DestinationId, only.msg.SourceRef);
                     }
                     catch (EmbeddingClientException ex2) when (DocGrokClient.IsInputError(ex2.StatusCode))
                     {

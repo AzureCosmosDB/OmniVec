@@ -130,6 +130,27 @@ class MetricsStore:
         self._pipelines: Dict[str, dict] = defaultdict(lambda: {
             "embedded": 0, "failed": 0, "skipped_no_content": 0,
             "skipped_unchanged": 0, "jobs_created": 0, "tokens": 0,
+            "input_bytes": 0, "requests": 0, "retries": 0, "throttles": 0,
+            "throttle_delay_ms": 0.0, "total_time_ms": 0.0,
+            "queue_wait_ms": 0.0, "last_activity_at": None,
+            "last_success_at": None, "last_failure_at": None,
+            "last_document": None, "error_types": defaultdict(int),
+        })
+        self._models: Dict[str, dict] = defaultdict(lambda: {
+            "embedded": 0, "failed": 0, "tokens": 0, "input_bytes": 0,
+            "requests": 0, "retries": 0, "throttles": 0,
+            "throttle_delay_ms": 0.0, "total_time_ms": 0.0,
+            "queue_wait_ms": 0.0, "last_activity_at": None,
+            "last_success_at": None, "last_failure_at": None,
+            "last_document": None, "error_types": defaultdict(int),
+        })
+        self._pipeline_models: Dict[tuple, dict] = defaultdict(lambda: {
+            "embedded": 0, "failed": 0, "tokens": 0, "input_bytes": 0,
+            "requests": 0, "retries": 0, "throttles": 0,
+            "throttle_delay_ms": 0.0, "total_time_ms": 0.0,
+            "queue_wait_ms": 0.0, "last_activity_at": None,
+            "last_success_at": None, "last_failure_at": None,
+            "last_document": None, "error_types": defaultdict(int),
         })
 
         # --- Failure breakdown { error_category: count } ---
@@ -142,6 +163,18 @@ class MetricsStore:
 
         # --- Throughput tracker (rolling 60s) ---
         self.throughput = _ThroughputTracker(60)
+        self._pipeline_throughput: Dict[str, _ThroughputTracker] = defaultdict(
+            lambda: _ThroughputTracker(60))
+        self._model_throughput: Dict[str, _ThroughputTracker] = defaultdict(
+            lambda: _ThroughputTracker(60))
+        self._pipeline_model_throughput: Dict[tuple, _ThroughputTracker] = defaultdict(
+            lambda: _ThroughputTracker(60))
+        self._pipeline_latency: Dict[str, _SlidingWindow] = defaultdict(
+            lambda: _SlidingWindow(300))
+        self._model_latency: Dict[str, _SlidingWindow] = defaultdict(
+            lambda: _SlidingWindow(300))
+        self._pipeline_model_latency: Dict[tuple, _SlidingWindow] = defaultdict(
+            lambda: _SlidingWindow(300))
 
         # --- Time-series buckets (minute granularity, last 24h) ---
         # { "2026-04-16T14:30:00": {processed, failed, processing_time_ms} }
@@ -155,7 +188,35 @@ class MetricsStore:
                                 docs_failed: int = 0, docs_skipped_no_content: int = 0,
                                 docs_skipped_unchanged: int = 0, jobs_created: int = 0,
                                 tokens_used: int = 0, latency_ms: float = 0,
-                                source_id: str = ""):
+                                source_id: str = "", model_id: str = "",
+                                destination_id: str = "", input_bytes: int = 0,
+                                queue_wait_ms: float = 0, retry_count: int = 0,
+                                throttle_count: int = 0, throttle_delay_ms: float = 0,
+                                error_category: str = "", last_document: str = "",
+                                request_count: int = 1):
+        now = datetime.now(timezone.utc).isoformat()
+
+        def update_scope(scope):
+            scope["embedded"] += docs_embedded
+            scope["failed"] += docs_failed
+            scope["tokens"] += tokens_used
+            scope["input_bytes"] += input_bytes
+            scope["requests"] += request_count
+            scope["retries"] += retry_count
+            scope["throttles"] += throttle_count
+            scope["throttle_delay_ms"] += throttle_delay_ms
+            scope["total_time_ms"] += latency_ms
+            scope["queue_wait_ms"] += queue_wait_ms
+            scope["last_activity_at"] = now
+            if last_document:
+                scope["last_document"] = last_document
+            if docs_embedded > 0:
+                scope["last_success_at"] = now
+            if docs_failed > 0:
+                scope["last_failure_at"] = now
+            if error_category:
+                scope["error_types"][error_category] += max(docs_failed, 1)
+
         with self._lock:
             self.documents_embedded += docs_embedded
             self.documents_failed += docs_failed
@@ -167,12 +228,14 @@ class MetricsStore:
 
             if pipeline_id:
                 p = self._pipelines[pipeline_id]
-                p["embedded"] += docs_embedded
-                p["failed"] += docs_failed
                 p["skipped_no_content"] += docs_skipped_no_content
                 p["skipped_unchanged"] += docs_skipped_unchanged
                 p["jobs_created"] += jobs_created
-                p["tokens"] += tokens_used
+                update_scope(p)
+            if model_id:
+                update_scope(self._models[model_id])
+            if pipeline_id and model_id:
+                update_scope(self._pipeline_models[(pipeline_id, model_id)])
 
             # Time-series bucket (minute granularity)
             bucket = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:00")
@@ -183,8 +246,20 @@ class MetricsStore:
 
         if docs_embedded > 0:
             self.throughput.record(docs_embedded)
+            if pipeline_id:
+                self._pipeline_throughput[pipeline_id].record(docs_embedded)
+            if model_id:
+                self._model_throughput[model_id].record(docs_embedded)
+            if pipeline_id and model_id:
+                self._pipeline_model_throughput[(pipeline_id, model_id)].record(docs_embedded)
         if latency_ms > 0:
             self.embedding_latency.record(latency_ms)
+            if pipeline_id:
+                self._pipeline_latency[pipeline_id].record(latency_ms)
+            if model_id:
+                self._model_latency[model_id].record(latency_ms)
+            if pipeline_id and model_id:
+                self._pipeline_model_latency[(pipeline_id, model_id)].record(latency_ms)
 
     def record_search(self, latency_ms: float = 0, tokens_used: int = 0,
                       results_count: int = 0, embed_latency_ms: float = 0):
@@ -219,10 +294,34 @@ class MetricsStore:
 
     def snapshot(self) -> dict:
         """Return full metrics snapshot for /api/metrics/live."""
+        def scope_snapshot(counters, latency, throughput):
+            result = dict(counters)
+            result["error_types"] = dict(counters.get("error_types", {}))
+            result["latency"] = latency.stats()
+            result["throughput_docs_per_sec"] = throughput.rate()
+            requests = counters.get("requests", 0)
+            result["avg_queue_wait_ms"] = (
+                round(counters.get("queue_wait_ms", 0.0) / requests, 1)
+                if requests else None
+            )
+            return result
+
         with self._lock:
             pipelines = {}
             for pid, counters in self._pipelines.items():
-                pipelines[pid] = dict(counters)
+                pipelines[pid] = scope_snapshot(
+                    counters, self._pipeline_latency[pid], self._pipeline_throughput[pid])
+            models = {}
+            for model_id, counters in self._models.items():
+                models[model_id] = scope_snapshot(
+                    counters, self._model_latency[model_id], self._model_throughput[model_id])
+            pipeline_models = {}
+            for (pipeline_id, model_id), counters in self._pipeline_models.items():
+                pipeline_models.setdefault(pipeline_id, {})[model_id] = scope_snapshot(
+                    counters,
+                    self._pipeline_model_latency[(pipeline_id, model_id)],
+                    self._pipeline_model_throughput[(pipeline_id, model_id)],
+                )
 
             total_tokens = self.tokens_embedding + self.tokens_search
 
@@ -258,6 +357,8 @@ class MetricsStore:
                 },
                 # Per-pipeline breakdown
                 "pipelines": pipelines,
+                "models": models,
+                "pipeline_models": pipeline_models,
             }
 
     def get_timeseries(self, start: str, end: str, granularity: str = "hour") -> list:
@@ -307,6 +408,8 @@ class MetricsStore:
                          "tokens_embedding", "tokens_search", "changefeed_batches"):
                 setattr(self, attr, 0)
             self._pipelines.clear()
+            self._models.clear()
+            self._pipeline_models.clear()
             self._failure_types.clear()
             self._timeseries.clear()
             self._started_at = datetime.now(timezone.utc).isoformat()
@@ -314,6 +417,12 @@ class MetricsStore:
         self.search_latency = _SlidingWindow(300)
         self.request_latency = _SlidingWindow(300)
         self.throughput = _ThroughputTracker(60)
+        self._pipeline_throughput.clear()
+        self._model_throughput.clear()
+        self._pipeline_model_throughput.clear()
+        self._pipeline_latency.clear()
+        self._model_latency.clear()
+        self._pipeline_model_latency.clear()
 
 
 # Singleton — importable anywhere
@@ -371,6 +480,10 @@ def init_telemetry():
             "omnivec.tokens.used", unit="tokens")
         _counters["api_errors"] = _meter.create_counter(
             "omnivec.api.errors", unit="errors")
+        _counters["retries"] = _meter.create_counter(
+            "omnivec.model.retries", unit="retries")
+        _counters["throttles"] = _meter.create_counter(
+            "omnivec.model.throttles", unit="throttles")
 
         _histograms["embedding_latency"] = _meter.create_histogram(
             "omnivec.embedding.latency", unit="ms")
@@ -378,6 +491,10 @@ def init_telemetry():
             "omnivec.search.latency", unit="ms")
         _histograms["request_latency"] = _meter.create_histogram(
             "omnivec.request.latency", unit="ms")
+        _histograms["queue_wait"] = _meter.create_histogram(
+            "omnivec.queue.wait", unit="ms")
+        _histograms["throttle_delay"] = _meter.create_histogram(
+            "omnivec.model.throttle_delay", unit="ms")
 
         _initialized = True
         logger.info("Azure Monitor telemetry initialized.")
@@ -411,9 +528,17 @@ def record_embedding_batch(pipeline_id: str = "", docs_embedded: int = 0,
                            docs_failed: int = 0, docs_skipped_no_content: int = 0,
                            docs_skipped_unchanged: int = 0, jobs_created: int = 0,
                            tokens_used: int = 0, latency_ms: float = 0,
-                           source_id: str = ""):
+                           source_id: str = "", model_id: str = "",
+                           destination_id: str = "", input_bytes: int = 0,
+                           queue_wait_ms: float = 0, retry_count: int = 0,
+                           throttle_count: int = 0, throttle_delay_ms: float = 0,
+                           error_category: str = "", last_document: str = "",
+                           request_count: int = 1):
     """Record a changefeed embedding batch — primary metrics event."""
-    attrs = {"pipeline_id": pipeline_id, "source_id": source_id}
+    attrs = {
+        "pipeline_id": pipeline_id, "source_id": source_id,
+        "model_id": model_id, "destination_id": destination_id,
+    }
 
     # In-memory
     metrics_store.record_embedding_batch(
@@ -421,6 +546,11 @@ def record_embedding_batch(pipeline_id: str = "", docs_embedded: int = 0,
         docs_failed=docs_failed, docs_skipped_no_content=docs_skipped_no_content,
         docs_skipped_unchanged=docs_skipped_unchanged, jobs_created=jobs_created,
         tokens_used=tokens_used, latency_ms=latency_ms, source_id=source_id,
+        model_id=model_id, destination_id=destination_id, input_bytes=input_bytes,
+        queue_wait_ms=queue_wait_ms, retry_count=retry_count,
+        throttle_count=throttle_count, throttle_delay_ms=throttle_delay_ms,
+        error_category=error_category, last_document=last_document,
+        request_count=request_count,
     )
 
     # App Insights
@@ -436,6 +566,14 @@ def record_embedding_batch(pipeline_id: str = "", docs_embedded: int = 0,
         _ai_counter("tokens_used", tokens_used, attrs)
     if latency_ms > 0:
         _ai_histogram("embedding_latency", latency_ms, attrs)
+    if retry_count:
+        _ai_counter("retries", retry_count, attrs)
+    if throttle_count:
+        _ai_counter("throttles", throttle_count, attrs)
+    if queue_wait_ms > 0:
+        _ai_histogram("queue_wait", queue_wait_ms, attrs)
+    if throttle_delay_ms > 0:
+        _ai_histogram("throttle_delay", throttle_delay_ms, attrs)
 
 
 def record_search(latency_ms: float = 0, embed_latency_ms: float = 0,

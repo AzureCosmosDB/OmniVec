@@ -15,6 +15,7 @@ from openai import AzureOpenAI
 from cosmos_tools import (
     list_query,
     normalize_top_k,
+    normalize_filters,
     parse_allowed_containers,
     public_document,
     select_container,
@@ -55,6 +56,9 @@ _MCP_TOOLS = [
                 "vector_field": {"type": "string"},
                 "fields": {"type": "string"},
                 "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                "source_id": {"type": "string", "maxLength": 160},
+                "pipeline_id": {"type": "string", "maxLength": 160},
+                "source_ref": {"type": "string", "maxLength": 2048},
             },
             "required": ["question"],
             "additionalProperties": False,
@@ -177,6 +181,9 @@ def _vector_search(
     vector_field: str = "embedding",
     fields: str = "id,title,body,source_ref",
     top_k: int = 3,
+    source_id: str = "",
+    pipeline_id: str = "",
+    source_ref: str = "",
 ) -> str:
     question = (question or "").strip()
     if not question:
@@ -184,6 +191,15 @@ def _vector_search(
     if len(question) > 8192:
         raise ValueError("question must not exceed 8192 characters")
     limit = normalize_top_k(top_k)
+    filters = normalize_filters({
+        key: value
+        for key, value in {
+            "source_id": source_id,
+            "pipeline_id": pipeline_id,
+            "source_ref": source_ref,
+        }.items()
+        if value
+    })
     selected, client = _container(container)
     try:
         response = _embedding_client().embeddings.create(
@@ -192,8 +208,14 @@ def _vector_search(
         )
         embedding = response.data[0].embedding
         rows = client.query_items(
-            query=vector_query(limit, vector_field, fields),
-            parameters=[{"name": "@embedding", "value": embedding}],
+            query=vector_query(limit, vector_field, fields, filters),
+            parameters=[
+                {"name": "@embedding", "value": embedding},
+                *[
+                    {"name": f"@{key}", "value": value}
+                    for key, value in filters.items()
+                ],
+            ],
             enable_cross_partition_query=True,
         )
         matches = [public_document(row) for row in rows]
@@ -202,6 +224,7 @@ def _vector_search(
                 "container": selected,
                 "question": question,
                 "count": len(matches),
+                "filters": filters,
                 "matches": matches,
             }
         )
@@ -238,15 +261,36 @@ def _vector_search(
     description="Number of nearest documents to return, from 1 through 10.",
     is_required=False,
 )
+@app.mcp_tool_property(
+    arg_name="source_id",
+    description="Optional exact OmniVec source ID filter.",
+    is_required=False,
+)
+@app.mcp_tool_property(
+    arg_name="pipeline_id",
+    description="Optional exact OmniVec pipeline ID filter.",
+    is_required=False,
+)
+@app.mcp_tool_property(
+    arg_name="source_ref",
+    description="Optional exact source reference filter.",
+    is_required=False,
+)
 def vector_search(
     question: str,
     container: str = "",
     vector_field: str = "embedding",
     fields: str = "id,title,body,source_ref",
     top_k: int = 3,
+    source_id: str = "",
+    pipeline_id: str = "",
+    source_ref: str = "",
 ) -> str:
     """Embed a question and perform vector search over an allowed Cosmos container."""
-    return _vector_search(question, container, vector_field, fields, top_k)
+    return _vector_search(
+        question, container, vector_field, fields, top_k,
+        source_id, pipeline_id, source_ref,
+    )
 
 
 def _mcp_result(request_id, result: dict) -> dict:

@@ -49,6 +49,9 @@ public class EmbeddingMessage
     [JsonPropertyName("doc_id_pattern")]
     public string DocIdPattern { get; set; } = "{source}";
 
+    [JsonPropertyName("partition_key_pattern")]
+    public string PartitionKeyPattern { get; set; } = "{source_partition}";
+
     [JsonPropertyName("pipeline_generation")]
     public string PipelineGeneration { get; set; } = "";
 
@@ -61,6 +64,18 @@ public class EmbeddingMessage
 
     [JsonPropertyName("enqueued_at")]
     public string EnqueuedAt { get; set; } = DateTime.UtcNow.ToString("O");
+
+    [JsonPropertyName("resource_weight")]
+    public int ResourceWeight { get; set; } = 10;
+
+    [JsonPropertyName("max_concurrency_per_worker")]
+    public int MaxConcurrencyPerWorker { get; set; } = 2;
+
+    [JsonPropertyName("resource_priority")]
+    public string ResourcePriority { get; set; } = "normal";
+
+    [JsonPropertyName("workload_class")]
+    public string WorkloadClass { get; set; } = "shared";
 
     /// <summary>Pipeline-level flag: persist the (possibly-truncated) content on the destination document alongside the vector.</summary>
     [JsonPropertyName("store_content")]

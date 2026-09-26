@@ -74,6 +74,7 @@ OmniVec is a **Universal Vector Ingestion Platform** deployed on Azure Kubernete
 | `GET/POST/PUT/DELETE` | `/api/destinations` | CRUD for vector destinations |
 | `POST` | `/api/destinations/{id}/test` | Test + probe vector indexes |
 | `GET/POST/PUT/DELETE` | `/api/pipelines` | CRUD for pipelines |
+| `POST` | `/api/pipelines/identity-preview` | Render document, chunk, and partition identities before save |
 | `POST` | `/api/pipelines/{id}/pause\|resume\|run\|reset` | Pipeline lifecycle |
 | `GET` | `/api/jobs` | List/filter jobs |
 | `POST` | `/api/jobs/{id}/retry\|cancel` | Job management |
@@ -82,7 +83,41 @@ OmniVec is a **Universal Vector Ingestion Platform** deployed on Azure Kubernete
 | `GET` | `/api/deployments` | K8s deployment management |
 | `GET` | `/health` | Health check |
 
-**Data Storage:** All metadata (sources, destinations, pipelines, jobs, metrics) in CosmosDB container `metadata` with partition key `/doc_type`.
+**Data Storage:** Control-plane metadata (sources, destinations, pipelines, jobs,
+metrics, and asynchronous sync operation records) is stored in Cosmos DB
+container `metadata` with partition key `/doc_type`. Ingestion workers use the
+preprovisioned shared `source-leases` container for CFP checkpoints and
+polling-source ownership, and `source-state` for durable polling cursors/outboxes;
+the partition keys are `/id` and `/scopeId`, respectively. Containers are shared,
+and state documents are co-located and namespaced by source/pipeline scope,
+avoiding container-per-source control-plane work and cross-source reconciliation
+scans.
+
+### 2.2.1 Destination Identity Policy
+
+Queue-mode pipelines define three independent identities:
+
+- `doc_id_pattern` renders the destination item ID. The safe default is
+  `{source_hash}-{pipeline}`. When a destination is shared, OmniVec rejects
+  patterns without `{pipeline}` or `{pipeline_hash}` unless the operator sets
+  `collision_policy: overwrite`.
+- `chunk_config.doc_id_pattern` renders the readable suffix for chunk items.
+  The worker always prepends a deterministic namespace derived from source,
+  source partition, and pipeline identity, so replay and fan-out cannot collide.
+- `partition_key_pattern` renders the destination logical partition key. The
+  compatibility default is `{source_partition}`; templates can additionally use
+  source, pipeline, destination, and model identifiers or hashes.
+
+The worker renders partition identity exactly once before document ID rendering,
+chunking, destination writes, and tombstone deletion. Messages produced before
+this policy existed retain their original behavior because a missing partition
+template defaults to `{source_partition}`.
+
+Changing an active document-ID template is a migration, not a cosmetic edit:
+pause the pipeline, delete destination records attributed to its `pipeline_id`,
+save the new policy, reset for a full replay, and resume. The Cosmos connector's
+`delete_by_pipeline_id` helper performs partition-key-aware cleanup for this
+operation.
 
 ### 2.3 OmniVec Controller (Bookkeeper)
 
@@ -101,7 +136,7 @@ OmniVec is a **Universal Vector Ingestion Platform** deployed on Azure Kubernete
 
 | Attribute | Detail |
 |-----------|--------|
-| Replicas | 1–10 (HPA autoscaled at 70% CPU) |
+| Replicas | Shared pool; fixed by default, optional CPU HPA or Service Bus KEDA scaling |
 
 **Processing flow:**
 1. Poll pending jobs from CosmosDB
@@ -111,6 +146,33 @@ OmniVec is a **Universal Vector Ingestion Platform** deployed on Azure Kubernete
 5. Send to DocGrok `/embed/batch`
 6. Write vector(s) to destination
 7. Update job status
+
+The .NET queue worker spreads replicas across nodes and uses a PodDisruptionBudget
+so a single node drain does not remove all embedding capacity. Queue-driven scaling
+is opt-in:
+
+```yaml
+dotnetWorker:
+  autoscaling:
+    enabled: true
+    type: keda
+    minReplicas: 2
+    maxReplicas: 10
+    messageCountPerReplica: 50
+```
+
+KEDA must be installed before enabling this mode. It scales the shared worker pool
+from the `embeddings/worker` Service Bus subscription backlog. The minimum remains
+two for availability and cold-start protection. CPU HPA remains available with
+`type: hpa`, but queue backlog is the preferred demand signal because workers can
+be waiting on model or destination I/O while CPU remains low.
+
+Ordinary pipelines share the worker pool; OmniVec does not create a Kubernetes
+deployment or Service Bus subscription for every pipeline. Pipeline/model metrics
+track throughput, queue wait, tokens, retries, throttles, errors, and last activity.
+Sustained high-cost, GPU-heavy, premium, or noisy pipelines can then be promoted to
+a dedicated worker-class subscription and deployment without imposing per-pipeline
+infrastructure on the common case.
 
 ### 2.5 Change Feed Processor (CFP)
 
@@ -362,6 +424,14 @@ CosmosDB Source → Change Feed Processor → Create Job (metadata)
                                                │
 Worker picks up → Download content → DocGrok → Write to Destination
 ```
+
+Physical deletes are not emitted by the standard Cosmos change feed. Sources
+that require deletion propagation configure `soft_delete_field` and,
+optionally, `soft_delete_value` (the default marker is boolean `true`). A
+matching tombstone bypasses embedding and publishes a delete message that
+removes every destination record for the source reference and pipeline.
+Tombstones require queue mode. Attachment tombstones must retain the attachment
+list so each previously emitted attachment reference can be deleted safely.
 
 ### 6.3 Blob Source → Event-Driven
 

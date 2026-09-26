@@ -147,3 +147,192 @@ def test_pipeline_identities_are_rejected_for_wrong_source_types(api_app):
     api._require_pipeline_source_identities(
         SimpleNamespace(get=lambda *_: {"type": "onelake-iceberg"}), request
     )
+
+
+@pytest.mark.asyncio
+async def test_full_source_sync_bumps_pipeline_generation(api_app, monkeypatch):
+    api = sys.modules["api"]
+    pipeline = SimpleNamespace(
+        id="pipeline", status=api.PipelineStatus.ACTIVE,
+        sources=[SimpleNamespace(source_id="source")],
+        destination_id="destination", docgrok_pipeline="model",
+        generation="old", reset_at=None, updated_at=None,
+    )
+    saved = []
+    store = SimpleNamespace(
+        get=lambda *_: {"id": "source"},
+        list=lambda kind: [{"id": "pipeline"}] if kind == "pipeline" else [],
+        upsert=lambda doc: saved.append(doc),
+    )
+    monkeypatch.setattr(api, "get_store", lambda: store)
+    monkeypatch.setattr(api, "_pipeline_from_doc", lambda _: pipeline)
+    monkeypatch.setattr(api, "_to_doc", lambda value, _: value)
+    result = await api.sync_source("source", api.SyncSourceRequest(full_sync=True))
+    assert result["success"] is True
+    assert "full replay" in result["message"]
+    assert pipeline.reset_at is not None
+    assert pipeline.generation != "old"
+    assert saved[0] is pipeline
+    assert saved[1]["doc_type"] == "sync_operation"
+    assert saved[1]["id"] == result["operation_id"]
+    assert saved[1]["pipeline_ids"] == ["pipeline"]
+    assert result["status_url"].endswith(result["operation_id"])
+
+
+@pytest.mark.parametrize(
+    ("embedded", "failed", "expected"),
+    [(0, 0, "running"), (2, 0, "ready"), (2, 1, "failed")],
+)
+def test_source_sync_status_tracks_current_pipeline_readiness(
+    api_app, monkeypatch, embedded, failed, expected
+):
+    api = sys.modules["api"]
+    operation = {
+        "id": "sync-test",
+        "doc_type": "sync_operation",
+        "source_id": "source",
+        "pipeline_ids": ["pipeline"],
+        "full_sync": True,
+        "minimum_documents": 2,
+        "status": "running",
+        "started_at": "2026-01-01T00:00:00",
+        "reset_at": "2026-01-01T00:00:00",
+    }
+    saved = []
+    store = SimpleNamespace(
+        get=lambda *_: operation,
+        upsert=lambda doc: saved.append(doc.copy()),
+    )
+
+    class Stats:
+        embedded_count = embedded
+        jobs = SimpleNamespace(failed=failed)
+
+        def model_dump(self, **_):
+            return {
+                "embedded_count": self.embedded_count,
+                "jobs": {"failed": self.jobs.failed},
+            }
+
+    monkeypatch.setattr(api, "get_store", lambda: store)
+    monkeypatch.setattr(api, "get_pipeline_stats", lambda _: Stats())
+
+    result = api.get_source_sync("sync-test")
+
+    assert result["status"] == expected
+    assert result["pipelines"][0]["ready"] is (embedded >= 2)
+    assert bool(saved) is (expected != "running")
+
+
+@pytest.mark.asyncio
+async def test_scoped_search_selects_exact_pipeline_and_parameterizes_filters(
+    api_app, monkeypatch
+):
+    api = sys.modules["api"]
+    destination = {
+        "id": "destination",
+        "type": "cosmosdb-vector",
+        "config": {
+            "endpoint": "https://example.documents.azure.com",
+            "database": "db",
+            "container": "vectors",
+            "vector_dimensions": 1536,
+        },
+    }
+    pipelines = [
+        {
+            "id": "pipeline-other",
+            "destination_id": "destination",
+            "status": "active",
+            "docgrok_pipeline": "other-model",
+            "vector_index_path": "/embedding",
+            "sources": [{"source_id": "other", "content_fields": ["content"]}],
+        },
+        {
+            "id": "pipeline-exact",
+            "destination_id": "destination",
+            "status": "active",
+            "docgrok_pipeline": "exact-model",
+            "vector_index_path": "/embedding",
+            "sources": [{"source_id": "source", "content_fields": ["content"]}],
+        },
+    ]
+    store = SimpleNamespace(
+        list=lambda kind: pipelines if kind == "pipeline" else [],
+        get=lambda item_id, kind: destination
+        if kind == "destination" and item_id == "destination"
+        else None,
+    )
+    monkeypatch.setattr(api, "get_store", lambda: store)
+    document_filter = {
+        "where": "c.source_id = @source_id AND c.pipeline_id = @pipeline_id",
+        "params": {"source_id": "source", "pipeline_id": "pipeline-exact"},
+    }
+
+    indexes, warnings = await api._build_index_specs(
+        ["destination"],
+        pipeline_id="pipeline-exact",
+        document_filter=document_filter,
+    )
+
+    assert warnings == []
+    assert len(indexes) == 1
+    assert indexes[0]["pipeline_id"] == "pipeline-exact"
+    assert indexes[0]["embedding"]["pipeline"] == "exact-model"
+    assert indexes[0]["filter"] == document_filter
+    assert indexes[0]["return_fields"] == ["source_id", "pipeline_id"]
+
+
+@pytest.mark.asyncio
+async def test_scoped_search_rejects_unsupported_destination(api_app, monkeypatch):
+    api = sys.modules["api"]
+    destination = {
+        "id": "destination",
+        "type": "pgvector",
+        "config": {"host": "db", "database": "db", "table": "vectors"},
+    }
+    pipeline = {
+        "id": "pipeline",
+        "destination_id": "destination",
+        "status": "active",
+        "docgrok_pipeline": "model",
+        "sources": [{"source_id": "source", "content_fields": ["content"]}],
+    }
+    store = SimpleNamespace(
+        list=lambda kind: [pipeline] if kind == "pipeline" else [],
+        get=lambda *_: destination,
+    )
+    monkeypatch.setattr(api, "get_store", lambda: store)
+
+    indexes, warnings = await api._build_index_specs(
+        ["destination"],
+        pipeline_id="pipeline",
+        document_filter={
+            "where": "c.source_id = @source_id",
+            "params": {"source_id": "source"},
+        },
+    )
+
+    assert indexes == []
+    assert warnings == [
+        "destination destination does not support OmniVec readiness filters"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_are_authoritative_and_unsupported_sources_fail_closed(api_app, monkeypatch):
+    api = sys.modules["api"]
+    monkeypatch.setattr(api, "_BLOB_SOURCE_ENABLED", True)
+    capabilities = await api.get_capabilities()
+    assert capabilities["allowed_source_types"] == [
+        "azure-blob", "cosmosdb", "postgresql", "mssql",
+        "databricks", "onelake-iceberg", "sharepoint",
+    ]
+    assert capabilities["unsupported_source_types"] == ["s3", "http"]
+    monkeypatch.setattr(api, "get_store", lambda: SimpleNamespace(list=lambda _: []))
+    for source_type in (api.SourceType.S3, api.SourceType.HTTP):
+        with pytest.raises(Exception) as error:
+            await api.create_source(api.CreateSourceRequest(
+                name=f"unsupported-{source_type.value}", type=source_type, config={},
+            ))
+        assert error.value.status_code == 422

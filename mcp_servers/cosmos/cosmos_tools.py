@@ -7,6 +7,7 @@ from typing import Any
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}$")
+_FILTER_FIELDS = ("source_id", "pipeline_id", "source_ref")
 
 
 def normalize_top_k(value: Any) -> int:
@@ -74,16 +75,38 @@ def list_query(top_k: Any, fields: str | None) -> str:
     return f"SELECT TOP {limit} {_projection(selected_fields)} FROM c"
 
 
-def vector_query(top_k: Any, vector_field: str, fields: str | None) -> str:
+def normalize_filters(filters: dict[str, Any] | None) -> dict[str, str]:
+    """Validate the fixed, parameterized metadata filters exposed by the MCP tool."""
+    normalized: dict[str, str] = {}
+    for key, value in (filters or {}).items():
+        if key not in _FILTER_FIELDS:
+            raise ValueError(f"unsupported filter field: {key}")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{key} must be a non-blank string")
+        if len(value) > 2048:
+            raise ValueError(f"{key} must not exceed 2048 characters")
+        normalized[key] = value.strip()
+    return normalized
+
+
+def vector_query(
+    top_k: Any,
+    vector_field: str,
+    fields: str | None,
+    filters: dict[str, Any] | None = None,
+) -> str:
     """Build a vector query after validating every interpolated identifier."""
     limit = normalize_top_k(top_k)
     if not _IDENTIFIER.fullmatch(vector_field or ""):
         raise ValueError("vector_field must be a top-level property name")
     selected_fields = parse_fields(fields)
+    normalized_filters = normalize_filters(filters)
+    predicates = [f"IS_DEFINED(c.{vector_field})"]
+    predicates.extend(f"c.{field} = @{field}" for field in normalized_filters)
     return (
         f"SELECT TOP {limit} {_projection(selected_fields)}, "
         f"VectorDistance(c.{vector_field}, @embedding) AS distance "
-        f"FROM c WHERE IS_DEFINED(c.{vector_field}) "
+        f"FROM c WHERE {' AND '.join(predicates)} "
         f"ORDER BY VectorDistance(c.{vector_field}, @embedding)"
     )
 

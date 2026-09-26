@@ -15,7 +15,7 @@ namespace OmniVec.ChangeFeed.Hosting;
 /// across instances via the shared lease container — no coordination needed here.
 ///
 /// Reset detection: Tracks each pipeline's reset_at timestamp. When it changes,
-/// stops the watcher, deletes the lease container, and restarts from the beginning.
+/// stops the watcher and restarts it with a generation-specific processor name.
 /// </summary>
 public class SourceDiscoveryService : BackgroundService
 {
@@ -69,6 +69,7 @@ public class SourceDiscoveryService : BackgroundService
 
                 var relevantSources = sources
                     .Where(s => neededSourceIds.Contains(s.Id))
+                    .Where(IsSourceTypeEnabled)
                     .ToList();
 
                 // Detect pipeline resets — if reset_at changed, reset affected source watchers
@@ -102,6 +103,15 @@ public class SourceDiscoveryService : BackgroundService
 
             await Task.Delay(TimeSpan.FromSeconds(_options.SourcePollIntervalSeconds), ct);
         }
+    }
+
+    private bool IsSourceTypeEnabled(Source source)
+    {
+        var type = (source.Type ?? "").ToLowerInvariant();
+        if (type == "azure-blob") return _options.EnableBlobSources;
+        if (type == "databricks") return _options.EnableDatabricksSources;
+        if (type == "sharepoint") return _options.EnableSharePointSources;
+        return _options.EnableCosmosSources;
     }
 
     /// <summary>

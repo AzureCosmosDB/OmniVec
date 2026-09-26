@@ -77,7 +77,7 @@ internal static class CosmosChunkTests
             var msg = Message();
             var config = msg.ChunkConfig!;
             var id = CosmosTextChunker.DocId(msg, config, 0);
-            Check(id.EndsWith("-document-chunk-000") && id == CosmosTextChunker.DocId(msg, config, 0));
+            Check(id.EndsWith("-pipeline-chunk-000") && id == CosmosTextChunker.DocId(msg, config, 0));
             msg.SourceId = "other";
             Check(id != CosmosTextChunker.DocId(msg, config, 0));
             msg = Message(); msg.PipelineId = "other";

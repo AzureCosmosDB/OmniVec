@@ -24,6 +24,7 @@ public class Source
     public string? Endpoint => TryGetString("endpoint");
     public string? Database => TryGetString("database");
     public string? Container => TryGetString("container");
+    public string? SoftDeleteField => TryGetString("soft_delete_field");
 
     // SQL source config accessors (MS SQL + PostgreSQL)
     public string? Table => TryGetString("table");
@@ -175,6 +176,21 @@ public class Source
                 return true;
         }
         return false;
+    }
+
+    public bool IsSoftDeleted(Newtonsoft.Json.Linq.JObject doc)
+    {
+        var field = SoftDeleteField;
+        if (string.IsNullOrEmpty(field)) return false;
+        var actual = doc[field];
+        if (actual is null) return false;
+
+        if (!Config.TryGetValue("soft_delete_value", out var configured)
+            || configured.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return actual.Type == Newtonsoft.Json.Linq.JTokenType.Boolean && (bool)actual;
+
+        var expected = Newtonsoft.Json.Linq.JToken.Parse(configured.GetRawText());
+        return Newtonsoft.Json.Linq.JToken.DeepEquals(actual, expected);
     }
 
     private string? TryGetString(string key)

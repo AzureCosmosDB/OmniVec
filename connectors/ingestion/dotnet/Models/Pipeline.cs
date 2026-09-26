@@ -40,6 +40,12 @@ public class Pipeline
     [JsonPropertyName("vector_index_path")]
     public string VectorIndexPath { get; set; } = "embedding";
 
+    [JsonPropertyName("doc_id_pattern")]
+    public string DocIdPattern { get; set; } = "{source}";
+
+    [JsonPropertyName("partition_key_pattern")]
+    public string PartitionKeyPattern { get; set; } = "{source_partition}";
+
     /// <summary>
     /// Optional opt-in to persist the (already-truncated) embedded text on the
     /// destination document alongside the vector. null = per-destination
@@ -58,6 +64,24 @@ public class Pipeline
 
     [JsonPropertyName("metadata_fields")]
     public List<string>? MetadataFields { get; set; }
+
+    [JsonPropertyName("resource_policy")]
+    public PipelineResourcePolicy ResourcePolicy { get; set; } = new();
+}
+
+public class PipelineResourcePolicy
+{
+    [JsonPropertyName("weight")]
+    public int Weight { get; set; } = 10;
+
+    [JsonPropertyName("max_concurrency_per_worker")]
+    public int MaxConcurrencyPerWorker { get; set; } = 2;
+
+    [JsonPropertyName("priority")]
+    public string Priority { get; set; } = "normal";
+
+    [JsonPropertyName("workload_class")]
+    public string WorkloadClass { get; set; } = "shared";
 }
 
 public class PipelineSource

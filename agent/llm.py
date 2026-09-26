@@ -83,7 +83,11 @@ class _LLMBackend:
             url += "?" + urlencode({"api-version": model.get("api_version") or "2024-06-01"})
         else:
             url = endpoint + ("/chat/completions" if endpoint.endswith("/v1") else "/v1/chat/completions")
-        body: dict[str, Any] = {"messages": messages, "temperature": 0.1, "max_tokens": 2048}
+        body: dict[str, Any] = {"messages": messages}
+        if deployment.lower().startswith("gpt-5"):
+            body["max_completion_tokens"] = 2048
+        else:
+            body.update({"temperature": 0.1, "max_tokens": 2048})
         if provider != "azure-openai":
             body["model"] = deployment
         if tools:

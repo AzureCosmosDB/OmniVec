@@ -11,7 +11,72 @@ Do not put this folder inside an existing watched folder such as `Policies`.
 Do not alter any existing document. Creating the folder and uploading these files
 is the only step performed outside OmniVec.
 
-After the upload, complete the remaining workflow in the OmniVec portal:
+## Two-to-five-minute CLI demo
+
+For a timed demonstration, pre-create the isolated Cosmos vector destination,
+Foundry project/chat deployment, deployment allowlist, and Azure role grants.
+Fresh Azure Function provisioning is subject to Azure control-plane latency and
+cannot be guaranteed to finish in five minutes.
+
+After uploading the files, run the remaining workflow through one OmniVec CLI
+command:
+
+```powershell
+omnivec demo sharepoint-foundry `
+  --site-id "<graph-site-id>" `
+  --drive-id "<graph-drive-id>" `
+  --folder "OmniVec-Foundry-Demo-20260923" `
+  --destination "<isolated-cosmos-destination-id>" `
+  --pipeline-model "text-azure" `
+  --embedding-model "<registered-azure-openai-model-id>" `
+  --resource-group-id "/subscriptions/<sub>/resourceGroups/<rg>" `
+  --cosmos-account-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.DocumentDB/databaseAccounts/<account>" `
+  --embedding-account-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>" `
+  --project-resource-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>/projects/<project>" `
+  --chat-deployment "<chat-deployment>" `
+  --timeout 5m `
+  --approve
+```
+
+For a cross-tenant SharePoint app, also pass
+`--sharepoint-tenant-id <tenant-guid>` and
+`--sharepoint-client-id <app-client-guid>`. Same-tenant deployments use the
+OmniVec workload identity by default.
+
+The command creates and tests the folder-scoped SharePoint source, creates and
+activates the queue pipeline, starts an asynchronous full sync, and waits until
+`NORTHSTAR-DEMO-TRAVEL-2026` is searchable using the exact new source and
+pipeline IDs. It then deploys or reuses the MCP server, creates or reuses the
+Foundry agent, asks the test question, and prints the answer plus inspectable
+vector-search source references. A timeout stops the CLI wait but does not
+cancel ingestion.
+
+For the fastest repeatable two-minute path, pre-create the MCP/Foundry resources
+against the same destination and replace the Azure provisioning flags with:
+
+```powershell
+  --foundry-deployment "<succeeded-foundry-job-id>"
+```
+
+Use `--mcp-deployment "<succeeded-mcp-job-id>"` to reuse only the MCP server
+while creating a fresh Foundry agent.
+
+`--approve` authorizes the exact plans, resource costs, identity grants, and one
+billable inference request. OmniVec never grants its own deployment identity
+additional Azure roles. If a plan lacks access, inspect it and print the exact
+administrator-reviewed commands:
+
+```powershell
+omnivec cloud show <job-id>
+omnivec cloud permissions <job-id>
+```
+
+The expected answer is **47 USD per day; receipts for individual meals over
+18 USD; submission within 12 calendar days after the trip ends.**
+
+## Manual portal workflow
+
+After the upload, the same workflow can be completed in the OmniVec portal:
 
 1. **MCP servers > Need a new isolated Cosmos vector container?** Prepare a
    container plan in an existing database, choosing the registered

@@ -42,3 +42,15 @@ resource fedCredAgent 'Microsoft.ManagedIdentity/userAssignedIdentities/federate
   }
   dependsOn: [fedCredDocgrok]
 }
+
+// KEDA resolves Azure scaler credentials from its operator service account.
+resource fedCredKedaOperator 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+  parent: identity
+  name: 'keda-operator-federation'
+  properties: {
+    issuer: oidcIssuerUrl
+    subject: 'system:serviceaccount:kube-system:keda-operator'
+    audiences: ['api://AzureADTokenExchange']
+  }
+  dependsOn: [fedCredAgent]
+}

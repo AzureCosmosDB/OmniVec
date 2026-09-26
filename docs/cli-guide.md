@@ -158,6 +158,7 @@ omnivec source test <id>
 # Trigger a source sync (re-scan and create jobs)
 omnivec source sync <id>
 omnivec source sync <id> --full   # reprocess all documents
+omnivec source sync <id> --full --wait --minimum-documents 10 --timeout 5m
 
 # Update a source
 omnivec source update <id> --name "Renamed Source"
@@ -165,6 +166,13 @@ omnivec source update <id> --name "Renamed Source"
 # Delete a source
 omnivec source delete <id> -y
 ```
+
+Source synchronization is asynchronous. The API returns a durable operation ID;
+`--wait` polls that operation until every affected pipeline has embedded at least
+`--minimum-documents` documents from its current generation. A CLI timeout only
+stops waiting; it does not cancel the pipeline or its long-running watcher.
+This is a readiness threshold, not proof that a large or empty source has
+completed a full enumeration.
 
 **Config fields by source type:**
 
@@ -357,6 +365,92 @@ omnivec deployment restart omnivec-worker -y
 ```
 
 **Deployment names:** `omnivec-api`, `omnivec-controller`, `omnivec-worker`
+
+---
+
+## MCP and Foundry Cloud Jobs
+
+Cloud plans are approval-gated and require an authenticated OmniVec
+administrator. Preparing or inspecting a plan does not provision resources.
+
+```bash
+# Inspect capabilities and saved jobs
+omnivec cloud list
+omnivec cloud show <job-id>
+
+# Print exact Azure role grants for administrator review
+omnivec cloud permissions <job-id>
+omnivec cloud permissions <job-id> --shell bash
+
+# Approve the immutable saved plan and wait up to five minutes
+omnivec cloud approve <job-id> --yes --wait --timeout 5m
+omnivec cloud wait <job-id> --timeout 5m
+```
+
+Prepare an MCP deployment:
+
+```bash
+omnivec cloud plan mcp \
+  --resource-group-id /subscriptions/<sub>/resourceGroups/<rg> \
+  --location eastus2 \
+  --destination <dst-id> \
+  --embedding-model <model-id> \
+  --cosmos-account-id <cosmos-account-resource-id> \
+  --embedding-account-id <azure-openai-account-resource-id> \
+  --vector-field embedding \
+  --fields id,title,content,source_ref
+```
+
+Prepare a Foundry agent and one retrieval-verified question:
+
+```bash
+omnivec cloud plan foundry \
+  --mcp-deployment <succeeded-mcp-job-id> \
+  --project-resource-id <foundry-project-resource-id> \
+  --chat-deployment <chat-deployment>
+
+omnivec cloud plan verify \
+  --foundry-deployment <succeeded-foundry-job-id> \
+  --question "What does the travel policy require? Cite the source."
+```
+
+The CLI prints permission commands but never executes role assignments on its
+own identity.
+
+---
+
+## SharePoint to Foundry Demo
+
+`omnivec demo sharepoint-foundry` runs the folder-scoped SharePoint ingestion,
+pipeline activation, asynchronous full sync, source/pipeline-scoped marker
+search, MCP deployment, Foundry agent creation, and retrieval-verified question
+as one command. It requires `--approve` and defaults to a five-minute total
+budget.
+
+Use pre-created, permission-ready Azure resources for a timed demonstration.
+Fresh Azure Function provisioning can exceed five minutes due to Azure
+control-plane latency. Pass `--foundry-deployment <succeeded-job-id>` for the
+fastest path, or `--mcp-deployment <succeeded-job-id>` to reuse only MCP. See
+[`examples/sharepoint-foundry/README.md`](../examples/sharepoint-foundry/README.md)
+for the complete command and synthetic policy question.
+
+For any already registered source type, use the connector-neutral command:
+
+```bash
+omnivec demo source-foundry \
+  --source <source-id> \
+  --destination <cosmos-vector-destination-id> \
+  --pipeline-model <pipeline-or-embedding-model-id> \
+  --marker "unique text expected in one source document" \
+  --question "Question the Foundry agent must answer. Cite the source." \
+  --foundry-deployment <succeeded-foundry-job-id> \
+  --timeout 5m \
+  --approve
+```
+
+The existing Foundry deployment must ultimately target the selected destination.
+Omit `--foundry-deployment` to create MCP/Foundry resources and provide the same
+Azure provisioning flags documented for `sharepoint-foundry`.
 
 ---
 

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 DOC_TYPE = "cloud_deployment"
 LEASE_SECONDS = 1800
 MAX_ATTEMPTS = 3
+FOUNDRY_USER_ROLE_ID = "53ca6127-db72-4b80-b1b0-d745d6d5456d"
 SEGMENT = r"[A-Za-z0-9_-]+"
 RG_PATTERN = r"/subscriptions/([0-9a-fA-F-]{36})/resourceGroups/([A-Za-z0-9_.()-]+)"
 ACCOUNT_PATTERN = RG_PATTERN + r"/providers/Microsoft.CognitiveServices/accounts/(" + SEGMENT + ")"
@@ -47,6 +48,7 @@ class DeploymentPlanRequest(BaseModel):
     chat_deployment: str = Field(default="", pattern=r"^[A-Za-z0-9_.-]*$", max_length=128)
     database: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=128)
     container: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=128)
+    partition_key_path: str = Field(default="/id", pattern=r"^/[A-Za-z_][A-Za-z0-9_]{0,127}$")
     foundry_deployment_id: str = ""
     question: str = Field(default="", max_length=4000)
 
@@ -130,9 +132,10 @@ def build_plan(body, store):
             cosmos_account_id=body.cosmos_account_id, database=body.database, container=body.container,
             container_id=rid, cosmos_endpoint=f"https://{match[3]}.documents.azure.com",
             embedding_dimensions=dimensions, vector_field=body.vector_field,
+            partition_key_path=body.partition_key_path,
             resources=[rid], authorization_scopes=[body.cosmos_account_id],
             references=[{"id": model["id"], "type": "docgrok_model", "etag": model.get("_etag")}],
-            notice="Creates one NEW vector container in an existing Cosmos database, partitioned by /id, with a cosine DiskANN index. Existing containers will not be adopted or changed. Uses the account/database throughput arrangement; normal Cosmos storage, RU and indexing charges apply. Register this container as a destination after provisioning succeeds.",
+            notice=f"Creates one NEW vector container in an existing Cosmos database, partitioned by {body.partition_key_path}, with a cosine DiskANN index. Existing containers will not be adopted or changed. Uses the account/database throughput arrangement; normal Cosmos storage, RU and indexing charges apply. Register this container as a destination after provisioning succeeds.",
         )
     elif body.kind == "verification":
         parent = _record(store, body.foundry_deployment_id, DOC_TYPE)
@@ -144,9 +147,10 @@ def build_plan(body, store):
         plan.update(
             resource_group_id=previous["resource_group_id"], location=previous["location"],
             foundry_deployment_id=parent["id"], project_resource_id=previous["project_resource_id"],
+            foundry_account_id=previous["foundry_account_id"],
             agent_name=parent["result"]["agent_name"], agent_version=parent["result"]["agent_version"],
             question=body.question.strip(), resources=[previous["project_resource_id"]],
-            authorization_scopes=[previous["project_resource_id"]],
+            authorization_scopes=[previous["foundry_account_id"]],
             notice="Runs ONE billable Foundry response against the saved agent version, including MCP retrieval and embedding calls. The question, answer and returned source references are saved in administrator-only job metadata. No SharePoint files are modified. A timed-out inference is not replayed automatically.",
         )
     elif body.kind == "mcp":
@@ -250,32 +254,34 @@ def package_path():
 def deployer_permissions(plan):
     """Commands are for the administrator to review, never executed by the worker."""
     if plan["kind"] == "verification":
-        roles = [(plan["project_resource_id"], "Azure AI User")]
+        roles = [(plan["foundry_account_id"], "Foundry User", FOUNDRY_USER_ROLE_ID)]
     elif plan["kind"] == "cosmos_container":
-        roles = [(plan["cosmos_account_id"], "DocumentDB Account Contributor")]
+        roles = [(plan["cosmos_account_id"], "DocumentDB Account Contributor", "DocumentDB Account Contributor")]
     else:
-        roles = [(plan["resource_group_id"], "Contributor")]
+        roles = [(plan["resource_group_id"], "Contributor", "Contributor")]
     if plan["kind"] == "mcp":
         roles += [
-            (plan["resource_group_id"], "Role Based Access Control Administrator"),
-            (plan["cosmos_account_id"], "DocumentDB Account Contributor"),
-            (plan["embedding_account_id"], "Reader"),
-            (plan["embedding_account_id"], "Role Based Access Control Administrator"),
+            (plan["resource_group_id"], "Role Based Access Control Administrator", "Role Based Access Control Administrator"),
+            (plan["cosmos_account_id"], "DocumentDB Account Contributor", "DocumentDB Account Contributor"),
+            (plan["embedding_account_id"], "Reader", "Reader"),
+            (plan["embedding_account_id"], "Role Based Access Control Administrator", "Role Based Access Control Administrator"),
         ]
     elif plan["kind"] == "foundry":
         roles += [
-            (plan["project_resource_id"], "Azure AI User"),
-            (plan["foundry_account_id"], "Reader"),
-            (plan["function_id"], "Website Contributor"),
+            (plan["foundry_account_id"], "Foundry User", FOUNDRY_USER_ROLE_ID),
+            (plan["foundry_account_id"], "Reader", "Reader"),
+            (plan["function_id"], "Website Contributor", "Website Contributor"),
         ]
     principal = guid(os.getenv("AZURE_PRINCIPAL_ID", ""))
     result = []
-    for scope, role in roles:
+    for scope, role, role_argument in roles:
         item = {"scope": scope, "role": role, "principal_id": principal or "", "commands": {}}
+        if role_argument == FOUNDRY_USER_ROLE_ID:
+            item["role_definition_id"] = FOUNDRY_USER_ROLE_ID
         if principal:
             args = ["az", "role", "assignment", "create", "--subscription", scope.split("/")[2],
                     "--assignee-object-id", principal, "--assignee-principal-type", "ServicePrincipal",
-                    "--role", role, "--scope", scope]
+                    "--role", role_argument, "--scope", scope]
             item["commands"] = {shell: render_command(args, shell) for shell in ("powershell", "bash")}
         result.append(item)
     return result
@@ -314,6 +320,16 @@ def install_routes(app, get_store):
             docs = store.query("SELECT TOP 100 * FROM c WHERE c.doc_type = @type ORDER BY c.created_at DESC",
                                [{"name": "@type", "value": DOC_TYPE}], partition_key=DOC_TYPE)
             return {"capabilities": capabilities(), "jobs": [public_job(d) for d in docs]}
+        return await asyncio.to_thread(read)
+
+    @app.get("/api/cloud-deployments/{job_id}")
+    async def get_cloud_deployment(job_id: str, request: Request):
+        admin(request)
+        def read():
+            doc = get_store().get(job_id, DOC_TYPE)
+            if not doc:
+                raise HTTPException(404, "Deployment not found.")
+            return public_job(doc)
         return await asyncio.to_thread(read)
 
     @app.post("/api/cloud-deployments/plan")

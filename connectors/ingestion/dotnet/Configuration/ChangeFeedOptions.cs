@@ -24,6 +24,18 @@ public class ChangeFeedOptions
     /// Falls back to <see cref="OmniVecDatabase"/> when empty.</summary>
     public string LeaseCosmosDatabase { get; set; } = "";
 
+    /// <summary>
+    /// Preprovisioned shared container used by Cosmos CFP checkpoints and polling-source
+    /// ownership leases. Partition key: /id.
+    /// </summary>
+    public string LeaseContainerName { get; set; } = "source-leases";
+
+    /// <summary>
+    /// Preprovisioned shared container used by polling-source cursors and durable
+    /// outboxes. Partition key: /scopeId.
+    /// </summary>
+    public string StateContainerName { get; set; } = "source-state";
+
     /// <summary>How often to poll the API for source/pipeline changes</summary>
     public int SourcePollIntervalSeconds { get; set; } = 5;
 

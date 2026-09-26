@@ -57,6 +57,20 @@ async def test_azure_registered_chat_forwards_tools_and_parses_standard_response
 
 
 @pytest.mark.asyncio
+async def test_gpt5_uses_supported_completion_parameters(backend):
+    llm, model, requests, _, _ = backend
+    model["deployment"] = "gpt-5-mini-globalstandard"
+    result = await llm._LLMBackend().chat_completion(
+        [{"role": "user", "content": "diagnose"}], None, "mdl-chat"
+    )
+    assert result.content == "ready to diagnose"
+    body = json.loads(requests[0].content)
+    assert body["max_completion_tokens"] == 2048
+    assert "max_tokens" not in body
+    assert "temperature" not in body
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", [
     "https://approved.openai.azure.com",
     "https://approved.cognitiveservices.azure.com",

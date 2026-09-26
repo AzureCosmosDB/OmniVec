@@ -87,6 +87,49 @@ internal static class ConnectorReliabilityTests
     {
         var tests = new List<(string, Func<Task>)>();
         void Test(string name, Func<Task> action) => tests.Add((name, action));
+        Test("Cosmos soft-delete markers require an exact configured scalar match", () =>
+        {
+            var defaultMarker = new Source
+            {
+                Config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                    """{"soft_delete_field":"is_deleted"}""")!,
+            };
+            Check(defaultMarker.IsSoftDeleted(JObject.Parse("""{"is_deleted":true}""")));
+            Check(!defaultMarker.IsSoftDeleted(JObject.Parse("""{"is_deleted":"true"}""")));
+
+            var stringMarker = new Source
+            {
+                Config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                    """{"soft_delete_field":"state","soft_delete_value":"deleted"}""")!,
+            };
+            Check(stringMarker.IsSoftDeleted(JObject.Parse("""{"state":"deleted"}""")));
+            Check(!stringMarker.IsSoftDeleted(JObject.Parse("""{"state":"active"}""")));
+            return Task.CompletedTask;
+        });
+        Test("Pipeline scheduler enforces caps and favors higher weighted pending work", async () =>
+        {
+            var scheduler = new PipelineFairScheduler(2);
+            await using var firstA = await scheduler.AcquireAsync(
+                "a", 1, 1, "normal", "shared", 1, default);
+            var secondA = scheduler.AcquireAsync("a", 100, 1, "critical", "shared", 1, default);
+            await using var firstB = await scheduler.AcquireAsync(
+                "b", 1, 1, "normal", "shared", 1, default);
+            Check(!secondA.IsCompleted, "pipeline cap must hold the second request");
+            await firstA.DisposeAsync();
+            await using var admittedA = await secondA;
+
+            var weighted = new PipelineFairScheduler(1);
+            await using var blocker = await weighted.AcquireAsync(
+                "blocker", 1, 1, "normal", "shared", 1, default);
+            var low = weighted.AcquireAsync("low", 1, 1, "low", "shared", 1, default);
+            var high = weighted.AcquireAsync("high", 10, 1, "high", "shared", 1, default);
+            await blocker.DisposeAsync();
+            Check(await Task.WhenAny(low, high) == high, "higher weight should be admitted first");
+            await using var highLease = await high;
+            Check(!low.IsCompleted);
+            await highLease.DisposeAsync();
+            await using var lowLease = await low;
+        });
         foreach (var status in new[] { 429, 500, 503 })
             Test($"DocGrok {status} exhausts exactly four attempts on all endpoint paths", async () =>
             {
@@ -108,6 +151,33 @@ internal static class ConnectorReliabilityTests
                     Check(calls == 4, $"{path}: {calls} attempts");
                 }
             });
+        Test("DocGrok throttling reports model and pipeline retry telemetry", async () =>
+        {
+            var metricCalls = 0;
+            var metricHandler = new LocalHttpHandler(_ =>
+            {
+                metricCalls++;
+                return new(HttpStatusCode.OK);
+            });
+            var metrics = new MetricsReporter(
+                new HttpClient(metricHandler) { BaseAddress = new("http://local.invalid") },
+                NullLogger<MetricsReporter>.Instance);
+            var client = new DocGrokClient(
+                new HttpClient(new LocalHttpHandler(_ => new(HttpStatusCode.TooManyRequests)))
+                    { BaseAddress = new("http://local.invalid") },
+                NullLogger<DocGrokClient>.Instance,
+                metrics)
+            { DelayAsync = (_, _) => Task.CompletedTask };
+
+            await Fails(() => client.EmbedBatchAsync(
+                "mdl-test", ["hello"], default,
+                "pipeline", "source", "destination", "document"));
+
+            Check(metricCalls == 4);
+            Check(metricHandler.LastBody?.Contains("\"model_id\":\"mdl-test\"") == true);
+            Check(metricHandler.LastBody?.Contains("\"throttle_count\":1") == true);
+            Check(metricHandler.LastBody?.Contains("\"error_category\":\"http_429\"") == true);
+        });
         Test("Transport failure retries are bounded and cancellation interrupts retry delay", async () =>
         {
             var calls = 0;
@@ -120,12 +190,81 @@ internal static class ConnectorReliabilityTests
             await Fails(() => client.EmbedBatchAsync("mdl-test", ["text"], cancellation.Token));
             Check(calls == 1);
         });
+        Test("Control-plane discovery retries transient GET failures", async () =>
+        {
+            var calls = 0;
+            var http = new HttpClient(new LocalHttpHandler(_ =>
+            {
+                calls++;
+                if (calls < 3) throw new HttpRequestException("connection reset");
+                return new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"pipelines":[{"id":"pipeline","status":"active"}]}""")
+                };
+            })) { BaseAddress = new("http://local.invalid") };
+            var api = new OmniVecApiClient(http, NullLogger<OmniVecApiClient>.Instance);
+            var pipelines = await api.GetActivePipelinesAsync();
+            Check(calls == 3 && pipelines.Single().Id == "pipeline");
+        });
         Test("Permanent input errors do not enter HTTP retry loops", async () =>
         {
             var calls = 0;
             var client = Client(new LocalHttpHandler(_ => { calls++; return new(HttpStatusCode.BadRequest); }));
             await Fails(() => client.EmbedBatchAsync("mdl-test", ["text"], default));
             Check(calls == 1);
+        });
+        Test("Non-chunk document IDs preserve legacy defaults and explicit patterns isolate pipelines", () =>
+        {
+            var defaultMessage = TextMessage();
+            defaultMessage.SourceRef = "document-05.txt";
+            Check(InvokeWorkerString("RenderDocumentId", defaultMessage) == "document-05.txt");
+
+            var first = TextMessage("pipeline-a");
+            first.SourceRef = "folder/document-05.txt";
+            first.DocIdPattern = "{source_hash}-{pipeline}";
+            var second = TextMessage("pipeline-b");
+            second.SourceRef = first.SourceRef;
+            second.DocIdPattern = first.DocIdPattern;
+            var firstId = InvokeWorkerString("RenderDocumentId", first);
+            var secondId = InvokeWorkerString("RenderDocumentId", second);
+            Check(firstId.EndsWith("-pipeline-a", StringComparison.Ordinal));
+            Check(secondId.EndsWith("-pipeline-b", StringComparison.Ordinal));
+            Check(firstId != secondId && !firstId.Contains('/'));
+            return Task.CompletedTask;
+        });
+        Test("Partition-key templates render deterministically and reject invalid policies", () =>
+        {
+            var message = TextMessage("pipeline-a");
+            message.PartitionKeyValue = "tenant-a";
+            message.PartitionKeyPattern = "{source_partition}-{pipeline_hash}-{destination_hash}";
+            var rendered = IdentityTemplateRenderer.RenderPartitionKey(message);
+            Check(rendered.StartsWith("tenant-a-", StringComparison.Ordinal)
+                && rendered == IdentityTemplateRenderer.RenderPartitionKey(message));
+            message.PartitionKeyPattern = "{unknown}";
+            Fails(() =>
+            {
+                _ = IdentityTemplateRenderer.RenderPartitionKey(message);
+                return Task.CompletedTask;
+            }).GetAwaiter().GetResult();
+            return Task.CompletedTask;
+        });
+        Test("Invalid non-chunk document ID patterns fail explicitly", () =>
+        {
+            foreach (var pattern in new[] { "{unknown}", "{source}", "bad/id", new string('x', 1024) })
+            {
+                var message = TextMessage();
+                message.DocIdPattern = pattern;
+                if (pattern == "{source}") message.SourceRef = "folder/document.txt";
+                try
+                {
+                    _ = InvokeWorkerString("RenderDocumentId", message);
+                    throw new Exception($"Expected invalid pattern to fail: {pattern}");
+                }
+                catch (TargetInvocationException error) when (error.InnerException is ArgumentException)
+                {
+                }
+            }
+            return Task.CompletedTask;
         });
         Test("Transient outage is abandoned without mass bisect, truncation or dead-letter", async () =>
         {
@@ -164,6 +303,19 @@ internal static class ConnectorReliabilityTests
             deletion.MessageType = "delete";
             await Invoke(worker, "ProcessReceivedBatchAsync", receiver, new[] { Delivery(deletion) }, CancellationToken.None);
             Check(receiver.Completed == 0 && receiver.DeadLettered == 2);
+        });
+        Test("Delete messages carry the deterministic document id to the destination writer", async () =>
+        {
+            var writer = new ReliabilityWriter { SupportDelete = true };
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Must not embed"))), writer);
+            var receiver = new ReliabilityReceiver();
+            var deletion = TextMessage();
+            deletion.MessageType = "delete";
+            await Invoke(worker, "ProcessReceivedBatchAsync", receiver, new[] { Delivery(deletion) }, CancellationToken.None);
+            Check(receiver.Completed == 1 && receiver.DeadLettered == 0);
+            Check(writer.Deletes.TryPeek(out var request)
+                && request.SourceRef == "doc"
+                && request.DocumentId == InvokeWorkerString("RenderDocumentId", deletion));
         });
         Test("A failed destination write abandons rather than acknowledging", async () =>
         {
@@ -450,6 +602,18 @@ internal static class ConnectorReliabilityTests
             Check(!SourceWatcherManager.RequiresPollingLease("cosmosdb"));
             return Task.CompletedTask;
         });
+        Test("Watcher source fingerprints are stable across config ordering and change on policy edits", () =>
+        {
+            var first = PhysicalSource("source", "cosmosdb",
+                """{"endpoint":"https://account.local.invalid","database":"db","container":"docs"}""");
+            var reordered = PhysicalSource("source", "cosmosdb",
+                """{"container":"docs","database":"db","endpoint":"https://account.local.invalid"}""");
+            var baseline = SourceWatcherManager.SourceConfigurationFingerprint(first);
+            Check(baseline == SourceWatcherManager.SourceConfigurationFingerprint(reordered));
+            reordered.Config["soft_delete_field"] = JsonSerializer.SerializeToElement("is_deleted");
+            Check(baseline != SourceWatcherManager.SourceConfigurationFingerprint(reordered));
+            return Task.CompletedTask;
+        });
         Test("Inline SQL/Postgres/Cosmos HTTP failures are bounded and malformed output is rejected", async () =>
         {
             foreach (var status in new[] { HttpStatusCode.BadRequest, HttpStatusCode.ServiceUnavailable })
@@ -539,7 +703,7 @@ internal static class ConnectorReliabilityTests
                 { InlinePipeline("one", "source"), InlinePipeline("two", "alias"), InlinePipeline("three", "healthy") };
             var log = new ManagerLogger();
             await using var manager = new SourceWatcherManager(
-                Options.Create(new ChangeFeedOptions { EnableCosmosSources = true }), null!, null!, null!,
+                Options.Create(new ChangeFeedOptions { EnableCosmosSources = true }), null!, null!, null!, null!,
                 new ContentHasher(), null!, NullLoggerFactory.Instance, log);
             var watchers = (ConcurrentDictionary<string, ISourceWatcher>)Get(manager, "_watchers")!;
             var first = new RecordingWatcher("source");
@@ -570,6 +734,17 @@ internal static class ConnectorReliabilityTests
             Check(Detect(["source"]).Count == 0);
             Check(Detect([]).SetEquals(["source"]));
             Check(Detect([]).Count == 0);
+            return Task.CompletedTask;
+        });
+        Test("Cosmos replay generations use distinct CFP processor names", () =>
+        {
+            var method = typeof(SourceWatcher).GetMethod(
+                "ProcessorName", BindingFlags.Static | BindingFlags.NonPublic)!;
+            var first = (string)method.Invoke(null, ["src-test", "0"])!;
+            var replay = (string)method.Invoke(null, ["src-test", "abc12345"])!;
+            Check(first == "omnivec-cf-src-test-0");
+            Check(replay == "omnivec-cf-src-test-abc12345");
+            Check(first != replay);
             return Task.CompletedTask;
         });
         Test("Cosmos content changes and different pipelines are not mistaken for patch feedback", () =>
@@ -881,7 +1056,9 @@ internal static class ConnectorReliabilityTests
     {
         public string DestinationType => "cosmosdb-vector";
         public bool Fail { get; init; }
+        public bool SupportDelete { get; init; }
         public ConcurrentQueue<EmbeddingResult> Written { get; } = new();
+        public ConcurrentQueue<DeleteRequest> Deletes { get; } = new();
         public Task WriteBatchAsync(Dictionary<string, object> config, List<EmbeddingResult> results, CancellationToken ct)
         {
             if (Fail) return Task.FromException(new InvalidOperationException("Destination failed"));
@@ -890,6 +1067,13 @@ internal static class ConnectorReliabilityTests
         }
         public Task<bool> ReplaceSharePointAsync(Dictionary<string, object> config, SharePointReplacement replacement, CancellationToken ct)
             => Task.FromResult(true);
+        public Task DeleteByRefAsync(Dictionary<string, object> config, List<DeleteRequest> requests, CancellationToken ct)
+        {
+            if (!SupportDelete)
+                return Task.FromException(new NotSupportedException("Delete propagation is not supported"));
+            foreach (var request in requests) Deletes.Enqueue(request);
+            return Task.CompletedTask;
+        }
     }
     private class ReliabilityReceiver : ServiceBusReceiver
     {

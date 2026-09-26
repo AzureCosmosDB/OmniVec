@@ -62,6 +62,58 @@ def test_custom_template_is_preserved_not_replaced_with_default(setup):
     assert config.chunk_size == 450 and config.chunk_overlap == 90
 
 
+@pytest.mark.parametrize("pattern", [
+    "", "{unknown}", "{source:10}", "{{source}}", "bad/path", "bad\nid", "x" * 1024,
+])
+def test_invalid_non_chunk_document_id_pattern_rejected(setup, pattern):
+    with pytest.raises(HTTPException, match="Invalid doc_id_pattern"):
+        setup.api._validate_document_id_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", [
+    "{source}", "{source_ref}", "{source_hash}-{pipeline}", "{source_hash}-{job}",
+])
+def test_valid_non_chunk_document_id_pattern_accepted(setup, pattern):
+    setup.api._validate_document_id_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", ["", "{unknown}", "{source_partition:10}", "x" * 2049])
+def test_invalid_partition_key_pattern_rejected(setup, pattern):
+    with pytest.raises(HTTPException, match="partition_key_pattern"):
+        setup.api._validate_partition_key_pattern(pattern)
+
+
+def test_identity_preview_renders_document_chunk_and_partition(setup):
+    body = setup.models.PipelineIdentityPreviewRequest(
+        document_id_pattern="{source_hash}-{pipeline}",
+        partition_key_pattern="{source_partition}-{pipeline_hash}",
+        chunk_id_pattern="{source_hash}-{destination_hash}-{chunk}",
+        source_ref="folder/document.pdf",
+        source_partition="tenant-a",
+        pipeline_id="pip-a",
+        destination_id="dst-a",
+    )
+    preview = setup.api.preview_pipeline_identity(body)
+    assert preview["document_id"].endswith("-pip-a")
+    assert preview["partition_key"].startswith("tenant-a-")
+    assert preview["chunk_id_suffix"].endswith("-000")
+    assert preview["shared_destination_safe"] is True
+
+
+def test_shared_destination_requires_pipeline_discriminator(setup):
+    setup.req.content_strategy = "truncate"
+    setup.req.doc_id_pattern = "{source_hash}"
+    setup.store.upsert(pipeline(id="existing", destination_id="destination"))
+    with pytest.raises(HTTPException) as error:
+        setup.api._validate_pipeline_identity_policy(setup.store, setup.req)
+    assert error.value.status_code == 409
+    setup.req.doc_id_pattern = "{source_hash}-{pipeline_hash}"
+    setup.api._validate_pipeline_identity_policy(setup.store, setup.req)
+    setup.req.doc_id_pattern = "{source_hash}"
+    setup.req.collision_policy = "overwrite"
+    setup.api._validate_pipeline_identity_policy(setup.store, setup.req)
+
+
 @pytest.mark.asyncio
 async def test_create_update_resume_run_mode_reject_inline(setup):
     setup.req.processing_mode = "inline"
@@ -85,9 +137,13 @@ async def test_create_update_resume_run_mode_reject_inline(setup):
 
 @pytest.mark.asyncio
 async def test_create_persists_and_update_validates_chunk_config(setup):
+    setup.req.doc_id_pattern = "{source_hash}-{pipeline}"
     response = await setup.api.create_pipeline(setup.req)
     created = response["pipeline"]
     assert created.content_strategy == "chunk" and created.chunk_config.store_text
+    assert created.doc_id_pattern == "{source_hash}-{pipeline}"
+    assert created.partition_key_pattern == "{source_partition}"
+    assert created.collision_policy == "reject"
     setup.req.chunk_config["chunk_overlap"] = -1
     with pytest.raises(HTTPException):
         await setup.api.update_pipeline(created.id, setup.req)
@@ -110,10 +166,14 @@ async def test_custom_chunk_fields_round_trip_and_template_edit(setup):
                              "store_text": True, "text_field": "passage",
                              "doc_id_pattern": "custom-{source_hash}-{chunk}"}
     created = (await setup.api.create_pipeline(setup.req))["pipeline"]
-    setup.req.chunk_config.update(chunk_size=500, doc_id_pattern="edited-{pipeline_hash}-{chunk}")
+    setup.req.chunk_config.update(chunk_size=500)
     await setup.api.update_pipeline(created.id, setup.req)
     stored = setup.store.get(created.id, "pipeline")
     assert stored["chunk_config"] == setup.req.chunk_config
+    setup.req.chunk_config["doc_id_pattern"] = "edited-{pipeline_hash}-{chunk}"
+    with pytest.raises(HTTPException, match="immutable"):
+        await setup.api.update_pipeline(created.id, setup.req)
+    setup.req.chunk_config["doc_id_pattern"] = "custom-{source_hash}-{chunk}"
     setup.req.chunk_config["text_field"] = "other"
     with pytest.raises(HTTPException) as error:
         await setup.api.update_pipeline(created.id, setup.req)
@@ -122,13 +182,18 @@ async def test_custom_chunk_fields_round_trip_and_template_edit(setup):
 
 
 @pytest.mark.asyncio
-async def test_document_template_update_persists(setup):
+async def test_document_identity_templates_are_immutable(setup):
     setup.req.content_strategy = "truncate"
     setup.req.doc_id_pattern = "original-{source}"
     created = (await setup.api.create_pipeline(setup.req))["pipeline"]
     setup.req.doc_id_pattern = "edited-{source_hash}"
-    await setup.api.update_pipeline(created.id, setup.req)
-    assert setup.store.get(created.id, "pipeline")["doc_id_pattern"] == "edited-{source_hash}"
+    setup.req.partition_key_pattern = "{source_partition}-{pipeline_hash}"
+    setup.req.collision_policy = "overwrite"
+    with pytest.raises(HTTPException, match="immutable"):
+        await setup.api.update_pipeline(created.id, setup.req)
+    stored = setup.store.get(created.id, "pipeline")
+    assert stored["doc_id_pattern"] == "original-{source}"
+    assert stored["partition_key_pattern"] == "{source_partition}"
 
 
 def test_source_modes_destination_and_partition_validated(setup):

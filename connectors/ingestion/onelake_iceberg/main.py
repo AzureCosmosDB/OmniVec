@@ -280,6 +280,8 @@ class OneLakeIcebergWatcher:
                     "source_version": source_version,
                     "pipeline_revision": pipeline_revision,
                     "partition_key_value": source_ref,
+                    "partition_key_pattern": pipeline.get("partition_key_pattern", "{source_partition}"),
+                    "doc_id_pattern": pipeline.get("doc_id_pattern", "{source_hash}-{pipeline}"),
                     "pipeline_generation": generation,
                     "source_content_fields": {
                         field: str(row[field]) for field in fields if row.get(field) is not None
@@ -336,6 +338,8 @@ class OneLakeIcebergWatcher:
                     "source_version": source_version,
                     "pipeline_revision": pipeline_revision,
                     "partition_key_value": source_ref,
+                    "partition_key_pattern": pipeline.get("partition_key_pattern", "{source_partition}"),
+                    "doc_id_pattern": pipeline.get("doc_id_pattern", "{source_hash}-{pipeline}"),
                     "pipeline_generation": generation,
                     "source_content_fields": {},
                     "message_type": "delete",

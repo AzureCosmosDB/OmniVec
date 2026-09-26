@@ -21,7 +21,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private readonly Source _source;
     private readonly ChangeFeedOptions _options;
-    private readonly LeaseContainerManager _stateStore;
+    private readonly SourceStateContainerManager _stateStore;
     private readonly ContentHasher _hasher;
     private readonly ServiceBusPublisher _sbPublisher;
     private readonly ILogger<SharePointSourceWatcher> _logger;
@@ -50,7 +50,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     public SharePointSourceWatcher(
         Source source,
         ChangeFeedOptions options,
-        LeaseContainerManager stateStore,
+        SourceStateContainerManager stateStore,
         ContentHasher hasher,
         ILogger<SharePointSourceWatcher> logger,
         string? generation = null,
@@ -95,7 +95,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
             || string.IsNullOrWhiteSpace(_source.SharePointDriveId))
             throw new InvalidOperationException("SharePoint source requires site_id and drive_id");
 
-        _stateContainer = await _stateStore.EnsureLeaseContainerAsync(_stateScopeId, ct);
+        _stateContainer = await _stateStore.GetContainerAsync(ct);
         await LoadStateAsync(ct);
         _deltaUrl ??= BuildInitialDeltaUrl();
         await ValidateDriveAsync(ct);
@@ -280,11 +280,17 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         if (_stateContainer is not null)
         {
             var query = new QueryDefinition(
-                "SELECT * FROM c WHERE IS_DEFINED(c.itemId) " +
+                "SELECT * FROM c WHERE c.scopeId = @scope AND IS_DEFINED(c.itemId) " +
                 "AND (NOT IS_DEFINED(c.deleted) OR c.deleted = false) " +
                 "AND (NOT IS_DEFINED(c.scanId) OR c.scanId < @scan)")
+                .WithParameter("@scope", _stateScopeId)
                 .WithParameter("@scan", _state.ScanId);
-            using var iterator = _stateContainer.GetItemQueryIterator<SharePointReferenceDocument>(query);
+            using var iterator = _stateContainer.GetItemQueryIterator<SharePointReferenceDocument>(
+                query,
+                requestOptions: new QueryRequestOptions
+                {
+                    PartitionKey = new PartitionKey(_stateScopeId),
+                });
             while (iterator.HasMoreResults)
                 foreach (var item in await iterator.ReadNextAsync(ct))
                     missing.Add(new SharePointChange(item.ItemId, item.SourceRef, "", 0, true));
@@ -357,8 +363,8 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         try
         {
             var response = await _stateContainer.ReadItemAsync<SharePointStateDocument>(
-                SharePointStateDocument.StateId,
-                new PartitionKey(SharePointStateDocument.StateId),
+                GetStateDocumentId(),
+                new PartitionKey(_stateScopeId),
                 cancellationToken: ct);
             _deltaUrl = response.Resource.DeltaUrl;
             _state = response.Resource;
@@ -374,7 +380,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
             _deltaUrl = null;
-            _state = new();
+            _state = new() { Id = GetStateDocumentId(), ScopeId = _stateScopeId };
             _stateEtag = null;
             lock (_pipelineLock) { _pipelineStateInitialized = true; }
         }
@@ -387,7 +393,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         try
         {
             var response = await _stateContainer.ReadItemAsync<SharePointReferenceDocument>(
-                id, new PartitionKey(id), cancellationToken: ct);
+                id, new PartitionKey(_stateScopeId), cancellationToken: ct);
             _knownRefs[itemId] = response.Resource.SourceRef;
             return response.Resource.SourceRef;
         }
@@ -411,20 +417,22 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 {
                     ItemResponse<SharePointReferenceDocument>? old = null;
                     try { old = await _stateContainer.ReadItemAsync<SharePointReferenceDocument>(
-                        id, new PartitionKey(id), cancellationToken: ct); }
+                        id, new PartitionKey(_stateScopeId), cancellationToken: ct); }
                     catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound) { }
                     if (old is not null && old.Resource.Revision > _state.Revision) break;
                     var reference = new SharePointReferenceDocument
                     {
-                        Id = id, ItemId = change.ItemId, SourceRef = change.SourceRef,
+                        Id = id, ScopeId = _stateScopeId, ItemId = change.ItemId, SourceRef = change.SourceRef,
                         Deleted = change.Deleted, Revision = _state.Revision, ScanId = _state.ScanId,
                     };
                     try
                     {
                         if (old is null)
-                            await _stateContainer.CreateItemAsync(reference, new PartitionKey(id), cancellationToken: ct);
+                            await _stateContainer.CreateItemAsync(
+                                reference, new PartitionKey(_stateScopeId), cancellationToken: ct);
                         else
-                            await _stateContainer.ReplaceItemAsync(reference, id, new PartitionKey(id),
+                            await _stateContainer.ReplaceItemAsync(
+                                reference, id, new PartitionKey(_stateScopeId),
                                 new ItemRequestOptions { IfMatchEtag = old.ETag }, ct);
                         break;
                     }
@@ -440,18 +448,26 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     {
         if (_stateContainer is null || string.IsNullOrEmpty(_deltaUrl)) return;
         _state.DeltaUrl = _deltaUrl;
-        var pk = new PartitionKey(SharePointStateDocument.StateId);
+        _state.Id = GetStateDocumentId();
+        _state.ScopeId = _stateScopeId;
+        var pk = new PartitionKey(_stateScopeId);
         var response = _stateEtag is null
             ? await _stateContainer.CreateItemAsync(_state, pk, cancellationToken: ct)
-            : await _stateContainer.ReplaceItemAsync(_state, SharePointStateDocument.StateId, pk,
+            : await _stateContainer.ReplaceItemAsync(_state, _state.Id, pk,
                 new ItemRequestOptions { IfMatchEtag = _stateEtag }, ct);
         _stateEtag = response.ETag;
     }
 
-    private static string GetReferenceDocumentId(string itemId)
+    private string GetStateDocumentId()
+        => HashStateId("state", _stateScopeId);
+
+    private string GetReferenceDocumentId(string itemId)
+        => HashStateId("ref", _stateScopeId, itemId);
+
+    private static string HashStateId(params string[] parts)
     {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(itemId));
-        return $"sharepoint-ref-{Convert.ToHexString(hash).ToLowerInvariant()}";
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(parts)));
+        return $"sharepoint-{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
     private bool IsAllowedFile(string name)
@@ -492,9 +508,15 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 PartitionKeyValue = HashIdentity(_source.Id, _source.SharePointSiteId!,
                     _source.SharePointDriveId!, change.ItemId, pipeline.Id),
                 PipelineGeneration = Generation,
+                DocIdPattern = pipeline.DocIdPattern,
+                PartitionKeyPattern = pipeline.PartitionKeyPattern,
                 StoreContent = pipeline.StoreContent,
                 ContentField = pipeline.ContentField,
                 MetadataFields = pipeline.MetadataFields,
+                ResourceWeight = pipeline.ResourcePolicy.Weight,
+                MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                ResourcePriority = pipeline.ResourcePolicy.Priority,
+                WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
                 ContentType = "sharepoint_ref",
                 MessageType = change.Deleted ? "delete" : "upsert",
                 SharePointSiteId = _source.SharePointSiteId,
@@ -549,10 +571,11 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private sealed class SharePointStateDocument
     {
-        public const string StateId = "sharepoint-state";
-
         [Newtonsoft.Json.JsonProperty("id")]
-        public string Id { get; set; } = StateId;
+        public string Id { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("scopeId")]
+        public string ScopeId { get; set; } = "";
 
         [Newtonsoft.Json.JsonProperty("deltaUrl")]
         public string DeltaUrl { get; set; } = "";
@@ -582,6 +605,9 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     {
         [Newtonsoft.Json.JsonProperty("id")]
         public string Id { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("scopeId")]
+        public string ScopeId { get; set; } = "";
 
         [Newtonsoft.Json.JsonProperty("itemId")]
         public string ItemId { get; set; } = "";

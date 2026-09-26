@@ -60,6 +60,34 @@ resource metadataContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
   }
 }
 
+resource sourceLeasesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: database
+  name: 'source-leases'
+  properties: {
+    resource: {
+      id: 'source-leases'
+      partitionKey: {
+        paths: ['/id']
+        kind: 'Hash'
+      }
+    }
+  }
+}
+
+resource sourceStateContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: database
+  name: 'source-state'
+  properties: {
+    resource: {
+      id: 'source-state'
+      partitionKey: {
+        paths: ['/scopeId']
+        kind: 'Hash'
+      }
+    }
+  }
+}
+
 // Built-in "Cosmos DB Built-in Data Contributor" role (SQL RBAC — data operations)
 var dataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 

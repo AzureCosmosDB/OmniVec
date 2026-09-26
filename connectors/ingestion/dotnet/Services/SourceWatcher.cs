@@ -133,9 +133,7 @@ public class SourceWatcher : ISourceWatcher
 
         var leaseContainer = await _leaseManager.EnsureLeaseContainerAsync(_source.Id, ct);
 
-        // Fixed processorName per source — no generation suffix.
-        // Resets are handled by clearing lease documents, not creating new processor names.
-        var processorName = $"omnivec-cf-{_source.Id}";
+        var processorName = ProcessorName(_source.Id, Generation);
         _processor = _sourceContainer
             .GetChangeFeedProcessorBuilder<JObject>(
                 processorName: processorName,
@@ -148,18 +146,37 @@ public class SourceWatcher : ISourceWatcher
             .WithErrorNotification(HandleErrorAsync)
             .Build();
 
-        await _processor.StartAsync();
+        const int maxStartAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await _processor.StartAsync();
+                break;
+            }
+            catch (CosmosException ex) when (
+                ex.StatusCode == System.Net.HttpStatusCode.Conflict && attempt < maxStartAttempts)
+            {
+                _logger.LogWarning(
+                    "CFP lease initialization raced for source {SourceId}, attempt {Attempt}/{Max}; retrying",
+                    _source.Id, attempt, maxStartAttempts);
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt - 1)), ct);
+            }
+        }
         _running = true;
         _logger.LogInformation(
             "Started CFP for source {SourceId} ({Name}) gen={Generation} [{Endpoint}/{Database}/{Container}]",
             _source.Id, _source.Name, Generation, _source.Endpoint, _source.Database, _source.Container);
     }
 
+    private static string ProcessorName(string sourceId, string generation)
+        => $"omnivec-cf-{sourceId}-{generation}";
+
     public async Task StopAsync()
     {
         if (!_running || _processor is null) return;
-        await _processor.StopAsync();
         _running = false;
+        await _processor.StopAsync();
         _logger.LogInformation("Stopped CFP for source {SourceId} ({Name})", _source.Id, _source.Name);
     }
 
@@ -193,7 +210,7 @@ public class SourceWatcher : ISourceWatcher
 
         // Process documents per-pipeline (each pipeline may have different content_fields)
         int skippedNoContent = 0, skippedUnchanged = 0;
-        var allEligibleDocs = new Dictionary<string, List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields, Source.AttachmentRef? att)>>();
+        var allEligibleDocs = new Dictionary<string, List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields, Source.AttachmentRef? att, bool isDelete)>>();
 
         // When the source opts into attachment mode, watcher emits one blob_ref message
         // per matching attachment (DocGrok pipeline-worker downloads the blob and embeds it)
@@ -214,13 +231,38 @@ public class SourceWatcher : ISourceWatcher
         {
             var pipSrcOuter = pipeline.Sources.FirstOrDefault(ps => ps.SourceId == _source.Id);
             var cfFields = pipSrcOuter?.ContentFields ?? new List<string> { "content" };
-            var eligible = new List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields, Source.AttachmentRef? att)>();
+            var eligible = new List<(string docId, string content, string contentHash, string pkValue, JObject doc, List<string> cfFields, Source.AttachmentRef? att, bool isDelete)>();
 
             foreach (var doc in changes)
             {
                 try
                 {
                     if (doc is null) continue;
+
+                    var docId = doc["id"]?.Value<string>() ?? "";
+                    var pkField = _partitionKeyPath.TrimStart('/');
+                    var pkValue = pkField == "id" ? docId : (doc[pkField]?.Value<string>() ?? "");
+                    if (_source.IsSoftDeleted(doc))
+                    {
+                        if (pipeline.ProcessingMode == "inline")
+                            throw new NotSupportedException(
+                                $"Cosmos soft-delete source {_source.Id} requires queue-mode pipelines; pipeline {pipeline.Id} is inline");
+
+                        if (attachmentMode)
+                        {
+                            var deletedAttachments = _source.ExtractAttachments(doc);
+                            if (deletedAttachments.Count == 0)
+                                throw new InvalidOperationException(
+                                    $"Cosmos tombstone {docId} must retain its attachment list so destination references can be deleted safely");
+                            foreach (var att in deletedAttachments)
+                                eligible.Add((docId, "", "", pkValue, doc, cfFields, att, true));
+                        }
+                        else
+                        {
+                            eligible.Add((docId, "", "", pkValue, doc, cfFields, null, true));
+                        }
+                        continue;
+                    }
 
                     if (attachmentMode)
                     {
@@ -230,14 +272,13 @@ public class SourceWatcher : ISourceWatcher
                             skippedNoContent++;
                             continue;
                         }
-                        var aDocId = doc["id"]?.Value<string>() ?? "";
+                        var aDocId = docId;
                         var aEtag = doc["_etag"]?.Value<string>() ?? "";
-                        var aPkField = _partitionKeyPath.TrimStart('/');
-                        var aPkValue = aPkField == "id" ? aDocId : (doc[aPkField]?.Value<string>() ?? "");
+                        var aPkValue = pkValue;
                         foreach (var att in atts)
                         {
                             var attHash = _hasher.ComputeHash($"{aDocId}::{aEtag}::{att.Name}::{att.Url}");
-                            eligible.Add((aDocId, "", attHash, aPkValue, doc, cfFields, att));
+                            eligible.Add((aDocId, "", attHash, aPkValue, doc, cfFields, att, false));
                         }
                         continue;
                     }
@@ -260,12 +301,9 @@ public class SourceWatcher : ISourceWatcher
                         continue;
                     }
 
-                    var docId = doc["id"]?.Value<string>() ?? "";
                     var contentHash2 = _hasher.ComputeHash(contentText);
-                    var pkField = _partitionKeyPath.TrimStart('/');
-                    var pkValue = pkField == "id" ? docId : (doc[pkField]?.Value<string>() ?? "");
 
-                    eligible.Add((docId, contentText, contentHash2, pkValue, doc, cfFields, null));
+                    eligible.Add((docId, contentText, contentHash2, pkValue, doc, cfFields, null, false));
                 }
                 catch (Exception ex)
                 {
@@ -299,7 +337,7 @@ public class SourceWatcher : ISourceWatcher
             // blob from Azure Storage), so they bypass the inline path and go to queue mode.
             var inlineEligible = inlinePipelines
                 .Where(p => allEligibleDocs.ContainsKey(p.Id))
-                .SelectMany(p => allEligibleDocs[p.Id].Where(e => e.att is null).Select(e => (e.docId, e.content, e.contentHash, e.pkValue, e.doc)))
+                .SelectMany(p => allEligibleDocs[p.Id].Where(e => e.att is null && !e.isDelete).Select(e => (e.docId, e.content, e.contentHash, e.pkValue, e.doc)))
                 .ToList();
             if (inlineEligible.Count > 0)
                 await ProcessInlineAsync(inlinePipelines, inlineEligible, context.LeaseToken, ct);
@@ -327,7 +365,7 @@ public class SourceWatcher : ISourceWatcher
                             $"Destination {pipeline.DestinationId} missing/disabled for pipeline {pipeline.Id}; retaining change-feed checkpoint");
                     }
 
-                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att) in pipelineDocs)
+                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att, isDelete) in pipelineDocs)
                     {
                         var contentFields = new Dictionary<string, string>();
                         if (att is null)
@@ -362,10 +400,17 @@ public class SourceWatcher : ISourceWatcher
                             ChunkConfig = pipeline.ChunkConfig,
                             PartitionKeyValue = pkValue,
                             PipelineGeneration = pipeline.Generation,
+                            DocIdPattern = pipeline.DocIdPattern,
+                            PartitionKeyPattern = pipeline.PartitionKeyPattern,
                             SourceContentFields = contentFields,
                             StoreContent = pipeline.StoreContent,
                             ContentField = pipeline.ContentField,
                             MetadataFields = pipeline.MetadataFields,
+                            ResourceWeight = pipeline.ResourcePolicy.Weight,
+                            MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                            ResourcePriority = pipeline.ResourcePolicy.Priority,
+                            WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
+                            MessageType = isDelete ? "delete" : "upsert",
                         };
                         if (att is not null)
                         {
@@ -391,7 +436,10 @@ public class SourceWatcher : ISourceWatcher
                 foreach (var pipeline in queuePipelines)
                 {
                     if (!allEligibleDocs.TryGetValue(pipeline.Id, out var pipelineDocs)) continue;
-                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att) in pipelineDocs)
+                    if (pipelineDocs.Any(entry => entry.isDelete))
+                        throw new NotSupportedException(
+                            "Cosmos soft-delete propagation requires Service Bus; the legacy job path cannot safely delete vectors");
+                    foreach (var (docId, content, contentHash, pkValue, doc, cfFields, att, _) in pipelineDocs)
                     {
                         var etag = doc["_etag"]?.Value<string>();
                         var metadata = new Dictionary<string, object>
@@ -781,11 +829,22 @@ public class SourceWatcher : ISourceWatcher
 
     private Task HandleErrorAsync(string leaseToken, Exception exception)
     {
+        if (!_running && IsCancellation(exception))
+        {
+            _logger.LogDebug(
+                "CFP cancellation during shutdown for source {SourceId}, partition {Partition}",
+                _source.Id, leaseToken);
+            return Task.CompletedTask;
+        }
         _logger.LogError(exception,
             "CFP error on source {SourceId}, partition {Partition}",
             _source.Id, leaseToken);
         return Task.CompletedTask;
     }
+
+    private static bool IsCancellation(Exception exception)
+        => exception is OperationCanceledException
+           || (exception.InnerException is not null && IsCancellation(exception.InnerException));
 
     public async ValueTask DisposeAsync()
     {

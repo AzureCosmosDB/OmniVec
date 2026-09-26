@@ -139,6 +139,13 @@ async def test_api_approval_is_admin_only_explicit_and_idempotent(api_app, setup
         assert plan.status_code == 200, plan.text
         doc = plan.json()
         assert doc["status"] == "awaiting_approval"
+        exact = await client.get(
+            "/api/cloud-deployments/" + doc["id"], headers=headers)
+        assert exact.status_code == 200
+        assert exact.json()["id"] == doc["id"]
+        assert (await client.get(
+            "/api/cloud-deployments/deploy-missing", headers=headers
+        )).status_code == 404
         url = "/api/cloud-deployments/" + doc["id"] + "/approve"
         approval = {"plan_hash": doc["plan_hash"], "approve_cost_and_permissions": True}
         assert (await client.post(url, json={**approval, "approve_cost_and_permissions": False}, headers=headers)).status_code == 422
@@ -228,15 +235,22 @@ def azure(setup, monkeypatch):
                 return httpx.Response(200, json={"status": 4})
             if "x-functions-key" not in request.headers:
                 return httpx.Response(401)
-            method = json.loads(request.content)["method"]
-            result = {"serverInfo": {"deployment_id": doc["id"]}} if method == "initialize" else {
-                "tools": [{"name": "list_allowed_containers"}, {"name": "vector_search"}]}
+            message = json.loads(request.content)
+            method = message["method"]
+            if method == "initialize":
+                result = {"serverInfo": {"deployment_id": doc["id"]}}
+            elif method == "tools/list":
+                result = {"tools": [{"name": "list_allowed_containers"}, {"name": "vector_search"}]}
+            else:
+                result = {"content": [{"type": "text", "text": "{\"matches\": []}"}], "isError": False}
             return httpx.Response(200, json={"result": result})
         if request.method == "PUT":
             value = json.loads(request.content)
             if path == doc["plan"]["function_id"]:
                 value["identity"]["principalId"] = PRINCIPAL
                 value["properties"].update(defaultHostName="test.azurewebsites.net", enabledHostNames=["test.scm.azurewebsites.net"])
+            for index in value.get("properties", {}).get("resource", {}).get("indexingPolicy", {}).get("vectorIndexes", []):
+                index["quantizationByteSize"] = 96
             resources[path] = value
             return httpx.Response(200, json=value)
         if path in resources:
@@ -305,6 +319,39 @@ def test_vector_mismatch_stops_before_provisioning(azure):
         deployment.run()
     assert error.value.code == "vector_mismatch"
     assert not any(r.method == "PUT" for r in requests)
+
+
+def test_foundry_permissions_use_stable_account_scoped_role(setup, azure):
+    module, store, _ = setup
+    _, _, mcp, _, _ = azure
+    mcp.update(status="succeeded", result={"server_url": "https://test.azurewebsites.net/api/mcp"})
+    store.create(mcp)
+    foundry = module.build_plan(module.DeploymentPlanRequest(
+        kind="foundry", resource_group_id=RG, location="eastus2",
+        mcp_deployment_id=mcp["id"], project_resource_id=OPENAI + "/projects/project",
+        chat_deployment="chat",
+    ), store)
+    permission = next(item for item in foundry["plan"]["deployer_permissions"] if item["role"] == "Foundry User")
+    assert permission["scope"] == OPENAI
+    assert permission["role_definition_id"] == module.FOUNDRY_USER_ROLE_ID
+    assert f"--role {module.FOUNDRY_USER_ROLE_ID}" in permission["commands"]["bash"]
+
+
+def test_wait_tolerates_transient_resource_not_found(azure):
+    _, deployment, doc, _, _ = azure
+    calls = 0
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(404)
+        return httpx.Response(200, json={"properties": {"provisioningState": "Succeeded"}})
+    deployment.client.close()
+    deployment.client = httpx.Client(transport=httpx.MockTransport(handler))
+    with deployment:
+        result = deployment.wait(doc["plan"]["storage_id"], "2023-05-01")
+    assert result["properties"]["provisioningState"] == "Succeeded"
+    assert calls == 2
 
 
 def test_worker_persists_failure_without_secrets(setup, monkeypatch):
@@ -413,7 +460,7 @@ def test_isolated_container_plan_and_actual_vector_policy(setup, azure):
     doc = module.build_plan(module.DeploymentPlanRequest(
         kind="cosmos_container", resource_group_id=RG, location="eastus2",
         cosmos_account_id=COSMOS, database="vectors", container="fresh-demo",
-        embedding_model_id="mdl-1",
+        embedding_model_id="mdl-1", partition_key_path="/document_id",
     ), store)
     resources[COSMOS] = {"location": "westus3"}
     resources[COSMOS + "/sqlDatabases/vectors"] = {}
@@ -424,10 +471,13 @@ def test_isolated_container_plan_and_actual_vector_policy(setup, azure):
     actual = resources[result["container_id"]]
     assert actual["location"] == "westus3"  # Existing account location, not arbitrary form location.
     assert actual["properties"]["options"] == {}  # No unsupported fixed throughput on serverless.
+    assert actual["properties"]["resource"]["partitionKey"]["paths"] == ["/document_id"]
     assert actual["properties"]["resource"]["vectorEmbeddingPolicy"]["vectorEmbeddings"][0]["dimensions"] == 1536
-    assert actual["properties"]["resource"]["indexingPolicy"]["vectorIndexes"] == [{"path": "/embedding", "type": "diskANN"}]
+    assert actual["properties"]["resource"]["indexingPolicy"]["vectorIndexes"][0]["quantizationByteSize"] == 96
+    assert actual["properties"]["resource"]["indexingPolicy"]["vectorIndexes"][0]["path"] == "/embedding"
     assert len([r for r in requests if r.method == "PUT"]) == 1
     assert doc["plan"]["authorization_scopes"] == [COSMOS]
+    assert doc["plan"]["partition_key_path"] == "/document_id"
 
 
 @pytest.mark.parametrize("with_references", [True, False])

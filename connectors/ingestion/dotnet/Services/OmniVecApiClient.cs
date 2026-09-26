@@ -45,7 +45,7 @@ public class OmniVecApiClient
 
     private async Task<List<Source>> FetchSourcesAsync(CancellationToken ct)
     {
-        var resp = await _http.GetAsync("/api/sources", ct);
+        using var resp = await GetWithRetryAsync("/api/sources", ct);
         resp.EnsureSuccessStatusCode();
         var body = await resp.Content.ReadFromJsonAsync<SourcesResponse>(cancellationToken: ct);
         return body?.Sources ?? new List<Source>();
@@ -96,7 +96,7 @@ public class OmniVecApiClient
         {
             if (_cachedPipelines != null && DateTime.UtcNow - _cachedPipelinesAt < PipelinesCacheTtl)
                 return _cachedPipelines;
-            var resp = await _http.GetAsync("/api/pipelines?include_stats=false", ct);
+            using var resp = await GetWithRetryAsync("/api/pipelines?include_stats=false", ct);
             resp.EnsureSuccessStatusCode();
             var body = await resp.Content.ReadFromJsonAsync<PipelinesResponse>(cancellationToken: ct);
             _cachedPipelines = body?.Pipelines?.Where(p => p.Status == "active").ToList() ?? new List<Pipeline>();
@@ -190,7 +190,7 @@ public class OmniVecApiClient
         {
             if (_cachedDestinations != null && DateTime.UtcNow - _cachedDestinationsAt < DestinationsCacheTtl)
                 return _cachedDestinations;
-            var resp = await _http.GetAsync("/api/destinations", ct);
+            using var resp = await GetWithRetryAsync("/api/destinations", ct);
             resp.EnsureSuccessStatusCode();
             var body = await resp.Content.ReadFromJsonAsync<DestinationsResponse>(cancellationToken: ct);
             _cachedDestinations = body?.Destinations?.Where(d => d.Enabled).ToList() ?? new List<Destination>();
@@ -198,6 +198,34 @@ public class OmniVecApiClient
             return _cachedDestinations;
         }
         finally { _destinationsLock.Release(); }
+    }
+
+    private async Task<HttpResponseMessage> GetWithRetryAsync(string path, CancellationToken ct)
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                var response = await _http.GetAsync(path, ct);
+                var status = (int)response.StatusCode;
+                if (response.IsSuccessStatusCode
+                    || (status < 500 && status is not (408 or 429))
+                    || attempt == maxAttempts)
+                    return response;
+                response.Dispose();
+            }
+            catch (Exception ex) when (
+                attempt < maxAttempts
+                && !ct.IsCancellationRequested
+                && ex is HttpRequestException or TaskCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "Transient API GET failure for {Path}, attempt {Attempt}/{Max}",
+                    path, attempt, maxAttempts);
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt - 1)), ct);
+        }
     }
 
     /// <summary>Report changefeed batch metrics including skip counts.</summary>

@@ -25,11 +25,16 @@ def test_normalize_top_k_rejects_invalid_values(value):
 
 
 def test_vector_query_only_interpolates_validated_identifiers():
-    query = cosmos_tools.vector_query("4", "embedding", "id,title,body")
+    query = cosmos_tools.vector_query(
+        "4", "embedding", "id,title,body",
+        {"source_id": "src-demo", "pipeline_id": "pip-demo"},
+    )
     assert "SELECT TOP 4" in query
     assert "c.id, c.title, c.body" in query
     assert "@embedding" in query
     assert "VectorDistance" in query
+    assert "c.source_id = @source_id" in query
+    assert "c.pipeline_id = @pipeline_id" in query
 
 
 def test_container_allowlist_is_enforced():
@@ -55,6 +60,13 @@ def test_container_allowlist_rejects_duplicates():
 def test_vector_query_rejects_unsafe_identifiers(vector_field, fields):
     with pytest.raises(ValueError):
         cosmos_tools.vector_query(3, vector_field, fields)
+
+
+def test_vector_query_rejects_unapproved_filter_fields():
+    with pytest.raises(ValueError, match="unsupported filter field"):
+        cosmos_tools.vector_query(
+            3, "embedding", "id,content", {"tenant_id": "tenant-a"}
+        )
 
 
 def test_public_document_excludes_internal_fields_and_normalizes_distance():
