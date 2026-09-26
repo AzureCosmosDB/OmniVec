@@ -105,7 +105,7 @@ function detail(kind, id, section) {
   if (!x) return { crumbs:[['Connections','#/connections'],['Not found']], html:`<div class="page">${empty('plug',`This ${noun} was not found`,'It may have been deleted.','<a class="btn" href="#/connections">Back to connections</a>')}</div>` };
   const h = healthOf(kind, x.id), used = X.usedBy(x.id), c = x.config||{}, t = M.trig[x.id];
   const base = `#/connections/${kind==='source'?'source':'store'}/${x.id}`;
-  const cfgRows = Object.entries(c).filter(([k,v]) => v!=null && v!=='' && typeof v !== 'object').map(([k,v]) => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd class="mono small">${esc(/password|secret|key$/i.test(k) ? '••••••' : v)}</dd>`).join('');
+  const cfgRows = Object.entries(c).filter(([k,v]) => v!=null && v!=='' && typeof v !== 'object').map(([k,v]) => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd class="mono small">${esc(/password|secret/i.test(k) || /key$/i.test(k) ? '••••••' : v)}</dd>`).join('');
   const vi = (c.vector_indexes||[])[0]; const pol = h && (h.checks||[]).find(k => k.check==='vector_policy');
   const html = `<div class="page">
    <div class="ph"><div style="min-width:0"><div class="row">${logo(x.type,'lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${esc(x.name)}</h1>${h ? `<span class="badge ${h.status==='healthy'?'ok':'warn'}">${hdot(h)}${h.status==='healthy'?'Healthy':esc(h.status)}</span>` : '<span class="badge out">Not checked</span>'}</div>

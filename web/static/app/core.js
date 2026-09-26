@@ -68,6 +68,7 @@ function errMessage(data, status) {
   return `Request failed (HTTP ${status})`;
 }
 async function api(path, { method='GET', body, raw=false, signal, headers={}, anon=false } = {}) {
+  if (typeof path !== 'string' || !/^\/api\/[^\s\\]*$/.test(path) || /(^|\/)\.\.(\/|$|\?)/.test(path)) throw new Error('Invalid API path');
   const h = { ...headers }; const t = getToken();
   if (t && !anon) h.Authorization = 'Bearer ' + t;
   let payload = body;

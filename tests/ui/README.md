@@ -1,6 +1,6 @@
 # OmniVec portal UI tests
 
-These tests run the real `web/static/index.html` in headless Chromium with
+These tests run the real legacy `web/static/classic.html` UI in headless Chromium with
 network calls intercepted. They cover source and destination wizard behavior,
 permission guidance, API request payloads, responsive layout, and parity with
 the CLI connector contract.

@@ -70,8 +70,9 @@ const STATUS = {
 };
 
 /* guide block (no network): identity + role + scope + steps + command */
+const guideFor = type => (typeof type === 'string' && Object.prototype.hasOwnProperty.call(GUIDE, type) && typeof GUIDE[type] === 'function') ? GUIDE[type] : null;
 function guideHtml(kind, type, cfg, id) {
-  const g = GUIDE[type] ? GUIDE[type](cfg||{}, id||{}, kind) : null;
+  const gf = guideFor(type); const g = gf ? gf(cfg||{}, id||{}, kind) : null;
   if (!g) return `<div class="muted">No permission guidance is available for ${esc(T(type).label)}.</div>`;
   const p = (id && id.principal) || '<omnivec-principal-id>';
   return `<div class="stack s12">
@@ -91,7 +92,7 @@ function permAssistant(el, opts) {
   const draw = async (result) => {
     const id = await identity(); if (result && result.principal_id) { principalCache = principalCache || result.principal_id; id.principal = id.principal || result.principal_id; }
     const type = opts.type || (result && result.connector_type); const cfg = opts.getConfig ? opts.getConfig() : {};
-    const g = GUIDE[type] ? GUIDE[type](cfg, id, opts.kind) : null;
+    const gf = guideFor(type); const g = gf ? gf(cfg, id, opts.kind) : null;
     el.innerHTML = `<div class="stack s12">
       ${opts.noGuide ? '' : guideHtml(opts.kind, type, cfg, id)}
       <div class="row" style="flex-wrap:wrap"><button class="btn ${result ? '' : 'pri'} sm" id="pchk">${icon('shield','sm')}${result ? 'Check again' : 'Check access'}</button>

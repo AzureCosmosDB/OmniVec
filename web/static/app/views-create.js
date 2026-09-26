@@ -77,9 +77,9 @@ function drawSide(v) {
   const q = '<span class="logo" style="background:var(--subtle);color:var(--muted)">?</span>';
   $('#wsum', v).innerHTML = [
     s ? node(logo(s.type), s.name, T(s.type).short) : node(q, 'Source', 'Choose in step 1', 1),
-    `<div class="muted small" style="padding-left:12px">↓ ${W.strategy==='chunk' ? `chunks ${W.chunk.size} / ${W.chunk.overlap} ${W.chunk.unit}` : 'whole document'}${W.fileTypes && W.fileTypes.length && s && s.type!=='cosmosdb' ? ' · '+esc(W.fileTypes.join(', ')) : ''}</div>`,
+    `<div class="muted small" style="padding-left:12px">↓ ${W.strategy==='chunk' ? `chunks ${esc(W.chunk.size)} / ${esc(W.chunk.overlap)} ${esc(W.chunk.unit)}` : 'whole document'}${W.fileTypes && W.fileTypes.length && s && s.type!=='cosmosdb' ? ' · '+esc(W.fileTypes.join(', ')) : ''}</div>`,
     m ? node(logo(m.type), m.deployment || m.name, `${m.embedding_dim||'—'} dims · ${T(m.type).short}`) : W.recipe ? node(logo('recipe'), W.recipe, 'Processing recipe') : node(q, 'Embedding', 'Choose in step 3', 1),
-    `<div class="muted small" style="padding-left:12px">↓ ${W.mode} mode</div>`,
+    `<div class="muted small" style="padding-left:12px">↓ ${esc(W.mode)} mode</div>`,
     d ? node(logo(d.type), d.name, `${T(d.type).short}${W.vpath ? ' · /'+W.vpath : ''}`) : node(q, 'Vector store', 'Choose in step 4', 1),
   ].join('');
   const ic = { pass:['check','var(--ok)'], warn:['alert','var(--warn)'], fail:['x','var(--err)'], info:['info','var(--info)'], wait:['clock','var(--faint)'] };
@@ -203,7 +203,7 @@ function bind(v) {
     inp.onkeydown = e => { if ((e.key==='Enter' || e.key===',') && inp.value.trim()) { e.preventDefault(); const t = inp.value.trim().replace(/^\./,''); inp.insertAdjacentHTML('beforebegin', `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`); inp.value=''; captureInputs(v); drawSide(v); } }; });
   const smp = $('#wsample', v); if (smp) smp.onclick = async () => { $('#wsampleout', v).innerHTML = spinner('Loading…');
     try { const r = await api(`/api/sources/${W.sourceId}/sample?limit=5`); W.sample = r.documents || r.samples || r.items || r.blobs || r.files || (Array.isArray(r) ? r : []); captureInputs(v); draw(v); }
-    catch (e) { $('#wsampleout', v).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span> · <a class="link" href="#/connections/source/${W.sourceId}/access">Check access</a>`; } };
+    catch (e) { $('#wsampleout', v).innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span> · <a class="link" href="#/connections/source/${esc(encodeURIComponent(W.sourceId||''))}/access">Check access</a>`; } };
   const prev = $('#wprev', v); if (prev) prev.onclick = async () => { captureInputs(v); const out = $('#wprevout', v); out.innerHTML = spinner('Rendering…');
     try { const r = await api('/api/pipelines/identity-preview', { method:'POST', body:{ document_id_pattern:W.docId, partition_key_pattern:W.pk, chunk_id_pattern:W.chunkId, source_ref:'folder/example-document.pdf', source_partition:'tenant-a', source_id:W.sourceId, destination_id:W.storeId, model_id:W.modelId || W.recipe } });
       out.innerHTML = `<dl class="kv">${Object.entries(r).map(([k,val]) => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd class="mono small">${esc(typeof val==='object' ? JSON.stringify(val) : val)}</dd>`).join('')}</dl>`; }

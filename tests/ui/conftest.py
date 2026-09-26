@@ -96,7 +96,7 @@ def ui_page(browser: Browser, static_server_url: str) -> Iterator[tuple[Page, li
 
     page.route("**/api/**", handle_api)
     page.route("https://**/*", lambda route: route.abort())
-    page.goto(f"{static_server_url}/index.html", wait_until="networkidle")
+    page.goto(f"{static_server_url}/classic.html", wait_until="networkidle")
     yield page, requests
     assert page_errors == []
     page.close()

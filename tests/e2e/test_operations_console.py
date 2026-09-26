@@ -39,7 +39,7 @@ def page():
                     route.abort("blockedbyclient")
                     return
             preview = os.getenv("OMNIVEC_E2E_PREVIEW_ROOT")
-            assets = {"/ui": ("index.html", "text/html"), "/static/operations.css": ("operations.css", "text/css"),
+            assets = {"/ui": ("classic.html", "text/html"), "/static/operations.css": ("operations.css", "text/css"),
                       "/static/operations.js": ("operations.js", "application/javascript")}
             if preview and target.netloc == parsed.netloc and target.path in assets:
                 file, content_type = assets[target.path]
