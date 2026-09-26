@@ -7,6 +7,7 @@ namespace OmniVec.Worker.Destinations;
 public partial class CosmosDbDestinationWriter : IDestinationWriter
 {
     private const string CosmosDataUserAgent = "OmniVec-DataCosmos/1.0";
+    private const int MaxBatchRetryAttempts = 12;
 
     private readonly ILogger<CosmosDbDestinationWriter> _logger;
     private static readonly ConcurrentDictionary<string, CosmosClient> _clients = new();
@@ -96,6 +97,10 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         IEnumerable<string> ids, string pkPath, string sourcePartition)
         => ids.GroupBy(id => pkPath == "/id" ? id : sourcePartition);
 
+    internal static string DeletionPartitionKey(
+        string id, string? storedPartitionKey, string sourcePartition, string pkPath)
+        => pkPath == "/id" ? id : storedPartitionKey ?? sourcePartition;
+
     private Task WriteBatchWithRetryAsync(
         Container container,
         string pkValue,
@@ -152,7 +157,8 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
 
                 if (statusCode == 429 || statusCode >= 500)
                 {
-                    if (attempt >= 5) throw new InvalidOperationException($"Cosmos patch retries exhausted: {status}");
+                    if (attempt >= MaxBatchRetryAttempts)
+                        throw new InvalidOperationException($"Cosmos patch retries exhausted: {status}");
                     var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                     _logger.LogWarning("Batch {Status} pk={PK}, attempt {Attempt}, retrying in {Delay}ms",
                         status, pkValue, attempt, delay.TotalMilliseconds);
@@ -164,7 +170,7 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
                 throw new Exception($"Batch patch failed: {status}");
             }
             catch (CosmosException ex) when (
-                attempt < 5 && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
+                attempt < MaxBatchRetryAttempts && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
                 ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
                 ex.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable ||
                 (int)ex.StatusCode >= 500))
@@ -341,32 +347,33 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         {
             try
             {
+                var pkField = pkPath.TrimStart('/');
                 var query = new QueryDefinition(
-                    "SELECT c.id FROM c WHERE c.source_id = @sid AND c.source_ref = @ref AND c.pipeline_id = @pid"
+                    $"SELECT c.id, c[\"{pkField}\"] AS partition_key FROM c WHERE c.source_id = @sid"
+                    + " AND (c.source_ref = @ref OR c.id = @document_id) AND c.pipeline_id = @pid"
                     + (req.KeepIds is null ? "" : " AND c.chunk_source_partition = @partition"))
                     .WithParameter("@sid", req.SourceId)
                     .WithParameter("@ref", req.SourceRef)
+                    .WithParameter("@document_id", req.DocumentId ?? "")
                     .WithParameter("@pid", req.PipelineId)
                     .WithParameter("@partition", req.PartitionKeyValue);
-                // With /id, each chunk occupies its own logical partition.
-                // Keep source and pipeline filters even when the query fans out.
                 using var iter = container.GetItemQueryIterator<DeletedIdDoc>(
                     query,
                     requestOptions: new QueryRequestOptions
                     {
-                        PartitionKey = pkPath == "/id" ? null : new PartitionKey(req.PartitionKeyValue),
+                        PartitionKey = null,
                     });
 
-                var ids = new List<string>();
+                var docs = new List<DeletedIdDoc>();
                 while (iter.HasMoreResults)
                 {
                     var page = await iter.ReadNextAsync(ct);
                     foreach (var d in page)
                         if (!string.IsNullOrEmpty(d.Id) && req.KeepIds?.Contains(d.Id) != true)
-                            ids.Add(d.Id);
+                            docs.Add(d);
                 }
 
-                if (ids.Count == 0)
+                if (docs.Count == 0)
                 {
                     _logger.LogInformation(
                         "Delete: no Cosmos docs for source_id={SrcId} source_ref={Ref}",
@@ -374,26 +381,45 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
                     continue;
                 }
 
-                foreach (var partition in GroupDeletionIds(ids, pkPath, req.PartitionKeyValue))
+                foreach (var partition in docs.GroupBy(d =>
+                    DeletionPartitionKey(d.Id, d.PartitionKey, req.PartitionKeyValue, pkPath)))
                 {
-                    var partitionIds = partition.ToList();
+                    var partitionIds = partition.Select(d => d.Id).ToList();
                     for (int i = 0; i < partitionIds.Count; i += 100)
                     {
-                        var batch = container.CreateTransactionalBatch(new PartitionKey(partition.Key));
-                        foreach (var id in partitionIds.Skip(i).Take(100)) batch.DeleteItem(id);
-                        using var resp = await batch.ExecuteAsync(ct);
-                        if (!resp.IsSuccessStatusCode)
+                        var ids = partitionIds.Skip(i).Take(100).ToList();
+                        for (var attempt = 0; ; attempt++)
                         {
-                            _logger.LogWarning(
-                                "Cosmos delete batch status={Status} for src={SrcId} ref={Ref}",
-                                resp.StatusCode, req.SourceId, req.SourceRef);
-                            throw new InvalidOperationException($"Cosmos delete batch failed: {resp.StatusCode}");
+                            var batch = container.CreateTransactionalBatch(new PartitionKey(partition.Key));
+                            foreach (var id in ids) batch.DeleteItem(id);
+                            using var resp = await batch.ExecuteAsync(ct);
+                            if (resp.IsSuccessStatusCode) break;
+
+                            var retryable = resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests
+                                || resp.StatusCode == System.Net.HttpStatusCode.RequestTimeout
+                                || (int)resp.StatusCode >= 500;
+                            if (!retryable || attempt >= 7)
+                            {
+                                _logger.LogWarning(
+                                    "Cosmos delete batch status={Status} for src={SrcId} ref={Ref}",
+                                    resp.StatusCode, req.SourceId, req.SourceRef);
+                                throw new InvalidOperationException($"Cosmos delete batch failed: {resp.StatusCode}");
+                            }
+
+                            var retryAfter = resp.RetryAfter;
+                            var delay = retryAfter.HasValue && retryAfter.Value > TimeSpan.Zero
+                                ? retryAfter.Value
+                                : TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
+                            _logger.LogInformation(
+                                "Cosmos delete batch throttled for src={SrcId} ref={Ref}; retry {Attempt} in {DelayMs}ms",
+                                req.SourceId, req.SourceRef, attempt + 1, delay.TotalMilliseconds);
+                            await Task.Delay(delay, ct);
                         }
                     }
                 }
                 _logger.LogInformation(
                     "Deleted {Count} Cosmos doc(s) for source_id={SrcId} source_ref={Ref}",
-                    ids.Count, req.SourceId, req.SourceRef);
+                    docs.Count, req.SourceId, req.SourceRef);
             }
             catch (Exception ex)
             {
@@ -408,5 +434,8 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
     {
         [Newtonsoft.Json.JsonProperty("id")]
         public string Id { get; set; } = "";
+
+        [Newtonsoft.Json.JsonProperty("partition_key")]
+        public string? PartitionKey { get; set; }
     }
 }

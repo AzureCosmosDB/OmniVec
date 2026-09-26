@@ -290,9 +290,25 @@ dotnetWorker:
       cpu: "1"
   autoscaling:
     enabled: false
+    # hpa uses CPU. keda uses Service Bus backlog and requires KEDA CRDs.
+    type: hpa
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
+    pollingInterval: 15
+    cooldownPeriod: 180
+    messageCountPerReplica: 50
+    activationMessageCount: 1
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
+  updateStrategy:
+    maxUnavailable: 1
+    maxSurge: 0
 
 # =============================================================================
 # BLOB ENUMERATOR (per-source blob enumeration with checkpointing)
@@ -371,6 +387,8 @@ azure:
     endpoint: "" # Set from Terraform output
     database: omnivec
     metadataContainer: metadata
+    leaseContainer: source-leases
+    stateContainer: source-state
 
   # Blob Storage
   storage:

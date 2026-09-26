@@ -43,18 +43,22 @@ spec:
           requests:
             memory: {{ $model.resources.requests.memory | quote }}
             cpu: {{ $model.resources.requests.cpu | quote }}
-            {{- if index $model.resources.requests "nvidia.com/gpu" }}
+            {{- if and (not ($model.cpuOnly | default false)) (index $model.resources.requests "nvidia.com/gpu") }}
             nvidia.com/gpu: {{ index $model.resources.requests "nvidia.com/gpu" }}
             {{- end }}
           limits:
             memory: {{ $model.resources.limits.memory | quote }}
             cpu: {{ $model.resources.limits.cpu | quote }}
-            {{- if index $model.resources.limits "nvidia.com/gpu" }}
+            {{- if and (not ($model.cpuOnly | default false)) (index $model.resources.limits "nvidia.com/gpu") }}
             nvidia.com/gpu: {{ index $model.resources.limits "nvidia.com/gpu" }}
             {{- end }}
         env:
         - name: HF_HOME
           value: "/app/.cache/huggingface"
+        {{- range $key, $value := $model.env }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: {{ $model.probes.liveness.path }}

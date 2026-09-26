@@ -58,7 +58,10 @@ public class EmbeddingMessage
     public TextChunkConfig? ChunkConfig { get; set; }
 
     [JsonPropertyName("doc_id_pattern")]
-    public string DocIdPattern { get; set; } = "{source}";
+    public string DocIdPattern { get; set; } = "{source_hash}-{pipeline}";
+
+    [JsonPropertyName("partition_key_pattern")]
+    public string PartitionKeyPattern { get; set; } = "{source_partition}";
 
     [JsonPropertyName("pipeline_generation")]
     public string PipelineGeneration { get; set; } = "";
@@ -87,6 +90,18 @@ public class EmbeddingMessage
 
     [JsonPropertyName("enqueued_at")]
     public string EnqueuedAt { get; set; } = DateTime.UtcNow.ToString("O");
+
+    [JsonPropertyName("resource_weight")]
+    public int ResourceWeight { get; set; } = 10;
+
+    [JsonPropertyName("max_concurrency_per_worker")]
+    public int MaxConcurrencyPerWorker { get; set; } = 2;
+
+    [JsonPropertyName("resource_priority")]
+    public string ResourcePriority { get; set; } = "normal";
+
+    [JsonPropertyName("workload_class")]
+    public string WorkloadClass { get; set; } = "shared";
 
     /// <summary>"text", "blob_ref", or "sharepoint_ref".</summary>
     [JsonPropertyName("content_type")]

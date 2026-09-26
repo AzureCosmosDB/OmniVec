@@ -534,8 +534,9 @@ func applyPipelineChunkFlags(cmd *cobra.Command, body map[string]any) {
 
 func newPipelineCreateCmd() *cobra.Command {
 	var name, description, source, destination, model, contentFields, vectorIndexPath string
-	var contentMode, contentStrategy, fileTypes, docIdPattern string
+	var contentMode, contentStrategy, fileTypes, docIdPattern, partitionKeyPattern, collisionPolicy string
 	var processingMode, embeddingField, storeContent, metadataFields, contentField string
+	var sharePointTenantID, sharePointClientID string
 	var processExisting bool
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -581,6 +582,15 @@ func newPipelineCreateCmd() *cobra.Command {
 				}
 				srcEntry["file_types"] = ft
 			}
+			if sharePointTenantID != "" || sharePointClientID != "" {
+				if sharePointTenantID == "" || sharePointClientID == "" {
+					exitErr("--sharepoint-tenant-id and --sharepoint-client-id must be supplied together")
+				}
+				srcEntry["sharepoint_identity"] = map[string]any{
+					"tenant_id": sharePointTenantID,
+					"client_id": sharePointClientID,
+				}
+			}
 
 			body := map[string]any{
 				"name": name,
@@ -605,6 +615,12 @@ func newPipelineCreateCmd() *cobra.Command {
 			applyPipelineChunkFlags(cmd, body)
 			if docIdPattern != "" {
 				body["doc_id_pattern"] = docIdPattern
+			}
+			if partitionKeyPattern != "" {
+				body["partition_key_pattern"] = partitionKeyPattern
+			}
+			if collisionPolicy != "" {
+				body["collision_policy"] = collisionPolicy
 			}
 			switch strings.ToLower(strings.TrimSpace(storeContent)) {
 			case "":
@@ -662,7 +678,9 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fileTypes, "file-types", "", "Comma-separated file type filters (e.g., txt,pdf,md)")
 	cmd.Flags().StringVar(&contentStrategy, "content-strategy", "", "Content strategy: truncate or chunk")
 	addPipelineChunkFlags(cmd)
-	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern (e.g., {source}-chunk-{chunk})")
+	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern (default: {source_hash}-{pipeline})")
+	cmd.Flags().StringVar(&partitionKeyPattern, "partition-key-pattern", "", "Destination partition-key pattern (default: {source_partition})")
+	cmd.Flags().StringVar(&collisionPolicy, "collision-policy", "", "Shared-destination collision policy: reject or overwrite")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path from destination's vector policy (required)")
 	cmd.Flags().StringVar(&processingMode, "processing-mode", "", "Processing mode: inline or queue (default queue)")
 	cmd.Flags().StringVar(&embeddingField, "embedding-field", "", "Destination field to write embedding into (default: embedding)")
@@ -670,12 +688,14 @@ func newPipelineCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false (default: per-destination — Postgres/MsSql=true, Cosmos=false)")
 	cmd.Flags().StringVar(&contentField, "content-field", "", "Destination field name receiving the embedded text (Cosmos only; default: content)")
 	cmd.Flags().StringVar(&metadataFields, "metadata-fields", "", "Optional metadata to write on dest docs: 'all' (default), 'none', or comma list (allowed: pipeline_name, embedding_dims, source_ref)")
+	cmd.Flags().StringVar(&sharePointTenantID, "sharepoint-tenant-id", "", "SharePoint application tenant ID")
+	cmd.Flags().StringVar(&sharePointClientID, "sharepoint-client-id", "", "SharePoint application client ID")
 	return cmd
 }
 
 func newPipelineUpdateCmd() *cobra.Command {
 	var name, description, destination, model string
-	var contentFields, contentStrategy, docIdPattern, vectorIndexPath, storeContent, contentField string
+	var contentFields, contentStrategy, docIdPattern, partitionKeyPattern, collisionPolicy, vectorIndexPath, storeContent, contentField string
 	var metadataFields string
 	cmd := &cobra.Command{
 		Use:   "update <pipeline-id>",
@@ -714,6 +734,12 @@ func newPipelineUpdateCmd() *cobra.Command {
 			}
 			if docIdPattern != "" {
 				body["doc_id_pattern"] = docIdPattern
+			}
+			if partitionKeyPattern != "" {
+				body["partition_key_pattern"] = partitionKeyPattern
+			}
+			if collisionPolicy != "" {
+				body["collision_policy"] = collisionPolicy
 			}
 			if contentFields != "" {
 				fields := strings.Split(contentFields, ",")
@@ -777,6 +803,8 @@ func newPipelineUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&contentStrategy, "content-strategy", "", "Content strategy: truncate or chunk")
 	addPipelineChunkFlags(cmd)
 	cmd.Flags().StringVar(&docIdPattern, "doc-id-pattern", "", "Document ID pattern")
+	cmd.Flags().StringVar(&partitionKeyPattern, "partition-key-pattern", "", "Destination partition-key pattern")
+	cmd.Flags().StringVar(&collisionPolicy, "collision-policy", "", "Shared-destination collision policy: reject or overwrite")
 	cmd.Flags().StringVar(&vectorIndexPath, "vector-index-path", "", "Vector index path")
 	cmd.Flags().StringVar(&storeContent, "store-content", "", "Persist embedded text on destination doc: true|false")
 	cmd.Flags().StringVar(&contentField, "content-field", "", "Destination field name receiving the embedded text (Cosmos only)")

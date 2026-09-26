@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -233,29 +234,58 @@ func newSourceTestCmd() *cobra.Command {
 }
 
 func newSourceSyncCmd() *cobra.Command {
-	var full bool
+	var full, wait bool
+	var timeout time.Duration
+	var minimumDocuments int
 	cmd := &cobra.Command{
 		Use:   "sync <source-id>",
 		Short: "Trigger source sync",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := ensurePrefix(args[0], "src-")
-			body := map[string]any{"full_sync": full}
+			body := map[string]any{
+				"full_sync":         full,
+				"minimum_documents": minimumDocuments,
+			}
 			c := getClient()
 			data, err := c.Post(fmt.Sprintf("/api/sources/%s/sync", id), body)
 			if err != nil {
 				exitErr("%v", err)
 			}
 			resp := parseJSONObject(data)
-			if msg, ok := resp["message"].(string); ok {
-				exitOK("%s", msg)
-			} else {
-				exitOK("Sync triggered")
+			operationID, _ := resp["operation_id"].(string)
+			if operationID == "" {
+				return fmt.Errorf("sync response returned no operation id")
 			}
-			return nil
+			if !wait {
+				exitOK("Sync triggered: %s", operationID)
+				return nil
+			}
+			deadline := time.Now().Add(timeout)
+			for {
+				statusRaw, getErr := c.Get("/api/source-syncs/"+operationID, nil)
+				if getErr != nil {
+					return getErr
+				}
+				status := parseJSONObject(statusRaw)
+				switch status["status"] {
+				case "ready":
+					exitOK("Sync ready: %s", operationID)
+					return nil
+				case "failed":
+					return fmt.Errorf("sync %s failed", operationID)
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("sync %s did not become ready within %s", operationID, timeout)
+				}
+				time.Sleep(2 * time.Second)
+			}
 		},
 	}
 	cmd.Flags().BoolVar(&full, "full", false, "Full re-sync")
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait until current-generation embeddings reach the requested minimum")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Maximum wait time")
+	cmd.Flags().IntVar(&minimumDocuments, "minimum-documents", 1, "Current-generation embeddings required for readiness")
 	return cmd
 }
 

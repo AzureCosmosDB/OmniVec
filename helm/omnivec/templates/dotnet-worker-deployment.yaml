@@ -9,6 +9,11 @@ metadata:
     {{- include "omnivec.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.dotnetWorker.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.dotnetWorker.updateStrategy.maxUnavailable | default 1 }}
+      maxSurge: {{ .Values.dotnetWorker.updateStrategy.maxSurge | default 0 }}
   selector:
     matchLabels:
       app: omnivec-dotnet-worker
@@ -19,6 +24,15 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ include "omnivec.serviceAccountName" . }}
+      {{- if .Values.dotnetWorker.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.dotnetWorker.topologySpread.maxSkew | default 1 }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.dotnetWorker.topologySpread.whenUnsatisfiable | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              app: omnivec-dotnet-worker
+      {{- end }}
       {{- with .Values.security }}
       {{- if and .seccompProfile .seccompProfile.enabled }}
       securityContext:
@@ -79,7 +93,7 @@ spec:
             failureThreshold: {{ .Values.dotnetWorker.probes.startup.failureThreshold | default 30 }}
           resources:
             {{- toYaml .Values.dotnetWorker.resources | nindent 12 }}
-{{- if .Values.dotnetWorker.autoscaling.enabled }}
+{{- if and .Values.dotnetWorker.autoscaling.enabled (eq (.Values.dotnetWorker.autoscaling.type | default "hpa") "hpa") }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -100,5 +114,53 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.dotnetWorker.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if and .Values.dotnetWorker.autoscaling.enabled (eq (.Values.dotnetWorker.autoscaling.type | default "hpa") "keda") }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: omnivec-dotnet-worker
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podIdentity:
+    provider: azure-workload
+    identityId: {{ .Values.azure.workloadIdentity.clientId | quote }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: omnivec-dotnet-worker
+  namespace: {{ .Values.global.namespace }}
+spec:
+  scaleTargetRef:
+    name: omnivec-dotnet-worker
+  pollingInterval: {{ .Values.dotnetWorker.autoscaling.pollingInterval | default 15 }}
+  cooldownPeriod: {{ .Values.dotnetWorker.autoscaling.cooldownPeriod | default 180 }}
+  minReplicaCount: {{ .Values.dotnetWorker.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.dotnetWorker.autoscaling.maxReplicas }}
+  triggers:
+    - type: azure-servicebus
+      metadata:
+        namespace: {{ trimSuffix ".servicebus.windows.net" .Values.azure.serviceBus.namespace | quote }}
+        topicName: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+        subscriptionName: {{ .Values.dotnetWorker.subscriptionName | default "worker" | quote }}
+        messageCount: {{ .Values.dotnetWorker.autoscaling.messageCountPerReplica | default 50 | quote }}
+        activationMessageCount: {{ .Values.dotnetWorker.autoscaling.activationMessageCount | default 1 | quote }}
+      authenticationRef:
+        name: omnivec-dotnet-worker
+{{- end }}
+{{- if .Values.dotnetWorker.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: omnivec-dotnet-worker
+  namespace: {{ .Values.global.namespace }}
+spec:
+  minAvailable: {{ .Values.dotnetWorker.podDisruptionBudget.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app: omnivec-dotnet-worker
 {{- end }}
 {{- end }}

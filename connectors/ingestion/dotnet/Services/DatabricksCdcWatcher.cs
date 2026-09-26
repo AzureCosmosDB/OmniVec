@@ -536,9 +536,15 @@ public class DatabricksCdcWatcher : ISourceWatcher
                 ContentHash = d.contentHash,
                 PartitionKeyValue = d.docId,
                 PipelineGeneration = Generation,
+                DocIdPattern = pipeline.DocIdPattern,
+                PartitionKeyPattern = pipeline.PartitionKeyPattern,
                 StoreContent = pipeline.StoreContent,
                 ContentField = pipeline.ContentField,
                 MetadataFields = pipeline.MetadataFields,
+                ResourceWeight = pipeline.ResourcePolicy.Weight,
+                MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                ResourcePriority = pipeline.ResourcePolicy.Priority,
+                WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
             }).ToList();
 
             await _sbPublisher!.PublishBatchAsync(messages, ct);

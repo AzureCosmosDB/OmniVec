@@ -33,10 +33,19 @@ async def test_source_warning_does_not_expose_connector_error(
     store = SimpleNamespace(list=lambda kind: [], upsert=saved.append)
     monkeypatch.setattr(api, "get_store", lambda: store)
     monkeypatch.setattr(api, "_require_blob_source_enabled", lambda *args: None)
+    configs = {
+        "azure-blob": {"container": "documents"},
+        "cosmosdb": {
+            "endpoint": "https://example.documents.azure.com:443/",
+            "database": "db",
+            "container": "items",
+        },
+        "sharepoint": {"site_id": "test-site", "drive_id": "test-drive"},
+    }
     request = api.CreateSourceRequest(
         name="source-validation-test",
         type=source_type,
-        config={"site_id": "test-site", "drive_id": "test-drive"},
+        config=configs[source_type],
     )
 
     result = await api.create_source(request)

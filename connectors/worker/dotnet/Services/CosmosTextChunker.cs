@@ -27,7 +27,9 @@ internal static class CosmosTextChunker
             throw new ArgumentException("Chunk text_field conflicts with Cosmos metadata");
         var variables = Regex.Matches(config.DocIdPattern, @"\{([^{}]+)\}").Select(m => m.Groups[1].Value).ToList();
         if (!variables.Contains("chunk") || variables.Any(v => v is not
-                ("source" or "source_ref" or "source_hash" or "chunk" or "pipeline" or "pipeline_hash"))
+                ("source" or "source_ref" or "source_hash" or "source_id" or "source_partition"
+                or "chunk" or "pipeline" or "pipeline_hash" or "destination" or "destination_hash"
+                or "model" or "model_hash"))
             || Regex.Replace(config.DocIdPattern, @"\{[^{}]+\}", "").IndexOfAny(['{', '}']) >= 0)
             throw new ArgumentException("Chunk doc_id_pattern must contain {chunk} and only supported variables");
     }
@@ -80,7 +82,10 @@ internal static class CosmosTextChunker
         {
             ["source"] = source, ["source_ref"] = message.SourceRef.Replace('/', '-').Replace('\\', '-'),
             ["source_hash"] = Hash(message.SourceRef)[..12], ["chunk"] = index.ToString("D3", CultureInfo.InvariantCulture),
+            ["source_id"] = message.SourceId, ["source_partition"] = message.PartitionKeyValue,
             ["pipeline"] = message.PipelineId, ["pipeline_hash"] = Hash(message.PipelineId)[..8],
+            ["destination"] = message.DestinationId, ["destination_hash"] = Hash(message.DestinationId)[..8],
+            ["model"] = message.DocgrokPipeline, ["model_hash"] = Hash(message.DocgrokPipeline)[..8],
         };
         var suffix = Regex.Replace(config.DocIdPattern, @"\{([^{}]+)\}", m => values[m.Groups[1].Value]);
         // Always namespace user patterns: identical source refs across registrations,

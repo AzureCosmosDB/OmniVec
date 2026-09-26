@@ -28,14 +28,18 @@ func TestPipelineChunkCreateAndUpdatePayload(t *testing.T) {
 	create := newPipelineCreateCmd()
 	create.SetArgs([]string{"--name=test", "--source=test", "--destination=test", "--model=mdl-test",
 		"--content-strategy=chunk", "--chunk-size=450", "--chunk-overlap=0", "--chunk-unit=tokens",
-		"--store-text", "--text-field=passage", "--doc-id-pattern=custom-{source_hash}-{chunk}"})
+		"--store-text", "--text-field=passage", "--doc-id-pattern=custom-{source_hash}-{chunk}",
+		"--partition-key-pattern={source_partition}-{pipeline_hash}", "--collision-policy=reject"})
 	if err := create.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	cc := payload["chunk_config"].(map[string]any)
 	if cc["chunk_overlap"] != float64(0) || cc["chunk_unit"] != "tokens" || cc["text_field"] != "passage" ||
-		cc["store_text"] != true || cc["doc_id_pattern"] != "custom-{source_hash}-{chunk}" {
+		cc["store_text"] != true || 		cc["doc_id_pattern"] != "custom-{source_hash}-{chunk}" {
 		t.Fatalf("incorrect create chunk payload: %#v", cc)
+	}
+	if payload["partition_key_pattern"] != "{source_partition}-{pipeline_hash}" || payload["collision_policy"] != "reject" {
+		t.Fatalf("incorrect identity payload: %#v", payload)
 	}
 	update := newPipelineUpdateCmd()
 	update.SetArgs([]string{"test", "--chunk-size=500", "--chunk-overlap=0", "--chunk-doc-id-pattern=edited-{chunk}"})

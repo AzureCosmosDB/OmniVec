@@ -117,6 +117,18 @@ class CosmosDBSourceConfig(BaseModel):
     container: str
     query: Optional[str] = "SELECT * FROM c"
     use_change_feed: bool = True
+    soft_delete_field: Optional[str] = None
+    soft_delete_value: Optional[Union[bool, str, int, float]] = None
+
+    @field_validator("soft_delete_field")
+    @classmethod
+    def validate_soft_delete_field(cls, value):
+        if value is None:
+            return value
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", value):
+            raise ValueError("soft_delete_field must be a top-level Cosmos property name")
+        return value
 
 
 class PostgreSQLSourceConfig(BaseModel):
@@ -436,7 +448,7 @@ class ChunkConfig(BaseModel):
     chunk_unit: str = "chars"      # "chars" or "tokens"
     store_text: bool = False       # Store chunk text in vector docs
     text_field: str = "text"       # Field name for stored text in vector doc
-    doc_id_pattern: str = "{source}-chunk-{chunk}"  # Template for chunk doc IDs
+    doc_id_pattern: str = "{source_hash}-{pipeline}-chunk-{chunk}"  # Template for chunk doc IDs
                                    # Variables: {source}, {source_ref}, {source_hash}, {chunk}, {pipeline}, {pipeline_hash}
 
 
@@ -527,6 +539,15 @@ class PipelineSource(BaseModel):
     onelake_identity: Optional[OneLakePipelineIdentity] = None
 
 
+class PipelineResourcePolicy(BaseModel):
+    """Operator-adjustable fairness policy for the shared worker pool."""
+
+    weight: int = Field(default=10, ge=1, le=100)
+    max_concurrency_per_worker: int = Field(default=2, ge=1, le=32)
+    priority: Literal["low", "normal", "high", "critical"] = "normal"
+    workload_class: Literal["shared", "burst", "dedicated"] = "shared"
+
+
 class Pipeline(BaseModel):
     id: Optional[str] = None
     name: str
@@ -541,7 +562,9 @@ class Pipeline(BaseModel):
     processing_mode: str = "queue"  # "queue" = CFP→jobs→worker, "inline" = CFP processes directly
     content_strategy: str = "truncate"  # "truncate" or "chunk"
     chunk_config: Optional[ChunkConfig] = None
-    doc_id_pattern: str = "{source}"  # Template for vector doc IDs: {source}, {source_ref}, {source_hash}, {pipeline}, {job}
+    doc_id_pattern: str = "{source_hash}-{pipeline}"
+    partition_key_pattern: str = "{source_partition}"
+    collision_policy: Literal["reject", "overwrite"] = "reject"
     # When set, controls whether the (possibly truncated) text actually sent
     # to the embedding model is persisted to the destination alongside the
     # vector. None = per-destination default (Postgres/MsSql write content,
@@ -559,6 +582,7 @@ class Pipeline(BaseModel):
     # (back-compat). [] → write none of them. List subset → write only those.
     # Allowed values: see ALLOWED_METADATA_FIELDS.
     metadata_fields: Optional[List[str]] = None
+    resource_policy: PipelineResourcePolicy = Field(default_factory=PipelineResourcePolicy)
     generation: str = "1"  # Incremented on reset - docs with mismatched generation are reprocessed
     reset_at: Optional[datetime] = None  # Set when pipeline is reset for reprocessing
     created_at: Optional[datetime] = None
@@ -663,7 +687,9 @@ class CreatePipelineRequest(BaseModel):
     processing_mode: str = "queue"  # "queue" or "inline"
     content_strategy: str = "truncate"  # "truncate" or "chunk"
     chunk_config: Optional[Dict[str, Any]] = None
-    doc_id_pattern: str = "{source}"  # Template for vector doc IDs: {source}, {source_ref}, {source_hash}, {pipeline}, {job}
+    doc_id_pattern: str = "{source_hash}-{pipeline}"
+    partition_key_pattern: str = "{source_partition}"
+    collision_policy: Literal["reject", "overwrite"] = "reject"
     # Optional: persist the embedded text on the destination document.
     # See Pipeline.store_content for full semantics.
     store_content: Optional[bool] = None
@@ -672,6 +698,7 @@ class CreatePipelineRequest(BaseModel):
     # Optional informational metadata fields to persist on destination docs.
     # See Pipeline.metadata_fields for semantics and ALLOWED_METADATA_FIELDS.
     metadata_fields: Optional[List[str]] = None
+    resource_policy: PipelineResourcePolicy = Field(default_factory=PipelineResourcePolicy)
 
     @field_validator("metadata_fields")
     @classmethod
@@ -687,8 +714,28 @@ class CreatePipelineRequest(BaseModel):
         return [f for f in v if not (f in seen or seen.add(f))]
 
 
+class PipelineIdentityPreviewRequest(BaseModel):
+    document_id_pattern: str = "{source_hash}-{pipeline}"
+    partition_key_pattern: str = "{source_partition}"
+    chunk_id_pattern: str = "{source}-chunk-{chunk}"
+    source_ref: str = "folder/document.pdf"
+    source_partition: str = "tenant-a"
+    source_id: str = "src-preview"
+    pipeline_id: str = "pip-preview"
+    destination_id: str = "dst-preview"
+    model_id: str = "mdl-preview"
+    message_id: str = "job-preview"
+    chunk_index: int = Field(default=0, ge=0, le=999999)
+
+
 class SyncSourceRequest(BaseModel):
     full_sync: bool = False  # If true, reprocess all documents
+    minimum_documents: int = Field(
+        default=1,
+        ge=0,
+        le=1_000_000,
+        description="Minimum current-generation embeddings required before the sync operation is ready",
+    )
 
 
 class PipelineRunStats(BaseModel):

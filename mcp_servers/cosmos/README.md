@@ -7,13 +7,16 @@ Function-key-protected Streamable HTTP endpoint:
 - `list_documents` returns a bounded, explicit projection from an allowed
   container.
 - `vector_search` embeds natural language and performs Cosmos DB vector search,
-  returning only explicitly requested fields.
+  returning only explicitly requested fields. It also accepts optional exact
+  `source_id`, `pipeline_id`, and `source_ref` filters so one shared vector
+  destination can be queried for a specific ingestion scope.
 
 The Function App uses managed identity for both Cosmos DB and Azure OpenAI. The
 MCP endpoint itself uses a Function key, which should be stored in a
 Microsoft Foundry project connection rather than source code or agent prompts.
 Container names and projected fields are validated before they are interpolated
-into Cosmos SQL, and result counts are capped at 10.
+into Cosmos SQL, filter names are fixed to the allowlist above, filter values
+remain parameterized, and result counts are capped at 10.
 
 Required application settings:
 

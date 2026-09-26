@@ -36,6 +36,10 @@ spec:
               value: {{ .Values.azure.cosmos.endpoint | quote }}
             - name: ChangeFeed__OmniVecDatabase
               value: {{ .Values.azure.cosmos.database | quote }}
+            - name: ChangeFeed__LeaseContainerName
+              value: {{ .Values.azure.cosmos.leaseContainer | default "source-leases" | quote }}
+            - name: ChangeFeed__StateContainerName
+              value: {{ .Values.azure.cosmos.stateContainer | default "source-state" | quote }}
             - name: ChangeFeed__OmniVecApiBaseUrl
               value: "http://omnivec-api:80"
             - name: ChangeFeed__EnableCosmosSources
@@ -47,7 +51,7 @@ spec:
             - name: ChangeFeed__EnableSharePointSources
               value: "true"
             - name: ChangeFeed__SourcePollIntervalSeconds
-              value: {{ .Values.sharepointWatcher.discoveryPollIntervalSeconds | default 30 | quote }}
+              value: {{ .Values.sharepointWatcher.discoveryPollIntervalSeconds | default 5 | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: ChangeFeed__ServiceBusEnabled

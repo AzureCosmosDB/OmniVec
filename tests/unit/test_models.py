@@ -89,6 +89,27 @@ class TestSource:
         )
         assert api_models.Source(**source.model_dump()) == source
 
+    def test_cosmos_soft_delete_config(self, api_models):
+        config = api_models.CosmosDBSourceConfig(
+            endpoint="https://example.documents.azure.com:443/",
+            database="db",
+            container="items",
+            soft_delete_field="is_deleted",
+            soft_delete_value="deleted",
+        )
+        assert config.soft_delete_field == "is_deleted"
+        assert config.soft_delete_value == "deleted"
+
+    @pytest.mark.parametrize("field", ["nested.path", "bad-field", "1deleted", ""])
+    def test_cosmos_rejects_invalid_soft_delete_field(self, api_models, field):
+        with pytest.raises(ValidationError):
+            api_models.CosmosDBSourceConfig(
+                endpoint="https://example.documents.azure.com:443/",
+                database="db",
+                container="items",
+                soft_delete_field=field,
+            )
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [

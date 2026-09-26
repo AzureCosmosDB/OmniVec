@@ -1,18 +1,20 @@
-"""Insert 100K test documents into throughput-test container."""
+"""Insert a configurable number of test documents into a Cosmos DB container."""
 import asyncio
 import os
 import sys
 import time
-import uuid  # lgtm[py/unused-import]
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import DefaultAzureCredential
 
 ENDPOINT = os.environ.get("COSMOS_ENDPOINT") or sys.exit("COSMOS_ENDPOINT env var is required")
-DATABASE = "documents"
-CONTAINER = "throughput-test-10"
-TOTAL_DOCS = 100_000
-NUM_PARTITIONS = 100  # spread across 100 partitions
-BATCH_SIZE = 500  # concurrent upserts per batch
+DATABASE = os.environ.get("COSMOS_DATABASE", "documents")
+CONTAINER = os.environ.get("COSMOS_CONTAINER", "throughput-test-10")
+TOTAL_DOCS = int(os.environ.get("TOTAL_DOCS", "100000"))
+NUM_PARTITIONS = int(os.environ.get("NUM_PARTITIONS", "100"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "500"))
+ID_PREFIX = os.environ.get("ID_PREFIX", "perf")
+ACTION = os.environ.get("ACTION", "insert").lower()
+TOMBSTONE = os.environ.get("TOMBSTONE", "false").lower() == "true"
 CONTENT_TEMPLATE = (
     "Document {doc_id} in partition {part_id}. "
     "This is a test document for throughput testing of the OmniVec Change Feed Processor. "
@@ -34,13 +36,34 @@ async def insert_batch(container, docs):
     return ok, fail
 
 
+async def delete_batch(container, docs):
+    """Delete a batch of docs concurrently."""
+    tasks = [
+        container.delete_item(doc["id"], partition_key=doc["partition_id"])
+        for doc in docs
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    ok = sum(
+        1
+        for result in results
+        if not isinstance(result, Exception)
+        or getattr(result, "status_code", None) == 404
+    )
+    fail = len(results) - ok
+    return ok, fail
+
+
 async def main():
+    if ACTION not in {"insert", "delete"}:
+        sys.exit("ACTION must be 'insert' or 'delete'")
+
     credential = DefaultAzureCredential()
     client = CosmosClient(ENDPOINT, credential)
     db = client.get_database_client(DATABASE)
     container = db.get_container_client(CONTAINER)
 
-    print(f"Inserting {TOTAL_DOCS} documents into {CONTAINER}...")
+    verb = "Inserting" if ACTION == "insert" else "Deleting"
+    print(f"{verb} {TOTAL_DOCS} documents in {CONTAINER}...")
     start = time.time()
     total_ok = 0
     total_fail = 0
@@ -49,30 +72,39 @@ async def main():
     for i in range(TOTAL_DOCS):
         part_num = i % NUM_PARTITIONS
         doc = {
-            "id": f"perf-{i:06d}",
+            "id": f"{ID_PREFIX}-{i:06d}",
             "partition_id": f"partition-{part_num}",
-            "content": CONTENT_TEMPLATE.format(doc_id=f"perf-{i:06d}", part_id=f"partition-{part_num}"),
+            "content": "" if TOMBSTONE else CONTENT_TEMPLATE.format(
+                doc_id=f"{ID_PREFIX}-{i:06d}",
+                part_id=f"partition-{part_num}",
+            ),
             "category": f"category-{part_num % 10}",
             "timestamp": time.time(),
         }
+        if TOMBSTONE:
+            doc["deleted"] = True
         batch.append(doc)
 
         if len(batch) >= BATCH_SIZE:
-            ok, fail = await insert_batch(container, batch)
+            operation = insert_batch if ACTION == "insert" else delete_batch
+            ok, fail = await operation(container, batch)
             total_ok += ok
             total_fail += fail
             elapsed = time.time() - start
             rate = total_ok / elapsed if elapsed > 0 else 0
-            print(f"  {total_ok:,}/{TOTAL_DOCS:,} inserted ({rate:.0f} docs/sec, {total_fail} failed)")
+            action = "inserted" if ACTION == "insert" else "deleted"
+            print(f"  {total_ok:,}/{TOTAL_DOCS:,} {action} ({rate:.0f} docs/sec, {total_fail} failed)")
             batch = []
 
     if batch:
-        ok, fail = await insert_batch(container, batch)
+        operation = insert_batch if ACTION == "insert" else delete_batch
+        ok, fail = await operation(container, batch)
         total_ok += ok
         total_fail += fail
 
     elapsed = time.time() - start
-    print(f"\nDone: {total_ok:,} inserted, {total_fail} failed in {elapsed:.1f}s ({total_ok/elapsed:.0f} docs/sec)")
+    action = "inserted" if ACTION == "insert" else "deleted"
+    print(f"\nDone: {total_ok:,} {action}, {total_fail} failed in {elapsed:.1f}s ({total_ok/elapsed:.0f} docs/sec)")
 
     await client.close()
     await credential.close()

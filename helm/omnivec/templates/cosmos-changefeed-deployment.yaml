@@ -28,6 +28,10 @@ spec:
               value: {{ .Values.azure.cosmos.endpoint | quote }}
             - name: ChangeFeed__OmniVecDatabase
               value: {{ .Values.azure.cosmos.database | quote }}
+            - name: ChangeFeed__LeaseContainerName
+              value: {{ .Values.azure.cosmos.leaseContainer | default "source-leases" | quote }}
+            - name: ChangeFeed__StateContainerName
+              value: {{ .Values.azure.cosmos.stateContainer | default "source-state" | quote }}
             - name: ChangeFeed__OmniVecApiBaseUrl
               value: "http://omnivec-api:80"
             - name: ChangeFeed__DocGrokBaseUrl

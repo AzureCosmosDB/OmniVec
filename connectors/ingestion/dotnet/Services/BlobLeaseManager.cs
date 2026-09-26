@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using OmniVec.ChangeFeed.Configuration;
 
@@ -13,7 +14,7 @@ namespace OmniVec.ChangeFeed.Services;
 /// holds a valid lease at any time. Expired leases (owner missed renewals for >
 /// LeaseTtlSeconds) can be stolen by any other pod using a conditional ETag update.
 ///
-/// Lease doc schema (container: blob-leases in omnivec-cosmos):
+/// Lease doc schema (container: source-leases in the configured lease database):
 ///   { "id": "<sourceId>", "ownerId": "<hostname>", "expiresAt": "<iso-utc>" }
 /// Partition key: /id
 /// </summary>
@@ -30,7 +31,7 @@ public class BlobLeaseManager
     public int LeaseTtlSeconds { get; set; } = 90;  // stale after 90s without renewal
 
     public BlobLeaseManager(
-        CosmosClient cosmos,
+        [FromKeyedServices("lease")] CosmosClient cosmos,
         IOptions<ChangeFeedOptions> options,
         ILogger<BlobLeaseManager> logger)
     {
@@ -51,11 +52,25 @@ public class BlobLeaseManager
         try
         {
             if (_container is not null) return _container;
-            var db = _cosmos.GetDatabase(_options.OmniVecDatabase);
-            await db.CreateContainerIfNotExistsAsync(
-                new ContainerProperties("blob-leases", "/id"),
-                cancellationToken: ct);
-            _container = db.GetContainer("blob-leases");
+            var database = string.IsNullOrWhiteSpace(_options.LeaseCosmosDatabase)
+                ? _options.OmniVecDatabase
+                : _options.LeaseCosmosDatabase;
+            var db = _cosmos.GetDatabase(database);
+            var container = db.GetContainer(_options.LeaseContainerName);
+            try
+            {
+                var response = await container.ReadContainerAsync(cancellationToken: ct);
+                if (response.Resource.PartitionKeyPath != "/id")
+                    throw new InvalidOperationException(
+                        $"Lease container {_options.LeaseContainerName} must use partition key /id");
+            }
+            catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                throw new InvalidOperationException(
+                    $"Required lease container '{_options.LeaseContainerName}' is missing in database '{database}'. " +
+                    "Provision it through Bicep/Terraform before starting ingestion.", ex);
+            }
+            _container = container;
             return _container;
         }
         finally
@@ -133,6 +148,17 @@ public class BlobLeaseManager
                 // Another pod won the race. That's fine.
                 return false;
             }
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (CosmosException ex) when (
+            ex.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+        {
+            throw new InvalidOperationException(
+                $"Cannot access required lease container '{_options.LeaseContainerName}'. " +
+                "Verify Cosmos data-plane permissions for the ingestion identity.", ex);
         }
         catch (Exception ex)
         {

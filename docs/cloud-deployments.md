@@ -64,9 +64,11 @@ Deployment uses Entra-authenticated OneDeploy and the prebuilt package, with
 remote build disabled.
 
 Readiness verifies anonymous requests are rejected, authenticated initialization
-identifies this deployment, and the expected tools are advertised. **It does not
-run embeddings, query documents, or prove Foundry-to-Function connectivity.**
-Success explicitly reports these verification limits.
+identifies this deployment, the expected tools are advertised, and one bounded
+authenticated `vector_search` call can embed and query the selected Cosmos
+container. **It does not prove Foundry-to-Function connectivity or guarantee
+that a specific source has finished ingestion.** Success explicitly reports
+these verification limits.
 
 ## Create a Foundry agent
 

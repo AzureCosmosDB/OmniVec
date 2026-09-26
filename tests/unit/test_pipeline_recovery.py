@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import importlib
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from azure.core import MatchConditions
@@ -123,6 +123,156 @@ def test_connector_metrics_are_deduplicated_and_visible_in_pipeline_stats(module
     assert stats.lifetime_embedded_count == 3
     assert stats.avg_processing_time_ms == 100
     assert stats.recent_throughput_docs_per_sec == 0.1
+
+
+def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatch):
+    store = MemoryStore(pipeline())
+    attach(monkeypatch, modules.api, store)
+    modules.api.metrics_store.reset()
+
+    payload = {
+        "processed": 4,
+        "failed": 1,
+        "processing_time_ms": 250,
+        "batch_key": "worker:pipeline:model:1",
+        "source_id": "source",
+        "destination_id": "destination",
+        "model_id": "mdl-embedding",
+        "tokens_used": 120,
+        "input_bytes": 2048,
+        "queue_wait_ms": 50,
+        "retry_count": 2,
+        "throttle_count": 1,
+        "throttle_delay_ms": 1000,
+        "error_category": "throttled",
+        "last_document": "document-4",
+    }
+
+    assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True}
+    assert modules.api.report_inline_metrics("pipeline", payload) == {
+        "ok": True, "dedup": True,
+    }
+
+    persisted = store.get("global", "metrics")
+    pipeline_metrics = persisted["pipelines"]["pipeline"]
+    model_metrics = persisted["models"]["mdl-embedding"]
+    assert pipeline_metrics["processed"] == 4
+    assert pipeline_metrics["tokens"] == 120
+    assert pipeline_metrics["throttles"] == 1
+    assert pipeline_metrics["last_document"] == "document-4"
+    assert pipeline_metrics["models"]["mdl-embedding"]["retries"] == 2
+    assert model_metrics["processed"] == 4
+
+    live = modules.api.get_live_metrics()
+    assert live["pipelines"]["pipeline"]["embedded"] == 4
+    assert live["models"]["mdl-embedding"]["failed"] == 1
+    assert live["pipeline_models"]["pipeline"]["mdl-embedding"]["tokens"] == 120
+    assert live["pipeline_models"]["pipeline"]["mdl-embedding"]["latency"]["p95"] == 250
+    assert live["pipelines"]["pipeline"]["avg_queue_wait_ms"] == 50
+
+
+def test_worker_metrics_reject_negative_values(modules, monkeypatch):
+    store = MemoryStore(pipeline())
+    attach(monkeypatch, modules.api, store)
+
+    with pytest.raises(modules.api.HTTPException) as exc:
+        modules.api.report_inline_metrics("pipeline", {
+            "processed": -1,
+            "batch_key": "invalid",
+        })
+    assert exc.value.status_code == 400
+
+
+def test_metrics_timeseries_applies_pipeline_and_model_filters(modules, monkeypatch):
+    captured = {}
+
+    def run_kql(query, _timespan):
+        captured["query"] = query
+        return []
+
+    monkeypatch.setattr(modules.api, "_run_kql", run_kql)
+    result = asyncio.run(modules.api.get_metrics_timeseries(
+        pipeline_id="pip-123", model_id="mdl-embedding",
+    ))
+
+    assert "customDimensions.pipeline_id) == 'pip-123'" in captured["query"]
+    assert "customDimensions.model_id) == 'mdl-embedding'" in captured["query"]
+    assert result["pipeline_id"] == "pip-123"
+    assert result["model_id"] == "mdl-embedding"
+
+
+def test_worker_metrics_retry_concurrent_cosmos_update(modules, monkeypatch):
+    metrics = {
+        "id": "global",
+        "doc_type": "metrics",
+        "_etag": "1",
+        "events_processed": 10,
+        "events_failed": 0,
+        "pipelines": {},
+        "models": {},
+    }
+    store = MemoryStore(pipeline(), metrics)
+    attach(monkeypatch, modules.api, store)
+
+    def concurrent_update():
+        current = store.get("global", "metrics")
+        current["events_processed"] = 11
+        store.upsert(current)
+
+    store.before_replace = concurrent_update
+    assert modules.api.report_inline_metrics("pipeline", {
+        "processed": 2,
+        "batch_key": "concurrent-update",
+    }) == {"ok": True}
+
+    persisted = store.get("global", "metrics")
+    assert persisted["events_processed"] == 13
+    assert persisted["pipelines"]["pipeline"]["processed"] == 2
+
+
+def test_operator_resource_policy_and_insights(modules, monkeypatch):
+    metrics = {
+        "id": "global",
+        "doc_type": "metrics",
+        "_etag": "1",
+        "events_processed": 10,
+        "events_failed": 0,
+        "models": {},
+        "pipelines": {
+            "pipeline": {
+                "processed": 10,
+                "failed": 0,
+                "requests": 10,
+                "queue_wait_ms": 150000,
+                "total_time_ms": 2000,
+                "tokens": 1000,
+                "input_bytes": 5000,
+                "throttles": 0,
+                "retries": 0,
+            },
+        },
+    }
+    store = MemoryStore(pipeline(), metrics)
+    attach(monkeypatch, modules.api, store)
+    policy = modules.api.PipelineResourcePolicy(
+        weight=20,
+        max_concurrency_per_worker=3,
+        priority="high",
+        workload_class="burst",
+    )
+
+    result = modules.api.update_pipeline_resource_policy("pipeline", policy)
+    assert result["success"] is True
+    saved = store.get("pipeline", "pipeline")
+    assert saved["resource_policy"]["weight"] == 20
+    assert saved["resource_policy"]["max_concurrency_per_worker"] == 3
+
+    insights = modules.api.get_resource_insights()
+    row = insights["pipelines"][0]
+    assert row["policy"]["priority"] == "high"
+    assert row["observed"]["avg_queue_wait_ms"] == 15000
+    assert row["recommendation"]["suggested_policy"]["weight"] == 25
+    assert row["recommendation"]["suggested_policy"]["max_concurrency_per_worker"] == 4
 
 
 def test_new_checkpoint_and_external_reset_clear_cached_state(modules, monkeypatch):
@@ -328,6 +478,36 @@ async def test_chunk_cleanup_only_ignores_already_deleted_items(modules, monkeyp
     else:
         with pytest.raises(RuntimeError, match="unavailable"):
             await connector.delete_chunks_by_prefix(config, "pipeline-")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_identity_cleanup_uses_stored_partition_keys(modules, monkeypatch):
+    connector = importlib.import_module("connectors.cosmosdb_vector_connector")
+    container = SimpleNamespace(
+        query_items=Mock(return_value=[
+            {"id": "old-a", "tenant": "tenant-a"},
+            {"id": "old-b", "tenant": "tenant-b"},
+        ]),
+        delete_item=Mock(),
+    )
+    database = SimpleNamespace(get_container_client=lambda _: container)
+
+    async def client(_):
+        return SimpleNamespace(get_database_client=lambda _: database)
+
+    monkeypatch.setattr(connector, "get_cosmos_client", client)
+    deleted = await connector.delete_by_pipeline_id(
+        {"database": "database", "container": "vectors", "partition_key_path": "/tenant"},
+        "pipeline-a",
+    )
+    assert deleted == 2
+    assert container.delete_item.call_args_list == [
+        call("old-a", partition_key="tenant-a"),
+        call("old-b", partition_key="tenant-b"),
+    ]
+    query = container.query_items.call_args
+    assert "pipeline_id" in query.args[0]
+    assert query.kwargs["parameters"] == [{"name": "@pid", "value": "pipeline-a"}]
 
 
 def test_concurrent_progress_update_preserves_other_worker_fields(modules, monkeypatch):

@@ -1589,6 +1589,15 @@
               ]),
               'title': 'Chunk Config',
             }),
+            'collision_policy': dict({
+              'default': 'reject',
+              'enum': list([
+                'reject',
+                'overwrite',
+              ]),
+              'title': 'Collision Policy',
+              'type': 'string',
+            }),
             'content_field': dict({
               'anyOf': list([
                 dict({
@@ -1622,7 +1631,7 @@
               'type': 'string',
             }),
             'doc_id_pattern': dict({
-              'default': '{source}',
+              'default': '{source_hash}-{pipeline}',
               'title': 'Doc Id Pattern',
               'type': 'string',
             }),
@@ -1657,6 +1666,11 @@
               'title': 'Name',
               'type': 'string',
             }),
+            'partition_key_pattern': dict({
+              'default': '{source_partition}',
+              'title': 'Partition Key Pattern',
+              'type': 'string',
+            }),
             'process_existing': dict({
               'default': True,
               'title': 'Process Existing',
@@ -1666,6 +1680,9 @@
               'default': 'queue',
               'title': 'Processing Mode',
               'type': 'string',
+            }),
+            'resource_policy': dict({
+              '$ref': '#/components/schemas/PipelineResourcePolicy',
             }),
             'sources': dict({
               'items': dict({
@@ -1876,6 +1893,12 @@
               'title': 'Mcp Deployment Id',
               'type': 'string',
             }),
+            'partition_key_path': dict({
+              'default': '/id',
+              'pattern': '^/[A-Za-z_][A-Za-z0-9_]{0,127}$',
+              'title': 'Partition Key Path',
+              'type': 'string',
+            }),
             'project_resource_id': dict({
               'default': '',
               'title': 'Project Resource Id',
@@ -2024,6 +2047,111 @@
           'title': 'PermissionCheckRequest',
           'type': 'object',
         }),
+        'PipelineIdentityPreviewRequest': dict({
+          'properties': dict({
+            'chunk_id_pattern': dict({
+              'default': '{source}-chunk-{chunk}',
+              'title': 'Chunk Id Pattern',
+              'type': 'string',
+            }),
+            'chunk_index': dict({
+              'default': 0,
+              'maximum': 999999.0,
+              'minimum': 0.0,
+              'title': 'Chunk Index',
+              'type': 'integer',
+            }),
+            'destination_id': dict({
+              'default': 'dst-preview',
+              'title': 'Destination Id',
+              'type': 'string',
+            }),
+            'document_id_pattern': dict({
+              'default': '{source_hash}-{pipeline}',
+              'title': 'Document Id Pattern',
+              'type': 'string',
+            }),
+            'message_id': dict({
+              'default': 'job-preview',
+              'title': 'Message Id',
+              'type': 'string',
+            }),
+            'model_id': dict({
+              'default': 'mdl-preview',
+              'title': 'Model Id',
+              'type': 'string',
+            }),
+            'partition_key_pattern': dict({
+              'default': '{source_partition}',
+              'title': 'Partition Key Pattern',
+              'type': 'string',
+            }),
+            'pipeline_id': dict({
+              'default': 'pip-preview',
+              'title': 'Pipeline Id',
+              'type': 'string',
+            }),
+            'source_id': dict({
+              'default': 'src-preview',
+              'title': 'Source Id',
+              'type': 'string',
+            }),
+            'source_partition': dict({
+              'default': 'tenant-a',
+              'title': 'Source Partition',
+              'type': 'string',
+            }),
+            'source_ref': dict({
+              'default': 'folder/document.pdf',
+              'title': 'Source Ref',
+              'type': 'string',
+            }),
+          }),
+          'title': 'PipelineIdentityPreviewRequest',
+          'type': 'object',
+        }),
+        'PipelineResourcePolicy': dict({
+          'description': 'Operator-adjustable fairness policy for the shared worker pool.',
+          'properties': dict({
+            'max_concurrency_per_worker': dict({
+              'default': 2,
+              'maximum': 32.0,
+              'minimum': 1.0,
+              'title': 'Max Concurrency Per Worker',
+              'type': 'integer',
+            }),
+            'priority': dict({
+              'default': 'normal',
+              'enum': list([
+                'low',
+                'normal',
+                'high',
+                'critical',
+              ]),
+              'title': 'Priority',
+              'type': 'string',
+            }),
+            'weight': dict({
+              'default': 10,
+              'maximum': 100.0,
+              'minimum': 1.0,
+              'title': 'Weight',
+              'type': 'integer',
+            }),
+            'workload_class': dict({
+              'default': 'shared',
+              'enum': list([
+                'shared',
+                'burst',
+                'dedicated',
+              ]),
+              'title': 'Workload Class',
+              'type': 'string',
+            }),
+          }),
+          'title': 'PipelineResourcePolicy',
+          'type': 'object',
+        }),
         'PipelineSource': dict({
           'properties': dict({
             'content_fields': dict({
@@ -2142,6 +2270,19 @@
               'title': 'Merge Strategy',
               'type': 'string',
             }),
+            'pipeline_id': dict({
+              'anyOf': list([
+                dict({
+                  'maxLength': 160,
+                  'pattern': '^[A-Za-z0-9][A-Za-z0-9_.-]*$',
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Pipeline Id',
+            }),
             'query': dict({
               'anyOf': list([
                 dict({
@@ -2168,6 +2309,31 @@
               'default': 'vector',
               'title': 'Search Mode',
               'type': 'string',
+            }),
+            'source_id': dict({
+              'anyOf': list([
+                dict({
+                  'maxLength': 160,
+                  'pattern': '^[A-Za-z0-9][A-Za-z0-9_.-]*$',
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Source Id',
+            }),
+            'source_ref': dict({
+              'anyOf': list([
+                dict({
+                  'maxLength': 2048,
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Source Ref',
             }),
             'top_k': dict({
               'default': 5,
@@ -2221,6 +2387,14 @@
               'default': False,
               'title': 'Full Sync',
               'type': 'boolean',
+            }),
+            'minimum_documents': dict({
+              'default': 1,
+              'description': 'Minimum current-generation embeddings required before the sync operation is ready',
+              'maximum': 1000000.0,
+              'minimum': 0.0,
+              'title': 'Minimum Documents',
+              'type': 'integer',
             }),
           }),
           'title': 'SyncSourceRequest',
@@ -3386,6 +3560,44 @@
             }),
           }),
           'summary': 'Plan Cloud Deployment',
+        }),
+      }),
+      '/api/cloud-deployments/{job_id}': dict({
+        'get': dict({
+          'operationId': 'get_cloud_deployment_api_cloud_deployments__job_id__get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'job_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Job Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Get Cloud Deployment',
         }),
       }),
       '/api/cloud-deployments/{job_id}/approve': dict({
@@ -5083,6 +5295,24 @@
           'summary': 'Get Insights Metrics',
         }),
       }),
+      '/api/metrics/live': dict({
+        'get': dict({
+          'description': 'Return process-local, low-latency pipeline and model metrics.',
+          'operationId': 'get_live_metrics_api_metrics_live_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Get Live Metrics',
+        }),
+      }),
       '/api/metrics/timeseries': dict({
         'get': dict({
           'description': 'Get time-series metrics from Azure App Insights (Log Analytics).',
@@ -5144,6 +5374,22 @@
                   }),
                 ]),
                 'title': 'Pipeline Id',
+              }),
+            }),
+            dict({
+              'in': 'query',
+              'name': 'model_id',
+              'required': False,
+              'schema': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'title': 'Model Id',
               }),
             }),
           ]),
@@ -5602,6 +5848,24 @@
           'summary': 'Scale Deployment',
         }),
       }),
+      '/api/operations/resource-insights': dict({
+        'get': dict({
+          'description': 'Recommend operator-adjustable fairness settings from durable telemetry.',
+          'operationId': 'get_resource_insights_api_operations_resource_insights_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Get Resource Insights',
+        }),
+      }),
       '/api/permissions/check': dict({
         'post': dict({
           'description': "Read-only diagnosis; returned commands are executed by the customer's administrator.",
@@ -5720,6 +5984,43 @@
             }),
           }),
           'summary': 'Create Pipeline',
+        }),
+      }),
+      '/api/pipelines/identity-preview': dict({
+        'post': dict({
+          'operationId': 'preview_pipeline_identity_api_pipelines_identity_preview_post',
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/PipelineIdentityPreviewRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Preview Pipeline Identity',
         }),
       }),
       '/api/pipelines/{pipeline_id}': dict({
@@ -5847,11 +6148,7 @@
       }),
       '/api/pipelines/{pipeline_id}/metrics/inline': dict({
         'post': dict({
-          'description': '''
-            Report inline processing metrics from CFP (continuous, cumulative).
-            Payload: {processed: N, failed: M, processing_time_ms: T, batch_key: str}
-            batch_key is used for deduplication â€” duplicate reports from lease rebalancing are ignored.
-          ''',
+          'description': 'Report authoritative worker metrics with bounded batch deduplication.',
           'operationId': 'report_inline_metrics_api_pipelines__pipeline_id__metrics_inline_post',
           'parameters': list([
             dict({
@@ -5992,8 +6289,8 @@
           'description': '''
             Reset a pipeline: briefly pause, delete jobs, bump generation, restore prior status.
             
-            Sets reset_at which the .NET CFP service detects — it will automatically
-            delete its lease container and restart the change feed from the beginning.
+            Sets reset_at which the .NET CFP service detects — it will restart with a
+            generation-specific processor name and replay from the beginning.
             Prior status (ACTIVE/PAUSED) is preserved so the user doesn't have to
             manually resume after every reset.
             Cleanup failures leave the pipeline paused and are reported to the caller;
@@ -6033,6 +6330,55 @@
             }),
           }),
           'summary': 'Reset Pipeline',
+        }),
+      }),
+      '/api/pipelines/{pipeline_id}/resource-policy': dict({
+        'patch': dict({
+          'description': 'Update shared-worker fairness controls without resetting the pipeline.',
+          'operationId': 'update_pipeline_resource_policy_api_pipelines__pipeline_id__resource_policy_patch',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'pipeline_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Pipeline Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/PipelineResourcePolicy',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Update Pipeline Resource Policy',
         }),
       }),
       '/api/pipelines/{pipeline_id}/resume': dict({
@@ -6222,6 +6568,45 @@
             }),
           }),
           'summary': 'Update Settings',
+        }),
+      }),
+      '/api/source-syncs/{operation_id}': dict({
+        'get': dict({
+          'description': 'Return current progress for an asynchronous source synchronization.',
+          'operationId': 'get_source_sync_api_source_syncs__operation_id__get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'operation_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Operation Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Get Source Sync',
         }),
       }),
       '/api/sources': dict({
@@ -7269,6 +7654,17 @@
       ]),
     ),
     tuple(
+      'get',
+      '/api/cloud-deployments/{job_id}',
+      list([
+        'job_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'post',
       '/api/cloud-deployments/{job_id}/approve',
       list([
@@ -7780,10 +8176,20 @@
     ),
     tuple(
       'get',
+      '/api/metrics/live',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
+      'get',
       '/api/metrics/timeseries',
       list([
         'end',
         'granularity',
+        'model_id',
         'pipeline_id',
         'start',
       ]),
@@ -7918,6 +8324,15 @@
       ]),
     ),
     tuple(
+      'get',
+      '/api/operations/resource-insights',
+      list([
+      ]),
+      list([
+        '200',
+      ]),
+    ),
+    tuple(
       'post',
       '/api/permissions/check',
       list([
@@ -7941,6 +8356,16 @@
     tuple(
       'post',
       '/api/pipelines',
+      list([
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'post',
+      '/api/pipelines/identity-preview',
       list([
       ]),
       list([
@@ -8027,6 +8452,17 @@
       ]),
     ),
     tuple(
+      'patch',
+      '/api/pipelines/{pipeline_id}/resource-policy',
+      list([
+        'pipeline_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'post',
       '/api/pipelines/{pipeline_id}/resume',
       list([
@@ -8071,6 +8507,17 @@
       'put',
       '/api/settings',
       list([
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/source-syncs/{operation_id}',
+      list([
+        'operation_id',
       ]),
       list([
         '200',

@@ -15,7 +15,7 @@ public sealed class TextChunkConfig
     [JsonPropertyName("text_field")]
     public string TextField { get; set; } = "text";
     [JsonPropertyName("doc_id_pattern")]
-    public string DocIdPattern { get; set; } = "{source}-chunk-{chunk}";
+    public string DocIdPattern { get; set; } = "{source_hash}-{pipeline}-chunk-{chunk}";
     [JsonExtensionData]
     public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
 }

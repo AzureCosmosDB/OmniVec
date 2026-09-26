@@ -184,6 +184,8 @@ internal static class CosmosSourceContentTests
                 group.Count() == 1 && group.Key == group.Single()));
             var sharedPartition = GroupDeletionIds(ids, "/tenant", "blob.txt").Single();
             Check(sharedPartition.Key == "blob.txt" && sharedPartition.Count() == 16);
+            Check(DeletionPartitionKey("doc", "doc", "source-partition", "/document_id") == "doc");
+            Check(DeletionPartitionKey("doc", null, "source-partition", "/tenant") == "source-partition");
         });
 
         Test("Cosmos id-partition deletion includes legacy collapsed document and all chunks", () =>

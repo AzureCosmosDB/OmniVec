@@ -73,7 +73,10 @@ class AzureDeployment:
 
     def wait(self, rid, version):
         for _ in range(120):
-            result = self.arm("GET", rid, version)
+            result = self.arm("GET", rid, version, allow_missing=True)
+            if result is None:
+                time.sleep(5)
+                continue
             state = result.get("properties", {}).get("provisioningState", "Succeeded")
             if state.lower() == "succeeded":
                 return result
@@ -113,10 +116,10 @@ class AzureDeployment:
         account = self.arm("GET", p["cosmos_account_id"], "2024-05-15")
         self.arm("GET", p["cosmos_account_id"] + "/sqlDatabases/" + p["database"], "2024-05-15")
         self.progress("Creating isolated Cosmos vector container")
-        self.ensure(p["container_id"], "2024-05-15", {
+        container_body = {
             "location": account["location"],
             "properties": {"resource": {
-                "id": p["container"], "partitionKey": {"paths": ["/id"], "kind": "Hash"},
+                "id": p["container"], "partitionKey": {"paths": [p["partition_key_path"]], "kind": "Hash"},
                 "vectorEmbeddingPolicy": {"vectorEmbeddings": [{
                     "path": "/" + p["vector_field"], "dataType": "float32",
                     "distanceFunction": "cosine", "dimensions": p["embedding_dimensions"],
@@ -128,17 +131,31 @@ class AzureDeployment:
                     "vectorIndexes": [{"path": "/" + p["vector_field"], "type": "diskANN"}],
                 },
             }, "options": {}},
-        })
+        }
+        existing = self.arm("GET", p["container_id"], "2024-05-15", allow_missing=True)
+        if existing is None:
+            self.arm("PUT", p["container_id"], "2024-05-15", container_body)
+            self.progress("Creating isolated Cosmos vector container", container_create_started=True)
+            self.wait(p["container_id"], "2024-05-15")
+        elif not self.doc.get("container_create_started"):
+            raise DeploymentFailure(
+                "resource_conflict",
+                "A Cosmos container with this name already exists and is not owned by this deployment.",
+                p["container_id"],
+            )
         actual = self.arm("GET", p["container_id"], "2024-05-15")["properties"]["resource"]
         expected_embedding = {"path": "/" + p["vector_field"], "dataType": "float32",
                               "distanceFunction": "cosine", "dimensions": p["embedding_dimensions"]}
-        expected_index = {"path": "/" + p["vector_field"], "type": "diskANN"}
-        if (actual.get("id") != p["container"] or actual.get("partitionKey", {}).get("paths") != ["/id"]
+        if (actual.get("id") != p["container"] or actual.get("partitionKey", {}).get("paths") != [p["partition_key_path"]]
                 or expected_embedding not in actual.get("vectorEmbeddingPolicy", {}).get("vectorEmbeddings", [])
-                or expected_index not in actual.get("indexingPolicy", {}).get("vectorIndexes", [])):
+                or not any(
+                    index.get("path") == "/" + p["vector_field"] and index.get("type") == "diskANN"
+                    for index in actual.get("indexingPolicy", {}).get("vectorIndexes", [])
+                )):
             raise DeploymentFailure("container_verification_failed", "The created container did not match the requested identity, partition key or vector policy.", p["container_id"])
         return {"container_id": p["container_id"], "endpoint": p["cosmos_endpoint"],
                 "database": p["database"], "container": p["container"], "vector_field": p["vector_field"],
+                "partition_key_path": p["partition_key_path"],
                 "verification": "Isolated vector container provisioned. Register it as an OmniVec destination; ingestion has not run yet."}
 
     def project_endpoint(self, resource_id):
@@ -298,7 +315,7 @@ class AzureDeployment:
         self.verify_mcp(server_url)
         return {
             "server_url": server_url, "function_id": p["function_id"], "principal_id": principal,
-            "verification": "Authenticated MCP initialization and tool discovery passed. Data retrieval, embedding inference and Foundry reachability are not yet verified.",
+            "verification": "Authenticated MCP initialization, tool discovery, embedding inference and Cosmos vector retrieval passed. Foundry reachability is not yet verified.",
         }
 
     @staticmethod
@@ -333,13 +350,25 @@ class AzureDeployment:
                         tools = self.client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
                         names = {t["name"] for t in tools.json().get("result", {}).get("tools", [])} if tools.status_code == 200 else set()
                         if anonymous.status_code in (401, 403) and {"list_allowed_containers", "vector_search"} <= names:
-                            return
+                            probe = self.client.post(url, headers=headers, json={
+                                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                "params": {"name": "vector_search", "arguments": {
+                                    "question": "OmniVec deployment compatibility probe",
+                                    "container": self.plan["container"],
+                                    "vector_field": self.plan["vector_field"],
+                                    "fields": self.plan["fields"],
+                                    "top_k": 1,
+                                }},
+                            })
+                            probe_result = probe.json().get("result", {}) if probe.status_code == 200 else {}
+                            if probe.status_code == 200 and not probe_result.get("isError", True):
+                                return
             except (httpx.HTTPError, ValueError, DeploymentFailure) as exc:
                 if isinstance(exc, DeploymentFailure) and exc.code not in ("resource_missing", "function_key_unavailable"):
                     raise
             self.progress("Waiting for Function host readiness")
             time.sleep(5)
-        raise DeploymentFailure("mcp_not_ready", "Function resources exist, but the protected MCP endpoint did not pass readiness. Inspect host startup and deployment logs before retrying.", self.plan["function_id"])
+        raise DeploymentFailure("mcp_not_ready", "Function resources exist, but authenticated vector retrieval did not pass readiness. Inspect Function identity access, embedding compatibility and deployment logs before retrying.", self.plan["function_id"])
 
     def deploy_foundry(self):
         from azure.ai.projects import AIProjectClient
@@ -395,7 +424,7 @@ class AzureDeployment:
                 return self.agent_result(agent)
         except AzureError as exc:
             code = "access_denied" if getattr(exc, "status_code", None) in (401, 403) else "foundry_operation_failed"
-            raise DeploymentFailure(code, "Foundry agent creation or reconciliation failed. Check workload identity Azure AI User access on the project and model availability. No inference was attempted.", p["project_resource_id"]) from None
+            raise DeploymentFailure(code, "Foundry agent creation or reconciliation failed. Check workload identity Foundry User access on the Foundry account and model availability. No inference was attempted.", p["foundry_account_id"]) from None
 
     def agent_result(self, agent):
         return {"agent_name": agent.name, "agent_version": agent.version,

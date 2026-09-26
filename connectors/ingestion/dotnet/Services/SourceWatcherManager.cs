@@ -19,6 +19,7 @@ public class SourceWatcherManager : IAsyncDisposable
     private readonly ChangeFeedOptions _options;
     private readonly OmniVecApiClient _apiClient;
     private readonly LeaseContainerManager _leaseManager;
+    private readonly SourceStateContainerManager _stateContainerManager;
     private readonly BlobLeaseManager _blobLeaseManager;
     private readonly ContentHasher _hasher;
     private readonly ServiceBusPublisher _sbPublisher;
@@ -26,6 +27,7 @@ public class SourceWatcherManager : IAsyncDisposable
     private readonly ILogger<SourceWatcherManager> _logger;
 
     private readonly ConcurrentDictionary<string, ISourceWatcher> _watchers = new();
+    private readonly ConcurrentDictionary<string, string> _watcherFingerprints = new();
 
     private sealed record WatcherPlan(
         string Key,
@@ -51,6 +53,7 @@ public class SourceWatcherManager : IAsyncDisposable
         IOptions<ChangeFeedOptions> options,
         OmniVecApiClient apiClient,
         LeaseContainerManager leaseManager,
+        SourceStateContainerManager stateContainerManager,
         BlobLeaseManager blobLeaseManager,
         ContentHasher hasher,
         ServiceBusPublisher sbPublisher,
@@ -60,6 +63,7 @@ public class SourceWatcherManager : IAsyncDisposable
         _options = options.Value;
         _apiClient = apiClient;
         _leaseManager = leaseManager;
+        _stateContainerManager = stateContainerManager;
         _blobLeaseManager = blobLeaseManager;
         _hasher = hasher;
         _sbPublisher = sbPublisher;
@@ -161,6 +165,24 @@ public class SourceWatcherManager : IAsyncDisposable
         List<Pipeline> activePipelines)
         => BuildWatcherPlans(sources, activePipelines).Select(plan => plan.Key).ToList();
 
+    internal static string SourceConfigurationFingerprint(
+        Source source, PipelineSource? pipelineSource = null)
+    {
+        var canonical = new System.Text.StringBuilder(source.Type ?? "");
+        foreach (var entry in source.Config.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+            canonical.Append('\n').Append(entry.Key).Append('=').Append(entry.Value.GetRawText());
+        if (pipelineSource?.SharePointIdentity is not null)
+        {
+            canonical.Append("\nsharepoint_tenant=")
+                .Append(pipelineSource.SharePointIdentity.TenantId)
+                .Append("\nsharepoint_client=")
+                .Append(pipelineSource.SharePointIdentity.ClientId);
+        }
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonical.ToString()));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
     /// <summary>
     /// Reconcile running watchers against desired state.
     /// Starts new watchers for added sources, stops watchers for removed/disabled sources,
@@ -195,10 +217,12 @@ public class SourceWatcherManager : IAsyncDisposable
         foreach (var plan in plans)
         {
             var source = plan.Source;
+            var fingerprint = SourceConfigurationFingerprint(source, plan.SharePointSource);
             // Every polling source needs one owner; only Cosmos CFP distributes
             // its own partition leases. This also applies during explicit resets.
             bool isSharePoint = string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase);
             var generation = plan.Generation;
+            var replayFromBeginning = false;
             if (RequiresPollingLease(source.Type))
             {
                 var haveLease = await _blobLeaseManager.TryAcquireAsync(plan.LeaseId, ct);
@@ -207,6 +231,7 @@ public class SourceWatcherManager : IAsyncDisposable
                     // Another pod owns this source. If we were running it, stop.
                     if (_watchers.TryRemove(plan.Key, out var old))
                     {
+                        _watcherFingerprints.TryRemove(plan.Key, out _);
                         _logger.LogInformation(
                             "Lost lease for watcher {WatcherId} source={SourceId} ({Type}), stopping local watcher",
                             plan.Key, source.Id, source.Type);
@@ -218,22 +243,26 @@ public class SourceWatcherManager : IAsyncDisposable
 
             if (_watchers.TryGetValue(plan.Key, out var existing))
             {
-                // Check if generation changed — if so, stop old watcher, clear leases, start fresh
-                if (existing.Generation != generation)
+                var configChanged = _watcherFingerprints.TryGetValue(plan.Key, out var currentFingerprint)
+                    && currentFingerprint != fingerprint;
+                var generationChanged = existing.Generation != generation;
+                // A new processor name starts from the beginning without privileged lease-container deletion.
+                if (generationChanged || configChanged)
                 {
                     _logger.LogInformation(
-                        "Generation changed for watcher {WatcherId} source={SourceId} ({Name}): {Old} → {New}, restarting",
-                        plan.Key, source.Id, source.Name, existing.Generation, generation);
+                        "Watcher configuration changed for {WatcherId} source={SourceId} ({Name}): generation {Old} → {New}, configChanged={ConfigChanged}; restarting",
+                        plan.Key, source.Id, source.Name, existing.Generation, generation, configChanged);
                     if (_watchers.TryRemove(plan.Key, out var old))
+                    {
+                        _watcherFingerprints.TryRemove(plan.Key, out _);
                         await old.DisposeAsync();
-                    // Clear leases so the single processorName starts fresh
-                    // SharePoint's outbox and revision high-water mark must survive resets.
-                    try { if (!isSharePoint) await _leaseManager.DeleteLeaseContainerAsync(source.Id, ct); }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Could not clear leases for {SourceId}", source.Id); }
+                    }
+                    replayFromBeginning = generationChanged && !isSharePoint;
                     // Fall through to create a new watcher below
                 }
                 else
                 {
+                    _watcherFingerprints.TryAdd(plan.Key, fingerprint);
                     continue; // Same generation, nothing to do
                 }
             }
@@ -244,8 +273,10 @@ public class SourceWatcherManager : IAsyncDisposable
                 watcher = CreateWatcher(plan);
                 watcher.UpdateDestinations(_destinations);
                 watcher.UpdatePipelines(plan.Pipelines);
+                watcher.SkipContentHash = replayFromBeginning;
                 await watcher.StartAsync(ct);
                 _watchers.TryAdd(plan.Key, watcher);
+                _watcherFingerprints[plan.Key] = fingerprint;
             }
             catch (Exception ex)
             {
@@ -260,6 +291,7 @@ public class SourceWatcherManager : IAsyncDisposable
         {
             if (_watchers.TryRemove(sourceId, out var watcher))
             {
+                _watcherFingerprints.TryRemove(sourceId, out _);
                 _logger.LogInformation("Stopping watcher for removed source {SourceId}", sourceId);
                 await watcher.DisposeAsync();
             }
@@ -292,7 +324,10 @@ public class SourceWatcherManager : IAsyncDisposable
             foreach (var entry in _watchers.Where(entry => entry.Value.SourceId == sourceId).ToList())
             {
                 if (_watchers.TryRemove(entry.Key, out var removedWatcher))
+                {
+                    _watcherFingerprints.TryRemove(entry.Key, out _);
                     await removedWatcher.DisposeAsync();
+                }
             }
             await ReconcileAsync(knownSources, activePipelines, ct);
             return;
@@ -304,25 +339,13 @@ public class SourceWatcherManager : IAsyncDisposable
         // Stop and remove existing watcher
         if (_watchers.TryRemove(sourceId, out var existingWatcher))
         {
+            _watcherFingerprints.TryRemove(sourceId, out _);
             await existingWatcher.DisposeAsync();
         }
         if (RequiresPollingLease(source.Type) && !await _blobLeaseManager.TryAcquireAsync(sourceId, ct))
         {
             _logger.LogInformation("Source {SourceId} reset will be handled by its polling lease owner", sourceId);
             return;
-        }
-
-        // Delete lease container to clear all checkpoints — forces replay from beginning.
-        // This is critical: the processorName is fixed per source, so clearing leases
-        // is the only way to force the CFP to start over.
-        try
-        {
-            if (!string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase))
-                await _leaseManager.DeleteLeaseContainerAsync(sourceId, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not delete lease container for source {SourceId}, continuing anyway", sourceId);
         }
 
         ISourceWatcher? watcher = null;
@@ -335,6 +358,7 @@ public class SourceWatcherManager : IAsyncDisposable
             watcher.SkipContentHash = true;
             await watcher.StartAsync(ct);
             _watchers.TryAdd(sourceId, watcher);
+            _watcherFingerprints[sourceId] = SourceConfigurationFingerprint(source);
             _logger.LogInformation("Watcher reset complete for source {SourceId} gen={Generation} — replaying from beginning",
                 sourceId, generation);
         }
@@ -356,7 +380,10 @@ public class SourceWatcherManager : IAsyncDisposable
             foreach (var entry in _watchers.Where(entry => entry.Value.SourceId == sourceId).ToList())
             {
                 if (_watchers.TryRemove(entry.Key, out var watcher))
+                {
+                    _watcherFingerprints.TryRemove(entry.Key, out _);
                     await watcher.DisposeAsync();
+                }
             }
         }
         return blocked;
@@ -396,7 +423,7 @@ public class SourceWatcherManager : IAsyncDisposable
                 sbPublisher: _sbPublisher),
 
             "sharepoint" => new SharePointSourceWatcher(
-                source, _options, _leaseManager, _hasher,
+                source, _options, _stateContainerManager, _hasher,
                 _loggerFactory.CreateLogger<SharePointSourceWatcher>(),
                 generation: generation,
                 sbPublisher: _sbPublisher,
@@ -421,5 +448,6 @@ public class SourceWatcherManager : IAsyncDisposable
             await watcher.DisposeAsync();
         }
         _watchers.Clear();
+        _watcherFingerprints.Clear();
     }
 }

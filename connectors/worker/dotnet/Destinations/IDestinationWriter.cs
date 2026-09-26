@@ -68,7 +68,8 @@ public record DeleteRequest(
     string PipelineId,
     HashSet<string>? KeepIds = null,
     long SourceVersion = 0,
-    long PipelineRevision = 0);
+    long PipelineRevision = 0,
+    string? DocumentId = null);
 
 public record SharePointReplacement(
     string Identity,
