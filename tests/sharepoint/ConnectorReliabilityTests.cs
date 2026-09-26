@@ -213,11 +213,11 @@ internal static class ConnectorReliabilityTests
             await Fails(() => client.EmbedBatchAsync("mdl-test", ["text"], default));
             Check(calls == 1);
         });
-        Test("Non-chunk document IDs preserve defaults and isolate pipelines", () =>
+        Test("Non-chunk document IDs preserve legacy defaults and explicit patterns isolate pipelines", () =>
         {
             var defaultMessage = TextMessage();
             defaultMessage.SourceRef = "document-05.txt";
-            Check(InvokeWorkerString("RenderDocumentId", defaultMessage).EndsWith("-pipeline", StringComparison.Ordinal));
+            Check(InvokeWorkerString("RenderDocumentId", defaultMessage) == "document-05.txt");
 
             var first = TextMessage("pipeline-a");
             first.SourceRef = "folder/document-05.txt";

@@ -41,7 +41,7 @@ internal static class IdentityTemplateRenderer
     internal static string RenderDocumentId(EmbeddingMessage message)
     {
         var pattern = string.IsNullOrWhiteSpace(message.DocIdPattern)
-            ? "{source_hash}-{pipeline}"
+            ? "{source}"
             : message.DocIdPattern;
         var rendered = Render(pattern, Values(message, message.PartitionKeyValue), "doc_id_pattern");
         return ValidateDocumentId(rendered);

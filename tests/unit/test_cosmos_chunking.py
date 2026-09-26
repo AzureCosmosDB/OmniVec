@@ -166,10 +166,14 @@ async def test_custom_chunk_fields_round_trip_and_template_edit(setup):
                              "store_text": True, "text_field": "passage",
                              "doc_id_pattern": "custom-{source_hash}-{chunk}"}
     created = (await setup.api.create_pipeline(setup.req))["pipeline"]
-    setup.req.chunk_config.update(chunk_size=500, doc_id_pattern="edited-{pipeline_hash}-{chunk}")
+    setup.req.chunk_config.update(chunk_size=500)
     await setup.api.update_pipeline(created.id, setup.req)
     stored = setup.store.get(created.id, "pipeline")
     assert stored["chunk_config"] == setup.req.chunk_config
+    setup.req.chunk_config["doc_id_pattern"] = "edited-{pipeline_hash}-{chunk}"
+    with pytest.raises(HTTPException, match="immutable"):
+        await setup.api.update_pipeline(created.id, setup.req)
+    setup.req.chunk_config["doc_id_pattern"] = "custom-{source_hash}-{chunk}"
     setup.req.chunk_config["text_field"] = "other"
     with pytest.raises(HTTPException) as error:
         await setup.api.update_pipeline(created.id, setup.req)
@@ -178,17 +182,18 @@ async def test_custom_chunk_fields_round_trip_and_template_edit(setup):
 
 
 @pytest.mark.asyncio
-async def test_document_template_update_persists(setup):
+async def test_document_identity_templates_are_immutable(setup):
     setup.req.content_strategy = "truncate"
     setup.req.doc_id_pattern = "original-{source}"
     created = (await setup.api.create_pipeline(setup.req))["pipeline"]
     setup.req.doc_id_pattern = "edited-{source_hash}"
     setup.req.partition_key_pattern = "{source_partition}-{pipeline_hash}"
     setup.req.collision_policy = "overwrite"
-    await setup.api.update_pipeline(created.id, setup.req)
-    assert setup.store.get(created.id, "pipeline")["doc_id_pattern"] == "edited-{source_hash}"
-    assert setup.store.get(created.id, "pipeline")["partition_key_pattern"] == "{source_partition}-{pipeline_hash}"
-    assert setup.store.get(created.id, "pipeline")["collision_policy"] == "overwrite"
+    with pytest.raises(HTTPException, match="immutable"):
+        await setup.api.update_pipeline(created.id, setup.req)
+    stored = setup.store.get(created.id, "pipeline")
+    assert stored["doc_id_pattern"] == "original-{source}"
+    assert stored["partition_key_pattern"] == "{source_partition}"
 
 
 def test_source_modes_destination_and_partition_validated(setup):

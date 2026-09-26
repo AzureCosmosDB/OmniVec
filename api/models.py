@@ -448,7 +448,7 @@ class ChunkConfig(BaseModel):
     chunk_unit: str = "chars"      # "chars" or "tokens"
     store_text: bool = False       # Store chunk text in vector docs
     text_field: str = "text"       # Field name for stored text in vector doc
-    doc_id_pattern: str = "{source_hash}-{pipeline}-chunk-{chunk}"  # Template for chunk doc IDs
+    doc_id_pattern: str = "{source}-chunk-{chunk}"  # Legacy-safe fallback; new pipelines set an explicit collision-safe pattern
                                    # Variables: {source}, {source_ref}, {source_hash}, {chunk}, {pipeline}, {pipeline_hash}
 
 
@@ -562,7 +562,7 @@ class Pipeline(BaseModel):
     processing_mode: str = "queue"  # "queue" = CFP→jobs→worker, "inline" = CFP processes directly
     content_strategy: str = "truncate"  # "truncate" or "chunk"
     chunk_config: Optional[ChunkConfig] = None
-    doc_id_pattern: str = "{source_hash}-{pipeline}"
+    doc_id_pattern: str = "{source}"  # Legacy-safe fallback; new pipelines persist an explicit collision-safe pattern
     partition_key_pattern: str = "{source_partition}"
     collision_policy: Literal["reject", "overwrite"] = "reject"
     # When set, controls whether the (possibly truncated) text actually sent

@@ -4207,7 +4207,7 @@ def _validate_partition_key_pattern(pattern: str) -> None:
 def _validate_pipeline_identity_policy(store, req, pipeline_id: str | None = None) -> None:
     _validate_document_id_pattern(req.doc_id_pattern)
     _validate_partition_key_pattern(req.partition_key_pattern)
-    if req.content_strategy == "chunk" or req.collision_policy == "overwrite":
+    if pipeline_id or req.content_strategy == "chunk" or req.collision_policy == "overwrite":
         return
     variables = _identity_pattern_variables(req.doc_id_pattern, "doc_id_pattern")
     shared = [
@@ -4329,6 +4329,11 @@ async def create_pipeline(req: CreatePipelineRequest):
     store = get_store()
     if not req.name or not req.name.strip():
         raise HTTPException(status_code=400, detail="Pipeline name cannot be blank")
+    if req.content_strategy == "chunk":
+        req.chunk_config = dict(req.chunk_config or {})
+        req.chunk_config.setdefault(
+            "doc_id_pattern", "{source_hash}-{pipeline}-chunk-{chunk}"
+        )
     _validate_pipeline_identity_policy(store, req)
     existing_pipelines = [_pipeline_from_doc(d) for d in store.list("pipeline")]
     if any(p.name.lower() == req.name.strip().lower() for p in existing_pipelines):
@@ -4493,6 +4498,20 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     doc = await asyncio.to_thread(store.get, pipeline_id, "pipeline")
     if not doc:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
+    fields_set = req.model_fields_set
+    if "doc_id_pattern" not in fields_set:
+        req.doc_id_pattern = doc.get("doc_id_pattern", "{source}")
+    if "partition_key_pattern" not in fields_set:
+        req.partition_key_pattern = doc.get(
+            "partition_key_pattern", "{source_partition}"
+        )
+    if req.content_strategy == "chunk" and req.chunk_config is not None:
+        req.chunk_config = dict(req.chunk_config or {})
+        old_chunk_config = doc.get("chunk_config") or {}
+        req.chunk_config.setdefault(
+            "doc_id_pattern",
+            old_chunk_config.get("doc_id_pattern", "{source}-chunk-{chunk}"),
+        )
     _validate_pipeline_identity_policy(store, req, pipeline_id)
 
     chunk_destination = await asyncio.to_thread(store.get, req.destination_id, "destination")
@@ -4561,6 +4580,33 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
         raise HTTPException(status_code=400, detail="Destination cannot be changed after pipeline creation. Create a new pipeline instead.")
     if req.vector_index_path.lstrip("/") != pipeline.vector_index_path.lstrip("/"):
         raise HTTPException(status_code=400, detail="Vector index path cannot be changed after pipeline creation. Create a new pipeline instead.")
+    legacy_doc_id_pattern = doc.get("doc_id_pattern", "{source}")
+    legacy_partition_key_pattern = doc.get(
+        "partition_key_pattern", "{source_partition}"
+    )
+    if req.doc_id_pattern != legacy_doc_id_pattern:
+        raise HTTPException(
+            status_code=400,
+            detail="Document ID pattern is immutable; create a new pipeline to migrate existing vectors",
+        )
+    if req.partition_key_pattern != legacy_partition_key_pattern:
+        raise HTTPException(
+            status_code=400,
+            detail="Partition key pattern is immutable; create a new pipeline to migrate existing vectors",
+        )
+    old_chunk = doc.get("chunk_config") or {}
+    if (
+        pipeline.content_strategy == "chunk"
+        and req.chunk_config
+        and req.chunk_config.get(
+            "doc_id_pattern", "{source}-chunk-{chunk}"
+        )
+        != old_chunk.get("doc_id_pattern", "{source}-chunk-{chunk}")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Chunk document ID pattern is immutable; create a new pipeline to migrate existing vectors",
+        )
 
     pipeline.name = req.name
     pipeline.description = req.description
@@ -4568,8 +4614,6 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
-    pipeline.doc_id_pattern = req.doc_id_pattern
-    pipeline.partition_key_pattern = req.partition_key_pattern
     pipeline.collision_policy = req.collision_policy
     if cosmos_chunk_config is not None:
         pipeline.chunk_config = cosmos_chunk_config

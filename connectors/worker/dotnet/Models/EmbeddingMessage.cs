@@ -58,7 +58,7 @@ public class EmbeddingMessage
     public TextChunkConfig? ChunkConfig { get; set; }
 
     [JsonPropertyName("doc_id_pattern")]
-    public string DocIdPattern { get; set; } = "{source_hash}-{pipeline}";
+    public string DocIdPattern { get; set; } = "{source}";
 
     [JsonPropertyName("partition_key_pattern")]
     public string PartitionKeyPattern { get; set; } = "{source_partition}";
