@@ -100,3 +100,68 @@ def ui_page(browser: Browser, static_server_url: str) -> Iterator[tuple[Page, li
     yield page, requests
     assert page_errors == []
     page.close()
+
+
+class SpaApp:
+    """Handle for the redesigned SPA served from web/static/index.html with a mocked API."""
+
+    def __init__(self, page: Page, base_url: str, responses: dict, requests: list[dict], errors: list[str]):
+        self.page, self.base_url, self.responses, self.requests, self.errors = page, base_url, responses, requests, errors
+
+    def goto(self, hash_route: str = "#/home") -> Page:
+        self.page.evaluate("h => { location.hash = h; }", hash_route)
+        self.page.wait_for_selector("#view .page", state="attached")
+        return self.page
+
+    def called(self, path: str, method: str = "GET") -> list[dict]:
+        return [r for r in self.requests if r["path"] == path and r["method"] == method]
+
+
+@pytest.fixture
+def spa_app(browser: Browser, static_server_url: str):
+    from urllib.parse import urlparse
+
+    from spa_mock import default_responses
+
+    opened: list[Page] = []
+    apps: list[SpaApp] = []
+
+    def open_app(route: str = "#/home", overrides: dict | None = None, token: str | None = "test-token",
+                 viewport: dict | None = None) -> SpaApp:
+        responses = default_responses()
+        responses.update(overrides or {})
+        page = browser.new_page(viewport=viewport or {"width": 1440, "height": 1000})
+        opened.append(page)
+        requests: list[dict] = []
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+
+        def handle_api(api_route: Route) -> None:
+            request = api_route.request
+            path = urlparse(request.url).path
+            payload = request.post_data_json if request.post_data else None
+            requests.append({"path": path, "url": request.url, "method": request.method, "payload": payload})
+            body = responses.get(f"{request.method} {path}", responses.get(path, {}))
+            status = 200
+            if isinstance(body, tuple):
+                status, body = body
+            api_route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+        page.route("**/api/**", handle_api)
+        page.route("https://**/*", lambda r: r.abort())
+        if token is not None:
+            page.add_init_script(f"localStorage.setItem('omnivec_token', {json.dumps(token)});"
+                                 "localStorage.setItem('ov-theme', 'light');")
+        page.goto(f"{static_server_url}/index.html{route}", wait_until="domcontentloaded")
+        page.wait_for_selector("#view .page, .signin, form", state="attached")
+        app = SpaApp(page, static_server_url, responses, requests, errors)
+        apps.append(app)
+        return app
+
+    yield open_app
+    try:
+        for app in apps:
+            assert app.errors == [], f"JavaScript errors: {app.errors}"
+    finally:
+        for page in opened:
+            page.close()
