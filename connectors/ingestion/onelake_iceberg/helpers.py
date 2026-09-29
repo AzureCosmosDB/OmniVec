@@ -6,6 +6,9 @@ import hashlib
 import json
 from typing import Any, Iterable
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 
 OMNIVEC_MANAGED_FIELDS = frozenset(
     {
@@ -34,6 +37,40 @@ def content_from_row(row: dict[str, Any], fields: Iterable[str]) -> str:
 
 def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def read_projected_rows(table: Any, projection: Iterable[str]) -> tuple[list[dict[str, Any]], bool]:
+    """Read current rows, bypassing invalid Delta CDF columns in Iceberg name mappings."""
+    columns = tuple(projection)
+    try:
+        return table.scan(selected_fields=columns).to_arrow().to_pylist(), False
+    except ValueError as exc:
+        if "Could not find field with name: _change_type" not in str(exc):
+            raise
+
+    tables: list[pa.Table] = []
+    seen_paths: set[str] = set()
+    for task in table.scan(selected_fields=columns).plan_files():
+        if task.delete_files:
+            raise ValueError(
+                "Cannot bypass Iceberg name mapping for a scan containing delete files"
+            )
+        path = task.file.file_path
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        with table.io.new_input(path).open() as stream:
+            parquet_file = pq.ParquetFile(stream)
+            available = [column for column in columns if column in parquet_file.schema_arrow.names]
+            current = parquet_file.read(columns=available)
+        for column in columns:
+            if column not in current.column_names:
+                current = current.append_column(column, pa.nulls(current.num_rows))
+        tables.append(current.select(columns))
+
+    if not tables:
+        return [], True
+    return pa.concat_tables(tables, promote_options="default").to_pylist(), True
 
 
 def ordered_source_version(timestamp_ms: int, sequence_number: int) -> int:

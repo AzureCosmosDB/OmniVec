@@ -1,11 +1,16 @@
 from pathlib import Path
+import io
 import sys
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "connectors" / "ingestion" / "onelake_iceberg"))
 from helpers import (  # noqa: E402
     checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
-    ordered_source_version, pipeline_fingerprint, row_has_current_omnivec_embedding,
+    ordered_source_version, pipeline_fingerprint, read_projected_rows,
+    row_has_current_omnivec_embedding,
 )
 
 
@@ -71,3 +76,41 @@ def test_checkpoint_persists_known_refs_for_delete_detection():
 
 def test_source_version_orders_by_snapshot_timestamp_then_sequence():
     assert ordered_source_version(1000, 999) < ordered_source_version(1001, 0)
+
+
+def test_scan_falls_back_when_delta_cdf_column_is_missing_from_name_mapping():
+    sink = io.BytesIO()
+    pq.write_table(
+        pa.table(
+            {
+                "id": ["row-1"],
+                "title": ["Title"],
+                "_change_type": ["update_postimage"],
+            }
+        ),
+        sink,
+    )
+    payload = sink.getvalue()
+
+    class Scan:
+        def to_arrow(self):
+            raise ValueError("Could not find field with name: _change_type")
+
+        def plan_files(self):
+            file = type("File", (), {"file_path": "row.parquet"})()
+            return [type("Task", (), {"delete_files": [], "file": file})()]
+
+    class Input:
+        def open(self):
+            return io.BytesIO(payload)
+
+    class Table:
+        io = type("IO", (), {"new_input": lambda self, path: Input()})()
+
+        def scan(self, selected_fields):
+            return Scan()
+
+    rows, used_fallback = read_projected_rows(Table(), ("id", "title", "content_hash"))
+
+    assert used_fallback
+    assert rows == [{"id": "row-1", "title": "Title", "content_hash": None}]

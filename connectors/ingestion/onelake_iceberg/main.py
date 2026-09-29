@@ -30,7 +30,8 @@ from pyiceberg.catalog import load_catalog
 
 from helpers import (
     checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
-    ordered_source_version, pipeline_fingerprint, row_has_current_omnivec_embedding,
+    ordered_source_version, pipeline_fingerprint, read_projected_rows,
+    row_has_current_omnivec_embedding,
 )
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -49,6 +50,7 @@ DEFAULT_WRITEBACK_COLUMNS = {
     "run_id_field": "omnivec_run_id",
     "embedded_at_field": "embedded_at",
 }
+MAX_SERVICE_BUS_BATCH_BYTES = 240 * 1024
 
 
 @dataclass
@@ -211,7 +213,12 @@ class OneLakeIcebergWatcher:
                     "model_field",
                 )
             )
-        rows = table.scan(selected_fields=tuple(projection)).to_arrow().to_pylist()
+        rows, used_cdf_fallback = read_projected_rows(table, projection)
+        if used_cdf_fallback:
+            log.warning(
+                "Ignored unmapped Delta CDF metadata columns while scanning source %s",
+                source["id"],
+            )
         id_field = config.get("id_field", "id")
         rows_by_ref = {
             str(row.get(id_field)): row
@@ -365,7 +372,9 @@ class OneLakeIcebergWatcher:
             async with sender:
                 for start in range(0, len(messages), batch_size):
                     chunk = messages[start : start + batch_size]
-                    batch = await sender.create_message_batch(max_size_in_bytes=240_000)
+                    batch = await sender.create_message_batch(
+                        max_size_in_bytes=MAX_SERVICE_BUS_BATCH_BYTES
+                    )
                     for message, _, _ in chunk:
                         outgoing = ServiceBusMessage(json.dumps(message, separators=(",", ":")))
                         try:
@@ -374,7 +383,9 @@ class OneLakeIcebergWatcher:
                             if len(batch) == 0:
                                 raise  # one message cannot fit; do not checkpoint it
                             await sender.send_messages(batch)
-                            batch = await sender.create_message_batch(max_size_in_bytes=240_000)
+                            batch = await sender.create_message_batch(
+                                max_size_in_bytes=MAX_SERVICE_BUS_BATCH_BYTES
+                            )
                             batch.add_message(outgoing)
                     if len(batch):
                         await sender.send_messages(batch)
