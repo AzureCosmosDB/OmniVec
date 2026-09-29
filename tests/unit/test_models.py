@@ -458,7 +458,43 @@ class TestOneLakeIcebergConfig:
         )
         assert config.writeback_columns.embedding_field == "embedding"
         assert config.staging_path == "lakehouse/Files/omnivec/staging"
+        assert config.merge_batch_size == 5000
+        assert config.merge_flush_interval_seconds == 30
+        assert config.max_concurrent_merges == 1
         assert api_models.OneLakeIcebergDestinationConfig(**config.model_dump()) == config
+
+        configured = api_models.OneLakeIcebergDestinationConfig(
+            workspace_id="workspace",
+            lakehouse_item_id="lakehouse",
+            spark_job_definition_item_id="job-definition",
+            staging_file_system="workspace",
+            target_table="dbo.embeddings",
+            merge_batch_size=10000,
+            merge_flush_interval_seconds=60,
+            max_concurrent_merges=2,
+        )
+        assert configured.merge_batch_size == 10000
+        assert configured.merge_flush_interval_seconds == 60
+        assert configured.max_concurrent_merges == 2
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("merge_batch_size", 0),
+            ("merge_flush_interval_seconds", 0),
+            ("max_concurrent_merges", 0),
+        ],
+    )
+    def test_destination_rejects_invalid_merge_batching(self, api_models, field, value):
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergDestinationConfig(
+                workspace_id="workspace",
+                lakehouse_item_id="lakehouse",
+                spark_job_definition_item_id="job-definition",
+                staging_file_system="workspace",
+                target_table="dbo.embeddings",
+                **{field: value},
+            )
 
     @pytest.mark.parametrize(
         ("field", "value"),

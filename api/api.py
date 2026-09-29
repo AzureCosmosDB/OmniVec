@@ -3995,12 +3995,19 @@ def _require_onelake_iceberg_pipeline(store, req, dest_doc) -> None:
         namespace = source_config.get("namespace", "")
         namespace_parts = namespace.split(".") if isinstance(namespace, str) else list(namespace)
         source_table_parts = [*namespace_parts, str(source_config.get("table", ""))]
-        if len(target_parts) < len(source_table_parts) or target_parts[-len(source_table_parts):] != source_table_parts:
+        table_name = source_table_parts[-1]
+        matches_table = target_parts == [table_name]
+        matches_qualified_table = (
+            len(target_parts) >= len(source_table_parts)
+            and target_parts[-len(source_table_parts):] == source_table_parts
+        )
+        if not (matches_table or matches_qualified_table):
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"OneLake destination target_table must identify source '{source_id}' table "
-                    f"'{'.'.join(source_table_parts)}' for same-row write-back."
+                    f"'{'.'.join(source_table_parts)}' (or Spark name '{table_name}') "
+                    "for same-row write-back."
                 ),
             )
 

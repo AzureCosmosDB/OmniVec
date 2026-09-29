@@ -103,6 +103,21 @@ Test("OneLake operation versions sort by Iceberg snapshot sequence", () =>
     Assert(newer.StartsWith("00000000000000000010:00000000000000000001:", StringComparison.Ordinal));
     return Task.CompletedTask;
 });
+
+Test("OneLake merge batching parses counts and creates deterministic run IDs", () =>
+{
+    Assert(OneLakeIcebergDestinationWriter.ParsePendingCount(
+        "root/pending/part=abc-count=005000.jsonl") == 5000);
+    Assert(OneLakeIcebergDestinationWriter.ParsePendingCount(
+        "root/pending/not-a-batch.jsonl") == 0);
+    var first = OneLakeIcebergDestinationWriter.BuildMergeRunId(
+        "documents", ["b.jsonl", "a.jsonl"]);
+    var second = OneLakeIcebergDestinationWriter.BuildMergeRunId(
+        "documents", ["a.jsonl", "b.jsonl"]);
+    Assert(first == second);
+    Assert(first.Length == 32);
+    return Task.CompletedTask;
+});
 Test("OneLake delete run IDs are order-independent and distinct from upserts", () =>
 {
     var requests = new[]
