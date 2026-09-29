@@ -255,6 +255,14 @@ case "$AGENT_ALLOW_K8S_REMEDIATION" in
   true|false) ;;
   *) printf 'OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION must be true or false.\n' >&2; exit 1 ;;
 esac
+ENTRA_ENABLED=$(get_azd_value "OMNIVEC_ENTRA_ENABLED")
+ENTRA_ENABLED=${ENTRA_ENABLED:-false}
+case "$ENTRA_ENABLED" in
+  true|false) ;;
+  *) printf 'OMNIVEC_ENTRA_ENABLED must be true or false.\n' >&2; exit 1 ;;
+esac
+ENTRA_PUBLIC_URL=$(get_azd_value "OMNIVEC_PUBLIC_URL")
+ENTRA_CLIENT_ID=$(get_azd_value "OMNIVEC_ENTRA_CLIENT_ID")
 
 # Azure rejects PublicIP DNS labels containing reserved trademarks
 # (windows, microsoft, azure, xbox, login, bing, apple) with
@@ -1059,6 +1067,32 @@ if [ -z "$SEARCH_INTERNAL_TOKEN" ]; then
   printf "  ${GREEN}Generated new search internal token.${NC}\n"
 fi
 
+ENTRA_CONFIG_FILE=""
+if [ "$ENTRA_ENABLED" = "true" ]; then
+  case "$ENTRA_PUBLIC_URL" in
+    https://*) ;;
+    *) printf 'OMNIVEC_PUBLIC_URL must be an HTTPS URL when Entra login is enabled.\n' >&2; exit 1 ;;
+  esac
+  ENTRA_CONFIG_FILE="$_post_lock/entra-config.json"
+  set -- python "$ROOT_DIR/scripts/configure_entra_app.py" \
+    --display-name "OmniVec ${AZURE_ENV_NAME}" \
+    --redirect-uri "$ENTRA_PUBLIC_URL" \
+    --assign-current-user-admin
+  if [ -n "$ENTRA_CLIENT_ID" ]; then
+    set -- "$@" --client-id "$ENTRA_CLIENT_ID"
+  fi
+  "$@" > "$ENTRA_CONFIG_FILE"
+  ENTRA_TENANT_ID=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$ENTRA_CONFIG_FILE")
+  ENTRA_CLIENT_ID=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["client_id"])' "$ENTRA_CONFIG_FILE")
+  ENTRA_AUDIENCE=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["audience"])' "$ENTRA_CONFIG_FILE")
+  ENTRA_SCOPE=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["scope"])' "$ENTRA_CONFIG_FILE")
+  azd env set OMNIVEC_ENTRA_TENANT_ID "$ENTRA_TENANT_ID" </dev/null
+  azd env set OMNIVEC_ENTRA_CLIENT_ID "$ENTRA_CLIENT_ID" </dev/null
+  azd env set OMNIVEC_ENTRA_AUDIENCE "$ENTRA_AUDIENCE" </dev/null
+  azd env set OMNIVEC_ENTRA_SCOPE "$ENTRA_SCOPE" </dev/null
+  printf "  ${GREEN}Microsoft Entra login configured for %s.${NC}\n" "$ENTRA_PUBLIC_URL"
+fi
+
 IMAGE_TAG="$API_IMAGE_TAG"
 if [ "$AGENT_IMAGE_TAG" = "latest" ]; then
   AGENT_DEPLOY_TAG="$AGENT_SOURCE_IMAGE_TAG"
@@ -1083,6 +1117,24 @@ api:
   image:
     tag: "${API_IMAGE_TAG}"
   adminToken: "${ADMIN_TOKEN}"
+EOF
+
+if [ "$ENTRA_ENABLED" = "true" ]; then
+  cat >> "$HELM_VALUES_FILE" <<EOF
+  entra:
+    enabled: true
+    tenantId: "${ENTRA_TENANT_ID}"
+    clientId: "${ENTRA_CLIENT_ID}"
+    audience: "${ENTRA_AUDIENCE}"
+    scope: "${ENTRA_SCOPE}"
+    adminRole: "OmniVec.Admin"
+    operatorRole: "OmniVec.Operator"
+    viewerRole: "OmniVec.Viewer"
+    requireRole: true
+EOF
+fi
+
+cat >> "$HELM_VALUES_FILE" <<EOF
 search:
   image:
     tag: "${SEARCH_IMAGE_TAG}"
@@ -1515,15 +1567,22 @@ FQDN="${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
 
 # Persist the OmniVec server URL into the azd env so subsequent CLI
 # invocations / tooling can pick it up without re-deriving from the cluster.
-OMNIVEC_API_URL="http://${FQDN}"
+if [ "$ENTRA_ENABLED" = "true" ]; then
+  OMNIVEC_API_URL=${ENTRA_PUBLIC_URL%/}
+else
+  OMNIVEC_API_URL="http://${FQDN}"
+fi
 azd env set OMNIVEC_API_URL "$OMNIVEC_API_URL" </dev/null 2>/dev/null || true
-azd env set OMNIVEC_UI_URL  "${OMNIVEC_API_URL}/ui" </dev/null 2>/dev/null || true
+azd env set OMNIVEC_UI_URL  "$OMNIVEC_API_URL" </dev/null 2>/dev/null || true
 if [ -n "${EXTERNAL_IP}" ]; then
   azd env set OMNIVEC_API_IP "http://${EXTERNAL_IP}" </dev/null 2>/dev/null || true
 fi
 
 if [ -n "${EXTERNAL_IP}" ]; then
   echo ""
+  if [ "$ENTRA_ENABLED" = "true" ]; then
+    printf "  OmniVec HTTPS: ${CYAN}%s${NC}\n" "$OMNIVEC_API_URL"
+  fi
   printf "  OmniVec FQDN:  ${CYAN}http://${FQDN}/ui${NC}\n"
   printf "  OmniVec IP:    ${CYAN}http://${EXTERNAL_IP}/ui${NC}\n"
   printf "  Health Check:  ${CYAN}http://${FQDN}/health${NC}\n"

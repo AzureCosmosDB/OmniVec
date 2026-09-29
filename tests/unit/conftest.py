@@ -76,6 +76,8 @@ def _set_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "OMNIVEC_ADMIN_TOKEN": "test-admin-token",
         "OMNIVEC_AAD_TENANT_ID": "",  # disable AAD path
         "OMNIVEC_AAD_AUDIENCE": "",
+        "OMNIVEC_AAD_CLIENT_ID": "",
+        "OMNIVEC_AAD_SCOPE": "",
         "COSMOS_ENDPOINT": "https://test.example.invalid/",
         "COSMOS_DATABASE": "omnivec",
         "DOCGROK_URL": "http://docgrok.test.invalid",

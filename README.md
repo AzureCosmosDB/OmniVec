@@ -157,6 +157,25 @@ azd env get-value OMNIVEC_ADMIN_TOKEN
 azd env list
 ```
 
+### Microsoft Entra login
+
+The API accepts Entra access tokens and the web console can show **Sign in with
+Microsoft**. The public browser origin must use HTTPS.
+
+```bash
+azd env set OMNIVEC_ENTRA_ENABLED true
+azd env set OMNIVEC_PUBLIC_URL https://omnivec.example.com
+azd up
+```
+
+The post-provision hook creates or updates a single-tenant app registration,
+defines `OmniVec.Admin`, `OmniVec.Operator`, and `OmniVec.Viewer` app roles,
+assigns the deploying user the admin role, and stores the generated client ID
+in the azd environment. The deploying identity needs permission to manage
+application registrations and enterprise-app role assignments. Assign other
+users or groups from the printed Enterprise application URL. The generated
+admin token remains available as break-glass access during migration.
+
 ---
 
 ### Open the UI
@@ -445,6 +464,9 @@ This removes the resource group, all Azure services, and local environment confi
 | `OMNIVEC_AGENT_IMAGE_TAG` | No | `latest` | Pin an already-published `omnivec-agent` tag in this environment's ACR; missing pins fail deployment |
 | `OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION` | No | `false` | Opt in to namespace-scoped agent restart/scale permissions; each action still needs operator approval |
 | `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
+| `OMNIVEC_ENTRA_ENABLED` | No | `false` | Create or reconcile a single-tenant Entra application and enable Microsoft login |
+| `OMNIVEC_PUBLIC_URL` | When Entra is enabled | — | Public HTTPS origin registered as the SPA redirect URI |
+| `OMNIVEC_ENTRA_CLIENT_ID` | No | auto-created | Reuse an existing OmniVec app registration instead of creating one |
 
 ### What gets deployed
 

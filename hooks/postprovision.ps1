@@ -98,6 +98,14 @@ if ($AGENT_IMAGE_TAG -cnotmatch '\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\z') {
 }
 $AGENT_ALLOW_K8S_REMEDIATION = Get-AzdValue "OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION"
 if (-not $AGENT_ALLOW_K8S_REMEDIATION) { $AGENT_ALLOW_K8S_REMEDIATION = "false" }
+
+$ENTRA_ENABLED = Get-AzdValue "OMNIVEC_ENTRA_ENABLED"
+if (-not $ENTRA_ENABLED) { $ENTRA_ENABLED = "false" }
+if ($ENTRA_ENABLED -notin @("true", "false")) {
+    throw "OMNIVEC_ENTRA_ENABLED must be true or false."
+}
+$ENTRA_PUBLIC_URL = Get-AzdValue "OMNIVEC_PUBLIC_URL"
+$ENTRA_CLIENT_ID = Get-AzdValue "OMNIVEC_ENTRA_CLIENT_ID"
 if ($AGENT_ALLOW_K8S_REMEDIATION -cnotin @("true", "false")) {
     throw 'OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION must be true or false.'
 }
@@ -864,6 +872,35 @@ if (-not $SEARCH_INTERNAL_TOKEN) {
     Write-Host "  `e[32mGenerated new search internal token.`e[0m"
 }
 
+$ENTRA_CONFIG = $null
+if ($ENTRA_ENABLED -eq "true") {
+    if (-not $ENTRA_PUBLIC_URL -or -not $ENTRA_PUBLIC_URL.StartsWith("https://")) {
+        throw "OMNIVEC_PUBLIC_URL must be an HTTPS URL when Entra login is enabled."
+    }
+    $entraArgs = @(
+        "$RootDir/scripts/configure_entra_app.py",
+        "--display-name", "OmniVec $($env:AZURE_ENV_NAME)",
+        "--redirect-uri", $ENTRA_PUBLIC_URL,
+        "--assign-current-user-admin"
+    )
+    if ($ENTRA_CLIENT_ID) {
+        $entraArgs += @("--client-id", $ENTRA_CLIENT_ID)
+    }
+    $entraOutput = & python @entraArgs
+    Assert-NativeSuccess "Configuring Microsoft Entra application"
+    $ENTRA_CONFIG = $entraOutput | ConvertFrom-Json
+    foreach ($entry in @{
+        OMNIVEC_ENTRA_TENANT_ID = $ENTRA_CONFIG.tenant_id
+        OMNIVEC_ENTRA_CLIENT_ID = $ENTRA_CONFIG.client_id
+        OMNIVEC_ENTRA_AUDIENCE = $ENTRA_CONFIG.audience
+        OMNIVEC_ENTRA_SCOPE = $ENTRA_CONFIG.scope
+    }.GetEnumerator()) {
+        azd env set $entry.Key $entry.Value 2>$null | Out-Null
+        Assert-NativeSuccess "Persisting $($entry.Key)"
+    }
+    Write-Host "  `e[32mMicrosoft Entra login configured for $ENTRA_PUBLIC_URL.`e[0m"
+}
+
 $IMAGE_TAG = $script:imageTags["omnivec-api"]
 $agentDeployTag = if ($AGENT_IMAGE_TAG -eq "latest") { $script:imageTags["omnivec-agent"] } else { $AGENT_IMAGE_TAG }
 
@@ -903,6 +940,20 @@ $helmArgs = @(
     "--set", "agent.allowKubernetesRemediation=$AGENT_ALLOW_K8S_REMEDIATION",
     "--set", "web.service.dnsLabel=$WEB_DNS_LABEL"
 )
+
+if ($ENTRA_CONFIG) {
+    $helmArgs += @(
+        "--set", "api.entra.enabled=true",
+        "--set-string", "api.entra.tenantId=$($ENTRA_CONFIG.tenant_id)",
+        "--set-string", "api.entra.clientId=$($ENTRA_CONFIG.client_id)",
+        "--set-string", "api.entra.audience=$($ENTRA_CONFIG.audience)",
+        "--set-string", "api.entra.scope=$($ENTRA_CONFIG.scope)",
+        "--set-string", "api.entra.adminRole=$($ENTRA_CONFIG.admin_role)",
+        "--set-string", "api.entra.operatorRole=$($ENTRA_CONFIG.operator_role)",
+        "--set-string", "api.entra.viewerRole=$($ENTRA_CONFIG.viewer_role)",
+        "--set", "api.entra.requireRole=true"
+    )
+}
 
 if ($KEYVAULT_URI) {
     $helmArgs += @(
@@ -1191,6 +1242,10 @@ Write-Host "  ACR Registry:  `e[36m$ACR_LOGIN_SERVER`e[0m"
 Write-Host "  CosmosDB:      `e[36m$COSMOS_ENDPOINT`e[0m"
 
 Write-Host "  Admin token:   `e[36mpersisted in the local azd environment (not printed)`e[0m"
+if ($ENTRA_CONFIG) {
+    Write-Host "  Entra login:   `e[36m$ENTRA_PUBLIC_URL`e[0m"
+    Write-Host "  User access:   `e[36m$($ENTRA_CONFIG.enterprise_app_url)`e[0m"
+}
 
 $LOCATION = $env:AZURE_LOCATION
 if (-not $LOCATION) { $LOCATION = Get-AzdValue "AZURE_LOCATION" }
@@ -1199,15 +1254,18 @@ $FQDN = "${INSTANCE_ID}.${LOCATION}.cloudapp.azure.com"
 
 # Persist the OmniVec server URL into the azd env so subsequent CLI
 # invocations / tooling can pick it up without re-deriving from the cluster.
-$OMNIVEC_API_URL = "http://$FQDN"
+$OMNIVEC_API_URL = if ($ENTRA_CONFIG) { $ENTRA_PUBLIC_URL.TrimEnd("/") } else { "http://$FQDN" }
 azd env set OMNIVEC_API_URL $OMNIVEC_API_URL 2>$null | Out-Null
-azd env set OMNIVEC_UI_URL  "$OMNIVEC_API_URL/ui" 2>$null | Out-Null
+azd env set OMNIVEC_UI_URL  $OMNIVEC_API_URL 2>$null | Out-Null
 if ($externalIp) {
     azd env set OMNIVEC_API_IP "http://$externalIp" 2>$null | Out-Null
 }
 
 if ($externalIp) {
     Write-Host ""
+    if ($ENTRA_CONFIG) {
+        Write-Host "  OmniVec HTTPS: `e[36m$OMNIVEC_API_URL`e[0m"
+    }
     Write-Host "  OmniVec FQDN:  `e[36mhttp://${FQDN}/ui`e[0m"
     Write-Host "  OmniVec IP:    `e[36mhttp://${externalIp}/ui`e[0m"
     Write-Host "  Health Check:  `e[36mhttp://${FQDN}/health`e[0m"

@@ -1948,6 +1948,7 @@
             'pgvector',
             'mssql',
             'onelake-iceberg',
+            'garnet',
           ]),
           'title': 'DestinationType',
           'type': 'string',
@@ -3290,6 +3291,24 @@
             }),
           }),
           'summary': 'List Audit Log',
+        }),
+      }),
+      '/api/auth/config': dict({
+        'get': dict({
+          'description': 'Return non-secret browser authentication metadata.',
+          'operationId': 'auth_config_api_auth_config_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+          }),
+          'summary': 'Auth Config',
         }),
       }),
       '/api/auth/login': dict({
@@ -7570,6 +7589,15 @@
       list([
         '200',
         '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/auth/config',
+      list([
+      ]),
+      list([
+        '200',
       ]),
     ),
     tuple(

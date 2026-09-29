@@ -113,7 +113,14 @@ _cloud_deployment_task = None
 # =============================================================================
 
 # Paths that don't require authentication
-AUTH_SKIP_PATHS = {"/health", "/health/", "/openapi.json", "/docs", "/redoc"}
+AUTH_SKIP_PATHS = {
+    "/health",
+    "/health/",
+    "/openapi.json",
+    "/docs",
+    "/redoc",
+    "/api/auth/config",
+}
 AUTH_SKIP_PREFIXES = ("/static/",)
 
 # Admin bootstrap token â€” hash immediately, never keep plaintext in memory
@@ -203,6 +210,8 @@ def _validate_token(token: str) -> Optional[dict]:
 
 _AAD_TENANT_ID = os.getenv("OMNIVEC_AAD_TENANT_ID", "").strip()
 _AAD_AUDIENCE = os.getenv("OMNIVEC_AAD_AUDIENCE", "").strip()
+_AAD_CLIENT_ID = os.getenv("OMNIVEC_AAD_CLIENT_ID", "").strip()
+_AAD_SCOPE = os.getenv("OMNIVEC_AAD_SCOPE", "").strip()
 _AAD_ADMIN_GROUP = os.getenv("OMNIVEC_AAD_ADMIN_GROUP_ID", "").strip()
 _AAD_OPERATOR_GROUP = os.getenv("OMNIVEC_AAD_OPERATOR_GROUP_ID", "").strip()
 _AAD_VIEWER_GROUP = os.getenv("OMNIVEC_AAD_VIEWER_GROUP_ID", "").strip()
@@ -637,7 +646,12 @@ async def metrics_middleware(request: Request, call_next):
 _AUDIT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 # Don't audit auth-token list/login churn; they're already covered by
 # /api/auth/login rate-limiting and aren't state changes when GET-only.
-_AUDIT_SKIP_PREFIXES = ("/api/health", "/api/metrics", "/api/auth/login")
+_AUDIT_SKIP_PREFIXES = (
+    "/api/health",
+    "/api/metrics",
+    "/api/auth/login",
+    "/api/auth/config",
+)
 
 
 def _redact_path(path: str) -> str:
@@ -1316,6 +1330,24 @@ class CreateTokenRequest(BaseModel):
     role: str = "user"  # "admin" or "user"
     scope: str = "admin"  # "admin" | "search" — controls which API the token can access
     expires_days: Optional[int] = None  # None = no expiry
+
+
+@app.get("/api/auth/config")
+def auth_config():
+    """Return non-secret browser authentication metadata."""
+    enabled = bool(_aad_enabled() and _AAD_CLIENT_ID and _AAD_SCOPE)
+    return {
+        "entra_enabled": enabled,
+        "tenant_id": _AAD_TENANT_ID if enabled else "",
+        "client_id": _AAD_CLIENT_ID if enabled else "",
+        "authority": (
+            f"https://login.microsoftonline.com/{_AAD_TENANT_ID}"
+            if enabled
+            else ""
+        ),
+        "scope": _AAD_SCOPE if enabled else "",
+        "admin_token_enabled": bool(ADMIN_TOKEN_HASH),
+    }
 
 
 @app.post("/api/auth/login")

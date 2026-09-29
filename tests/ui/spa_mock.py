@@ -38,6 +38,7 @@ def default_responses() -> dict[str, Any]:
     """Map of API path (without query) to JSON payload."""
     pipelines = [_pipeline(i) for i in range(1, PIPELINE_COUNT + 1)]
     return copy.deepcopy({
+        "/api/auth/config": {"entra_enabled": False, "admin_token_enabled": True},
         "/api/auth/login": {"name": "admin", "role": "admin", "is_admin": True, "permissions": ["*"]},
         "/api/sources": {"sources": SOURCES},
         "/api/destinations": {"destinations": DESTINATIONS},
