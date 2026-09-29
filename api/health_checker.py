@@ -373,6 +373,25 @@ async def check_destination(destination: Destination, last_write_age_seconds: fl
             finally:
                 conn.close()
 
+        elif dest_type == DestinationType.GARNET:
+            from api import _test_garnet_vector_set
+
+            probe = await _test_garnet_vector_set(config)
+            if not probe.get("success"):
+                raise RuntimeError(probe.get("error", "Garnet probe failed"))
+            result["checks"].append({
+                "check": "connectivity",
+                "status": "pass",
+                "detail": probe.get("message", "Connected to Garnet"),
+            })
+            result["checks"].append({
+                "check": "vector_index",
+                "status": "pass",
+                "detail": probe.get("details", f"Vector set: {config.get('vector_set', 'omnivec-vectors')}"),
+                "dimensions": probe.get("dimensions"),
+                "vector_field": config.get("vector_set", "omnivec-vectors"),
+            })
+
         else:
             result["checks"].append({"check": "connectivity", "status": "skip", "detail": f"Unsupported destination type: {dest_type}"})
 

@@ -51,7 +51,8 @@ from models import (  # lgtm[py/unused-import]
     PipelineIdentityPreviewRequest, PipelineResourcePolicy,
     SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
     ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
-    CosmosDBSourceConfig, OneLakeIcebergSourceConfig, OneLakeIcebergDestinationConfig,
+    CosmosDBSourceConfig, GarnetDestinationConfig, OneLakeIcebergSourceConfig,
+    OneLakeIcebergDestinationConfig,
     SharePointSourceConfig,
 )
 from store import init_store, get_store
@@ -3055,6 +3056,11 @@ async def create_destination(req: CreateDestinationRequest):
             config = OneLakeIcebergDestinationConfig(**config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == "garnet":
+        try:
+            config = GarnetDestinationConfig(**config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     warnings = []
     enabled = True
     if req.type == "cosmosdb-vector":
@@ -3129,6 +3135,21 @@ async def create_destination(req: CreateDestinationRequest):
                 "Could not probe MSSQL table. Check the server, database, table, "
                 "and managed identity access. Vector column discovery skipped."
             )
+    elif req.type == "garnet":
+        probe_result = await _test_garnet_vector_set(config)
+        if probe_result.get("success"):
+            config["vector_indexes"] = [{
+                "path": config["vector_set"],
+                "indexType": "garnet-vector-set",
+                "distanceFunction": config["distance_metric"].lower(),
+                **({"dimensions": probe_result["dimensions"]} if probe_result.get("dimensions") else {}),
+            }]
+        else:
+            enabled = False
+            warnings.append(str(probe_result.get(
+                "error",
+                "Could not connect to Garnet Vector Sets.",
+            )))
 
     dest_id = f"dst-{str(uuid.uuid4())[:8]}"
     destination = Destination(
@@ -3165,6 +3186,11 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
     if req.type == "onelake-iceberg":
         try:
             clean_config = OneLakeIcebergDestinationConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == "garnet":
+        try:
+            clean_config = GarnetDestinationConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
     # Preserve stored password if masked value was sent
@@ -3224,6 +3250,13 @@ async def patch_destination(dest_id: str, req: DestinationEnableRequest):
                     raise HTTPException(
                         status_code=409,
                         detail="Cannot enable: pgvector table has no vector columns.",
+                    )
+            elif destination.type == "garnet":
+                probe = await _test_garnet_vector_set(destination.config)
+                if not probe.get("success"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Cannot enable: {probe.get('error', 'Garnet probe failed')}",
                     )
         except HTTPException:
             raise
@@ -3442,18 +3475,23 @@ async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True)
         vector_set = str(config.get("vector_set", "omnivec-vectors"))
         info = await client.execute_command("VINFO", vector_set)
         size = None
+        dimensions = None
         if info:
             decoded = [
                 value.decode("utf-8") if isinstance(value, bytes) else value
                 for value in info
             ]
-            size = dict(zip(decoded[0::2], decoded[1::2])).get("size")
+            metadata = dict(zip(decoded[0::2], decoded[1::2]))
+            size = metadata.get("size")
+            dimensions = metadata.get("input-vector-dimensions")
         return {
             "success": True,
             "message": "Connected successfully to Garnet Vector Sets.",
             "details": f"Vector set: {vector_set}" + (
                 f", size: {size}" if size is not None else " (created on first write)"
             ),
+            "size": int(size) if size is not None else None,
+            "dimensions": int(dimensions) if dimensions is not None else None,
         }
     except Exception as exc:
         logger.warning("Garnet connection test failed: %s", type(exc).__name__)
@@ -3592,6 +3630,18 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
                 }
             finally:
                 await conn.close()
+
+        elif req.type == "garnet":
+            config = GarnetDestinationConfig(**req.config).model_dump(exclude_none=True)
+            result = await _test_garnet_vector_set(config)
+            if result.get("success"):
+                result["vector_indexes"] = [{
+                    "path": config["vector_set"],
+                    "indexType": "garnet-vector-set",
+                    "dimensions": result.get("dimensions"),
+                    "distanceFunction": config["distance_metric"].lower(),
+                }]
+            return result
 
         elif req.type == "onelake-iceberg":
             config = OneLakeIcebergDestinationConfig(**req.config)
@@ -7030,6 +7080,43 @@ async def _build_index_specs(
                 },
                 "mode": "vector",
                 "vector": {"field": cfg.get("vector_column", "embedding"), "dims": cfg.get("vector_dimensions") or model_dims or 1024, "metric": "cosine"},
+                "embedding": embedding,
+                "content_fields": cf,
+                "pipeline_id": matched_pip.get("id"),
+            })
+        elif dtype == "garnet":
+            if want_fts and not want_vector:
+                warnings.append(f"destination {dest_id} (garnet) does not support full-text search")
+                continue
+            if want_fts:
+                warnings.append(f"destination {dest_id} (garnet) does not support full-text search; using vector only")
+            raw_metric = str(cfg.get("distance_metric", "cosine")).lower()
+            metric = {
+                "ip": "dot",
+                "xcosine_normalized": "cosine",
+            }.get(raw_metric, raw_metric)
+            indexes.append({
+                "id": dest_id,
+                "store": {
+                    "type": "garnet",
+                    "endpoint": cfg.get("endpoint", ""),
+                    "vector_set": cfg.get("vector_set", "omnivec-vectors"),
+                    "tls": cfg.get("tls", True),
+                    "use_entra_auth": cfg.get("use_entra_auth", False),
+                    "username": cfg.get("username"),
+                    "auth": (
+                        {"mode": "key", "secret_ref": cfg.get("password_secret_ref")}
+                        if cfg.get("password_secret_ref")
+                        else {"mode": "managed_identity"}
+                    ),
+                    "search_ef": cfg.get("search_ef", 100),
+                    "filter_ef": cfg.get("filter_ef", 16),
+                },
+                "vector": {
+                    "field": "embedding",
+                    "dims": cfg.get("vector_dimensions") or model_dims,
+                    "metric": metric,
+                },
                 "embedding": embedding,
                 "content_fields": cf,
                 "pipeline_id": matched_pip.get("id"),

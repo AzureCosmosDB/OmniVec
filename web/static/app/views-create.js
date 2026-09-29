@@ -136,6 +136,7 @@ async function loadIndexes(v) {
     if (d.type==='cosmosdb-vector') { const r = await api('/api/destinations/test-connection', { method:'POST', body:{ type:d.type, config:d.config||{}, destination_id:d.id } });
       W.indexes = r.vector_indexes || cfgIdx || []; if (r.success === false) W.indexErr = r.error || r.message; }
     else if (d.type==='pgvector') W.indexes = [{ path:(d.config||{}).vector_column||'embedding', dimensions:(d.config||{}).vector_dimensions, indexType:(d.config||{}).index_type }];
+    else if (d.type==='garnet') W.indexes = [{ path:(d.config||{}).vector_set||'omnivec-vectors', dimensions:(d.config||{}).vector_dimensions, indexType:'garnet-vector-set', distanceFunction:((d.config||{}).distance_metric||'COSINE').toLowerCase() }];
     else W.indexes = cfgIdx || [{ path:'embedding' }];
   } catch (e) { W.indexes = cfgIdx || []; W.indexErr = e.message; }
   if (!W.indexes.length) { const pol = ((M.hd[d.id]||{}).checks||[]).find(c => c.check==='vector_policy'); if (pol && pol.vector_field) W.indexes = [{ path:'/'+pol.vector_field, dimensions:pol.dimensions }]; }

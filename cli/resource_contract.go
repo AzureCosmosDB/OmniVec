@@ -17,6 +17,7 @@ var sourceConnectorFields = map[string][]string{
 var destinationConnectorFields = map[string][]string{
 	"cosmosdb-vector": {"endpoint", "database", "container"},
 	"pgvector":        {"host", "database", "table"},
+	"garnet":          {"endpoint", "vector_set"},
 	"onelake-iceberg": {
 		"workspace_id",
 		"lakehouse_item_id",

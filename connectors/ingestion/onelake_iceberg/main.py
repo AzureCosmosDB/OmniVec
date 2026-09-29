@@ -91,7 +91,7 @@ class OneLakeIcebergWatcher:
         active = [p for p in pipelines if p.get("status") == "active"]
         dest_by_id = {
             d["id"]: d for d in destinations
-            if d.get("enabled") and d.get("type") in ("onelake-iceberg", "cosmosdb-vector")
+            if d.get("enabled") and d.get("type") in ("onelake-iceberg", "cosmosdb-vector", "garnet")
         }
         for source in sources:
             if source.get("type") != "onelake-iceberg" or not source.get("enabled"):
@@ -365,7 +365,7 @@ class OneLakeIcebergWatcher:
             async with sender:
                 for start in range(0, len(messages), batch_size):
                     chunk = messages[start : start + batch_size]
-                    batch = await sender.create_message_batch()
+                    batch = await sender.create_message_batch(max_size_in_bytes=240_000)
                     for message, _, _ in chunk:
                         outgoing = ServiceBusMessage(json.dumps(message, separators=(",", ":")))
                         try:
@@ -374,7 +374,7 @@ class OneLakeIcebergWatcher:
                             if len(batch) == 0:
                                 raise  # one message cannot fit; do not checkpoint it
                             await sender.send_messages(batch)
-                            batch = await sender.create_message_batch()
+                            batch = await sender.create_message_batch(max_size_in_bytes=240_000)
                             batch.add_message(outgoing)
                     if len(batch):
                         await sender.send_messages(batch)

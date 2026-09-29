@@ -129,6 +129,7 @@ const TYPES = {
   'onelake-iceberg':{label:'OneLake · Apache Iceberg',short:'OneLake',logo:'l-onelake',abbr:'OL'},
   'cosmosdb-vector':{label:'Azure Cosmos DB · Vector',short:'Cosmos DB vector',logo:'l-vec',abbr:'VEC'},
   'pgvector':{label:'PostgreSQL + pgvector',short:'pgvector',logo:'l-pg',abbr:'PGV'},
+  'garnet':{label:'Microsoft Garnet · Vector Sets',short:'Garnet',logo:'l-vec',abbr:'GAR'},
   'azure-openai':{label:'Azure OpenAI',short:'Azure OpenAI',logo:'l-aoai',abbr:'AI'},
   'openai':{label:'OpenAI',short:'OpenAI',logo:'l-aoai',abbr:'AI'},
   'native':{label:'In-cluster model',short:'In-cluster',logo:'l-aoai',abbr:'ML'},
