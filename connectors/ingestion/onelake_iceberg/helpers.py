@@ -36,6 +36,13 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def ordered_source_version(timestamp_ms: int, sequence_number: int) -> int:
+    """Create one ordering domain shared by Iceberg recovery and Delta CDF."""
+    if timestamp_ms < 0 or sequence_number < 0:
+        raise ValueError("source version components must be non-negative")
+    return timestamp_ms * 1_000_000 + sequence_number
+
+
 def checkpoint_key(pipeline_id: str, pipeline_revision: str, source_ref: str) -> str:
     return f"{pipeline_id}:{pipeline_revision}:{source_ref}"
 

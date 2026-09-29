@@ -30,7 +30,7 @@ from pyiceberg.catalog import load_catalog
 
 from helpers import (
     checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
-    pipeline_fingerprint, row_has_current_omnivec_embedding,
+    ordered_source_version, pipeline_fingerprint, row_has_current_omnivec_embedding,
 )
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -96,7 +96,13 @@ class OneLakeIcebergWatcher:
         for source in sources:
             if source.get("type") != "onelake-iceberg" or not source.get("enabled"):
                 continue
-            poll_interval = int(source.get("config", {}).get("poll_interval_seconds", 60))
+            source_config = source.get("config", {})
+            cdf_config = source_config.get("change_data_feed") or {}
+            poll_interval = int(
+                cdf_config.get("recovery_poll_interval_seconds", 900)
+                if cdf_config.get("enabled")
+                else source_config.get("poll_interval_seconds", 60)
+            )
             source_pipelines = [
                 pipeline for pipeline in active
                 if any(ps.get("source_id") == source["id"] for ps in pipeline.get("sources", []))
@@ -152,7 +158,14 @@ class OneLakeIcebergWatcher:
         table = catalog.load_table((*namespace_tuple, config["table"]))
         current_snapshot = table.current_snapshot()
         snapshot_id = str(current_snapshot.snapshot_id) if current_snapshot else None
-        source_version = int(current_snapshot.sequence_number) if current_snapshot else 0
+        source_version = (
+            ordered_source_version(
+                int(current_snapshot.timestamp_ms),
+                int(current_snapshot.sequence_number),
+            )
+            if current_snapshot
+            else 0
+        )
         pipeline_state = {
             pipeline["id"]: pipeline_fingerprint(pipeline, destinations[pipeline["destination_id"]])
             for pipeline in pipelines
