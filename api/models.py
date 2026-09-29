@@ -346,6 +346,9 @@ class OneLakeIcebergDestinationConfig(BaseModel):
     target_table: str
     fabric_api_base_url: str = "https://api.fabric.microsoft.com/v1"
     spark_executable_file: Optional[str] = None
+    merge_batch_size: int = Field(default=5000, ge=1, le=100000)
+    merge_flush_interval_seconds: int = Field(default=30, ge=1, le=3600)
+    max_concurrent_merges: int = Field(default=1, ge=1, le=32)
     writeback_columns: "OneLakeIcebergWritebackColumns" = Field(
         default_factory=lambda: OneLakeIcebergWritebackColumns()
     )

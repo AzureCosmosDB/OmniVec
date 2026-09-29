@@ -37,8 +37,11 @@ const FORMS = {
     'onelake-iceberg': { blurb:'Iceberg tables in OneLake, merged by a Spark job, with an optional Garnet mirror for low-latency search.', fields:[
       F('workspace_id','Workspace ID',{ req:1 }), F('lakehouse_item_id','Lakehouse item ID',{ req:1 }), F('spark_job_definition_item_id','Spark Job Definition item ID',{ req:1 }),
       F('staging_file_system','Staging file system',{ req:1, ph:'<workspace-id>' }), F('staging_path','Staging path',{ ph:'<lakehouse-id>/Files/omnivec/staging' }), F('target_table','Target table',{ req:1 }),
+      F('merge_batch_size','Merge batch size',{ type:'number', def:5000, adv:1, hint:'Submit when this many embeddings are staged.' }),
+      F('merge_flush_interval_seconds','Merge flush interval (seconds)',{ type:'number', def:30, adv:1, hint:'Submit a partial batch after this delay.' }),
+      F('max_concurrent_merges','Maximum concurrent merges',{ type:'number', def:1, adv:1, hint:'Limits active Fabric merge jobs for this destination.' }),
       F('garnet_endpoint','Garnet endpoint (optional mirror)',{ adv:1 }), F('garnet_vector_set','Garnet vector set',{ def:'omnivec-vectors', adv:1 }) ],
-      build: v => { const c = { workspace_id:v.workspace_id, lakehouse_item_id:v.lakehouse_item_id, spark_job_definition_item_id:v.spark_job_definition_item_id, staging_file_system:v.staging_file_system, staging_path:v.staging_path || `${v.lakehouse_item_id}/Files/omnivec/staging`, target_table:v.target_table };
+      build: v => { const c = { workspace_id:v.workspace_id, lakehouse_item_id:v.lakehouse_item_id, spark_job_definition_item_id:v.spark_job_definition_item_id, staging_file_system:v.staging_file_system, staging_path:v.staging_path || `${v.lakehouse_item_id}/Files/omnivec/staging`, target_table:v.target_table, merge_batch_size:+v.merge_batch_size||5000, merge_flush_interval_seconds:+v.merge_flush_interval_seconds||30, max_concurrent_merges:+v.max_concurrent_merges||1 };
         if (v.garnet_endpoint) c.mirror = { type:'garnet', best_effort:false, config:{ endpoint:v.garnet_endpoint, vector_set:v.garnet_vector_set||'omnivec-vectors', tls:true, use_entra_auth:true } }; return c; },
       load: c => ({ ...c, garnet_endpoint: c.mirror && c.mirror.config && c.mirror.config.endpoint, garnet_vector_set: c.mirror && c.mirror.config && c.mirror.config.vector_set }) },
   },

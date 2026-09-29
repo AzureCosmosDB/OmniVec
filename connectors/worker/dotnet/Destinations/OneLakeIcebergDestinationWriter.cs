@@ -5,6 +5,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Azure;
 using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
@@ -24,6 +25,8 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
     internal const string WriterMarker = "omnivec-onelake-iceberg-v1";
     private static readonly ConcurrentDictionary<string, Lazy<Task<ConnectionMultiplexer>>> GarnetConnections = new();
     private static readonly ConcurrentDictionary<string, ConnectionMultiplexer> RedisConnections = new();
+    private static readonly ConcurrentDictionary<string, int> PendingMergeCounts = new();
+    private static readonly ConcurrentDictionary<string, Task> ScheduledMergeFlushes = new();
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<OneLakeIcebergDestinationWriter> _logger;
 
@@ -62,16 +65,354 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         var accountUrl = Get(config, "staging_account_url", "https://onelake.dfs.fabric.microsoft.com");
         var fileSystem = Required(config, "staging_file_system");
         var stagingRoot = Get(config, "staging_path", $"{lakehouseItemId}/Files/omnivec/staging").Trim('/');
-        var writebackColumnsJson = GetJson(config, "writeback_columns", "{}");
         var runId = BuildRunId(targetTable, results);
-        var stagingPath = $"{stagingRoot}/pipeline={SafePath(results[0].PipelineId)}/generation={SafePath(results[0].PipelineGeneration)}/batch={runId}.jsonl";
-        var stageUri = BuildAbfsUri(accountUrl, fileSystem, stagingPath);
+        var pipelineId = results[0].PipelineId;
+        var generation = results[0].PipelineGeneration;
+        var pendingDirectory = PendingDirectory(stagingRoot, pipelineId, generation);
+        var stagingPath = $"{pendingDirectory}/part={runId}-count={results.Count:D6}.jsonl";
 
         await StageAsync(accountUrl, fileSystem, stagingPath, targetTable, runId, results, ct);
-        await StartFabricJobAsync(
-            config, workspaceId, lakehouseItemId, jobDefinitionId, stageUri, targetTable, runId,
-            writebackColumnsJson, ct);
         await MirrorToServingEngineAsync(config, results, ct);
+        QueueMergeFlush(
+            config, workspaceId, lakehouseItemId, jobDefinitionId, accountUrl, fileSystem,
+            stagingRoot, targetTable, pipelineId, generation, results.Count);
+    }
+
+    private void QueueMergeFlush(
+        Dictionary<string, object> config,
+        string workspaceId,
+        string lakehouseItemId,
+        string jobDefinitionId,
+        string accountUrl,
+        string fileSystem,
+        string stagingRoot,
+        string targetTable,
+        string pipelineId,
+        string generation,
+        int stagedCount)
+    {
+        var batchSize = GetPositiveInt(config, "merge_batch_size", 5000);
+        var flushSeconds = GetPositiveInt(config, "merge_flush_interval_seconds", 30);
+        var key = string.Join("|", workspaceId, jobDefinitionId, targetTable, pipelineId, generation);
+        var pending = PendingMergeCounts.AddOrUpdate(key, stagedCount, (_, current) => current + stagedCount);
+        if (pending >= batchSize)
+        {
+            PendingMergeCounts[key] = 0;
+            StartBackgroundFlush(
+                key, TimeSpan.Zero, config, workspaceId, lakehouseItemId, jobDefinitionId,
+                accountUrl, fileSystem, stagingRoot, targetTable, pipelineId, generation, false);
+        }
+        StartBackgroundFlush(
+            key, TimeSpan.FromSeconds(flushSeconds), config, workspaceId, lakehouseItemId,
+            jobDefinitionId, accountUrl, fileSystem, stagingRoot, targetTable, pipelineId,
+            generation, true);
+    }
+
+    private void StartBackgroundFlush(
+        string key,
+        TimeSpan delay,
+        Dictionary<string, object> config,
+        string workspaceId,
+        string lakehouseItemId,
+        string jobDefinitionId,
+        string accountUrl,
+        string fileSystem,
+        string stagingRoot,
+        string targetTable,
+        string pipelineId,
+        string generation,
+        bool flushPartial)
+    {
+        var scheduleKey = $"{key}|{(flushPartial ? "timer" : "full")}";
+        ScheduledMergeFlushes.GetOrAdd(scheduleKey, ignored => Task.Run(async () =>
+        {
+            try
+            {
+                if (delay > TimeSpan.Zero)
+                    await Task.Delay(delay);
+                await FlushPendingMergesAsync(
+                    config, workspaceId, lakehouseItemId, jobDefinitionId, accountUrl,
+                    fileSystem, stagingRoot, targetTable, pipelineId, generation, flushPartial,
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "OneLake merge coordinator failed for pipeline {PipelineId}; staged files remain durable",
+                    pipelineId);
+            }
+            finally
+            {
+                ScheduledMergeFlushes.TryRemove(scheduleKey, out _);
+            }
+        }));
+    }
+
+    private async Task FlushPendingMergesAsync(
+        Dictionary<string, object> config,
+        string workspaceId,
+        string lakehouseItemId,
+        string jobDefinitionId,
+        string accountUrl,
+        string fileSystem,
+        string stagingRoot,
+        string targetTable,
+        string pipelineId,
+        string generation,
+        bool flushPartial,
+        CancellationToken ct)
+    {
+        var service = new DataLakeServiceClient(new Uri(accountUrl), new DefaultAzureCredential());
+        var fileSystemClient = service.GetFileSystemClient(fileSystem);
+        var pendingDirectory = PendingDirectory(stagingRoot, pipelineId, generation);
+        var lockPath = $"{pendingDirectory}/.merge-lock";
+        var lockFile = fileSystemClient.GetFileClient(lockPath);
+        if (!await TryAcquireCoordinatorLockAsync(fileSystemClient, lockPath, ct))
+        {
+            ScheduleMergeRetry(
+                config, workspaceId, lakehouseItemId, jobDefinitionId, accountUrl,
+                fileSystem, stagingRoot, targetTable, pipelineId, generation);
+            return;
+        }
+
+        try
+        {
+            var batchSize = GetPositiveInt(config, "merge_batch_size", 5000);
+            var submittedThisPass = 0;
+            while (true)
+            {
+                var pending = new List<(string Path, int Count, DateTimeOffset Modified)>();
+                await foreach (var path in fileSystemClient.GetPathsAsync(
+                    pendingDirectory, recursive: false, cancellationToken: ct))
+                {
+                    if (path.IsDirectory == true || path.Name.EndsWith("/.merge-lock", StringComparison.Ordinal))
+                        continue;
+                    var count = ParsePendingCount(path.Name);
+                    if (count > 0)
+                        pending.Add((path.Name, count, path.LastModified));
+                }
+                pending.Sort((left, right) => left.Modified.CompareTo(right.Modified));
+                var total = pending.Sum(item => item.Count);
+                if (total == 0 || (!flushPartial && total < batchSize))
+                    return;
+
+                var selected = new List<(string Path, int Count, DateTimeOffset Modified)>();
+                var selectedCount = 0;
+                foreach (var item in pending)
+                {
+                    if (selectedCount > 0 && selectedCount + item.Count > batchSize)
+                        break;
+                    selected.Add(item);
+                    selectedCount += item.Count;
+                    if (selectedCount >= batchSize)
+                        break;
+                }
+                if (selected.Count == 0)
+                    return;
+
+                var maxConcurrent = GetPositiveInt(config, "max_concurrent_merges", 1);
+                var activeMerges = await GetActiveFabricMergeCountAsync(
+                    config, workspaceId, jobDefinitionId, ct);
+                if (activeMerges + submittedThisPass >= maxConcurrent)
+                {
+                    ScheduleMergeRetry(
+                        config, workspaceId, lakehouseItemId, jobDefinitionId, accountUrl,
+                        fileSystem, stagingRoot, targetTable, pipelineId, generation);
+                    return;
+                }
+
+                var runId = BuildMergeRunId(targetTable, selected.Select(item => item.Path));
+                var mergedPath =
+                    $"{stagingRoot}/pipeline={SafePath(pipelineId)}/generation={SafePath(generation)}/runs/run={runId}/batch.jsonl";
+                await CombinePendingFilesAsync(
+                    fileSystemClient, selected.Select(item => item.Path), mergedPath, runId, ct);
+                await StartFabricJobAsync(
+                    config, workspaceId, lakehouseItemId, jobDefinitionId,
+                    BuildAbfsUri(accountUrl, fileSystem, mergedPath), targetTable, runId,
+                    GetJson(config, "writeback_columns", "{}"), ct);
+                foreach (var item in selected)
+                    await fileSystemClient.DeleteFileAsync(item.Path, cancellationToken: ct);
+                _logger.LogInformation(
+                    "Submitted OneLake merge run {RunId} with {Count} embeddings from {Files} staged files",
+                    runId, selectedCount, selected.Count);
+                submittedThisPass++;
+                flushPartial = false;
+            }
+        }
+        finally
+        {
+            try
+            {
+                await lockFile.DeleteIfExistsAsync(cancellationToken: ct);
+            }
+            catch (RequestFailedException ex)
+            {
+                _logger.LogWarning(ex, "Failed to release OneLake merge coordinator lock {LockPath}", lockPath);
+            }
+        }
+    }
+
+    private void ScheduleMergeRetry(
+        Dictionary<string, object> config,
+        string workspaceId,
+        string lakehouseItemId,
+        string jobDefinitionId,
+        string accountUrl,
+        string fileSystem,
+        string stagingRoot,
+        string targetTable,
+        string pipelineId,
+        string generation)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10));
+                await FlushPendingMergesAsync(
+                    config, workspaceId, lakehouseItemId, jobDefinitionId, accountUrl,
+                    fileSystem, stagingRoot, targetTable, pipelineId, generation, true,
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "OneLake merge retry failed for pipeline {PipelineId}; staged files remain durable",
+                    pipelineId);
+            }
+        });
+    }
+
+    private async Task<int> GetActiveFabricMergeCountAsync(
+        Dictionary<string, object> config,
+        string workspaceId,
+        string jobDefinitionId,
+        CancellationToken ct)
+    {
+        var baseUrl = Get(config, "fabric_api_base_url", "https://api.fabric.microsoft.com/v1").TrimEnd('/');
+        var endpoint =
+            $"{baseUrl}/workspaces/{Uri.EscapeDataString(workspaceId)}/items/{Uri.EscapeDataString(jobDefinitionId)}/jobs/instances?jobType=SparkJobDefinition";
+        var token = await new DefaultAzureCredential().GetTokenAsync(
+            new Azure.Core.TokenRequestContext(new[] { "https://api.fabric.microsoft.com/.default" }), ct);
+        using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+        var client = _httpClientFactory.CreateClient("FabricJobs");
+        using var response = await client.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            throw new InvalidOperationException(
+                $"Fabric job status query failed ({(int)response.StatusCode}): {body}");
+        }
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+        if (!document.RootElement.TryGetProperty("value", out var jobs)
+            || jobs.ValueKind != JsonValueKind.Array)
+            return 0;
+        return jobs.EnumerateArray().Count(job =>
+            job.TryGetProperty("status", out var status)
+            && status.GetString() is "NotStarted" or "InProgress");
+    }
+
+    private static async Task<bool> TryAcquireCoordinatorLockAsync(
+        DataLakeFileSystemClient fileSystem,
+        string lockPath,
+        CancellationToken ct)
+        {
+            var directoryPath = lockPath[..lockPath.LastIndexOf('/')];
+            await fileSystem.GetDirectoryClient(directoryPath).CreateIfNotExistsAsync(cancellationToken: ct);
+            var file = fileSystem.GetFileClient(lockPath);
+            try
+            {
+                await using var stream = new MemoryStream(
+                    Encoding.UTF8.GetBytes(DateTimeOffset.UtcNow.ToString("O")), writable: false);
+                await file.UploadAsync(stream, overwrite: false, cancellationToken: ct);
+                return true;
+            }
+            catch (RequestFailedException ex) when (ex.Status == 409)
+            {
+                var properties = await file.GetPropertiesAsync(cancellationToken: ct);
+                if (DateTimeOffset.UtcNow - properties.Value.LastModified <= TimeSpan.FromMinutes(5))
+                    return false;
+                await file.DeleteIfExistsAsync(cancellationToken: ct);
+                await using var retry = new MemoryStream(
+                    Encoding.UTF8.GetBytes(DateTimeOffset.UtcNow.ToString("O")), writable: false);
+                try
+                {
+                    await file.UploadAsync(retry, overwrite: false, cancellationToken: ct);
+                    return true;
+                }
+                catch (RequestFailedException retryEx) when (retryEx.Status == 409)
+                {
+                    return false;
+                }
+            }
+        }
+
+        private static async Task CombinePendingFilesAsync(
+            DataLakeFileSystemClient fileSystem,
+            IEnumerable<string> sourcePaths,
+            string destinationPath,
+            string runId,
+            CancellationToken ct)
+        {
+            await using var output = new MemoryStream();
+            await using var writer = new StreamWriter(output, new UTF8Encoding(false), leaveOpen: true);
+            foreach (var sourcePath in sourcePaths)
+            {
+                var download = await fileSystem.GetFileClient(sourcePath).ReadStreamingAsync(cancellationToken: ct);
+                using var reader = new StreamReader(download.Value.Content, Encoding.UTF8);
+                while (await reader.ReadLineAsync(ct) is { } line)
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                        continue;
+                    var record = JsonNode.Parse(line)?.AsObject()
+                        ?? throw new InvalidOperationException($"Invalid staged JSON record in {sourcePath}");
+                    var operationOrder = record["operation_order"]?.GetValue<string>()
+                        ?? throw new InvalidOperationException($"Staged record in {sourcePath} lacks operation_order");
+                    record["omnivec_run_id"] = runId;
+                    record["operation_version"] = $"{operationOrder}:{runId}";
+                    await writer.WriteLineAsync(record.ToJsonString());
+                }
+            }
+            await writer.FlushAsync(ct);
+            output.Position = 0;
+            var directoryPath = destinationPath[..destinationPath.LastIndexOf('/')];
+            await fileSystem.GetDirectoryClient(directoryPath).CreateIfNotExistsAsync(cancellationToken: ct);
+            var destination = fileSystem.GetFileClient(destinationPath);
+            try
+            {
+                await destination.UploadAsync(output, overwrite: false, cancellationToken: ct);
+            }
+            catch (RequestFailedException ex) when (ex.Status == 409)
+            {
+                await destination.GetPropertiesAsync(cancellationToken: ct);
+            }
+        }
+
+        private static string PendingDirectory(string stagingRoot, string pipelineId, string generation)
+            => $"{stagingRoot}/pipeline={SafePath(pipelineId)}/generation={SafePath(generation)}/pending";
+
+        internal static int ParsePendingCount(string path)
+        {
+            const string marker = "-count=";
+            var markerIndex = path.LastIndexOf(marker, StringComparison.Ordinal);
+            var extensionIndex = path.LastIndexOf(".jsonl", StringComparison.Ordinal);
+            return markerIndex >= 0
+                && extensionIndex > markerIndex
+                && int.TryParse(
+                    path.AsSpan(markerIndex + marker.Length, extensionIndex - markerIndex - marker.Length),
+                    out var count)
+                ? count
+                : 0;
+        }
+
+    internal static string BuildMergeRunId(string targetTable, IEnumerable<string> sourcePaths)
+    {
+        var material = $"{targetTable}\n{string.Join("\n", sourcePaths.Order(StringComparer.Ordinal))}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material))).ToLowerInvariant()[..32];
     }
 
     private async Task StageAsync(
@@ -321,14 +662,14 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         var accountUrl = Get(config, "staging_account_url", "https://onelake.dfs.fabric.microsoft.com");
         var fileSystem = Required(config, "staging_file_system");
         var stagingRoot = Get(config, "staging_path", $"{lakehouseItemId}/Files/omnivec/staging").Trim('/');
-        var writebackColumnsJson = GetJson(config, "writeback_columns", "{}");
 
         foreach (var pipelineRequests in requests.GroupBy(request => request.PipelineId))
         {
             var batch = pipelineRequests.ToList();
             var runId = BuildDeleteRunId(targetTable, batch);
-            var stagingPath = $"{stagingRoot}/pipeline={SafePath(batch[0].PipelineId)}/deletes/batch={runId}.jsonl";
-            var stageUri = BuildAbfsUri(accountUrl, fileSystem, stagingPath);
+            const string generation = "deletes";
+            var stagingPath =
+                $"{PendingDirectory(stagingRoot, batch[0].PipelineId, generation)}/part={runId}-count={batch.Count:D6}.jsonl";
             var records = batch.Select(request => new
             {
                 id = request.SourceRef,
@@ -354,9 +695,9 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
             var payload = Encoding.UTF8.GetBytes(string.Join(
                 "\n", records.Select(record => JsonSerializer.Serialize(record))) + "\n");
             await StagePayloadAsync(accountUrl, fileSystem, stagingPath, payload, ct);
-            await StartFabricJobAsync(
-                config, workspaceId, lakehouseItemId, jobDefinitionId, stageUri, targetTable, runId,
-                writebackColumnsJson, ct);
+            QueueMergeFlush(
+                config, workspaceId, lakehouseItemId, jobDefinitionId, accountUrl, fileSystem,
+                stagingRoot, targetTable, batch[0].PipelineId, generation, batch.Count);
         }
 
         var mirror = GetMirror(config);

@@ -59,7 +59,9 @@ They also store a pipeline fingerprint, so adding a pipeline or changing its
 model, generation, write-back mapping, or serving mirror forces a rescan even
 when the Iceberg snapshot itself has not changed.
 Configure the pipeline's OneLake destination `target_table` to this same
-source table (using the Spark catalog-qualified table form required by Fabric).
+source table. Use the identifier visible to the attached Spark lakehouse
+(commonly `documents`); namespace-qualified names such as `dbo.documents` are
+also accepted when that Spark catalog exposes them.
 When `change_data_feed.enabled` is true, the watcher performs the initial
 prefill immediately and then scans at `recovery_poll_interval_seconds` as a
 repair path. The Delta CDF job below handles low-latency changes.
@@ -74,7 +76,10 @@ Create a destination with `type: "onelake-iceberg"`:
   "staging_account_url": "https://onelake.dfs.fabric.microsoft.com",
   "staging_file_system": "<workspaceId>",
   "staging_path": "<lakehouseItemId>/Files/omnivec/staging",
-  "target_table": "dbo.documents",
+  "target_table": "documents",
+  "merge_batch_size": 5000,
+  "merge_flush_interval_seconds": 30,
+  "max_concurrent_merges": 1,
   "writeback_columns": {
     "id_field": "id",
     "embedding_field": "embedding",
@@ -108,9 +113,19 @@ Create a destination with `type: "onelake-iceberg"`:
 }
 ```
 
+The merge controls are user-configurable in the OneLake destination form.
+`merge_batch_size` submits a full batch, while
+`merge_flush_interval_seconds` bounds latency for a partially filled batch.
+`max_concurrent_merges` limits active Fabric Spark MERGE submissions for the
+destination. The defaults favor sustained ingestion without launching one
+Spark job per embedding microbatch.
+
 Staged JSONL names are deterministic from the target table and
-pipeline/source/ref/content hashes. The worker first proves the file durable,
-then accepts HTTP 200/201/202 from the Fabric Jobs API as asynchronous success.
+pipeline/source/ref/content hashes. The worker first persists each embedding
+microbatch under the destination staging path. A distributed OneLake
+coordinator combines those durable files and submits a Fabric job when the
+configured row threshold or flush interval is reached. Accepted source
+messages therefore do not require one Fabric job per embedding call.
 The Spark job refuses to insert a missing source row: it updates only the
 configured `id_field` in the existing target/source table. Each update carries
 the monotonic Iceberg snapshot sequence in `omnivec_run_id`, so a late older
