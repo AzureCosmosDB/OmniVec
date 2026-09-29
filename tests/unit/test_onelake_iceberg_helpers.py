@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parents[2] / "connectors" / "ingestion" / "onelake_iceberg"))
 from helpers import (  # noqa: E402
     checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
-    pipeline_fingerprint, row_has_current_omnivec_embedding,
+    ordered_source_version, pipeline_fingerprint, row_has_current_omnivec_embedding,
 )
 
 
@@ -67,3 +67,7 @@ def test_checkpoint_persists_known_refs_for_delete_detection():
     assert b'"known_refs":{"pipeline":["row-1","row-2"]}' in payload
     assert b'"pipeline_revisions":{"pipeline":3}' in payload
     assert b'"pending_empty_refs":{"pipeline":["row-3"]}' in payload
+
+
+def test_source_version_orders_by_snapshot_timestamp_then_sequence():
+    assert ordered_source_version(1000, 999) < ordered_source_version(1001, 0)

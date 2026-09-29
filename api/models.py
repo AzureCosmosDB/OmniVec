@@ -192,6 +192,28 @@ class DatabricksSourceConfig(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class OneLakeDeltaCdfConfig(BaseModel):
+    """Optional Fabric Spark streaming configuration for Delta Change Data Feed."""
+    enabled: bool = False
+    checkpoint_path: str = "Files/omnivec/cdf-checkpoints"
+    trigger_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    recovery_poll_interval_seconds: int = Field(default=900, ge=60, le=86400)
+    starting_version: Optional[int] = Field(default=None, ge=0)
+    max_files_per_trigger: int = Field(default=1000, ge=1, le=100000)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("checkpoint_path")
+    @classmethod
+    def _validate_checkpoint_path(cls, value: str) -> str:
+        normalized = value.strip("/")
+        if not normalized.startswith("Files/") or any(
+            part in ("", ".", "..") for part in normalized.split("/")
+        ):
+            raise ValueError("checkpoint_path must be a safe Lakehouse path below Files/")
+        return normalized
+
+
 class OneLakeIcebergSourceConfig(BaseModel):
     """A read-only OneLake Iceberg REST catalog source.
 
@@ -210,6 +232,7 @@ class OneLakeIcebergSourceConfig(BaseModel):
     checkpoint_account_url: str = "https://onelake.dfs.fabric.microsoft.com"
     checkpoint_file_system: Optional[str] = None  # defaults to workspaceId
     checkpoint_path: str = ".omnivec/checkpoints"
+    change_data_feed: Optional[OneLakeDeltaCdfConfig] = None
 
     model_config = {"extra": "forbid"}
 

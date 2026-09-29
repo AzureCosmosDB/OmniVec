@@ -245,6 +245,30 @@ class TestPipeline:
                 onelake_identity={"tenant_id": "not-a-guid", "client_id": "also-bad"},
             )
 
+    def test_onelake_delta_cdf_config_is_validated(self, api_models):
+        config = api_models.OneLakeIcebergSourceConfig(
+            warehouse="workspace/lakehouse",
+            namespace="dbo",
+            table="documents",
+            change_data_feed={
+                "enabled": True,
+                "checkpoint_path": "Files/omnivec/cdf/documents",
+                "trigger_interval_seconds": 5,
+                "recovery_poll_interval_seconds": 600,
+                "max_files_per_trigger": 250,
+            },
+        )
+        assert config.change_data_feed.enabled is True
+        assert config.change_data_feed.max_files_per_trigger == 250
+
+        with pytest.raises(ValidationError):
+            api_models.OneLakeIcebergSourceConfig(
+                warehouse="workspace/lakehouse",
+                namespace="dbo",
+                table="documents",
+                change_data_feed={"enabled": True, "checkpoint_path": "../outside"},
+            )
+
 
 # ===========================================================================
 # Job + JobStats

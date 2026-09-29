@@ -21,7 +21,14 @@ Create a source with `type: "onelake-iceberg"`:
   "fabric_retry_interval_seconds": 900,
   "checkpoint_account_url": "https://onelake.dfs.fabric.microsoft.com",
   "checkpoint_file_system": "<workspaceId>",
-  "checkpoint_path": ".omnivec/checkpoints"
+  "checkpoint_path": ".omnivec/checkpoints",
+  "change_data_feed": {
+    "enabled": true,
+    "checkpoint_path": "Files/omnivec/cdf-checkpoints/documents",
+    "trigger_interval_seconds": 10,
+    "recovery_poll_interval_seconds": 900,
+    "max_files_per_trigger": 1000
+  }
 }
 ```
 
@@ -53,6 +60,9 @@ model, generation, write-back mapping, or serving mirror forces a rescan even
 when the Iceberg snapshot itself has not changed.
 Configure the pipeline's OneLake destination `target_table` to this same
 source table (using the Spark catalog-qualified table form required by Fabric).
+When `change_data_feed.enabled` is true, the watcher performs the initial
+prefill immediately and then scans at `recovery_poll_interval_seconds` as a
+repair path. The Delta CDF job below handles low-latency changes.
 
 Create a destination with `type: "onelake-iceberg"`:
 
@@ -181,3 +191,86 @@ azd env set OMNIVEC_ONELAKE_ICEBERG_ENABLED true
 azd env set OMNIVEC_BUILD true
 azd up
 ```
+
+## Streaming inserts, updates, and deletes with Delta CDF
+
+Fabric Lakehouse tables are physically Delta tables even when OneLake exposes
+them through the Iceberg REST catalog. Use Delta Change Data Feed for the live
+path and keep the Iceberg watcher for prefill and recovery.
+
+Enable CDF before starting the stream:
+
+```sql
+ALTER TABLE dbo.documents SET TBLPROPERTIES (
+  'delta.enableChangeDataFeed' = 'true'
+);
+```
+
+Upload these files to a long-running Fabric Spark Job Definition:
+
+- `connectors/fabric_spark/onelake_delta_cdf_stream.py`
+- `connectors/fabric_spark/onelake_delta_cdf_helpers.py`
+
+The job reads `insert`, `update_postimage`, and `delete` records. Updates made
+only by OmniVec are discarded when the stored content hash, model, pipeline
+ID, and generation match. An update that clears all configured source content
+is emitted as a delete.
+
+Create a Key Vault secret containing a Service Bus namespace connection string
+with **Send** permission only. Grant the Fabric job identity permission to read
+that secret. Fabric NotebookUtils doesn't expose a Service Bus token audience,
+so the connection string is retrieved from Key Vault at runtime and is never
+placed in Spark arguments or source control.
+
+Start the job after the first watcher prefill completes:
+
+```text
+--target-table dbo.documents
+--checkpoint-location abfss://<workspaceId>@onelake.dfs.fabric.microsoft.com/<lakehouseId>/Files/omnivec/cdf-checkpoints/documents
+--service-bus-namespace <namespace>.servicebus.windows.net
+--service-bus-topic embeddings
+--service-bus-key-vault-url https://<vault>.vault.azure.net/
+--service-bus-connection-secret-name omnivec-servicebus-send
+--pipeline-config-base64 <base64-encoded JSON array>
+--trigger-interval-seconds 10
+--max-files-per-trigger 1000
+```
+
+Omit `--starting-version` for the normal prefill-to-live handoff; Structured
+Streaming starts with changes arriving after the stream starts. Set it only
+when intentionally replaying retained CDF history. Spark's checkpoint provides
+microbatch recovery. Messages have deterministic IDs, and downstream writes
+use source and pipeline versions, so retried microbatches are safe. Enabling
+duplicate detection on the Service Bus topic also avoids redundant embedding
+calls.
+
+The decoded `pipeline-config-base64` value is an array with one entry per
+active pipeline:
+
+```json
+[
+  {
+    "pipeline_id": "pip-documents",
+    "pipeline_name": "Documents",
+    "docgrok_pipeline": "text-embedding-model",
+    "pipeline_generation": "1",
+    "pipeline_revision": 1,
+    "source_id": "src-onelake",
+    "id_field": "id",
+    "content_fields": ["title", "body"],
+    "destination_id": "dst-onelake",
+    "destination_type": "onelake-iceberg",
+    "destination_config": {},
+    "writeback_columns": {
+      "content_hash_field": "content_hash",
+      "pipeline_id_field": "pipeline_id",
+      "pipeline_generation_field": "pipeline_generation",
+      "model_field": "embedding_model"
+    }
+  }
+]
+```
+
+This job remains running and consumes Fabric capacity while active. If
+continuous Spark capacity isn't desired, retain the polling watcher or route
+upstream database CDC through Fabric Eventstream before landing the table.
