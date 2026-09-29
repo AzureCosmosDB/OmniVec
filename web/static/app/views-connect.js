@@ -34,6 +34,17 @@ const FORMS = {
       F('vector_dimensions','Dimensions',{ type:'number', def:1536, hint:'Must match the embedding model.' }), F('index_type','Index',{ type:'select', opts:['hnsw','ivfflat'], def:'hnsw' }),
       F('user','User',{ req:1 }), F('password','Password',{ type:'password' }),
       F('vector_column','Vector column',{ def:'embedding', adv:1 }), F('content_column','Content column',{ def:'content', adv:1 }), F('id_column','ID column',{ def:'id', adv:1 }), F('ssl_mode','SSL mode',{ type:'select', opts:['require','verify-full','prefer','disable'], def:'require', adv:1 }) ] },
+    'garnet': { blurb:'Low-latency DiskANN vector search using Garnet Vector Sets (preview).', fields:[
+      F('endpoint','Endpoint',{ req:1, ph:'garnet.omnivec.svc.cluster.local:6379' }),
+      F('vector_set','Vector set',{ req:1, def:'omnivec-vectors' }),
+      F('distance_metric','Distance metric',{ type:'select', opts:['COSINE','L2','IP','XCOSINE_NORMALIZED'], def:'COSINE' }),
+      F('quantization','Quantization',{ type:'select', opts:['NOQUANT','Q8','BIN'], def:'NOQUANT' }),
+      F('tls','TLS',{ type:'select', opts:['true','false'], def:'true', adv:1 }),
+      F('use_entra_auth','Microsoft Entra auth',{ type:'select', opts:['false','true'], def:'false', adv:1 }),
+      F('username','Username',{ adv:1 }), F('password_secret_ref','Password secret reference',{ ph:'kv://<vault>/<secret>', adv:1 }),
+      F('m','Graph links (M)',{ type:'number', def:16, adv:1 }), F('ef','Build EF',{ type:'number', def:200, adv:1 }),
+      F('search_ef','Search EF',{ type:'number', def:100, adv:1 }), F('filter_ef','Filter EF',{ type:'number', def:16, adv:1 }) ],
+      build: v => ({ endpoint:v.endpoint, vector_set:v.vector_set||'omnivec-vectors', distance_metric:v.distance_metric||'COSINE', quantization:v.quantization||'NOQUANT', tls:String(v.tls)!=='false', use_entra_auth:String(v.use_entra_auth)==='true', username:v.username||undefined, password_secret_ref:v.password_secret_ref||undefined, m:+v.m||16, ef:+v.ef||200, search_ef:+v.search_ef||100, filter_ef:+v.filter_ef||16 }) },
     'onelake-iceberg': { blurb:'Iceberg tables in OneLake, merged by a Spark job, with an optional Garnet mirror for low-latency search.', fields:[
       F('workspace_id','Workspace ID',{ req:1 }), F('lakehouse_item_id','Lakehouse item ID',{ req:1 }), F('spark_job_definition_item_id','Spark Job Definition item ID',{ req:1 }),
       F('staging_file_system','Staging file system',{ req:1, ph:'<workspace-id>' }), F('staging_path','Staging path',{ ph:'<lakehouse-id>/Files/omnivec/staging' }), F('target_table','Target table',{ req:1 }),
@@ -51,7 +62,7 @@ const listOf = kind => kind==='source' ? M.sources : M.dests;
 const healthOf = (kind, id) => (kind==='source' ? M.hs : M.hd)[id];
 const hdot = h => dot(!h ? '' : h.status==='healthy' ? 'ok' : h.status==='warning' ? 'warn' : 'err');
 const keyInfo = (x) => { const c = x.config||{};
-  return x.type==='azure-blob' ? `${c.container||'—'}${c.prefix?' / '+c.prefix:''}` : x.type==='sharepoint' ? (c.folder_path||'Document library') : x.type==='onelake-iceberg' ? (c.table||c.target_table||'—')
+  return x.type==='azure-blob' ? `${c.container||'—'}${c.prefix?' / '+c.prefix:''}` : x.type==='sharepoint' ? (c.folder_path||'Document library') : x.type==='onelake-iceberg' ? (c.table||c.target_table||'—') : x.type==='garnet' ? `${c.endpoint||'—'} / ${c.vector_set||'omnivec-vectors'}`
     : c.container ? `${c.database||''} / ${c.container}` : c.table ? `${c.database||''} / ${c.table}` : '—'; };
 
 /* ---------- list ---------- */
@@ -80,7 +91,7 @@ route('connections', { needs:[...X.CORE, 'caps'], render(parts) {
        <td class="r"><button class="btn ghost sm icon" data-rm="${x.id}">${icon('more','sm')}</button></td></tr>`; }).join('')}</tbody></table>`
     : empty('search', 'No matches', 'Try another filter.');
   const firstRun = !list.length;
-  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','onelake-iceberg','mssql'] : ['cosmosdb-vector','pgvector','onelake-iceberg'])
+  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','onelake-iceberg','mssql'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
     .map(t => `<a class="opt" href="#/connections/new/${path}?type=${t}">${logo(t)}<div><div class="t">${esc(T(t).label)}</div><div class="d">Guided setup with a permissions check</div></div></a>`).join('');
   const html = `<div class="page">
    <div class="ph"><div><h1>Connections</h1><p>Sources are where content comes from. Vector stores are where embeddings are written and searched. Each can be reused by many pipelines.</p></div>

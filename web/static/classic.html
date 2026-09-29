@@ -2587,6 +2587,7 @@
                                 <select class="form-input" name="type" onchange="updateDestinationConfig(this.value)">
                                     <option value="cosmosdb-vector">Azure CosmosDB (Vector)</option>
                                     <option value="pgvector">PostgreSQL + pgvector</option>
+                                    <option value="garnet">Microsoft Garnet Vector Sets</option>
                                     <option value="onelake-iceberg">OneLake Iceberg + Garnet</option>
                                 </select>
                             </div>
@@ -9061,6 +9062,21 @@
                     password: formData.get('password') || '',
                     ssl_mode: formData.get('ssl_mode') || 'require'
                 };
+            } else if (destType === 'garnet') {
+                config = {
+                    endpoint: formData.get('endpoint'),
+                    vector_set: formData.get('vector_set') || 'omnivec-vectors',
+                    distance_metric: formData.get('distance_metric') || 'COSINE',
+                    quantization: formData.get('quantization') || 'NOQUANT',
+                    tls: formData.get('garnet_tls') === 'on',
+                    use_entra_auth: formData.get('garnet_entra') === 'on',
+                    username: formData.get('garnet_username') || undefined,
+                    password_secret_ref: formData.get('garnet_password_secret_ref') || undefined,
+                    m: parseInt(formData.get('garnet_m')) || 16,
+                    ef: parseInt(formData.get('garnet_ef')) || 200,
+                    search_ef: parseInt(formData.get('garnet_search_ef')) || 100,
+                    filter_ef: parseInt(formData.get('garnet_filter_ef')) || 16,
+                };
             } else if (destType === 'onelake-iceberg') {
                 const garnetEndpoint = formData.get('garnet_endpoint');
                 const lakehouseItemId = formData.get('lakehouse_item_id');
@@ -10071,6 +10087,40 @@
                         </select>
                     </div>
                 `;
+            } else if (type === 'garnet') {
+                container.innerHTML = `
+                    <div class="form-group"><label class="form-label">Endpoint</label>
+                        <input type="text" class="form-input" name="endpoint" placeholder="garnet.omnivec.svc.cluster.local:6379"></div>
+                    <div class="form-group"><label class="form-label">Vector Set</label>
+                        <input type="text" class="form-input" name="vector_set" value="omnivec-vectors"></div>
+                    <div class="form-group"><label class="form-label">Distance Metric</label>
+                        <select class="form-input" name="distance_metric">
+                            <option value="COSINE" selected>Cosine</option>
+                            <option value="L2">L2</option>
+                            <option value="IP">Inner product</option>
+                            <option value="XCOSINE_NORMALIZED">Normalized cosine</option>
+                        </select></div>
+                    <div class="form-group"><label class="form-label">Quantization</label>
+                        <select class="form-input" name="quantization">
+                            <option value="NOQUANT" selected>None (FP32)</option>
+                            <option value="Q8">Q8</option>
+                            <option value="BIN">Binary</option>
+                        </select></div>
+                    <div class="form-group"><label class="form-label">ACL Username (optional)</label>
+                        <input type="text" class="form-input" name="garnet_username"></div>
+                    <div class="form-group"><label class="form-label">Password Secret Reference (optional)</label>
+                        <input type="text" class="form-input" name="garnet_password_secret_ref" placeholder="kv://vault/secret"></div>
+                    <div class="form-group"><label class="form-label">Graph Links (M)</label>
+                        <input type="number" class="form-input" name="garnet_m" value="16" min="4" max="4096"></div>
+                    <div class="form-group"><label class="form-label">Build EF</label>
+                        <input type="number" class="form-input" name="garnet_ef" value="200" min="1"></div>
+                    <div class="form-group"><label class="form-label">Search EF</label>
+                        <input type="number" class="form-input" name="garnet_search_ef" value="100" min="1"></div>
+                    <div class="form-group"><label class="form-label">Filter EF</label>
+                        <input type="number" class="form-input" name="garnet_filter_ef" value="16" min="4" max="256"></div>
+                    <label style="display:flex;gap:8px;align-items:center;margin-bottom:8px;"><input type="checkbox" name="garnet_tls" checked> TLS</label>
+                    <label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" name="garnet_entra"> Microsoft Entra authentication (only when supported)</label>
+                    <p style="font-size:12px;color:var(--text-tertiary);">The endpoint must support Garnet Vector Sets. Garnet preview servers require --enable-vector-set-preview.</p>`;
             } else if (type === 'onelake-iceberg') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Workspace ID</label>
@@ -10175,6 +10225,25 @@
                 config.ssl_mode = formData.get('ssl_mode') || 'require';
                 if (!config.host || !config.database) {
                     resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Host and Database</div>`;
+                    return;
+                }
+            } else if (type === 'garnet') {
+                config = {
+                    endpoint: formData.get('endpoint') || '',
+                    vector_set: formData.get('vector_set') || 'omnivec-vectors',
+                    distance_metric: formData.get('distance_metric') || 'COSINE',
+                    quantization: formData.get('quantization') || 'NOQUANT',
+                    tls: formData.get('garnet_tls') === 'on',
+                    use_entra_auth: formData.get('garnet_entra') === 'on',
+                    username: formData.get('garnet_username') || undefined,
+                    password_secret_ref: formData.get('garnet_password_secret_ref') || undefined,
+                    m: parseInt(formData.get('garnet_m')) || 16,
+                    ef: parseInt(formData.get('garnet_ef')) || 200,
+                    search_ef: parseInt(formData.get('garnet_search_ef')) || 100,
+                    filter_ef: parseInt(formData.get('garnet_filter_ef')) || 16,
+                };
+                if (!config.endpoint || !config.vector_set) {
+                    resultDiv.innerHTML = `<div style="background:var(--warning-muted);border:1px solid var(--warning);padding:12px;border-radius:var(--radius-md);color:var(--warning);">Please fill in Endpoint and Vector Set</div>`;
                     return;
                 }
             } else if (type === 'onelake-iceberg') {
@@ -12119,6 +12188,7 @@
                 const dests = (data.destinations || []).filter(d =>
                     d.type === 'cosmosdb-vector' ||
                     d.type === 'pgvector' ||
+                    d.type === 'garnet' ||
                     (d.type === 'onelake-iceberg' && d.config?.mirror?.type === 'garnet')
                 );
                 let html = `<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--border);margin-bottom:4px;font-weight:600;font-size:13px;color:var(--text-secondary);">

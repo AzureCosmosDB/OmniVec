@@ -29,7 +29,7 @@ class TestEnums:
 
     def test_destination_type_values(self, api_models):
         assert {e.value for e in api_models.DestinationType} == {
-            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg"
+            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg", "garnet"
         }
 
     def test_job_status_values(self, api_models):
@@ -165,6 +165,33 @@ class TestDestination:
     def test_missing_required(self, api_models):
         with pytest.raises(ValidationError):
             api_models.Destination(type=api_models.DestinationType.PGVECTOR, config={})
+
+    def test_garnet_config_normalizes_vector_options(self, api_models):
+        config = api_models.GarnetDestinationConfig(
+            endpoint="garnet.omnivec.svc.cluster.local:6379",
+            vector_set="iceberg-vectors",
+            tls=False,
+            distance_metric="cosine",
+            quantization="noquant",
+        )
+        assert config.distance_metric == "COSINE"
+        assert config.quantization == "NOQUANT"
+        assert config.search_ef == 100
+
+    @pytest.mark.parametrize("field,value", [
+        ("endpoint", ""),
+        ("vector_set", "bad set"),
+        ("password_secret_ref", "plain-password"),
+        ("m", 3),
+    ])
+    def test_garnet_rejects_invalid_config(self, api_models, field, value):
+        config = {
+            "endpoint": "garnet:6379",
+            "vector_set": "omnivec-vectors",
+            field: value,
+        }
+        with pytest.raises(ValidationError):
+            api_models.GarnetDestinationConfig(**config)
 
 
 # ===========================================================================

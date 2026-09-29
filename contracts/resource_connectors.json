@@ -23,6 +23,9 @@
     "pgvector": {
       "required_fields": ["host", "database", "table"]
     },
+    "garnet": {
+      "required_fields": ["endpoint", "vector_set"]
+    },
     "onelake-iceberg": {
       "required_fields": [
         "workspace_id",

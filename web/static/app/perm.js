@@ -57,6 +57,12 @@ const GUIDE = {
     why:'OmniVec inserts, updates and deletes rows that hold the vector, text and metadata. The pgvector extension must be enabled.',
     portal:['Allow-list the <b>vector</b> extension (Azure Database for PostgreSQL: Server parameters → azure.extensions).', 'Run the SQL below as a database owner.', `Make sure the vector column has ${c.vector_dimensions||'<dimensions>'} dimensions to match your embedding model.`],
     cli: () => `CREATE EXTENSION IF NOT EXISTS vector;\nGRANT USAGE, CREATE ON SCHEMA public TO omnivec;\nGRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${c.table||'<table>'} TO omnivec;`, shell:'SQL', checkable:false }),
+  'garnet': c => ({
+    role:c.use_entra_auth ? 'Garnet data access through Microsoft Entra authentication' : 'Garnet endpoint credentials and network access',
+    scope:`${c.endpoint||'<garnet-endpoint>'} / vector set ${c.vector_set||'omnivec-vectors'}`,
+    why:'OmniVec writes and removes Vector Set elements and executes VSIM searches. The Garnet server must enable the preview Vector Set command surface.',
+    portal:['Allow the OmniVec worker and search pods to reach the Garnet endpoint.', 'Start Garnet with <span class="mono">--enable-vector-set-preview</span>.', c.use_entra_auth ? 'Grant the managed Garnet service access expected by its Entra authentication policy.' : 'For password authentication, store the password in Key Vault and use a <span class="mono">kv://vault/secret</span> reference.', 'Use <b>Test connection</b> to verify PING and VINFO.'],
+    cli:null, checkable:false }),
   'azure-openai': c => ({
     role:'Cognitive Services OpenAI User', scope:`Azure OpenAI account ${acct(c.endpoint)}`,
     why:'Lets OmniVec call the embedding deployment with its managed identity, so no API key is stored.',

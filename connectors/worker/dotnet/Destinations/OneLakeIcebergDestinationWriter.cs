@@ -749,34 +749,51 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         }
     }
 
-    private static async Task ApplyGarnetVersionedOperationAsync(
+    internal static async Task ApplyGarnetVersionedOperationAsync(
         IDatabase database,
         string vectorSet,
         string elementId,
         string operationVersion,
-        Func<ITransaction, Task<RedisResult>> queueOperation,
+        Func<IDatabase, Task<RedisResult>> operation,
         CancellationToken ct)
     {
         var versionKey = $"{vectorSet}:omnivec-version:{elementId}";
+        var lockKey = $"{versionKey}:lock";
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             var current = await database.StringGetAsync(versionKey);
             if (current.HasValue
-                && string.CompareOrdinal(current.ToString(), operationVersion) > 0)
+                && string.CompareOrdinal(current.ToString(), operationVersion) >= 0)
                 return;
 
-            var transaction = database.CreateTransaction();
-            transaction.AddCondition(current.HasValue
-                ? Condition.StringEqual(versionKey, current)
-                : Condition.KeyNotExists(versionKey));
-            var operation = queueOperation(transaction);
-            var versionWrite = transaction.StringSetAsync(versionKey, operationVersion);
-            if (!await transaction.ExecuteAsync())
+            var lockToken = Guid.NewGuid().ToString("N");
+            if (!await database.StringSetAsync(
+                    lockKey,
+                    lockToken,
+                    TimeSpan.FromMinutes(5),
+                    When.NotExists))
+            {
+                await Task.Delay(25, ct);
                 continue;
-            await operation;
-            await versionWrite;
-            return;
+            }
+
+            try
+            {
+                current = await database.StringGetAsync(versionKey);
+                if (current.HasValue
+                    && string.CompareOrdinal(current.ToString(), operationVersion) >= 0)
+                    return;
+
+                await operation(database);
+                await database.StringSetAsync(versionKey, operationVersion);
+                return;
+            }
+            finally
+            {
+                if (await database.StringGetAsync(lockKey) == lockToken)
+                    await database.KeyDeleteAsync(lockKey);
+            }
         }
     }
 
@@ -962,7 +979,7 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
             Get(config, "username", ""),
             Get(config, "password_secret_ref", ""));
 
-    private static async Task<ConfigurationOptions> CreateGarnetOptionsAsync(
+    internal static async Task<ConfigurationOptions> CreateGarnetOptionsAsync(
         Dictionary<string, object> config,
         CancellationToken ct)
     {
@@ -970,6 +987,8 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         options.Ssl = GetBool(config, "tls", true);
         options.AbortOnConnectFail = false;
         options.Protocol = RedisProtocol.Resp2;
+        options.AsyncTimeout = 60_000;
+        options.SyncTimeout = 60_000;
         if (GetBool(config, "use_entra_auth", false))
         {
             await AzureCacheForRedis.ConfigureForAzureWithTokenCredentialAsync(

@@ -112,3 +112,31 @@ async def test_destination_warning_does_not_expose_probe_error(
     assert internal_detail not in str(result)
     assert internal_detail not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_garnet_destination_is_disabled_when_vector_preview_probe_fails(
+    api_app, monkeypatch
+):
+    api = sys.modules["api"]
+    saved = []
+    store = SimpleNamespace(list=lambda kind: [], upsert=saved.append)
+    monkeypatch.setattr(api, "get_store", lambda: store)
+    monkeypatch.setattr(
+        api,
+        "_test_garnet_vector_set",
+        AsyncMock(return_value={
+            "success": False,
+            "error": "Could not execute Garnet Vector Set commands. Verify authentication and --enable-vector-set-preview.",
+        }),
+    )
+
+    result = await api.create_destination(api.CreateDestinationRequest(
+        name="Local Garnet",
+        type="garnet",
+        config={"endpoint": "garnet:6379", "vector_set": "iceberg-vectors", "tls": False},
+    ))
+
+    assert result["destination"].enabled is False
+    assert "--enable-vector-set-preview" in result["warnings"][0]
+    assert saved[0]["config"]["tls"] is False

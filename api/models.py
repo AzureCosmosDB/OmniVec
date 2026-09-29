@@ -38,6 +38,7 @@ class DestinationType(str, Enum):
     PGVECTOR = "pgvector"
     MSSQL = "mssql"
     ONELAKE_ICEBERG = "onelake-iceberg"
+    GARNET = "garnet"
 
 
 class TriggerType(str, Enum):
@@ -333,6 +334,56 @@ class PgVectorConfig(BaseModel):
     index_lists: int = 100  # For ivfflat: number of lists
     hnsw_m: int = 16  # For hnsw: max connections per layer
     hnsw_ef_construction: int = 64  # For hnsw: size of dynamic candidate list
+
+
+class GarnetDestinationConfig(BaseModel):
+    """Garnet Vector Set destination configuration."""
+    endpoint: str
+    vector_set: str = "omnivec-vectors"
+    tls: bool = True
+    use_entra_auth: bool = False
+    username: Optional[str] = None
+    password_secret_ref: Optional[str] = None
+    distance_metric: Literal["L2", "COSINE", "IP", "XCOSINE_NORMALIZED"] = "COSINE"
+    quantization: Literal["NOQUANT", "Q8", "BIN"] = "NOQUANT"
+    m: int = Field(default=16, ge=4, le=4096)
+    ef: int = Field(default=200, ge=1, le=1_000_000)
+    search_ef: int = Field(default=100, ge=1, le=1_000_000)
+    filter_ef: int = Field(default=16, ge=4, le=256)
+    vector_indexes: List[Dict[str, Any]] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("endpoint is required")
+        parsed = urlsplit(value if "://" in value else f"redis://{value}")
+        if not parsed.hostname or parsed.scheme not in ("redis", "rediss"):
+            raise ValueError("endpoint must be a Redis-compatible host[:port] or redis[s] URL")
+        return value
+
+    @field_validator("vector_set")
+    @classmethod
+    def _validate_vector_set(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", value):
+            raise ValueError("vector_set must contain only letters, numbers, ':', '_' or '-'")
+        return value
+
+    @field_validator("distance_metric", "quantization", mode="before")
+    @classmethod
+    def _normalize_uppercase(cls, value: Any) -> Any:
+        return value.upper() if isinstance(value, str) else value
+
+    @field_validator("password_secret_ref")
+    @classmethod
+    def _validate_password_secret_ref(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.startswith("kv://"):
+            raise ValueError("password_secret_ref must use kv://<vault>/<secret>")
+        return value
 
 
 class OneLakeIcebergDestinationConfig(BaseModel):
