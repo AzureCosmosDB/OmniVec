@@ -80,6 +80,7 @@ def main() -> int:
 
     if not args.redirect_uri.startswith("https://"):
         parser.error("--redirect-uri must use HTTPS")
+    redirect_uri = f"{args.redirect_uri.rstrip('/')}/auth-callback.html"
 
     account = az_json("account", "show")
     tenant_id = account["tenantId"]
@@ -96,7 +97,7 @@ def main() -> int:
             {
                 "displayName": args.display_name,
                 "signInAudience": "AzureADMyOrg",
-                "spa": {"redirectUris": [args.redirect_uri]},
+                "spa": {"redirectUris": [redirect_uri]},
             },
         )
 
@@ -124,7 +125,7 @@ def main() -> int:
         f"/applications/{object_id}",
         {
             "identifierUris": [f"api://{client_id}"],
-            "spa": {"redirectUris": [args.redirect_uri]},
+            "spa": {"redirectUris": [redirect_uri]},
             "api": {
                 "requestedAccessTokenVersion": 2,
                 "oauth2PermissionScopes": [permission_scope],
@@ -190,7 +191,7 @@ def main() -> int:
                 "admin_role": "OmniVec.Admin",
                 "operator_role": "OmniVec.Operator",
                 "viewer_role": "OmniVec.Viewer",
-                "redirect_uri": args.redirect_uri,
+                "redirect_uri": redirect_uri,
                 "enterprise_app_url": (
                     "https://entra.microsoft.com/#view/Microsoft_AAD_IAM/"
                     f"ManagedAppMenuBlade/~/Users/objectId/{service_principal['id']}"

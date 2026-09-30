@@ -58,6 +58,7 @@ const $$ = (s, r=document) => [...r.querySelectorAll(s)];
 
 /* ---------- API client ---------- */
 const TOKEN_KEY = 'omnivec_token';
+const ENTRA_REDIRECT_PATH = '/auth-callback.html';
 const session = { user: null };
 const getToken = () => localStorage.getItem(TOKEN_KEY) || '';
 let entraConfig = null;
@@ -75,7 +76,7 @@ async function initEntra() {
       auth: {
         clientId: entraConfig.client_id,
         authority: entraConfig.authority,
-        redirectUri: location.origin,
+        redirectUri: `${location.origin}${ENTRA_REDIRECT_PATH}`,
         postLogoutRedirectUri: location.origin,
       },
       cache: { cacheLocation:'localStorage' },
@@ -519,7 +520,12 @@ function showSignin(msg) {
       const user = await api('/api/auth/login', { method:'POST', body:{ token:tokenResult.accessToken }, anon:true });
       session.user = user; buildShell(); if (!location.hash || location.hash === '#/signin') location.hash = '#/home'; render();
     } catch (err) {
-      $('#serr').textContent = err.message || 'Microsoft sign-in did not complete.';
+      if (err.errorCode === 'interaction_in_progress') {
+        await msalApp.clearCache();
+        $('#serr').textContent = 'The previous Microsoft sign-in was interrupted and has been reset. Select Sign in with Microsoft again.';
+      } else {
+        $('#serr').textContent = err.message || 'Microsoft sign-in did not complete.';
+      }
       b.disabled = false; b.innerHTML = `${icon('user','sm')}Sign in with Microsoft`;
     }
   };
