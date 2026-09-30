@@ -295,6 +295,13 @@ def _aad_enabled() -> bool:
     return bool(_AAD_TENANT_ID and _AAD_AUDIENCE)
 
 
+def _aad_valid_audiences() -> list[str]:
+    audiences = [_AAD_AUDIENCE]
+    if _AAD_CLIENT_ID and _AAD_CLIENT_ID not in audiences:
+        audiences.append(_AAD_CLIENT_ID)
+    return audiences
+
+
 def _get_aad_jwks_client():
     global _aad_jwks_client
     if _aad_jwks_client is not None:
@@ -406,7 +413,7 @@ def _validate_aad_token(token: str) -> Optional[dict]:
                     token,
                     signing_key,
                     algorithms=["RS256"],
-                    audience=_AAD_AUDIENCE,
+                    audience=_aad_valid_audiences(),
                     issuer=iss,
                     options={"require": ["exp", "iat", "iss", "aud"]},
                 )

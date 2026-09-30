@@ -186,7 +186,7 @@ def main() -> int:
             {
                 "tenant_id": tenant_id,
                 "client_id": client_id,
-                "audience": f"api://{client_id}",
+                "audience": client_id,
                 "scope": scope,
                 "admin_role": "OmniVec.Admin",
                 "operator_role": "OmniVec.Operator",
