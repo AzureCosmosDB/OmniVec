@@ -8,6 +8,7 @@ FROM nginx:alpine
 # Copy static files
 COPY static/ /usr/share/nginx/html/
 COPY --from=auth-assets /build/node_modules/@azure/msal-browser/lib/msal-browser.min.js /usr/share/nginx/html/vendor/msal-browser.min.js
+COPY --from=auth-assets /build/node_modules/@azure/msal-browser/lib/redirect-bridge/msal-redirect-bridge.min.js /usr/share/nginx/html/vendor/msal-redirect-bridge.min.js
 
 # Copy nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
