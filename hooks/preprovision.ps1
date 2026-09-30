@@ -145,6 +145,58 @@ function Read-InputSafely {
     }
 }
 
+function Configure-Authentication {
+    $ErrorActionPreference = "SilentlyContinue"
+    $configured = azd env get-value OMNIVEC_ENTRA_ENABLED 2>$null
+    $configuredExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($configuredExit -eq 0 -and $configured -in @("true", "false")) {
+        if ($configured -eq "true") {
+            $publicUrl = azd env get-value OMNIVEC_PUBLIC_URL 2>$null
+            if (-not $publicUrl -or -not "$publicUrl".StartsWith("https://")) {
+                if (-not (Test-CanPrompt)) {
+                    throw "OMNIVEC_PUBLIC_URL must be preset to an HTTPS URL when OMNIVEC_ENTRA_ENABLED=true."
+                }
+                $publicUrl = Read-InputSafely -Prompt "Public HTTPS URL for Entra redirect" -Default ""
+                if (-not "$publicUrl".StartsWith("https://")) {
+                    throw "Microsoft Entra login requires a public HTTPS URL."
+                }
+                azd env set OMNIVEC_PUBLIC_URL "$publicUrl"
+                Assert-NativeSuccess 'Saving Entra public URL'
+            }
+        }
+        Write-Host "`e[32mAuthentication: $(if ($configured -eq 'true') { 'Microsoft Entra ID' } else { 'admin token' }) (already set)`e[0m"
+        return
+    }
+
+    if (-not (Test-CanPrompt)) {
+        azd env set OMNIVEC_ENTRA_ENABLED "false" 2>$null
+        Assert-NativeSuccess 'Saving admin-token authentication default'
+        return
+    }
+
+    Write-Host ""
+    Write-Host "`e[33mSelect OmniVec login method:`e[0m"
+    Write-Host "  1) Admin token (default; generated and stored by azd)"
+    Write-Host "  2) Microsoft Entra ID (requires a public HTTPS URL)"
+    $authChoice = Read-InputSafely -Prompt "Choice [1]" -Default "1"
+    if ($authChoice -eq "2") {
+        $publicUrl = Read-InputSafely -Prompt "Public HTTPS URL (for example https://omnivec.contoso.com)" -Default ""
+        if (-not "$publicUrl".StartsWith("https://")) {
+            throw "Microsoft Entra login requires a public HTTPS URL."
+        }
+        azd env set OMNIVEC_ENTRA_ENABLED "true"
+        Assert-NativeSuccess 'Enabling Microsoft Entra login'
+        azd env set OMNIVEC_PUBLIC_URL "$publicUrl"
+        Assert-NativeSuccess 'Saving Entra public URL'
+        Write-Host "  `e[32mMicrosoft Entra ID login selected.`e[0m"
+    } else {
+        azd env set OMNIVEC_ENTRA_ENABLED "false"
+        Assert-NativeSuccess 'Selecting admin-token login'
+        Write-Host "  `e[32mAdmin token login selected.`e[0m"
+    }
+}
+
 function Use-QuickstartDefaults {
     Write-Host "  `e[32mApplying Quick-start defaults (non-interactive mode).`e[0m"
     $defaults = @{
@@ -158,6 +210,7 @@ function Use-QuickstartDefaults {
         azd env set $kv.Key $kv.Value 2>$null
         Assert-NativeSuccess "Saving $($kv.Key)"
     }
+    Configure-Authentication
 }
 
 function Require-InteractiveOrPreset {
@@ -278,6 +331,7 @@ if ("$rgExists".Trim() -eq "true") {
     $systemCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
     if ("$systemCount" -match '^ERROR') { $systemCount = '' }
     Assert-SystemPoolConfiguration "$systemVm" "$systemCount"
+    Configure-Authentication
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
 }
@@ -291,6 +345,7 @@ if ($_vmExit -eq 0 -and $_existingVm -and "$_existingVm" -notmatch "ERROR") {
     $systemCount = azd env get-value OMNIVEC_SYSTEM_NODE_COUNT 2>$null
     if ("$systemCount" -match '^ERROR') { $systemCount = '' }
     Assert-SystemPoolConfiguration "$_existingVm" "$systemCount"
+    Configure-Authentication
     Write-Host "`n`e[32mConfig already set. Skipping prompts.`e[0m"
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
@@ -325,6 +380,7 @@ if ($setupMode -eq "1") {
     Write-Host "  GPU pool: none (use Azure OpenAI for embeddings)"
     Write-Host "  Metadata: CosmosDB Serverless"
     Write-Host "  Blob storage source: enabled"
+    Configure-Authentication
     Write-Host "`n`e[32mPre-provision checks passed. Proceeding with Bicep deployment...`e[0m"
     exit 0
 }
@@ -568,10 +624,11 @@ azd env set OMNIVEC_GPU_NODE_VM_SIZE $GPU_SKU
 Assert-NativeSuccess 'Saving GPU VM size'
 azd env set OMNIVEC_GPU_NODE_COUNT $gpuCount
 Assert-NativeSuccess 'Saving GPU node count'
+Configure-Authentication
 
 # -- Sanitize env values: strip BOM, tabs, carriage returns --
 Write-Host "`n`e[36mSanitizing environment values...`e[0m"
-$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_METADATA_STORE")
+$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_METADATA_STORE", "OMNIVEC_ENTRA_ENABLED", "OMNIVEC_PUBLIC_URL")
 foreach ($key in $envKeys) {
     $ErrorActionPreference = "SilentlyContinue"
     $raw = azd env get-value $key 2>$null

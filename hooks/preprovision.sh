@@ -165,6 +165,61 @@ read_input() {
   printf '%s' "$_input"
 }
 
+configure_auth_choice() {
+  _configured=$(azd_get OMNIVEC_ENTRA_ENABLED)
+  case "$_configured" in
+    true)
+      _public_url=$(azd_get OMNIVEC_PUBLIC_URL)
+      case "$_public_url" in
+        https://*) ;;
+        *)
+          if ! _can_prompt; then
+            printf 'OMNIVEC_PUBLIC_URL must be preset to an HTTPS URL when OMNIVEC_ENTRA_ENABLED=true.\n' >&2
+            exit 1
+          fi
+          _public_url=$(read_input "Public HTTPS URL for Entra redirect: ")
+          case "$_public_url" in
+            https://*) azd env set OMNIVEC_PUBLIC_URL "$_public_url" < /dev/null ;;
+            *) printf 'Microsoft Entra login requires a public HTTPS URL.\n' >&2; exit 1 ;;
+          esac
+          ;;
+      esac
+      printf "  ${GREEN}Authentication: Microsoft Entra ID (already set)${NC}\n"
+      return 0
+      ;;
+    false)
+      printf "  ${GREEN}Authentication: admin token (already set)${NC}\n"
+      return 0
+      ;;
+  esac
+
+  if ! _can_prompt; then
+    azd env set OMNIVEC_ENTRA_ENABLED false < /dev/null
+    return 0
+  fi
+
+  echo ""
+  printf "${YELLOW}Select OmniVec login method:${NC}\n"
+  echo "  1) Admin token (default; generated and stored by azd)"
+  echo "  2) Microsoft Entra ID (requires a public HTTPS URL)"
+  _auth_choice=$(read_input "Choice [1]: ")
+  _auth_choice=${_auth_choice:-1}
+  if [ "$_auth_choice" = "2" ]; then
+    _public_url=$(read_input "Public HTTPS URL (for example https://omnivec.contoso.com): ")
+    case "$_public_url" in
+      https://*)
+        azd env set OMNIVEC_ENTRA_ENABLED true < /dev/null
+        azd env set OMNIVEC_PUBLIC_URL "$_public_url" < /dev/null
+        printf "  ${GREEN}Microsoft Entra ID login selected.${NC}\n"
+        ;;
+      *) printf 'Microsoft Entra login requires a public HTTPS URL.\n' >&2; exit 1 ;;
+    esac
+  else
+    azd env set OMNIVEC_ENTRA_ENABLED false < /dev/null
+    printf "  ${GREEN}Admin token login selected.${NC}\n"
+  fi
+}
+
 # a2: Detect non-interactive mode from several common sources. Users (and CI)
 # commonly set one of these; we honor any of them.
 is_noninteractive() {
@@ -184,6 +239,7 @@ apply_quickstart_defaults() {
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
+  azd env set OMNIVEC_ENTRA_ENABLED       "false" < /dev/null
 }
 
 # a2: Fail fast when we would need to prompt but can't. Far better than a
@@ -362,6 +418,7 @@ if [ "$RG_EXISTS" = "true" ]; then
     fi
   done
   validate_system_pool "$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)" "$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)"
+  configure_auth_choice
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
 fi
@@ -370,6 +427,7 @@ fi
 _existing_vm=$(azd_get OMNIVEC_SYSTEM_NODE_VM_SIZE)
 if [ -n "$_existing_vm" ]; then
   validate_system_pool "$_existing_vm" "$(azd_get OMNIVEC_SYSTEM_NODE_COUNT)"
+  configure_auth_choice
   printf "\n${GREEN}Config already set. Skipping prompts.${NC}\n"
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
@@ -406,6 +464,7 @@ if [ "$setup_mode" = "1" ]; then
   echo "  GPU pool: none (use Azure OpenAI for embeddings)"
   echo "  Metadata: CosmosDB Serverless"
   echo "  Blob storage source: enabled"
+  configure_auth_choice
   printf "\n${GREEN}Pre-provision checks passed. Proceeding with Bicep deployment...${NC}\n"
   exit 0
 fi
@@ -575,10 +634,11 @@ azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE "$SYS_SKU" < /dev/null
 azd env set OMNIVEC_SYSTEM_NODE_COUNT "$sys_count" < /dev/null
 azd env set OMNIVEC_GPU_NODE_VM_SIZE "$GPU_SKU" < /dev/null
 azd env set OMNIVEC_GPU_NODE_COUNT "$gpu_count" < /dev/null
+configure_auth_choice
 
 # ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
 printf "\n${CYAN}Sanitizing environment values...${NC}\n"
-for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE; do
+for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE OMNIVEC_ENTRA_ENABLED OMNIVEC_PUBLIC_URL; do
   raw=$(azd_get "$key")
   if [ -n "$raw" ]; then
     clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')

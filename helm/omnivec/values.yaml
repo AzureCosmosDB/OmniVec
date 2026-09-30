@@ -72,6 +72,16 @@ api:
       initialDelaySeconds: 5
       periodSeconds: 10
   adminToken: ""  # Set via --set api.adminToken=<token> during deploy
+  entra:
+    enabled: false
+    tenantId: ""
+    clientId: ""
+    audience: ""
+    scope: ""
+    adminRole: "OmniVec.Admin"
+    operatorRole: "OmniVec.Operator"
+    viewerRole: "OmniVec.Viewer"
+    requireRole: true
   env:
     DOCGROK_URL: "http://docgrok:80"
 

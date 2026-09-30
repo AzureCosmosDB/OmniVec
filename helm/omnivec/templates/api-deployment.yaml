@@ -72,6 +72,24 @@ spec:
             - name: OMNIVEC_ADMIN_TOKEN
               value: {{ .Values.api.adminToken | quote }}
             {{- end }}
+            {{- if .Values.api.entra.enabled }}
+            - name: OMNIVEC_AAD_TENANT_ID
+              value: {{ required "api.entra.tenantId is required when Entra login is enabled" .Values.api.entra.tenantId | quote }}
+            - name: OMNIVEC_AAD_CLIENT_ID
+              value: {{ required "api.entra.clientId is required when Entra login is enabled" .Values.api.entra.clientId | quote }}
+            - name: OMNIVEC_AAD_AUDIENCE
+              value: {{ required "api.entra.audience is required when Entra login is enabled" .Values.api.entra.audience | quote }}
+            - name: OMNIVEC_AAD_SCOPE
+              value: {{ required "api.entra.scope is required when Entra login is enabled" .Values.api.entra.scope | quote }}
+            - name: OMNIVEC_AAD_ADMIN_GROUP_ID
+              value: {{ .Values.api.entra.adminRole | quote }}
+            - name: OMNIVEC_AAD_OPERATOR_GROUP_ID
+              value: {{ .Values.api.entra.operatorRole | quote }}
+            - name: OMNIVEC_AAD_VIEWER_GROUP_ID
+              value: {{ .Values.api.entra.viewerRole | quote }}
+            - name: OMNIVEC_AAD_REQUIRE_GROUP
+              value: {{ ternary "1" "0" .Values.api.entra.requireRole | quote }}
+            {{- end }}
             {{- if .Values.search.internalToken }}
             - name: SEARCH_INTERNAL_TOKEN
               value: {{ .Values.search.internalToken | quote }}

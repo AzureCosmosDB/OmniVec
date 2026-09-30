@@ -220,6 +220,46 @@ class AadValidationTests(unittest.TestCase):
         self.assertEqual(result["auth_method"], "aad")
         self.assertEqual(result["name"], "alice@example.com")
 
+    def test_validate_aad_accepts_app_id_and_identifier_uri_audiences(self):
+        fake_client = types.SimpleNamespace(
+            get_signing_key_from_jwt=lambda t: types.SimpleNamespace(key="k")
+        )
+        api._aad_jwks_client = fake_client
+        original_client_id = api._AAD_CLIENT_ID
+        original_audience = api._AAD_AUDIENCE
+        api._AAD_CLIENT_ID = "client-id"
+        api._AAD_AUDIENCE = "api://client-id"
+
+        fake_jwt = types.ModuleType("jwt")
+
+        class _IssErr(Exception):
+            pass
+
+        fake_jwt.InvalidIssuerError = _IssErr
+        seen = {}
+
+        def _decode(*args, **kwargs):
+            seen["audience"] = kwargs["audience"]
+            return {
+                "oid": "user-oid-1",
+                "roles": ["grp-admin"],
+                "exp": 0,
+                "iat": 0,
+                "iss": "x",
+                "aud": "client-id",
+            }
+
+        fake_jwt.decode = _decode
+        try:
+            with patch.dict(sys.modules, {"jwt": fake_jwt}):
+                result = api._validate_aad_token("a.b.c")
+        finally:
+            api._AAD_CLIENT_ID = original_client_id
+            api._AAD_AUDIENCE = original_audience
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen["audience"], ["api://client-id", "client-id"])
+
     def test_validate_token_jwt_shape_filter(self):
         # Non-JWT-shape tokens never invoke the AAD path — they go straight
         # to the legacy admin compare. The test-token env from setUpModule

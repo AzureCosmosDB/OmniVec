@@ -58,8 +58,44 @@ const $$ = (s, r=document) => [...r.querySelectorAll(s)];
 
 /* ---------- API client ---------- */
 const TOKEN_KEY = 'omnivec_token';
+const ENTRA_REDIRECT_PATH = '/auth-callback.html';
 const session = { user: null };
 const getToken = () => localStorage.getItem(TOKEN_KEY) || '';
+let entraConfig = null;
+let msalApp = null;
+async function initEntra() {
+  if (entraConfig) return entraConfig;
+  try {
+    const r = await fetch('/api/auth/config');
+    entraConfig = r.ok ? await r.json() : { entra_enabled:false };
+  } catch {
+    entraConfig = { entra_enabled:false };
+  }
+  if (entraConfig.entra_enabled && window.msal) {
+    msalApp = new window.msal.PublicClientApplication({
+      auth: {
+        clientId: entraConfig.client_id,
+        authority: entraConfig.authority,
+        redirectUri: `${location.origin}${ENTRA_REDIRECT_PATH}`,
+        postLogoutRedirectUri: `${location.origin}${ENTRA_REDIRECT_PATH}`,
+      },
+      cache: { cacheLocation:'localStorage' },
+    });
+    await msalApp.initialize();
+  }
+  return entraConfig;
+}
+async function activeToken() {
+  if (!msalApp || !entraConfig?.scope) return getToken();
+  const account = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
+  if (!account) return getToken();
+  msalApp.setActiveAccount(account);
+  try {
+    const result = await msalApp.acquireTokenSilent({ account, scopes:[entraConfig.scope] });
+    localStorage.setItem(TOKEN_KEY, result.accessToken);
+  } catch {}
+  return getToken();
+}
 function errMessage(data, status) {
   const d = data && (data.detail ?? data.error ?? data.message);
   if (typeof d === 'string') return d;
@@ -69,7 +105,7 @@ function errMessage(data, status) {
 }
 async function api(path, { method='GET', body, raw=false, signal, headers={}, anon=false } = {}) {
   if (typeof path !== 'string' || !/^\/api\/[^\s\\]*$/.test(path) || /(^|\/)\.\.(\/|$|\?)/.test(path)) throw new Error('Invalid API path');
-  const h = { ...headers }; const t = getToken();
+  const h = { ...headers }; const t = anon ? getToken() : await activeToken();
   if (t && !anon) h.Authorization = 'Bearer ' + t;
   let payload = body;
   if (body !== undefined && !(body instanceof FormData) && typeof body !== 'string') { h['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
@@ -464,8 +500,9 @@ function showSignin(msg) {
     <div class="muted small">Your token stays in this browser and is sent only to this OmniVec API.</div></div>
    <div class="signin-form"><form class="signin-card" id="signin" autocomplete="off">
     <span class="brand-mark" style="width:34px;height:34px;border-radius:10px"></span>
-    <h1>Sign in to OmniVec</h1><div class="muted" style="margin-bottom:20px">Paste an access token issued by your administrator.</div>
+    <h1>Sign in to OmniVec</h1><div class="muted" style="margin-bottom:20px">${entraConfig?.entra_enabled ? 'Use your Microsoft work account or an administrator-issued access token.' : 'Paste an access token issued by your administrator.'}</div>
     ${msg ? `<div class="callout warn" style="margin-bottom:14px">${icon('info','ic')}<div>${esc(msg)}</div></div>` : ''}
+    ${entraConfig?.entra_enabled ? `<button class="btn" type="button" style="width:100%;height:40px;justify-content:center;margin-bottom:16px" id="entraBtn">${icon('user','sm')}Sign in with Microsoft</button><div class="muted small" style="text-align:center;margin-bottom:14px">or use an access token</div>` : ''}
     <div class="fld"><label for="tok">Access token</label><input class="inp mono" id="tok" type="password" placeholder="ovk_…" required autofocus></div>
     <div class="inline-err" id="serr"></div>
     <button class="btn pri" style="width:100%;height:38px;justify-content:center;margin-top:14px" id="sbtn">Sign in</button>
@@ -473,6 +510,25 @@ function showSignin(msg) {
      <div style="margin-top:8px;line-height:1.6">Admins can run <span class="mono">omnivec login</span> and read <span class="mono">~/.omnivec/config.yaml</span>, or create a scoped token in <b>Settings → Access tokens</b>. Search-only tokens can query vector stores but cannot change pipelines.</div></details>
    </form></div></div><div id="overlay"></div><div class="toasts" id="toasts"></div>`;
   ov = $('#overlay');
+  if ($('#entraBtn')) $('#entraBtn').onclick = async () => {
+    const b = $('#entraBtn'); b.disabled = true; b.innerHTML = spinner('Opening Microsoft sign-in…'); $('#serr').textContent = '';
+    try {
+      const result = await msalApp.loginPopup({ scopes:[entraConfig.scope], prompt:'select_account' });
+      msalApp.setActiveAccount(result.account);
+      const tokenResult = result.accessToken ? result : await msalApp.acquireTokenSilent({ account:result.account, scopes:[entraConfig.scope] });
+      localStorage.setItem(TOKEN_KEY, tokenResult.accessToken);
+      const user = await api('/api/auth/login', { method:'POST', body:{ token:tokenResult.accessToken }, anon:true });
+      session.user = user; buildShell(); if (!location.hash || location.hash === '#/signin') location.hash = '#/home'; render();
+    } catch (err) {
+      if (err.errorCode === 'interaction_in_progress') {
+        await msalApp.clearCache();
+        $('#serr').textContent = 'The previous Microsoft sign-in was interrupted and has been reset. Select Sign in with Microsoft again.';
+      } else {
+        $('#serr').textContent = err.message || 'Microsoft sign-in did not complete.';
+      }
+      b.disabled = false; b.innerHTML = `${icon('user','sm')}Sign in with Microsoft`;
+    }
+  };
   $('#signin').onsubmit = async e => {
     e.preventDefault(); const tok = $('#tok').value.trim(); const b = $('#sbtn'); if (!tok) return;
     b.disabled = true; b.innerHTML = spinner('Verifying…'); $('#serr').textContent = '';
@@ -482,7 +538,12 @@ function showSignin(msg) {
     catch (err) { $('#serr').textContent = err.status === 401 || err.status === 403 ? 'This token was not accepted. Check it and try again.' : err.message; b.disabled = false; b.textContent = 'Sign in'; }
   };
 }
-function signOut(msg) { localStorage.removeItem(TOKEN_KEY); session.user = null; Object.keys(D).forEach(k => delete D[k]); Object.keys(stamp).forEach(k => delete stamp[k]); showSignin(msg); }
+function signOut(msg) {
+  const account = msalApp && (msalApp.getActiveAccount() || msalApp.getAllAccounts()[0]);
+  localStorage.removeItem(TOKEN_KEY); session.user = null; Object.keys(D).forEach(k => delete D[k]); Object.keys(stamp).forEach(k => delete stamp[k]);
+  if (account) msalApp.logoutPopup({ account, postLogoutRedirectUri:`${location.origin}${ENTRA_REDIRECT_PATH}` }).catch(() => {});
+  showSignin(msg);
+}
 
 /* ---------- command palette ---------- */
 function palette() {
@@ -533,6 +594,8 @@ document.addEventListener('click', e => {
 window.addEventListener('hashchange', () => render());
 
 async function boot() {
+  await initEntra();
+  await activeToken();
   if (!getToken()) return showSignin();
   try { session.user = await api('/api/auth/login', { method:'POST', body:{ token:getToken() }, anon:true }); }
   catch (e) { if (e.status === 401 || e.status === 403) return signOut('Your saved token is no longer valid. Sign in again.'); }

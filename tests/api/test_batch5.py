@@ -55,6 +55,51 @@ class AadRequireGroupTests(unittest.TestCase):
         self.assertEqual(api._aad_role_for_claims({"groups": ["random"]}), "viewer")
 
 
+class AadBrowserConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.original = (
+            api._AAD_TENANT_ID,
+            api._AAD_AUDIENCE,
+            api._AAD_CLIENT_ID,
+            api._AAD_SCOPE,
+        )
+
+    def tearDown(self):
+        (
+            api._AAD_TENANT_ID,
+            api._AAD_AUDIENCE,
+            api._AAD_CLIENT_ID,
+            api._AAD_SCOPE,
+        ) = self.original
+
+    def test_config_disabled_when_browser_settings_are_incomplete(self):
+        api._AAD_TENANT_ID = "tenant"
+        api._AAD_AUDIENCE = "api://client"
+        api._AAD_CLIENT_ID = ""
+        api._AAD_SCOPE = ""
+        result = api.auth_config()
+        self.assertFalse(result["entra_enabled"])
+        self.assertEqual(result["client_id"], "")
+
+    def test_config_exposes_only_public_browser_metadata(self):
+        api._AAD_TENANT_ID = "tenant"
+        api._AAD_AUDIENCE = "api://client"
+        api._AAD_CLIENT_ID = "client"
+        api._AAD_SCOPE = "api://client/access_as_user"
+        result = api.auth_config()
+        self.assertEqual(
+            result,
+            {
+                "entra_enabled": True,
+                "tenant_id": "tenant",
+                "client_id": "client",
+                "authority": "https://login.microsoftonline.com/tenant",
+                "scope": "api://client/access_as_user",
+                "admin_token_enabled": bool(api.ADMIN_TOKEN_HASH),
+            },
+        )
+
+
 class CosmosResultCapWarningTests(unittest.TestCase):
     def test_warning_emitted_when_cap_hit(self):
         from connectors import cosmosdb_connector as cdc

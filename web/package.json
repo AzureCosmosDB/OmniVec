@@ -1,0 +1,7 @@
+{
+  "name": "omnivec-web",
+  "private": true,
+  "dependencies": {
+    "@azure/msal-browser": "5.23.0"
+  }
+}
