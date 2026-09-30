@@ -77,7 +77,7 @@ async function initEntra() {
         clientId: entraConfig.client_id,
         authority: entraConfig.authority,
         redirectUri: `${location.origin}${ENTRA_REDIRECT_PATH}`,
-        postLogoutRedirectUri: location.origin,
+        postLogoutRedirectUri: `${location.origin}${ENTRA_REDIRECT_PATH}`,
       },
       cache: { cacheLocation:'localStorage' },
     });
@@ -541,7 +541,7 @@ function showSignin(msg) {
 function signOut(msg) {
   const account = msalApp && (msalApp.getActiveAccount() || msalApp.getAllAccounts()[0]);
   localStorage.removeItem(TOKEN_KEY); session.user = null; Object.keys(D).forEach(k => delete D[k]); Object.keys(stamp).forEach(k => delete stamp[k]);
-  if (account) msalApp.logoutPopup({ account, postLogoutRedirectUri:location.origin }).catch(() => {});
+  if (account) msalApp.logoutPopup({ account, postLogoutRedirectUri:`${location.origin}${ENTRA_REDIRECT_PATH}` }).catch(() => {});
   showSignin(msg);
 }
 
