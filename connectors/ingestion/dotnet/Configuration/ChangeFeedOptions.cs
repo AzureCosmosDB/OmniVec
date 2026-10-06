@@ -48,6 +48,10 @@ public class ChangeFeedOptions
     /// <summary>Change feed poll interval</summary>
     public int FeedPollIntervalSeconds { get; set; } = 5;
 
+    /// <summary>Concurrent inline PATCH transactions per feed callback/range.
+    /// Zero preserves the existing parallelism; positive values bound write bursts.</summary>
+    public int InlinePatchConcurrency { get; set; }
+
     /// <summary>Max retries for job creation API calls</summary>
     public int MaxJobCreationRetries { get; set; } = 3;
 
@@ -86,6 +90,9 @@ public class ChangeFeedOptions
 
     /// <summary>When true, this process watches SharePoint Online document libraries through Microsoft Graph.</summary>
     public bool EnableSharePointSources { get; set; } = false;
+
+    /// <summary>When true, this process polls native Garnet HASH sources (default: false).</summary>
+    public bool EnableGarnetSources { get; set; } = false;
 
     /// <summary>When true, BlobEventConsumer consumes blob events from the
     /// <see cref="BlobEventQueueName"/> Service Bus queue (default: false).</summary>

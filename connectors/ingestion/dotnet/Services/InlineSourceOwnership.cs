@@ -73,6 +73,11 @@ internal static class InlineSourceOwnership
                 port.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 Required(connection.InitialCatalog), source.SchemaName ?? "dbo", Required(source.Table) });
         }
+        if (type == "garnet")
+        {
+            var endpoint = Required(source.Endpoint).Trim().TrimEnd('/').ToLowerInvariant();
+            return JsonSerializer.Serialize(new[] { type, endpoint, Required(source.GarnetHashKey) });
+        }
         return JsonSerializer.Serialize(new[] { "source", source.Id });
     }
 }

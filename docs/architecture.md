@@ -205,8 +205,29 @@ ChangeFeedProcessor (Azure SDK)
 
 **Inline Mode (high-throughput):** The CFP processes documents end-to-end without the job queue:
 - Extract content, compute content_hash, filter eligible docs
-- Sub-batch (100 native / 50 external) to DocGrok `/embed/batch`
-- `PatchByPartitionBatch` back to source container
+- Sub-batch (50 documents, 2 concurrent calls for external models / 8 for native models) to DocGrok `/embed/batch`
+- Keep validated float arrays directly and PATCH back to the source container, without returning unused document bodies
+- Wait for every required PATCH to succeed before allowing the change-feed checkpoint
+
+`ChangeFeed__InlinePatchConcurrency` bounds concurrent transactional PATCH batches
+within each feed callback/range. The default `0` preserves existing parallelism;
+positive values from `1` to `256` can smooth write bursts. Transactions remain
+partition-scoped and contain at most 100 operations. Positive Cosmos `RetryAfter`
+values are honored before the application retries; the SDK also performs its own
+configured retries.
+
+The `Inline stages` log separates embedding, result preparation and PATCH wall
+time, and reports PATCH request charge and the slowest SDK execution (including
+SDK-internal work/retries). PATCH wall time also includes transaction preparation,
+concurrency waits and application retry delays.
+
+Allocate real CPU capacity to active CFP workers rather than just adding replicas:
+lease ownership limits active range parallelism. For CPU-throttled deployments,
+test a 1-core request / 2-core limit with node headroom before changing model or
+write concurrency. A shorter `ChangeFeed__FeedPollIntervalSeconds` reduces idle
+poll latency, not processing time for an existing backlog. Inline vector writes
+generate feedback events; content-hash, pipeline and reset checks must continue
+to distinguish those events from genuine source updates.
 
 **Queue Mode:** CFP creates pending jobs in metadata store → Workers pick up and process.
 

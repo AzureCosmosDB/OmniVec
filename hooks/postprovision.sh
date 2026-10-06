@@ -557,8 +557,9 @@ prepare_source_build_spec() {
       copy_minimal_build_tree "$ROOT_DIR/web" "$_context"
       _dockerfile="$_context/Dockerfile" ;;
     omnivec-changefeed)
-      copy_minimal_build_tree "$ROOT_DIR/connectors/ingestion/dotnet" "$_context"
-      _dockerfile="$_context/Dockerfile" ;;
+      copy_minimal_build_tree "$ROOT_DIR/connectors/ingestion/dotnet" "$_context/connectors/ingestion/dotnet"
+      copy_minimal_build_tree "$ROOT_DIR/connectors/worker/dotnet" "$_context/connectors/worker/dotnet"
+      _dockerfile="$_context/connectors/ingestion/dotnet/Dockerfile" ;;
     omnivec-dotnet-worker)
       copy_minimal_build_tree "$ROOT_DIR/connectors/worker/dotnet" "$_context"
       _dockerfile="$_context/Dockerfile" ;;
@@ -667,7 +668,7 @@ build_missing_images() {
       omnivec-api)              build_image "$image" "${ROOT_DIR}/api/Dockerfile" "$ROOT_DIR" "latest" ;;
       omnivec-search)           build_image "$image" "${ROOT_DIR}/search/Dockerfile" "$ROOT_DIR" "latest" ;;
       omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
-      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}/connectors/ingestion/dotnet/" "latest" ;;
+      omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}" "latest" ;;
       omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
       omnivec-onelake-iceberg-watcher) build_image "$image" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/Dockerfile" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/" "latest" ;;
       omnivec-agent)            build_image "$image" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest" ;;

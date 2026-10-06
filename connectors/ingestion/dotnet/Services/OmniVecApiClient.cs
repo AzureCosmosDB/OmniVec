@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using OmniVec.ChangeFeed.Models;
+using OmniVec.Worker.Services;
 
 namespace OmniVec.ChangeFeed.Services;
 
@@ -29,11 +30,20 @@ public class OmniVecApiClient
     private readonly SemaphoreSlim _pipelinesLock = new(1, 1);
     private readonly SemaphoreSlim _destinationsLock = new(1, 1);
 
-    public OmniVecApiClient(HttpClient http, ILogger<OmniVecApiClient> logger)
+    private readonly MetricsTransport _metrics;
+
+    public OmniVecApiClient(HttpClient http, ILogger<OmniVecApiClient> logger, MetricsTransport metrics)
     {
         _http = http;
         _logger = logger;
+        _metrics = metrics;
     }
+
+    /// <summary>Test convenience: private metrics transport over the same caller-owned HttpClient.</summary>
+    internal OmniVecApiClient(HttpClient http, ILogger<OmniVecApiClient> logger, MetricsTransportOptions? metricsOptions = null)
+        : this(http, logger, new MetricsTransport(() => http, logger, metricsOptions)) { }
+
+    internal MetricsTransport MetricsTransport => _metrics;
 
     /// <summary>Force the next list call to skip the cache. Use after operator-triggered changes.</summary>
     public void InvalidateListCaches()
@@ -116,68 +126,33 @@ public class OmniVecApiClient
         return (result?.Created ?? 0, result?.Skipped ?? 0);
     }
 
-    /// <summary>Report inline processing metrics for a pipeline.
-    /// batch_key is used for deduplication — if the same batch_key is reported twice
-    /// (e.g. due to lease rebalancing), the API ignores the duplicate.
-    /// Retries on transient failures so the dashboard counter doesn't drift when
-    /// the API replica is restarting / a network hiccup occurs. Docs are already
-    /// patched in Cosmos by the time we report — only the counter is at risk.</summary>
-    public async Task ReportInlineMetricsAsync(
+    /// <summary>Report inline processing metrics for a pipeline (best-effort telemetry).
+    /// Non-blocking: the report is admitted into the bounded singleton
+    /// <see cref="MetricsTransport"/> and this returns a completed task; the transport's
+    /// background sender posts it with bounded timeout/retries, keeping the same
+    /// batch_key across retries so the control plane can deduplicate. Queue-full,
+    /// rejected, exhausted and shutdown-abandoned reports are counted and logged by
+    /// the transport — docs are already written, only the counter is at risk.
+    /// A caller token that is already cancelled propagates as a cancelled task.</summary>
+    public Task ReportInlineMetricsAsync(
         string pipelineId, int processed, int failed, long processingTimeMs,
         string batchKey, CancellationToken ct = default)
     {
-        var payload = new { processed, failed, processing_time_ms = processingTimeMs, batch_key = batchKey };
-        const int MaxAttempts = 6;
-        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
+        if (ct.IsCancellationRequested)
         {
-            try
-            {
-                using var resp = await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
-                if (resp.IsSuccessStatusCode) return;
-
-                var status = (int)resp.StatusCode;
-                // 4xx (except 408/429) is not retryable — payload is wrong, stop trying.
-                if (status >= 400 && status < 500 && status != 408 && status != 429)
-                {
-                    _logger.LogWarning(
-                        "Inline metric report rejected for pipeline {PipelineId} status={Status} batch={BatchKey} processed={Processed} — counter will drift",
-                        pipelineId, resp.StatusCode, batchKey, processed);
-                    return;
-                }
-                // Retryable: 408/429/5xx
-                if (attempt == MaxAttempts)
-                {
-                    _logger.LogError(
-                        "Inline metric report FAILED after {MaxAttempts} attempts for pipeline {PipelineId} status={Status} batch={BatchKey} processed={Processed} — counter will drift",
-                        MaxAttempts, pipelineId, resp.StatusCode, batchKey, processed);
-                    return;
-                }
-                var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 15_000));
-                _logger.LogWarning(
-                    "Inline metric report status={Status} for pipeline {PipelineId} attempt {Attempt}/{Max}, retrying in {Delay}ms",
-                    resp.StatusCode, pipelineId, attempt, MaxAttempts, delay.TotalMilliseconds);
-                await Task.Delay(delay, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                if (attempt == MaxAttempts)
-                {
-                    _logger.LogError(ex,
-                        "Inline metric report THREW after {MaxAttempts} attempts for pipeline {PipelineId} batch={BatchKey} processed={Processed} — counter will drift",
-                        MaxAttempts, pipelineId, batchKey, processed);
-                    return;
-                }
-                var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 15_000));
-                _logger.LogWarning(ex,
-                    "Inline metric report transient error for pipeline {PipelineId} attempt {Attempt}/{Max}, retrying in {Delay}ms",
-                    pipelineId, attempt, MaxAttempts, delay.TotalMilliseconds);
-                await Task.Delay(delay, ct);
-            }
+            _metrics.RecordCallerCancelled(pipelineId, batchKey);
+            return Task.FromCanceled(ct);
         }
+        try
+        {
+            var payload = new { processed, failed, processing_time_ms = processingTimeMs, batch_key = batchKey, reported_at = MetricsTransport.ReportedAtNow() };
+            _metrics.TryEnqueue(pipelineId, batchKey, processed, failed, payload);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to enqueue inline metrics for pipeline {PipelineId} (best-effort telemetry)", pipelineId);
+        }
+        return Task.CompletedTask;
     }
 
     /// <summary>Get all destinations.</summary>
@@ -228,11 +203,20 @@ public class OmniVecApiClient
         }
     }
 
-    /// <summary>Report changefeed batch metrics including skip counts.</summary>
-    public async Task ReportChangeFeedMetricsAsync(
+    /// <summary>Report changefeed batch metrics including skip counts (best-effort telemetry).
+    /// Non-blocking: admitted into the bounded singleton <see cref="MetricsTransport"/> and
+    /// returns a completed task. A per-report batch_key (stable across transport retries)
+    /// and reported_at (enqueue time, UTC) are included for downstream deduplication.</summary>
+    public Task ReportChangeFeedMetricsAsync(
         string sourceId, int total, int eligible, int skippedNoContent, int skippedUnchanged,
         int jobsCreated, string partition, CancellationToken ct = default)
     {
+        var batchKey = $"changefeed:{sourceId}:{partition}:{Guid.NewGuid():N}";
+        if (ct.IsCancellationRequested)
+        {
+            _metrics.RecordCallerCancelled(sourceId, batchKey);
+            return Task.FromCanceled(ct);
+        }
         try
         {
             var payload = new
@@ -243,13 +227,16 @@ public class OmniVecApiClient
                 skipped_no_content = skippedNoContent,
                 skipped_unchanged = skippedUnchanged,
                 jobs_created = jobsCreated,
-                partition
+                partition,
+                batch_key = batchKey,
+                reported_at = MetricsTransport.ReportedAtNow(),
             };
-            await _http.PostAsJsonAsync("/api/metrics/changefeed", payload, ct);
+            _metrics.TryEnqueue("changefeed", "/api/metrics/changefeed", sourceId, batchKey, total, 0, payload);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to report changefeed metrics for source {SourceId}", sourceId);
+            _logger.LogWarning(ex, "Failed to enqueue changefeed metrics for source {SourceId} (best-effort telemetry)", sourceId);
         }
+        return Task.CompletedTask;
     }
 }

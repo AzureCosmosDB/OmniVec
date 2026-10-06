@@ -38,6 +38,7 @@ def setup(api_app, monkeypatch):
     {"text_field": "id"}, {"doc_id_pattern": "bad/path-{chunk}"},
     {"doc_id_pattern": "same-name-for-every-chunk"},
     {"doc_id_pattern": "{source}-{pipeline}"},
+    {"cleanup_order": "unknown"},
 ])
 def test_invalid_config_rejected(setup, config):
     setup.req.chunk_config = config
@@ -52,6 +53,46 @@ def test_valid_config_and_defaults(setup, unit):
     config = setup.api._validate_cosmos_chunking(setup.store, setup.req, setup.dest)
     assert config.chunk_size == 500 and config.chunk_overlap == 50
     assert config.chunk_unit == unit and not config.store_text and config.text_field == "text"
+    assert config.cleanup_order == "insert-first"
+
+
+@pytest.mark.parametrize("order", ["insert-first", "delete-first"])
+@pytest.mark.asyncio
+async def test_cleanup_order_can_be_changed_without_reset_or_identity_changes(setup, order):
+    created = (await setup.api.create_pipeline(setup.req))["pipeline"]
+    setup.api.resume_pipeline(created.id)
+    setup.req.chunk_config = {"store_text": True, "cleanup_order": order}
+    updated = (await setup.api.update_pipeline(created.id, setup.req))["pipeline"]
+    assert updated.chunk_config.cleanup_order == order
+    assert updated.chunk_config.chunk_size == created.chunk_config.chunk_size
+    assert updated.chunk_config.chunk_overlap == created.chunk_config.chunk_overlap
+    assert updated.status == setup.models.PipelineStatus.ACTIVE
+    assert updated.reset_at is None and updated.generation == created.generation
+    assert updated.doc_id_pattern == created.doc_id_pattern
+    setup.req.chunk_config = {"store_text": True, "chunk_size": 450}
+    updated = (await setup.api.update_pipeline(created.id, setup.req))["pipeline"]
+    assert updated.chunk_config.cleanup_order == order
+    setup.req.chunk_config = None
+    updated = (await setup.api.update_pipeline(created.id, setup.req))["pipeline"]
+    assert updated.chunk_config.cleanup_order == order and updated.chunk_config.chunk_size == 450
+
+
+def test_non_cosmos_cleanup_order_is_not_silently_accepted(setup):
+    source = setup.store.get("source", "source")
+    source["type"] = "azure-blob"
+    setup.store.upsert(source)
+    setup.req.chunk_config = {"cleanup_order": "delete-first"}
+    with pytest.raises(HTTPException) as error:
+        setup.api._validate_cosmos_chunking(setup.store, setup.req, setup.dest)
+    assert "only for Cosmos text chunking" in error.value.detail
+
+
+def test_unchunked_cosmos_cleanup_order_is_not_silently_accepted(setup):
+    setup.req.content_strategy = "truncate"
+    setup.req.chunk_config = {"cleanup_order": "delete-first"}
+    with pytest.raises(HTTPException) as error:
+        setup.api._validate_cosmos_chunking(setup.store, setup.req, setup.dest)
+    assert "only for Cosmos text chunking" in error.value.detail
 
 
 def test_custom_template_is_preserved_not_replaced_with_default(setup):

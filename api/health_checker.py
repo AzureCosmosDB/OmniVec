@@ -161,6 +161,19 @@ async def check_source(source: Source, last_event_age_seconds: float = None) -> 
             finally:
                 conn.close()
 
+        elif source.type == SourceType.GARNET:
+            from api import _test_garnet_vector_set
+            detail = await _test_garnet_vector_set(
+                source.config, require_vector_set=False,
+                hash_key=source.config.get("hash_key"), sample_count=1,
+            )
+            if not detail.get("success"):
+                raise RuntimeError(detail.get("error", "Garnet source probe failed"))
+            result["checks"].append({
+                "check": "read_permission", "status": "pass",
+                "detail": "Garnet HASH is accessible via HSCAN",
+            })
+
         elif source.type == SourceType.SHAREPOINT:
             from api import _test_sharepoint_connection
             ok, detail = await _test_sharepoint_connection(source.config)

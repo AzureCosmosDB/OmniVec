@@ -131,8 +131,10 @@ If you create two pipelines with the **same source, same destination, and same e
 Once a pipeline is created, the following settings become **read-only**:
 - **Source** and **Destination** — cannot be changed
 - **Content Strategy** (truncate/chunk) — changing would invalidate existing vectors
-- **Chunk Configuration** (size, overlap, doc ID pattern) — must be consistent with existing chunks
+- **Chunk document ID pattern and text-storage fields** — cannot be changed in place.
 - **Processing Mode** (inline/queue) — tied to changefeed lease setup
+
+For Cosmos text chunking, **size, overlap, unit and replacement order** can be edited for newly queued work. In-flight messages retain their original configuration.
 
 ---
 
@@ -230,6 +232,19 @@ Source and destination are the **same** CosmosDB container. The embedding is pat
 
 Source is CosmosDB, destination is a **different** container. New vector documents are upserted to the destination.
 
+The queue writer directly upserts both new and existing vector documents; it does not attempt a patch first. An upsert replaces the destination document with the fields emitted by the pipeline, including configured source fields and metadata. Unrelated destination-only fields are not retained. Inline mode still patches the existing source document.
+
+Upserts are grouped by partition in transactions of at most 100 operations and a conservative 1.5 MB serialized payload budget. Larger individual documents use a single-item upsert instead of a transaction; the Cosmos 2 MiB item limit still applies. Payloads are planned before writes or delete-first cleanup begins.
+
+For Cosmos field-content chunking, choose `chunk_config.cleanup_order` in the pipeline settings:
+
+| Value | Behavior on replacement |
+|---|---|
+| `insert-first` (default) | Persist every new chunk before deleting obsolete chunks. Failed writes skip cleanup; partial writes can temporarily leave mixed old/new chunks. |
+| `delete-first` | Delete all previous chunks for that source document/pipeline/partition, then upsert the new chunks. Failed cleanup skips insertion; failed insertion can leave a search gap. |
+
+Neither mode is an atomic replacement across batches or partitions. Errors propagate for retry, and messages are completed only after both stages succeed. Ordinary unchunked records use direct upsert without a cleanup query. A chunked document that shrinks to one or zero chunks still requires cleanup. Chunk lookup remains query-based, including `/id` destinations; manifests and distributed fencing are not implemented by this setting. Concurrent revisions are not given atomic ordering guarantees.
+
 ### Content Change Detection
 
 After initial embedding, OmniVec tracks content changes using SHA256:
@@ -292,3 +307,26 @@ All UI operations are also available via the REST API:
 | `POST` | `/api/search` | Vector similarity search |
 | `GET` | `/api/deployments` | K8s deployment management |
 | `GET` | `/health` | System health |
+# Garnet HASH sources (inline)
+
+A native `garnet` source polls a named HASH containing JSON documents. Configure
+`endpoint`, `hash_key`, TLS/authentication, `poll_interval_seconds`, `scan_page_size`
+and `batch_size` (at most 50). Each HASH field is a stable source reference. Each
+value must contain `id`, a positive Int64 `version`, and string `content`.
+Increase the version for every change, including `{"id":"doc","version":2,
+"content":"","deleted":true}` tombstones. Hard `HDEL` is not a deletion feed.
+
+This source supports a single-source, `inline`, `truncate` pipeline to a separate
+Garnet vector set on the same endpoint. It does not use Service Bus. Real model
+calls and the normal version-fenced destination writer are used; source HASH
+values are never overwritten. Source checkpoint hashes use the reserved
+`__omnivec:source-checkpoints:` prefix and advance only after successful writes.
+Unchanged records are skipped; changing a record without increasing its version
+is logged as an error. Pipeline edits and resets advance the processing revision.
+Empty content removes the corresponding vector, as does an explicit tombstone.
+
+Polling provides eventual convergence, not a transactional change feed or a
+point-in-time snapshot. One polling lease owner handles each source, with bounded
+batch concurrency from `resource_policy.max_concurrency_per_worker` (capped at
+64). Logs separate read, model, writer/checkpoint, and metrics callback time.
+Memory-only Garnet deployment is not durable storage.

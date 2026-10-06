@@ -26,22 +26,30 @@ def run_ui(script):
     return json.loads(result.stdout)
 
 
-def test_ui_create_chunk_payload_and_inline_rejection():
-    result = run_ui(r"""
+@pytest.mark.parametrize("order", ["insert-first", "delete-first"])
+@pytest.mark.parametrize("source_mode", ["existing", "new"])
+def test_ui_create_chunk_payload_and_inline_rejection(order, source_mode):
+    result = run_ui(f"const cleanupOrder = {json.dumps(order)}, sourceMode = {json.dumps(source_mode)};\n" + r"""
 const values = {name:'test', source_id:'source', destination:'destination', docgrok_pipeline:'mdl-test',
  content_strategy:'chunk', processing_mode:'queue', chunk_size:'450', chunk_overlap:'0',
+ chunk_cleanup_order:cleanupOrder,
  chunk_unit:'tokens', chunk_text_field:'passage', chunk_doc_id_pattern:'custom-{source_hash}-{chunk}'};
+const sources = sourceMode === 'new' ? [] : [{id:'source',type:'cosmosdb'}];
 const form = {querySelector: s => ({checked: !s.includes('store_content')}),
  querySelectorAll: () => []};
 const elements = {'pipeline-form':form, 'pl-dest-vector-policy':{value:'embedding'}};
 const document = {getElementById: id => elements[id]};
 const FormData = class {get(key) {return values[key] ?? null;}};
-const pipelineSourceMode='existing', pipelineDestMode='existing', pipelineTransformMode='pipeline';
+const pipelineSourceMode=sourceMode, pipelineDestMode='existing', pipelineTransformMode='pipeline';
+const collectInlineSourceData=()=>({name:'new source',type:'cosmosdb'});
 const alerts=[], requests=[];
 let step;
 const alert = m => alerts.push(m), showPipelineStep = s => step=s;
 const closeModal=()=>{}, refreshData=()=>{};
-const apiFetch = async (url, options) => {requests.push(JSON.parse(options.body)); return {ok:true};};
+const apiFetch = async (url, options) => {
+ if (url === '/api/sources') return {ok:true,json:async()=>({source:{id:'source'}})};
+ requests.push(JSON.parse(options.body)); return {ok:true};
+};
 (async()=>{
  await savePipeline();
  values.processing_mode='inline';
@@ -55,6 +63,7 @@ const apiFetch = async (url, options) => {requests.push(JSON.parse(options.body)
     assert chunk["chunk_config"] == {
         "chunk_size": 450, "chunk_overlap": 0, "chunk_unit": "tokens", "store_text": True,
         "text_field": "passage", "doc_id_pattern": "custom-{source_hash}-{chunk}",
+        "cleanup_order": order,
     }
     assert result["step"] == "options" and "Inline + chunk" in result["alerts"][0]
     assert inline["processing_mode"] == "inline" and "chunk_config" not in inline
@@ -79,6 +88,7 @@ for (const [id,value] of Object.entries({'chunk-size':'450','chunk-overlap':'0',
  elements['pip-detail-'+id]={value};
 }
 elements['pip-detail-store-text']={checked:true};
+elements['pip-detail-chunk-cleanup-order']={value:'delete-first'};
 capturePipelineTabData();
 elements['pip-detail-chunk-size'].value='500';
 capturePipelineTabData();
@@ -93,6 +103,8 @@ const closeModal=()=>{},refreshData=async()=>{};
     assert 'id="pip-detail-chunk-overlap" value="0"' in result["html"]
     assert 'value="tokens" selected' in result["html"]
     assert 'id="pip-detail-chunk-size" value="500"' in result["rerender"]
+    assert 'value="insert-first" selected' in result["html"]
+    assert 'value="delete-first" selected' in result["rerender"]
     for field in ("chunk-size", "chunk-overlap", "chunk-doc-id-pattern"):
         tag = re.search(rf'<input[^>]+id="pip-detail-{field}"[^>]*>', result["html"])[0]
         assert "disabled" not in tag and "markPipelineDetailDirty" in tag
@@ -101,6 +113,7 @@ const closeModal=()=>{},refreshData=async()=>{};
     assert result["request"]["chunk_config"] == {
         "chunk_size": 500, "chunk_overlap": 0, "chunk_unit": "tokens", "store_text": True,
         "text_field": "passage", "doc_id_pattern": "custom-{source_hash}-{chunk}",
+        "cleanup_order": "delete-first",
     }
 
 

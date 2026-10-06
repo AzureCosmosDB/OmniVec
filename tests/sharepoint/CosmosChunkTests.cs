@@ -33,7 +33,7 @@ internal static class CosmosChunkTests
         Test("Cosmos chunk settings cross ingestion pipeline and queue JSON unchanged", () =>
         {
             var pipeline = JsonSerializer.Deserialize<OmniVec.ChangeFeed.Models.Pipeline>(
-                """{"content_strategy":"chunk","chunk_config":{"chunk_size":300,"chunk_overlap":50,"chunk_unit":"tokens","store_text":true,"text_field":"body","doc_id_pattern":"{pipeline}-{source_hash}-{chunk}"}}""")!;
+                """{"content_strategy":"chunk","chunk_config":{"chunk_size":300,"chunk_overlap":50,"chunk_unit":"tokens","cleanup_order":"delete-first","store_text":true,"text_field":"body","doc_id_pattern":"{pipeline}-{source_hash}-{chunk}"}}""")!;
             var message = new OmniVec.ChangeFeed.Models.EmbeddingMessage
             {
                 ContentStrategy = pipeline.ContentStrategy,
@@ -45,10 +45,12 @@ internal static class CosmosChunkTests
             Check(worker.ContentStrategy == "chunk" && worker.ChunkConfig!.Size == 300
                 && worker.ChunkConfig.Overlap == 50 && worker.ChunkConfig.Unit == "tokens"
                 && worker.ChunkConfig.StoreText && worker.ChunkConfig.TextField == "body"
+                && worker.ChunkConfig.CleanupOrder == "delete-first"
                 && worker.SharePointGraphTenantId == message.SharePointGraphTenantId
                 && worker.SharePointGraphClientId == message.SharePointGraphClientId);
             Check(new EmbeddingMessage().ContentStrategy == "truncate"
-                && new OmniVec.ChangeFeed.Models.Pipeline().ContentStrategy == "truncate");
+                && new OmniVec.ChangeFeed.Models.Pipeline().ContentStrategy == "truncate"
+                && new TextChunkConfig().CleanupOrder == "insert-first");
         });
         Test("Character chunks retain overlap, Python boundaries and Unicode codepoints", () =>
         {
@@ -112,6 +114,7 @@ internal static class CosmosChunkTests
         foreach (var invalid in new TextChunkConfig[] {
             new() { Size = 99 }, new() { Overlap = -1 }, new() { Overlap = 1000 },
             new() { Unit = "bpe" }, new() { DocIdPattern = "{source}" },
+            new() { CleanupOrder = "unknown" },
             new() { DocIdPattern = "{unknown}-{chunk}" }, new() { TextField = "source_ref" },
         })
             tests.Add(("Invalid chunk config is rejected", () => Fails(() =>
@@ -141,6 +144,81 @@ internal static class CosmosChunkTests
             Check(!called);
             await Fails(() => CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([],
                 _ => Task.CompletedTask, _ => throw new IOException("cleanup")));
+        }));
+        tests.Add(("Both replacement orders enforce their stage dependencies", async () =>
+        {
+            var chunk = CosmosTextChunker.Result(Message(), Message().ChunkConfig!, "text", [1, 2], 0, 1);
+            foreach (var order in new[] { "insert-first", "delete-first" })
+            {
+                var stages = new List<string>();
+                await CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([chunk],
+                    _ => { stages.Add("write"); return Task.CompletedTask; },
+                    keep =>
+                    {
+                        stages.Add("delete");
+                        Check(order == "delete-first" ? keep.Count == 0 : keep.SetEquals([chunk.DocId]));
+                        return Task.CompletedTask;
+                    }, order);
+                Check(stages.SequenceEqual(order == "delete-first" ? ["delete", "write"] : ["write", "delete"]));
+            }
+            var inserted = false;
+            await Fails(() => CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([chunk],
+                _ => { inserted = true; return Task.CompletedTask; },
+                _ => throw new IOException("cleanup failed"), "delete-first"));
+            Check(!inserted);
+            await Fails(() => CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([chunk],
+                _ => throw new IOException("write failed"), _ => Task.CompletedTask, "delete-first"));
+            var mutated = false;
+            await Fails(() => CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([chunk],
+                _ => { mutated = true; return Task.CompletedTask; },
+                _ => { mutated = true; return Task.CompletedTask; }, "invalid"));
+            Check(!mutated);
+        }));
+        tests.Add(("Large insert-first replacements retain old chunks after partial writes and recover on retry", async () =>
+        {
+            var items = new HashSet<string> { "obsolete" };
+            var chunks = Enumerable.Range(0, 201).Select(i => CosmosTextChunker.Result(
+                Message(), Message().ChunkConfig!, "text", [1, 2], i, 201)).ToList();
+            var cleaned = false;
+            var fail = true;
+            async Task Replace() => await CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync(chunks,
+                docs =>
+                {
+                    foreach (var batch in CosmosDbDestinationWriter.BuildUpsertBatches(docs, "tenant", "embedding", "now"))
+                    {
+                        foreach (var doc in batch) items.Add(doc["id"]!.ToString());
+                        if (fail) throw new IOException("partial write");
+                    }
+                    return Task.CompletedTask;
+                },
+                keep => { cleaned = true; items.IntersectWith(keep); return Task.CompletedTask; });
+            await Fails(Replace);
+            Check(!cleaned && items.Contains("obsolete") && items.Count == 101);
+            fail = false;
+            await Replace();
+            Check(cleaned && items.Count == 201 && !items.Contains("obsolete"));
+        }));
+        tests.Add(("Both replacement orders remove obsolete chunks when shrinking to one or zero", async () =>
+        {
+            var chunk = CosmosTextChunker.Result(Message(), Message().ChunkConfig!, "text", [1, 2], 0, 1);
+            foreach (var order in new[] { "insert-first", "delete-first" })
+            {
+                var items = new HashSet<string> { chunk.DocId, "obsolete" };
+                Task Write(List<EmbeddingResult> docs)
+                {
+                    foreach (var doc in docs) items.Add(doc.DocId);
+                    return Task.CompletedTask;
+                }
+                Task Cleanup(HashSet<string> keep)
+                {
+                    items.IntersectWith(keep);
+                    return Task.CompletedTask;
+                }
+                await CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([chunk], Write, Cleanup, order);
+                Check(items.SetEquals([chunk.DocId]));
+                await CosmosDbDestinationWriter.ReplaceTextChunksInStoreAsync([], Write, Cleanup, order);
+                Check(items.Count == 0);
+            }
         }));
         tests.Add(("Actual worker chunks before truncation, shrinks, empties and retries failed writes", async () =>
         {
@@ -174,8 +252,11 @@ internal static class CosmosChunkTests
             await Process();
             Check(writer.Items.Count == 3 && receiver.Completed == 1 && inputs.Sum(t => t.Length) == 280);
             var originalId = writer.Items[0].DocId;
+            Check(writer.CleanupOrder == "insert-first");
+            msg.ChunkConfig!.CleanupOrder = "delete-first";
             msg.Content = "short"; await Process();
             Check(writer.Items.Count == 1 && writer.Items[0].DocId == originalId);
+            Check(writer.CleanupOrder == "delete-first");
             writer.Fail = true; await Process();
             Check(receiver.Completed == 2 && receiver.Abandoned == 1 && writer.Items.Count == 1);
             writer.Fail = false; msg.Content = ""; await Process();
@@ -200,12 +281,14 @@ internal static class CosmosChunkTests
         public string DestinationType => "cosmosdb-vector";
         public List<EmbeddingResult> Items = [];
         public bool Fail;
+        public string CleanupOrder = "";
         public Task WriteBatchAsync(Dictionary<string, object> config, List<EmbeddingResult> results, CancellationToken ct)
             => throw new Exception("Must use chunk replacement");
         public Task ReplaceTextChunksAsync(Dictionary<string, object> config, DeleteRequest source,
             List<EmbeddingResult> chunks, CancellationToken ct)
         {
             if (Fail) throw new IOException("write failed");
+            CleanupOrder = source.ChunkCleanupOrder;
             Items = chunks; return Task.CompletedTask;
         }
     }

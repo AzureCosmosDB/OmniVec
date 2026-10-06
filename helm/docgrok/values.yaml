@@ -226,6 +226,7 @@ docgrok:
     DSE_QWEN2_URL: "http://dse-qwen2-svc:8000"
     CLIP_URL: "http://clip-svc:8000"
     BGE_URL: "http://bge-svc:8000"
+    DOCGROK_UNPOOLED_MODEL_HOSTS: ""
   resources:
     requests:
       memory: "256Mi"
@@ -282,3 +283,7 @@ pipelineWorker:
   env:
     DOCGROK_ROUTER_URL: "http://docgrok:80"
     DEFAULT_MODEL_ID: ""
+    DOCGROK_EMBED_MODE: "router"
+    DOCGROK_DIRECT_EMBEDDING_ROUTES: "{}"
+    DOCGROK_DIRECT_EMBED_CONCURRENCY: "8"
+    DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS: "180"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from playwright.sync_api import expect
 
 from spa_mock import CHAT_MODEL, EMBED_MODEL, PIPELINE_COUNT
@@ -223,3 +224,72 @@ def test_api_client_rejects_unsafe_paths(spa_app):
         return out;
     }""")
     assert set(results.values()) == {"Invalid API path"}, results
+
+
+@pytest.mark.parametrize("order", ["insert-first", "delete-first"])
+def test_cosmos_chunk_cleanup_order_is_sent_on_create(spa_app, order):
+    app = spa_app("#/new?source=src-orders&reset=1", overrides={
+        "POST /api/destinations/test-connection": {
+            "success": True, "vector_indexes": [{"path": "/embedding", "dimensions": 1536}]},
+        "POST /api/pipelines": {"pipeline": {"id": "pip-created"}},
+    })
+    page = app.page
+    expect(page.locator("#wcko")).to_have_value("insert-first")
+    page.select_option("#wcko", order)
+    page.click("#wnext")
+    page.click("#wback")
+    expect(page.locator("#wcko")).to_have_value(order)
+    page.click("#wnext")
+    page.click("#wnext")
+    page.click('[data-store="dst-vec"]')
+    expect(page.locator("#wnext")).to_be_enabled()
+    page.click("#wnext")
+    with page.expect_request(lambda r: r.method == "POST" and r.url.endswith("/api/pipelines")):
+        page.click("#wcreate")
+    body = app.called("/api/pipelines", "POST")[-1]["payload"]
+    assert body["chunk_config"]["cleanup_order"] == order
+    assert body["content_strategy"] == "chunk" and body["processing_mode"] == "queue"
+
+
+def test_cleanup_order_only_shown_for_chunked_cosmos_sources(spa_app):
+    page = spa_app("#/new?source=src-docs&reset=1").page
+    expect(page.locator("#wcs")).to_be_visible()
+    expect(page.locator("#wcko")).to_have_count(0)
+    page = spa_app("#/new?source=src-orders&reset=1").page
+    expect(page.locator("#wcko")).to_be_visible()
+    page.locator("details", has=page.locator("#wcm")).locator("summary").click()
+    page.select_option("#wcm", "http_url")
+    expect(page.locator("#wcko")).to_have_count(0)
+    page.locator("details", has=page.locator("#wcm")).locator("summary").click()
+    page.select_option("#wcm", "field")
+    expect(page.locator("#wcko")).to_be_visible()
+    page.click('[data-strat="truncate"]')
+    expect(page.locator("#wcko")).to_have_count(0)
+
+
+@pytest.mark.parametrize("source_id", ["src-orders", "src-docs"])
+def test_chunk_cleanup_order_is_editable_only_for_cosmos(spa_app, source_id):
+    from spa_mock import default_responses
+
+    pipeline = default_responses()["/api/pipelines"]["pipelines"][0]
+    pipeline.update({
+        "sources": [{"source_id": source_id, "content_mode": "field", "content_fields": ["content"]}],
+        "content_strategy": "chunk",
+        "chunk_config": {"chunk_size": 500, "chunk_overlap": 50, "chunk_unit": "chars",
+                         "store_text": True, "cleanup_order": "delete-first"},
+    })
+    app = spa_app("#/pipelines/pip-001/settings", overrides={
+        "/api/pipelines": {"pipelines": [pipeline]},
+        "PUT /api/pipelines/pip-001": {"pipeline": pipeline},
+    })
+    page = app.page
+    if source_id == "src-orders":
+        expect(page.locator("#scko")).to_have_value("delete-first")
+        page.select_option("#scko", "insert-first")
+        with page.expect_request(lambda r: r.method == "PUT" and r.url.endswith("/api/pipelines/pip-001")):
+            page.click("#ssave")
+        config = app.called("/api/pipelines/pip-001", "PUT")[-1]["payload"]["chunk_config"]
+        assert config["cleanup_order"] == "insert-first"
+        assert config["chunk_size"] == 500 and config["chunk_overlap"] == 50 and config["store_text"]
+    else:
+        expect(page.locator("#scko")).to_have_count(0)

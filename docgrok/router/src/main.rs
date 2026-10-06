@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Json, Path, Query, Request, State},
-    http::{header, Method, StatusCode, Uri},
+    http::{header, HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Router,
@@ -17,6 +17,10 @@ use tracing::{error, info, warn};
 
 // 50 MiB raw input expands to ~66.7 MiB base64, plus JSON metadata.
 const MAX_REQUEST_BODY_BYTES: usize = 70 * 1024 * 1024;
+const EMBEDDING_BINARY_MEDIA_TYPE: &str = "application/vnd.omnivec.embeddings.f32";
+const EMBEDDING_BINARY_MAGIC: &[u8; 4] = b"OVEC";
+const EMBEDDING_BINARY_VERSION: u16 = 1;
+const EMBEDDING_BINARY_HEADER_SIZE: usize = 16;
 
 fn with_request_body_limits<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Router<S> {
     router
@@ -38,6 +42,11 @@ struct AppState {
     native_urls: Arc<HashMap<String, String>>,
     /// Shared HTTP client with connection pooling
     http: Client,
+    /// Model HTTP client without idle connection reuse. Used selectively for
+    /// in-cluster services where kube-proxy balances each new connection.
+    unpooled_model_http: Client,
+    /// Model endpoint hosts that should use request-level connection balancing.
+    unpooled_model_hosts: Arc<HashSet<String>>,
     /// K8s client (None if not in cluster)
     k8s: Option<kube::Client>,
     /// K8s namespace for model deployments
@@ -121,6 +130,8 @@ struct RegisterModelRequest {
     api_version: String,
     #[serde(default)]
     embedding_dim: u32,
+    #[serde(default)]
+    disable_keepalive: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -153,6 +164,90 @@ impl From<reqwest::Error> for AppError {
     }
 }
 
+fn accepts_binary_embeddings(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(|part| part.split(';').next().unwrap_or("").trim())
+                .any(|media_type| media_type.eq_ignore_ascii_case(EMBEDDING_BINARY_MEDIA_TYPE))
+        })
+}
+
+fn binary_embeddings_response(
+    embeddings: &[Value],
+    expected_count: usize,
+    model_id: &str,
+) -> Result<Response, AppError> {
+    if embeddings.len() != expected_count {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            "Embedding result count does not match input".into(),
+        ));
+    }
+    let dimension = embeddings
+        .first()
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if dimension == 0 {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            "Embedding vectors must have a positive dimension".into(),
+        ));
+    }
+    let value_count = expected_count.checked_mul(dimension).ok_or_else(|| {
+        AppError(StatusCode::BAD_GATEWAY, "Embedding payload is too large".into())
+    })?;
+    let payload_bytes = value_count.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
+        AppError(StatusCode::BAD_GATEWAY, "Embedding payload is too large".into())
+    })?;
+    let mut body = Vec::with_capacity(EMBEDDING_BINARY_HEADER_SIZE + payload_bytes);
+    body.extend_from_slice(EMBEDDING_BINARY_MAGIC);
+    body.extend_from_slice(&EMBEDDING_BINARY_VERSION.to_le_bytes());
+    body.extend_from_slice(&0u16.to_le_bytes());
+    body.extend_from_slice(&(expected_count as u32).to_le_bytes());
+    body.extend_from_slice(&(dimension as u32).to_le_bytes());
+
+    for embedding in embeddings {
+        let values = embedding.as_array().ok_or_else(|| {
+            AppError(StatusCode::BAD_GATEWAY, "Embedding vector is not an array".into())
+        })?;
+        if values.len() != dimension {
+            return Err(AppError(
+                StatusCode::BAD_GATEWAY,
+                "Embedding vectors have inconsistent dimensions".into(),
+            ));
+        }
+        for value in values {
+            let number = value.as_f64().ok_or_else(|| {
+                AppError(StatusCode::BAD_GATEWAY, "Embedding contains a non-numeric value".into())
+            })?;
+            let number = number as f32;
+            if !number.is_finite() {
+                return Err(AppError(
+                    StatusCode::BAD_GATEWAY,
+                    "Embedding contains a non-finite value".into(),
+                ));
+            }
+            body.extend_from_slice(&number.to_le_bytes());
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        [
+            ("content-type", EMBEDDING_BINARY_MEDIA_TYPE),
+            ("content-encoding", "identity"),
+            ("x-omnivec-embedding-model", model_id),
+        ],
+        body,
+    )
+        .into_response())
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -181,6 +276,21 @@ async fn main() {
         .timeout(Duration::from_secs(300))
         .build()
         .expect("Failed to build HTTP client");
+    let unpooled_model_http = Client::builder()
+        .pool_max_idle_per_host(0)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("Failed to build unpooled model HTTP client");
+    let unpooled_model_hosts = Arc::new(
+        env::var("DOCGROK_UNPOOLED_MODEL_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<HashSet<_>>(),
+    );
 
     // Native model URLs
     let native_urls: HashMap<String, String> = [
@@ -251,6 +361,8 @@ async fn main() {
         pipelines: pipelines.clone(),
         native_urls: Arc::new(native_urls),
         http: http.clone(),
+        unpooled_model_http,
+        unpooled_model_hosts,
         k8s,
         namespace,
         cosmos,
@@ -745,12 +857,12 @@ async fn call_model(
             .native_urls
             .get(name)
             .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, format!("Unknown native model: '{name}'")))?;
+        let model_http = model_http_client(state, url, false);
 
         match &text {
             TextInput::Single(t) => {
                 let payload = json!({"text": t, "model_id": model_id});
-                let resp = state
-                    .http
+                let resp = model_http
                     .post(format!("{url}/embed"))
                     .json(&payload)
                     .send()
@@ -766,8 +878,7 @@ async fn call_model(
             TextInput::Batch(texts) => {
                 // Try batch endpoint first
                 let payload = json!({"texts": texts, "model_id": model_id});
-                let resp = state
-                    .http
+                let resp = model_http
                     .post(format!("{url}/embed/batch"))
                     .json(&payload)
                     .send()
@@ -786,8 +897,7 @@ async fn call_model(
                         let mut results = Vec::with_capacity(texts.len());
                         for t in texts {
                             let payload = json!({"text": t});
-                            let resp = state
-                                .http
+                            let resp = model_http
                                 .post(format!("{url}/embed"))
                                 .json(&payload)
                                 .send()
@@ -838,6 +948,11 @@ async fn call_model(
         let api_key = cfg["api_key"].as_str().unwrap_or("");
         let embedding_dim = cfg["embedding_dim"].as_u64().unwrap_or(0);
         let name = cfg["name"].as_str().unwrap_or(model_id);
+        let model_http = model_http_client(
+            state,
+            endpoint,
+            cfg["disable_keepalive"].as_bool().unwrap_or(false),
+        );
 
         let input_data = match &text {
             TextInput::Single(t) => json!([t]),
@@ -889,8 +1004,7 @@ async fn call_model(
             payload["model"] = json!(name);
         }
 
-        let resp = state
-            .http
+        let resp = model_http
             .post(&url)
             .headers(headers)
             .json(&payload)
@@ -942,6 +1056,25 @@ async fn call_model(
 enum TextInput {
     Single(String),
     Batch(Vec<String>),
+}
+
+fn model_http_client<'a>(
+    state: &'a AppState,
+    endpoint: &str,
+    force_unpooled: bool,
+) -> &'a Client {
+    let configured_unpooled = reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            state.unpooled_model_hosts.contains("*")
+                || state.unpooled_model_hosts.contains(&host)
+        });
+    if force_unpooled || configured_unpooled {
+        &state.unpooled_model_http
+    } else {
+        &state.http
+    }
 }
 
 fn pipeline_model_id(config: &Value) -> Option<&str> {
@@ -1195,6 +1328,7 @@ async fn handle_embed(
 
 async fn handle_embed_batch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<EmbedBatchRequest>,
 ) -> Result<Response, AppError> {
     if req.texts.is_empty() {
@@ -1246,6 +1380,13 @@ async fn handle_embed_batch(
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                if accepts_binary_embeddings(&headers) {
+                    return binary_embeddings_response(
+                        &embeddings,
+                        req.texts.len(),
+                        model_id,
+                    );
+                }
                 let outputs: Vec<Value> = embeddings.iter().map(|e| json!([e])).collect();
                 return Ok(Json(json!({
                     "outputs": outputs,
@@ -1272,6 +1413,13 @@ async fn handle_embed_batch(
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        if accepts_binary_embeddings(&headers) {
+            return binary_embeddings_response(
+                &embeddings,
+                req.texts.len(),
+                model_id,
+            );
+        }
         let outputs: Vec<Value> = embeddings.iter().map(|e| json!([e])).collect();
         return Ok(Json(json!({
             "outputs": outputs,
@@ -1430,6 +1578,7 @@ async fn list_registry_models(State(state): State<AppState>) -> Result<impl Into
             "endpoint": cfg["endpoint"].as_str().unwrap_or(""),
             "deployment": cfg["deployment"].as_str().unwrap_or(""),
             "embedding_dim": cfg["embedding_dim"].as_u64().unwrap_or(0),
+            "disable_keepalive": cfg["disable_keepalive"].as_bool().unwrap_or(false),
             "api_version": cfg["api_version"].as_str().unwrap_or(""),
             "status": "available",
         }));
@@ -1492,6 +1641,9 @@ async fn register_model(
     }
     if let Some(client_id) = req.client_id {
         fields.insert("client_id".into(), json!(client_id));
+    }
+    if let Some(disable_keepalive) = req.disable_keepalive {
+        fields.insert("disable_keepalive".into(), json!(disable_keepalive));
     }
 
     // Keep lookup/merge/persist/cache under one lock without recursively calling
@@ -2425,6 +2577,52 @@ mod registry_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    #[tokio::test]
+    async fn binary_embedding_response_has_versioned_little_endian_shape() {
+        let response = binary_embeddings_response(
+            &[
+                json!([1.0, 2.5]),
+                json!([-3.0, 4.25]),
+            ],
+            2,
+            "mdl-test",
+        )
+        .unwrap_or_else(|_| panic!("Binary response failed"));
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            EMBEDDING_BINARY_MEDIA_TYPE
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "identity"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[0..4], EMBEDDING_BINARY_MAGIC);
+        assert_eq!(u16::from_le_bytes(body[4..6].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(body[6..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(body[8..12].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(body[12..16].try_into().unwrap()), 2);
+        let values: Vec<f32> = body[16..]
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![1.0, 2.5, -3.0, 4.25]);
+    }
+
+    #[test]
+    fn binary_embedding_response_rejects_inconsistent_dimensions() {
+        let error = binary_embeddings_response(
+            &[json!([1.0, 2.0]), json!([3.0])],
+            2,
+            "mdl-test",
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+    }
+
     fn registration_request(key: Option<&str>) -> RegisterModelRequest {
         let mut request = json!({
             "id": "mdl-ext-existing", "name": "edited name", "type": "azure-openai",
@@ -2644,6 +2842,12 @@ mod registry_tests {
             pipelines: Arc::new(DashMap::new()),
             native_urls: Arc::new(HashMap::new()),
             http: Client::builder().timeout(Duration::from_secs(5)).build().unwrap(),
+            unpooled_model_http: Client::builder()
+                .pool_max_idle_per_host(0)
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            unpooled_model_hosts: Arc::new(HashSet::new()),
             k8s: None,
             namespace: "test".into(),
             cosmos: Some(CosmosConfig {

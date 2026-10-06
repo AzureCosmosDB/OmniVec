@@ -38,7 +38,7 @@ jobs:
             context: web
             dockerfile: web/Dockerfile
           - image: omnivec-changefeed
-            context: connectors/ingestion/dotnet
+            context: .
             dockerfile: connectors/ingestion/dotnet/Dockerfile
           - image: omnivec-dotnet-worker
             context: connectors/worker/dotnet

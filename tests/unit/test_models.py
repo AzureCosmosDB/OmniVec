@@ -24,7 +24,7 @@ class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
             "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks",
-            "onelake-iceberg", "sharepoint"
+            "onelake-iceberg", "sharepoint", "garnet"
         }
 
     def test_destination_type_values(self, api_models):
@@ -192,6 +192,34 @@ class TestDestination:
         }
         with pytest.raises(ValidationError):
             api_models.GarnetDestinationConfig(**config)
+
+
+class TestGarnetSource:
+    def test_defaults_and_round_trip(self, api_models):
+        config = api_models.GarnetSourceConfig(
+            endpoint="garnet.omnivec.svc.cluster.local:6379",
+            hash_key="documents",
+            tls=False,
+        )
+        assert config.batch_size == 50
+        assert config.scan_page_size == 500
+        assert config.poll_interval_seconds == 10
+        assert api_models.GarnetSourceConfig(**config.model_dump()) == config
+
+    @pytest.mark.parametrize("field,value", [
+        ("endpoint", ""),
+        ("hash_key", "invalid key"),
+        ("hash_key", "__omnivec:source-checkpoints:manual"),
+        ("password_secret_ref", "plain-password"),
+        ("batch_size", 51),
+        ("scan_page_size", 0),
+        ("poll_interval_seconds", 3601),
+        ("password", "plain-password"),
+    ])
+    def test_rejects_invalid_or_secret_bearing_config(self, api_models, field, value):
+        config = {"endpoint": "garnet:6379", "hash_key": "documents", field: value}
+        with pytest.raises(ValidationError):
+            api_models.GarnetSourceConfig(**config)
 
 
 # ===========================================================================

@@ -22,6 +22,18 @@ const FORMS = {
       F('host','Host',{ req:1, ph:'<server>.postgres.database.azure.com' }), F('port','Port',{ type:'number', def:5432 }), F('database','Database',{ req:1 }), F('table','Table',{ req:1, ph:'public.documents' }),
       F('id_column','ID column',{ def:'id' }), F('timestamp_column','Updated-at column',{ def:'updated_at' }), F('user','User',{ req:1 }), F('password','Password',{ type:'password' }),
       F('ssl_mode','SSL mode',{ type:'select', opts:['require','verify-full','prefer','disable'], def:'require', adv:1 }), F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:60, adv:1 }) ] },
+    'garnet': { blurb:'Versioned JSON records in a Garnet HASH, polled into a separate Garnet vector set.', fields:[
+      F('endpoint','Endpoint',{ req:1, ph:'garnet.omnivec.svc.cluster.local:6379' }),
+      F('hash_key','Source HASH key',{ req:1, ph:'documents', hint:'HASH field names are stable source references. Reserve the __omnivec:source-checkpoints: namespace.' }),
+      F('tls','TLS',{ type:'select', opts:['true','false'], def:'true', adv:1 }),
+      F('use_entra_auth','Microsoft Entra auth',{ type:'select', opts:['false','true'], def:'false', adv:1 }),
+      F('username','Username',{ adv:1 }), F('password_secret_ref','Password secret reference',{ ph:'kv://<vault>/<secret>', adv:1 }),
+      F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:10, adv:1 }),
+      F('scan_page_size','HSCAN page size',{ type:'number', def:500, adv:1 }),
+      F('batch_size','Embedding batch size (max 50)',{ type:'number', def:50, adv:1 }) ],
+      build: v => ({ endpoint:v.endpoint, hash_key:v.hash_key, tls:String(v.tls)!=='false', use_entra_auth:String(v.use_entra_auth)==='true',
+        username:v.username||undefined, password_secret_ref:v.password_secret_ref||undefined,
+        poll_interval_seconds:+v.poll_interval_seconds||10, scan_page_size:+v.scan_page_size||500, batch_size:+v.batch_size||50 }) },
     'onelake-iceberg': { blurb:'Apache Iceberg tables in a Microsoft Fabric lakehouse.', fields:[
       F('warehouse','Workspace / lakehouse',{ req:1, ph:'<workspace-id>/<lakehouse-id>' }), F('namespace','Namespace',{ def:'dbo' }), F('table','Table',{ req:1 }),
       F('content_fields','Content fields',{ type:'tags', def:['content'] }), F('id_field','ID field',{ def:'id' }), F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:60, adv:1 }) ] },
@@ -62,7 +74,7 @@ const listOf = kind => kind==='source' ? M.sources : M.dests;
 const healthOf = (kind, id) => (kind==='source' ? M.hs : M.hd)[id];
 const hdot = h => dot(!h ? '' : h.status==='healthy' ? 'ok' : h.status==='warning' ? 'warn' : 'err');
 const keyInfo = (x) => { const c = x.config||{};
-  return x.type==='azure-blob' ? `${c.container||'—'}${c.prefix?' / '+c.prefix:''}` : x.type==='sharepoint' ? (c.folder_path||'Document library') : x.type==='onelake-iceberg' ? (c.table||c.target_table||'—') : x.type==='garnet' ? `${c.endpoint||'—'} / ${c.vector_set||'omnivec-vectors'}`
+  return x.type==='azure-blob' ? `${c.container||'—'}${c.prefix?' / '+c.prefix:''}` : x.type==='sharepoint' ? (c.folder_path||'Document library') : x.type==='onelake-iceberg' ? (c.table||c.target_table||'—') : x.type==='garnet' ? `${c.endpoint||'—'} / ${c.hash_key||c.vector_set||'omnivec-vectors'}`
     : c.container ? `${c.database||''} / ${c.container}` : c.table ? `${c.database||''} / ${c.table}` : '—'; };
 
 /* ---------- list ---------- */
@@ -91,7 +103,7 @@ route('connections', { needs:[...X.CORE, 'caps'], render(parts) {
        <td class="r"><button class="btn ghost sm icon" data-rm="${x.id}">${icon('more','sm')}</button></td></tr>`; }).join('')}</tbody></table>`
     : empty('search', 'No matches', 'Try another filter.');
   const firstRun = !list.length;
-  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','onelake-iceberg','mssql'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
+  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','garnet','onelake-iceberg','mssql'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
     .map(t => `<a class="opt" href="#/connections/new/${path}?type=${t}">${logo(t)}<div><div class="t">${esc(T(t).label)}</div><div class="d">Guided setup with a permissions check</div></div></a>`).join('');
   const html = `<div class="page">
    <div class="ph"><div><h1>Connections</h1><p>Sources are where content comes from. Vector stores are where embeddings are written and searched. Each can be reused by many pipelines.</p></div>

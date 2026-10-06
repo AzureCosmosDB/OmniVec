@@ -107,7 +107,7 @@ public sealed class GarnetDestinationWriter : IDestinationWriter
         }
     }
 
-    private static async Task<IDatabase> GetDatabaseAsync(
+    public static async Task<IDatabase> GetDatabaseAsync(
         Dictionary<string, object> config,
         CancellationToken ct)
     {

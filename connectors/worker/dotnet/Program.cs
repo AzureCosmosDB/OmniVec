@@ -37,13 +37,12 @@ builder.Services.AddHttpClient<DocGrokClient>((sp, client) =>
     client.Timeout = opts.GetDocGrokRequestTimeout();
 });
 
-// Metrics reporter HTTP client
-builder.Services.AddHttpClient<MetricsReporter>((sp, client) =>
-{
-    var opts = sp.GetRequiredService<IOptions<WorkerOptions>>().Value;
-    client.BaseAddress = new Uri(opts.OmniVecApiBaseUrl);
-    client.Timeout = TimeSpan.FromSeconds(10);
-});
+// Metrics: singleton bounded non-blocking transport (hosted, registered before the
+// worker so it stops after it and drains final reports) + singleton reporter facade.
+builder.Services.AddMetricsTransport(builder.Configuration,
+    sp => sp.GetRequiredService<IOptions<WorkerOptions>>().Value.OmniVecApiBaseUrl);
+builder.Services.AddSingleton<MetricsReporter>(sp => new MetricsReporter(
+    sp.GetRequiredService<MetricsTransport>(), sp.GetRequiredService<ILogger<MetricsReporter>>()));
 builder.Services.AddHttpClient("FabricJobs", client => client.Timeout = TimeSpan.FromSeconds(30));
 
 builder.Services.AddHttpClient<SharePointContentClient>(client =>

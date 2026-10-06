@@ -2481,6 +2481,7 @@
                                     <option value="onelake-iceberg">OneLake Apache Iceberg</option>
                                     <option value="cosmosdb">CosmosDB</option>
                                     <option value="postgresql">PostgreSQL</option>
+                                    <option value="garnet">Garnet HASH</option>
                                 </select>
                             </div>
                             </section>
@@ -2811,6 +2812,7 @@
                                                 <option value="onelake-iceberg">OneLake Apache Iceberg</option>
                                                 <option value="cosmosdb">CosmosDB</option>
                                                 <option value="postgresql">PostgreSQL</option>
+                                                <option value="garnet">Garnet HASH</option>
                                             </select>
                                         </div>
                                         <div id="pl-src-config-fields"></div>
@@ -3050,6 +3052,14 @@
                             </div>
                             <div id="chunk-config-section" style="display: none; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius-md); margin-top: 8px;">
                                 <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 10px; font-weight: 600; letter-spacing: 0.5px;">Chunk Settings</div>
+                                <div class="form-group" id="pl-chunk-cleanup-group" style="display: none;">
+                                    <label class="form-label">Chunk Replacement Order</label>
+                                    <select class="form-input" name="chunk_cleanup_order">
+                                        <option value="insert-first">Insert new chunks, then delete obsolete chunks</option>
+                                        <option value="delete-first">Delete old chunks, then insert new chunks</option>
+                                    </select>
+                                    <small>Cosmos text chunks only. Insert-first can show mixed chunks temporarily; delete-first can leave a search gap on failure. Editable later for newly queued work.</small>
+                                </div>
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                                     <div class="form-group" style="margin-bottom: 0;">
                                         <label class="form-label">Chunk Size (selected unit)</label>
@@ -6852,6 +6862,14 @@
                     <div style="padding: 20px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 16px;">
                         <div style="font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 16px; font-weight: 600; letter-spacing: 0.5px;">Chunk Configuration</div>
                         <small>Cosmos size, overlap, unit and template may be edited for future processing. Strategy, text storage and text field require a new pipeline.</small>
+                        ${cosmosChunk ? `<div class="form-group">
+                            <label class="form-label">Chunk Replacement Order</label>
+                            <select class="form-input" id="pip-detail-chunk-cleanup-order" onchange="markPipelineDetailDirty()">
+                                <option value="insert-first" ${cc.cleanup_order !== 'delete-first' ? 'selected' : ''}>Insert new chunks, then delete obsolete chunks</option>
+                                <option value="delete-first" ${cc.cleanup_order === 'delete-first' ? 'selected' : ''}>Delete old chunks, then insert new chunks</option>
+                            </select>
+                            <small>Applies to newly queued work. Insert-first can show mixed chunks; delete-first can leave a search gap on failure.</small>
+                        </div>` : ''}
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                             <div class="form-group" style="margin-bottom: 0;">
                                 <label class="form-label">Chunk Size (selected unit)</label>
@@ -7725,6 +7743,7 @@
         }
 
         function capturePipelineTabData() {
+            const pipeline = pipelines.find(p => p.id === currentPipelineId);
             const nameEl = document.getElementById('pip-detail-name');
             const descEl = document.getElementById('pip-detail-description');
             const processEl = document.getElementById('pip-detail-process-existing');
@@ -7771,6 +7790,8 @@
                     chunk_size: Number(chunkSizeEl?.value ?? 1000),
                     chunk_overlap: Number(chunkOverlapEl?.value ?? 200),
                     chunk_unit: document.getElementById('pip-detail-chunk-unit')?.value || 'chars',
+                    cleanup_order: document.getElementById('pip-detail-chunk-cleanup-order')?.value
+                        || editedPipelineData.chunk_config?.cleanup_order || pipeline?.chunk_config?.cleanup_order || 'insert-first',
                     store_text: storeTextEl?.checked || false,
                     text_field: document.getElementById('pip-detail-chunk-text-field')?.value || 'text',
                     doc_id_pattern: chunkDocIdEl?.value || '{source_hash}-{pipeline}-chunk-{chunk}',
@@ -8002,6 +8023,7 @@
 
             // Reset source config
             document.getElementById('pipeline-source-config').style.display = 'none';
+            updateChunkCleanupVisibility();
 
             // Reset inline forms
             document.getElementById('pl-src-config-fields').innerHTML = '';
@@ -8040,6 +8062,7 @@
             if (mode === 'new' && document.getElementById('pl-src-config-fields').innerHTML.trim() === '') {
                 updateSourceConfigInline(document.getElementById('pl-src-type').value, 'pl-src');
             }
+            updateChunkCleanupVisibility();
         }
 
         function togglePipelineDestMode(mode) {
@@ -8449,6 +8472,7 @@
         }
 
         function updateSourceConfigInline(type, prefix) {
+            if (prefix === 'pl-src') updateChunkCleanupVisibility();
             const container = document.getElementById(`${prefix}-config-fields`);
             if (type === 'azure-blob') {
                 container.innerHTML = `
@@ -8820,9 +8844,18 @@
             else if (currentPipelineStep === 'source') showPipelineStep('general');
         }
 
+        function updateChunkCleanupVisibility() {
+            const source = pipelineSourceMode === 'new'
+                ? { type: document.getElementById('pl-src-type').value }
+                : sources.find(s => s.id === document.getElementById('pipeline-source-select').value);
+            document.getElementById('pl-chunk-cleanup-group').style.display =
+                source?.type === 'cosmosdb' && !source.config?.attachments_field ? 'block' : 'none';
+        }
+
         function updatePipelineSourceConfig() {
             const sourceId = document.getElementById('pipeline-source-select').value;
             const configDiv = document.getElementById('pipeline-source-config');
+            updateChunkCleanupVisibility();
 
             if (!sourceId) {
                 configDiv.style.display = 'none';
@@ -9387,6 +9420,8 @@
                     chunk_size: Number(formData.get('chunk_size') ?? 1000),
                     chunk_overlap: Number(formData.get('chunk_overlap') ?? 200),
                     chunk_unit: formData.get('chunk_unit') || 'chars',
+                    cleanup_order: sourceType === 'cosmosdb'
+                        ? formData.get('chunk_cleanup_order') || 'insert-first' : 'insert-first',
                     store_text: form.querySelector('input[name="store_text"]')?.checked || false,
                     text_field: formData.get('chunk_text_field') || 'text',
                     doc_id_pattern: formData.get('chunk_doc_id_pattern') || '{source_hash}-{pipeline}-chunk-{chunk}',

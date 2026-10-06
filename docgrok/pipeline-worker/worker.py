@@ -23,14 +23,18 @@ import io
 import logging
 import tempfile
 import time
+import struct
+import itertools
 from dataclasses import dataclass, field, asdict
 from contextlib import contextmanager
+from urllib.parse import urljoin
 
 import fitz  # PyMuPDF
 import httpx
 import numpy as np
 from PIL import Image
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List, Iterator, Any, Dict
 
@@ -71,8 +75,42 @@ CLIP_ENDPOINT_URL = os.environ.get("CLIP_ENDPOINT_URL", "")
 CLIP_API_KEY = os.environ.get("CLIP_API_KEY", "")
 DEFAULT_MODEL_ID = os.environ.get("DEFAULT_MODEL_ID", "")
 EMBED_BATCH_SIZE = int(os.environ.get("DOCGROK_EMBED_BATCH_SIZE", "16"))
-if not 1 <= EMBED_BATCH_SIZE <= 128:
-    raise ValueError("DOCGROK_EMBED_BATCH_SIZE must be between 1 and 128")
+if not 1 <= EMBED_BATCH_SIZE <= 2048:
+    raise ValueError("DOCGROK_EMBED_BATCH_SIZE must be between 1 and 2048")
+
+EMBED_MODE = os.environ.get("DOCGROK_EMBED_MODE", "router").strip().lower()
+if EMBED_MODE not in {"router", "direct", "direct-with-router-fallback"}:
+    raise ValueError(
+        "DOCGROK_EMBED_MODE must be router, direct, or direct-with-router-fallback"
+    )
+
+try:
+    DIRECT_EMBEDDING_ROUTES = json.loads(
+        os.environ.get("DOCGROK_DIRECT_EMBEDDING_ROUTES", "{}")
+    )
+except json.JSONDecodeError as exc:
+    raise ValueError("DOCGROK_DIRECT_EMBEDDING_ROUTES must be valid JSON") from exc
+if not isinstance(DIRECT_EMBEDDING_ROUTES, dict):
+    raise ValueError("DOCGROK_DIRECT_EMBEDDING_ROUTES must be a JSON object")
+
+DIRECT_EMBED_CONCURRENCY = int(
+    os.environ.get("DOCGROK_DIRECT_EMBED_CONCURRENCY", "8")
+)
+if not 1 <= DIRECT_EMBED_CONCURRENCY <= 128:
+    raise ValueError("DOCGROK_DIRECT_EMBED_CONCURRENCY must be between 1 and 128")
+
+DIRECT_EMBED_TIMEOUT_SECONDS = float(
+    os.environ.get("DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS", "180")
+)
+if not math.isfinite(DIRECT_EMBED_TIMEOUT_SECONDS) or DIRECT_EMBED_TIMEOUT_SECONDS <= 0:
+    raise ValueError("DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS must be a positive number")
+
+_DIRECT_ENDPOINT_COUNTERS: Dict[tuple[str, tuple[str, ...]], Iterator[int]] = {}
+
+EMBEDDING_BINARY_MEDIA_TYPE = "application/vnd.omnivec.embeddings.f32"
+EMBEDDING_BINARY_MAGIC = b"OVEC"
+EMBEDDING_BINARY_VERSION = 1
+EMBEDDING_BINARY_HEADER_SIZE = 16
 
 # Memory-frugal PDF knobs
 PDF_DPI = int(os.environ.get("DOCGROK_PDF_DPI", "150"))
@@ -198,7 +236,8 @@ STAGE_CATALOG: Dict[str, Any] = {
     },
     "embed": {
         "summary": (
-            "Generate a vector for each chunk via the model router. "
+            "Generate a vector for each chunk through the configured direct "
+            "model data path or the model router. "
             "Every transform pipeline must end with exactly one embed stage."
         ),
         "params": {
@@ -211,8 +250,12 @@ STAGE_CATALOG: Dict[str, Any] = {
                 "description": "DocGrok router base URL. null = use DOCGROK_ROUTER_URL or the request override.",
             },
             "batch_size": {
-                "type": "int", "default": 1,
-                "description": "Reserved — currently sends one chunk at a time.",
+                "type": "int|null", "default": None,
+                "description": "Per-request batch override. null = use the direct route or DOCGROK_EMBED_BATCH_SIZE.",
+            },
+            "mode": {
+                "type": "str|null", "default": None,
+                "description": "router, direct, or direct-with-router-fallback. null = use DOCGROK_EMBED_MODE.",
             },
         },
     },
@@ -893,11 +936,19 @@ async def embed_via_router(texts: list[str], model_id: str, router_url: str) -> 
         for start in range(0, len(texts), EMBED_BATCH_SIZE):
             batch = [text if text.strip() else "[empty page]" for text in texts[start:start + EMBED_BATCH_SIZE]]
             payload = {"texts": batch, "model_id": model_id}
-            resp = await client.post(url, json=payload)
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={"Accept": EMBEDDING_BINARY_MEDIA_TYPE},
+            )
             if resp.status_code != 200:
                 logger.error("Router embed error for chunk batch %d: %d", start, resp.status_code)
                 status = resp.status_code if 400 <= resp.status_code <= 599 else 502
                 raise HTTPException(status_code=status, detail=f"Embedding error for chunk batch {start}: {resp.status_code}")
+            content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == EMBEDDING_BINARY_MEDIA_TYPE:
+                vectors.extend(_decode_binary_embeddings(resp.content, len(batch)))
+                continue
             try:
                 result = resp.json()
             except ValueError as exc:
@@ -911,6 +962,359 @@ async def embed_via_router(texts: list[str], model_id: str, router_url: str) -> 
                 vectors.append(output[0])
 
     return vectors
+
+
+def _decode_binary_embeddings(content: bytes, expected_count: int) -> list[list[float]]:
+    if len(content) < EMBEDDING_BINARY_HEADER_SIZE:
+        raise HTTPException(status_code=502, detail="Truncated binary embedding header")
+    magic, version, flags, count, dimension = struct.unpack_from("<4sHHII", content)
+    if magic != EMBEDDING_BINARY_MAGIC:
+        raise HTTPException(status_code=502, detail="Invalid binary embedding magic")
+    if version != EMBEDDING_BINARY_VERSION:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unsupported binary embedding version: {version}",
+        )
+    if flags != 0:
+        raise HTTPException(status_code=502, detail=f"Unsupported binary embedding flags: {flags}")
+    if count != expected_count:
+        raise HTTPException(status_code=502, detail="Binary embedding count does not match input")
+    if dimension == 0:
+        raise HTTPException(status_code=502, detail="Binary embedding dimension must be positive")
+    payload_size = count * dimension * 4
+    if len(content) != EMBEDDING_BINARY_HEADER_SIZE + payload_size:
+        raise HTTPException(status_code=502, detail="Binary embedding payload length is invalid")
+    values = np.frombuffer(
+        content,
+        dtype="<f4",
+        count=count * dimension,
+        offset=EMBEDDING_BINARY_HEADER_SIZE,
+    )
+    if not np.isfinite(values).all():
+        raise HTTPException(status_code=502, detail="Binary embedding payload contains non-finite values")
+    return values.reshape((count, dimension)).tolist()
+
+
+def _encode_binary_embeddings(vectors: list[list[float]]) -> bytes:
+    if not vectors or not vectors[0]:
+        raise HTTPException(status_code=502, detail="Embedding vectors must be non-empty")
+    dimension = len(vectors[0])
+    if any(not isinstance(vector, list) or len(vector) != dimension for vector in vectors):
+        raise HTTPException(status_code=502, detail="Embedding vectors have inconsistent dimensions")
+    values = np.asarray(vectors, dtype="<f4")
+    if values.shape != (len(vectors), dimension) or not np.isfinite(values).all():
+        raise HTTPException(status_code=502, detail="Embedding vectors contain invalid values")
+    return (
+        struct.pack(
+            "<4sHHII",
+            EMBEDDING_BINARY_MAGIC,
+            EMBEDDING_BINARY_VERSION,
+            0,
+            len(vectors),
+            dimension,
+        )
+        + values.tobytes(order="C")
+    )
+
+
+def _direct_embedding_route(model_id: str) -> Optional[Dict[str, Any]]:
+    route = DIRECT_EMBEDDING_ROUTES.get(model_id)
+    if route is None:
+        route = DIRECT_EMBEDDING_ROUTES.get("*")
+    if route is None:
+        return None
+    if isinstance(route, str):
+        return {"protocol": "openai", "endpoints": [route]}
+    if not isinstance(route, dict):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Direct embedding route for '{model_id}' must be a string or object",
+        )
+    return route
+
+
+def _direct_endpoint_url(endpoint: str, protocol: str) -> str:
+    endpoint = endpoint.strip()
+    if not endpoint:
+        raise HTTPException(status_code=500, detail="Direct embedding endpoint cannot be empty")
+    if protocol == "tei":
+        return endpoint if endpoint.rstrip("/").endswith("/embed") else urljoin(
+            endpoint.rstrip("/") + "/", "embed"
+        )
+    if protocol in {"openai", "omnivec-v1"}:
+        if endpoint.rstrip("/").endswith("/v1"):
+            return endpoint.rstrip("/") + "/embeddings"
+        return endpoint if endpoint.rstrip("/").endswith("/v1/embeddings") else urljoin(
+            endpoint.rstrip("/") + "/", "v1/embeddings"
+        )
+    raise HTTPException(
+        status_code=500,
+        detail=f"Unsupported direct embedding protocol: '{protocol}'",
+    )
+
+
+async def embed_direct(
+    texts: list[str],
+    model_id: str,
+    route: Dict[str, Any],
+    batch_size_override: Optional[int] = None,
+) -> list[list[float]]:
+    protocol = str(route.get("protocol") or "openai").strip().lower()
+    configured_endpoints = route.get("endpoints")
+    if isinstance(configured_endpoints, str):
+        configured_endpoints = [configured_endpoints]
+    if not isinstance(configured_endpoints, list) or not configured_endpoints:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Direct embedding route for '{model_id}' requires endpoints",
+        )
+    endpoints = [
+        _direct_endpoint_url(str(endpoint), protocol)
+        for endpoint in configured_endpoints
+    ]
+
+    try:
+        batch_size = int(
+            batch_size_override
+            or route.get("batch_size")
+            or EMBED_BATCH_SIZE
+        )
+        concurrency = int(route.get("concurrency") or DIRECT_EMBED_CONCURRENCY)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid direct embedding limits for '{model_id}'",
+        ) from exc
+    if not 1 <= batch_size <= 2048:
+        raise HTTPException(status_code=500, detail="Direct embedding batch_size must be 1..2048")
+    if not 1 <= concurrency <= 128:
+        raise HTTPException(status_code=500, detail="Direct embedding concurrency must be 1..128")
+
+    batches = [
+        (start, [text if text.strip() else "[empty page]" for text in texts[start:start + batch_size]])
+        for start in range(0, len(texts), batch_size)
+    ]
+    ordered: list[Optional[list[list[float]]]] = [None] * len(batches)
+    semaphore = asyncio.Semaphore(concurrency)
+    limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=0)
+    endpoint_counter = _DIRECT_ENDPOINT_COUNTERS.setdefault(
+        (model_id, tuple(endpoints)),
+        itertools.count(),
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DIRECT_EMBED_TIMEOUT_SECONDS,
+        limits=limits,
+    ) as client:
+        async def send(batch_index: int, batch: list[str]):
+            endpoint = endpoints[next(endpoint_counter) % len(endpoints)]
+            if protocol == "tei":
+                payload = {
+                    "inputs": batch,
+                    "truncate": bool(route.get("truncate", True)),
+                }
+            else:
+                encoding_format = str(route.get("encoding_format") or "base64").lower()
+                if encoding_format not in {"float", "base64"}:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Unsupported direct OpenAI encoding_format: '{encoding_format}'",
+                    )
+                payload = {
+                    "model": str(route.get("model") or model_id),
+                    "input": batch,
+                    "encoding_format": encoding_format,
+                }
+            async with semaphore:
+                response = await client.post(
+                    endpoint,
+                    json=payload,
+                    headers={"Accept": EMBEDDING_BINARY_MEDIA_TYPE},
+                )
+            if response.status_code != 200:
+                status = response.status_code if 400 <= response.status_code <= 599 else 502
+                raise HTTPException(
+                    status_code=status,
+                    detail=(
+                        f"Direct embedding error for '{model_id}' batch "
+                        f"{batch_index}: HTTP {response.status_code}"
+                    ),
+                )
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == EMBEDDING_BINARY_MEDIA_TYPE:
+                vectors = _decode_binary_embeddings(response.content, len(batch))
+            else:
+                try:
+                    result = response.json()
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Direct embedding endpoint returned invalid JSON for '{model_id}'",
+                    ) from exc
+                if protocol == "tei":
+                    vectors = result
+                else:
+                    data = result.get("data") if isinstance(result, dict) else None
+                    if not isinstance(data, list):
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Direct OpenAI endpoint returned invalid data for '{model_id}'",
+                        )
+                    ordered_data = sorted(
+                        data,
+                        key=lambda item: item.get("index", 0) if isinstance(item, dict) else 0,
+                    )
+                    vectors = [
+                        item.get("embedding") if isinstance(item, dict) else None
+                        for item in ordered_data
+                    ]
+                    if encoding_format == "base64":
+                        decoded_vectors = []
+                        for vector in vectors:
+                            if not isinstance(vector, str):
+                                raise HTTPException(
+                                    status_code=502,
+                                    detail=f"Direct OpenAI endpoint returned a non-base64 embedding for '{model_id}'",
+                                )
+                            try:
+                                packed = base64.b64decode(vector, validate=True)
+                            except (ValueError, TypeError) as exc:
+                                raise HTTPException(
+                                    status_code=502,
+                                    detail=f"Direct OpenAI endpoint returned invalid base64 for '{model_id}'",
+                                ) from exc
+                            if not packed or len(packed) % 4:
+                                raise HTTPException(
+                                    status_code=502,
+                                    detail=f"Direct OpenAI endpoint returned an invalid float32 payload for '{model_id}'",
+                                )
+                            values = np.frombuffer(packed, dtype="<f4")
+                            if not np.isfinite(values).all():
+                                raise HTTPException(
+                                    status_code=502,
+                                    detail=f"Direct OpenAI endpoint returned non-finite values for '{model_id}'",
+                                )
+                            decoded_vectors.append(values.tolist())
+                        vectors = decoded_vectors
+            if not isinstance(vectors, list) or len(vectors) != len(batch):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Direct embedding result count does not match input for '{model_id}'",
+                )
+            if any(not isinstance(vector, list) or not vector for vector in vectors):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Direct embedding endpoint returned an invalid vector for '{model_id}'",
+                )
+            ordered[batch_index] = vectors
+
+        await asyncio.gather(*(
+            send(batch_index, batch)
+            for batch_index, (_, batch) in enumerate(batches)
+        ))
+
+    vectors: list[list[float]] = []
+    for batch in ordered:
+        if batch is None:
+            raise HTTPException(status_code=502, detail="Direct embedding batch did not complete")
+        vectors.extend(batch)
+    return vectors
+
+
+async def embed_texts(
+    texts: list[str],
+    model_id: str,
+    router_url: str,
+    *,
+    mode_override: Optional[str] = None,
+    batch_size_override: Optional[int] = None,
+) -> list[list[float]]:
+    mode = (mode_override or EMBED_MODE).strip().lower()
+    if mode not in {"router", "direct", "direct-with-router-fallback"}:
+        raise HTTPException(status_code=400, detail=f"Unknown embedding mode: '{mode}'")
+
+    route = _direct_embedding_route(model_id)
+    if mode != "router" and route is not None:
+        try:
+            return await embed_direct(
+                texts,
+                model_id,
+                route,
+                batch_size_override=batch_size_override,
+            )
+        except (HTTPException, httpx.HTTPError) as exc:
+            if mode == "direct":
+                raise
+            logger.warning(
+                "Direct embedding failed for model %s; falling back to router: %s",
+                model_id,
+                exc,
+            )
+    elif mode == "direct":
+        raise HTTPException(
+            status_code=500,
+            detail=f"No direct embedding route configured for '{model_id}'",
+        )
+
+    return await embed_via_router(texts, model_id, router_url)
+
+
+@app.post("/v1/embeddings")
+async def openai_embeddings(request: Request):
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+
+    raw_input = body.get("input")
+    if isinstance(raw_input, str):
+        texts = [raw_input]
+    elif isinstance(raw_input, list) and raw_input and all(isinstance(item, str) for item in raw_input):
+        texts = raw_input
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="`input` must be a non-empty string or array of strings",
+        )
+    if len(texts) > 2048:
+        raise HTTPException(status_code=400, detail="A maximum of 2048 inputs is supported")
+
+    model_id = str(body.get("model") or DEFAULT_MODEL_ID)
+    if not model_id:
+        raise HTTPException(status_code=400, detail="`model` is required")
+
+    vectors = await embed_texts(texts, model_id, DOCGROK_ROUTER_URL)
+    accept = request.headers.get("accept", "")
+    if any(
+        part.split(";", 1)[0].strip().lower() == EMBEDDING_BINARY_MEDIA_TYPE
+        for part in accept.split(",")
+    ):
+        return Response(
+            content=_encode_binary_embeddings(vectors),
+            media_type=EMBEDDING_BINARY_MEDIA_TYPE,
+            headers={
+                "Content-Encoding": "identity",
+                "X-OmniVec-Embedding-Model": model_id,
+            },
+        )
+
+    prompt_tokens = sum(max(1, len(text) // 4) for text in texts)
+    return JSONResponse(content={
+        "object": "list",
+        "data": [
+            {
+                "object": "embedding",
+                "index": index,
+                "embedding": vector,
+            }
+            for index, vector in enumerate(vectors)
+        ],
+        "model": model_id,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "total_tokens": prompt_tokens,
+        },
+    })
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────
@@ -1338,7 +1742,13 @@ async def _stage_embed(srec: StepRecord, ctx: Dict[str, Any], cfg: Dict[str, Any
     router_url = cfg.get("router_url") or ctx["router_url"]
     if not model_id:
         raise HTTPException(status_code=400, detail="No model_id available for embed stage")
-    embeddings = await embed_via_router(chunks, model_id, router_url)
+    embeddings = await embed_texts(
+        chunks,
+        model_id,
+        router_url,
+        mode_override=cfg.get("mode"),
+        batch_size_override=cfg.get("batch_size"),
+    )
     ctx["embeddings"] = embeddings
     srec.output["vector_count"] = len(embeddings)
     srec.output["dim"] = len(embeddings[0]) if embeddings else 0
@@ -2190,6 +2600,9 @@ async def health():
         "status": "healthy",
         "ocr_loaded": _ocr_engine is not None,
         "router_url": DOCGROK_ROUTER_URL,
+        "embedding_mode": EMBED_MODE,
+        "direct_embedding_models": sorted(DIRECT_EMBEDDING_ROUTES),
+        "direct_embedding_concurrency": DIRECT_EMBED_CONCURRENCY,
         "default_model": DEFAULT_MODEL_ID or "(none — must be set per-request)",
         "pipeline": PIPELINE_NAME,
         "pipeline_version": PIPELINE_VERSION,

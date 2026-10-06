@@ -25,6 +25,10 @@ public class Source
     public string? Database => TryGetString("database");
     public string? Container => TryGetString("container");
     public string? SoftDeleteField => TryGetString("soft_delete_field");
+    public string? GarnetHashKey => TryGetString("hash_key");
+    public int GarnetPollIntervalSeconds => TryGetInt("poll_interval_seconds") ?? 10;
+    public int GarnetScanPageSize => TryGetInt("scan_page_size") ?? 500;
+    public int GarnetBatchSize => TryGetInt("batch_size") ?? 50;
 
     // SQL source config accessors (MS SQL + PostgreSQL)
     public string? Table => TryGetString("table");

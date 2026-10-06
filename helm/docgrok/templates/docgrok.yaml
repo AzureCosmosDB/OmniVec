@@ -39,6 +39,8 @@ spec:
           value: {{ .Values.docgrok.env.CLIP_URL | quote }}
         - name: BGE_URL
           value: {{ .Values.docgrok.env.BGE_URL | quote }}
+        - name: DOCGROK_UNPOOLED_MODEL_HOSTS
+          value: {{ .Values.docgrok.env.DOCGROK_UNPOOLED_MODEL_HOSTS | quote }}
         - name: NAMESPACE
           value: {{ .Values.global.namespace | quote }}
         - name: PROVIDERS_CONFIG_PATH

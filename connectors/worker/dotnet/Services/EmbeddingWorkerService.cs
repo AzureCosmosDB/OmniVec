@@ -362,7 +362,8 @@ public class EmbeddingWorkerService : BackgroundService
             if (results.Select(r => r.Embedding.Length).Distinct().Count() > 1)
                 throw new InvalidOperationException("Chunk embedding dimensions are inconsistent");
             await writer.ReplaceTextChunksAsync(msg.DestinationConfig,
-                new(msg.SourceId, msg.SourceRef, msg.PartitionKeyValue, msg.PipelineId), results, ct);
+                new(msg.SourceId, msg.SourceRef, msg.PartitionKeyValue, msg.PipelineId,
+                    ChunkCleanupOrder: config.CleanupOrder), results, ct);
             await receiver.CompleteMessageAsync(item.sbMsg, ct);
             _logger.LogInformation("Cosmos text chunked source={SourceId}/{SourceRef} pipeline={Pipeline}: {Count} chunks",
                 msg.SourceId, msg.SourceRef, msg.PipelineId, results.Count);

@@ -173,6 +173,7 @@ internal static class ConnectorReliabilityTests
                 "mdl-test", ["hello"], default,
                 "pipeline", "source", "destination", "document"));
 
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(metricCalls == 4);
             Check(metricHandler.LastBody?.Contains("\"model_id\":\"mdl-test\"") == true);
             Check(metricHandler.LastBody?.Contains("\"throttle_count\":1") == true);
@@ -342,10 +343,28 @@ internal static class ConnectorReliabilityTests
             var message = TextMessage();
             await Invoke(worker, "ProcessBatchAsync", receiver,
                 new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message, "poison-1")) }, CancellationToken.None);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(receiver.DeadLettered == 1 && receiver.Completed == 0 && reports.Count == 1);
             Check(reports[0].GetProperty("processed").GetInt32() == 0);
             Check(reports[0].GetProperty("failed").GetInt32() == 1);
             Check(reports[0].GetProperty("batch_key").GetString() == "worker-dlq:poison-1");
+        });
+        Test("Worker batch completes while the metrics endpoint is blocked (non-blocking reporting)", async () =>
+        {
+            var blocked = new MetricsTransportTests.BlockedHandler();
+            var metrics = new MetricsReporter(new HttpClient(blocked) { BaseAddress = new("http://local.invalid") },
+                NullLogger<MetricsReporter>.Instance);
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+                new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.25,0.5]]}""") })), metrics: metrics);
+            var receiver = new ReliabilityReceiver();
+            var message = TextMessage();
+            await Invoke(worker, "ProcessBatchAsync", receiver,
+                new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message)) }, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Check(receiver.Completed == 1 && metrics.Transport.Sent == 0, "batch waited on metrics I/O");
+            await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            blocked.Release();
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)) && metrics.Transport.Sent == 1);
         });
         Test("Failed dead-letter settlement does not claim terminal-failure metrics", async () =>
         {
@@ -357,6 +376,7 @@ internal static class ConnectorReliabilityTests
             var receiver = new ReliabilityReceiver { FailDeadLetter = true };
             await Fails(() => Invoke(worker, "DeadLetterWithMetricsAsync", receiver, Delivery(TextMessage()),
                 "Poison", "bad input", CancellationToken.None));
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(reports == 0 && receiver.DeadLettered == 0);
         });
         Test("Rejected metrics HTTP responses are logged instead of silently treated as delivered", async () =>
@@ -365,7 +385,8 @@ internal static class ConnectorReliabilityTests
             var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ => new(HttpStatusCode.Unauthorized)))
                 { BaseAddress = new("http://local.invalid") }, logger);
             await metrics.ReportInlineMetricsAsync("pipeline", 0, 1, 0, "failure");
-            Check(logger.Warnings == 1);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(logger.Warnings == 1 && metrics.Transport.Failed == 1);
         });
         Test("HTTP timeout does not permanently terminate the receive loop", async () =>
         {

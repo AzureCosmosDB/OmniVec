@@ -526,7 +526,10 @@ var connectorFailures = await ConnectorReliabilityTests.RunAsync();
 var cosmosSourceFailures = await CosmosSourceContentTests.RunAsync();
 var blobPollingFailures = await BlobPollingTests.RunAsync();
 var cosmosChunkFailures = await CosmosChunkTests.RunAsync();
-return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures == 0 ? 0 : 1;
+var inlineCosmosFailures = await InlineCosmosTests.RunAsync();
+var garnetSourceFailures = await GarnetSourceTests.RunAsync();
+var metricsTransportFailures = await MetricsTransportTests.RunAsync();
+return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures + inlineCosmosFailures + garnetSourceFailures + metricsTransportFailures == 0 ? 0 : 1;
 
 sealed class MemorySyncStore : ISharePointSyncStore
 {

@@ -1,19 +1,29 @@
-using System.Net.Http.Json;
-
 namespace OmniVec.Worker.Services;
 
+/// <summary>
+/// Best-effort inline-metrics reporter. ReportInlineMetricsAsync only admits the report
+/// into the bounded <see cref="MetricsTransport"/> queue and returns a completed task;
+/// delivery (bounded timeout/retries) happens on the transport's single background
+/// sender. Telemetry loss is counted and logged by the transport, never thrown.
+/// </summary>
 public class MetricsReporter
 {
-    private readonly HttpClient _http;
+    private readonly MetricsTransport _transport;
     private readonly ILogger<MetricsReporter> _logger;
 
-    public MetricsReporter(HttpClient http, ILogger<MetricsReporter> logger)
+    public MetricsReporter(MetricsTransport transport, ILogger<MetricsReporter> logger)
     {
-        _http = http;
+        _transport = transport;
         _logger = logger;
     }
 
-    public async Task ReportInlineMetricsAsync(
+    /// <summary>Test convenience: private transport over a caller-owned HttpClient.</summary>
+    internal MetricsReporter(HttpClient http, ILogger<MetricsReporter> logger, MetricsTransportOptions? options = null)
+        : this(new MetricsTransport(() => http, logger, options), logger) { }
+
+    internal MetricsTransport Transport => _transport;
+
+    public Task ReportInlineMetricsAsync(
         string pipelineId, int processed, int failed, long processingTimeMs,
         string batchKey, CancellationToken ct = default, string sourceId = "",
         string destinationId = "", string modelId = "", long tokensUsed = 0,
@@ -23,6 +33,11 @@ public class MetricsReporter
         int resourceWeight = 10, int maxConcurrencyPerWorker = 2,
         string resourcePriority = "normal", string workloadClass = "shared")
     {
+        if (ct.IsCancellationRequested)
+        {
+            _transport.RecordCallerCancelled(pipelineId, batchKey);
+            return Task.FromCanceled(ct);
+        }
         try
         {
             var payload = new
@@ -46,13 +61,14 @@ public class MetricsReporter
                 max_concurrency_per_worker = maxConcurrencyPerWorker,
                 resource_priority = resourcePriority,
                 workload_class = workloadClass,
+                reported_at = MetricsTransport.ReportedAtNow(),
             };
-            using var response = await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
-            response.EnsureSuccessStatusCode();
+            _transport.TryEnqueue(pipelineId, batchKey, processed, failed, payload);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to report metrics for pipeline {PipelineId}", pipelineId);
+            _logger.LogWarning(ex, "Failed to enqueue metrics for pipeline {PipelineId} (best-effort telemetry)", pipelineId);
         }
+        return Task.CompletedTask;
     }
 }

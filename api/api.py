@@ -5,6 +5,7 @@ import os
 import json  # lgtm[py/unused-import]
 import uuid
 import time
+import math
 import asyncio
 import logging
 import hashlib
@@ -13,6 +14,8 @@ import httpx
 from azure.core.exceptions import AzureError
 import concurrent.futures
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
+import batch_metrics
 from typing import Optional, List, Dict, Any, Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
@@ -26,6 +29,7 @@ try:
         init_telemetry, metrics_store,
         record_embedding_batch, record_search, record_error,
         record_request, record_failure,
+        record_worker_batch, reset_pipeline_metrics,
         track_metric, track_histogram, track_event, Timer,
     )
     init_telemetry()
@@ -40,6 +44,10 @@ except ImportError:
     def record_request(**kw): pass
     def record_failure(**kw): pass
     metrics_store = None  # lgtm[py/unused-global-variable]
+    def record_worker_batch(*args, **kwargs):
+        raise RuntimeError("Telemetry module is unavailable")
+    def reset_pipeline_metrics(pipeline_id):
+        logger.warning("Telemetry module unavailable while resetting pipeline %s", pipeline_id)
     class Timer:
         def __init__(self, *a, **kw): pass
         def __enter__(self): return self
@@ -51,7 +59,7 @@ from models import (  # lgtm[py/unused-import]
     PipelineIdentityPreviewRequest, PipelineResourcePolicy,
     SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
     ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
-    CosmosDBSourceConfig, GarnetDestinationConfig, OneLakeIcebergSourceConfig,
+    CosmosDBSourceConfig, GarnetSourceConfig, GarnetDestinationConfig, OneLakeIcebergSourceConfig,
     OneLakeIcebergDestinationConfig,
     SharePointSourceConfig,
 )
@@ -1094,7 +1102,7 @@ async def get_capabilities():
     that require infra we didn't provision (e.g. blob source / queue mode)."""
     implemented_source_types = [
         "cosmosdb", "postgresql", "mssql", "databricks",
-        "onelake-iceberg", "sharepoint",
+        "onelake-iceberg", "sharepoint", "garnet",
     ]
     if _BLOB_SOURCE_ENABLED:
         implemented_source_types.insert(0, "azure-blob")
@@ -1474,9 +1482,9 @@ async def get_stats():
         docgrok_status = f"error: {str(e)}"
 
     store = get_store()
-    metrics_doc = await asyncio.to_thread(store.get, "global", "metrics")
-    events_processed = metrics_doc.get("events_processed", 0) if metrics_doc else 0
-    events_failed = metrics_doc.get("events_failed", 0) if metrics_doc else 0
+    telemetry = await get_metrics()
+    events_processed = telemetry.get("events_processed")
+    events_failed = telemetry.get("events_failed")
 
     def _count(doc_type):
         result = store.query(
@@ -1504,6 +1512,8 @@ async def get_stats():
             "pipelines": pip_count,
             "events_processed": events_processed,
             "events_failed": events_failed,
+            "telemetry_source": telemetry.get("source"),
+            "telemetry_coverage": telemetry.get("coverage"),
             "jobs": job_stats.model_dump()
         }
     }
@@ -1583,10 +1593,13 @@ def _run_kql(kql: str, timespan=None):
         from azure.monitor.query import LogsQueryStatus
         if "customMetrics" in kql:
             kql = _APPMETRICS_AS_CUSTOM_METRICS + kql
+        if "embeddingBatches" in kql:
+            kql = batch_metrics.BATCHES_KQL + kql
         resp = client.query_workspace(ws_id, kql, timespan=timespan)
         if resp.status == LogsQueryStatus.SUCCESS and resp.tables:
             return [[_kql_cell(c) for c in row] for row in resp.tables[0].rows]
-        return []
+        logger.warning("Log Analytics returned incomplete metrics query results")
+        return None
     except Exception as e:
         logger.warning(f"KQL query failed: {e}")
         return None
@@ -1649,43 +1662,7 @@ async def get_metrics():
     rows = await asyncio.to_thread(_run_kql, kql, timedelta(days=7))
 
     if rows is None:
-        # App Insights not configured — fallback to CosmosDB inline metrics
-        try:
-            store = get_store()
-            doc = store.get("global", "metrics")
-            if doc and doc.get("pipelines"):
-                total_processed = doc.get("events_processed", 0)
-                total_failed = doc.get("events_failed", 0)
-                total_time_ms = 0.0
-                for pdata in doc["pipelines"].values():
-                    total_time_ms += pdata.get("total_time_ms", 0.0)
-                avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None
-                return {
-                    "events_processed": total_processed,
-                    "events_failed": total_failed,
-                    "avg_processing_time_ms": avg_lat,
-                    "throughput_docs_per_sec": 0,
-                    "search_queries": 0,
-                    "latency": {"embedding": {"avg": avg_lat, "p95": None}, "search": {}, "request": {}},
-                    "tokens": {"total": 0},
-                    "skipped": {"total": 0},
-                    "errors": {"total": total_failed},
-                    "source": "cosmos_inline",
-                }
-        except Exception:  # lgtm[py/empty-except]
-            pass
-        return {
-            "events_processed": 0,
-            "events_failed": 0,
-            "avg_processing_time_ms": None,
-            "throughput_docs_per_sec": 0,
-            "search_queries": 0,
-            "latency": {"embedding": {}, "search": {}, "request": {}},
-            "tokens": {"total": 0},
-            "skipped": {"total": 0},
-            "errors": {"total": 0},
-            "source": "unavailable",
-        }
+        return _local_metrics_response()
 
     m = {}
     for row in rows:
@@ -1694,7 +1671,7 @@ async def get_metrics():
 
     throughput_1m = m.get("throughput_1m", 0)
 
-    return {
+    result = {
         "events_processed": int(m.get("embedded", 0)),
         "events_failed": int(m.get("failed", 0)),
         "avg_processing_time_ms": round(m.get("embed_lat_avg", 0), 1) if m.get("embed_lat_cnt", 0) > 0 else None,
@@ -1710,6 +1687,56 @@ async def get_metrics():
         "errors": {"total": int(m.get("errors", 0))},
         "source": "app_insights",
     }
+    summary = await asyncio.to_thread(batch_metrics.pipeline_summary, _run_kql)
+    if summary is not None:
+        result["events_processed"] = sum(int(p.get("processed") or 0) for p in summary.values())
+        result["events_failed"] = sum(int(p.get("failed") or 0) for p in summary.values())
+        result["throughput_docs_per_sec"] = round(
+            sum(int(p.get("recent_processed") or 0) for p in summary.values()) / 60, 2)
+        result["coverage"] = "deduplicated_worker_batches_last_7_days"
+    else:
+        result["coverage"] = "worker_batch_telemetry_unavailable"
+        result["events_processed"] = None
+        result["events_failed"] = None
+        result["throughput_docs_per_sec"] = None
+    return result
+
+
+def _local_metrics_response():
+    snapshot = metrics_store.snapshot() if metrics_store is not None else {}
+    return {
+        "events_processed": snapshot.get("documents_embedded", 0),
+        "events_failed": snapshot.get("documents_failed", 0),
+        "avg_processing_time_ms": snapshot.get("embedding_latency", {}).get("avg"),
+        "throughput_docs_per_sec": snapshot.get("throughput_docs_per_sec", 0),
+        "search_queries": snapshot.get("search_queries", 0),
+        "latency": {"embedding": snapshot.get("embedding_latency", {}),
+                    "search": snapshot.get("search_latency", {}),
+                    "request": snapshot.get("request_latency", {})},
+        "tokens": snapshot.get("tokens", {"total": 0}),
+        "skipped": snapshot.get("skipped", {"total": 0}),
+        "errors": {"total": snapshot.get("documents_failed", 0)},
+        "source": "in_memory" if snapshot else "unavailable",
+        "coverage": "process_local_since_restart",
+        "warning": "Historical telemetry unavailable; these are not cluster-wide totals.",
+    }
+
+
+def _reported_pipeline_metrics(pipeline_id, reset_at=None):
+    summaries = batch_metrics.pipeline_summary(_run_kql, pipeline_id, reset_at)
+    if summaries is not None:
+        return summaries.get(pipeline_id, {}), "app_insights"
+    snapshot = metrics_store.snapshot() if metrics_store is not None else {}
+    scope = snapshot.get("pipelines", {}).get(pipeline_id, {})
+    if reset_at:
+        # A different API replica cannot isolate its local counters by reset epoch.
+        # Do not present old process-local totals as the new generation's progress.
+        scope = {}
+    return {
+        **scope, "processed": scope.get("embedded", 0),
+        "updated_at": scope.get("last_activity_at"),
+        "recent_processed": 0,
+    }, "in_memory"
 
 
 @app.get("/api/metrics/live")
@@ -1722,10 +1749,8 @@ def get_live_metrics():
 
 @app.get("/api/operations/resource-insights")
 def get_resource_insights():
-    """Recommend operator-adjustable fairness settings from durable telemetry."""
+    """Recommend operator-adjustable fairness settings from exported worker batches."""
     store = get_store()
-    metrics_doc = store.get("global", "metrics") or {}
-    metrics_by_pipeline = metrics_doc.get("pipelines", {})
     pipelines = [_pipeline_from_doc(doc) for doc in store.list("pipeline")]
     active = [p for p in pipelines if p.status == PipelineStatus.ACTIVE]
     priority_factor = {"low": 1, "normal": 2, "high": 4, "critical": 8}
@@ -1738,7 +1763,7 @@ def get_resource_insights():
     rows = []
     for pipeline in sorted(active, key=lambda p: p.name.lower()):
         policy = pipeline.resource_policy
-        observed = metrics_by_pipeline.get(pipeline.id, {})
+        observed, telemetry_source = _reported_pipeline_metrics(pipeline.id, pipeline.reset_at)
         requests = max(0, int(observed.get("requests", 0)))
         processed = max(0, int(observed.get("processed", 0)))
         failed = max(0, int(observed.get("failed", 0)))
@@ -1797,6 +1822,8 @@ def get_resource_insights():
             * class_factor[policy.workload_class]
         )
         rows.append({
+            "telemetry_source": telemetry_source,
+            "coverage": "last_7_days_since_reset" if telemetry_source == "app_insights" else "process_local_since_restart",
             "pipeline_id": pipeline.id,
             "pipeline_name": pipeline.name,
             "model_id": pipeline.docgrok_pipeline,
@@ -1902,9 +1929,10 @@ async def get_changefeed_metrics():
     if rows is None or not rows:
         return {"total_eligible": 0, "total_failed": 0, "total_skipped": 0, "total_jobs_created": 0, "source": "unavailable"}
     row = rows[0]
+    summary = await asyncio.to_thread(batch_metrics.pipeline_summary, _run_kql)
     return {
-        "total_eligible": int(row[0] or 0),
-        "total_failed": int(row[1] or 0),
+        "total_eligible": sum(int(p.get("processed") or 0) for p in summary.values()) if summary is not None else None,
+        "total_failed": sum(int(p.get("failed") or 0) for p in summary.values()) if summary is not None else None,
         "total_skipped": int(row[2] or 0),
         "total_jobs_created": int(row[3] or 0),
         "source": "app_insights",
@@ -1913,119 +1941,6 @@ async def get_changefeed_metrics():
 
 # â”€â”€ timeseries metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-
-def _build_cosmos_metrics_buckets(
-    granularity, gran_seconds, start_dt, end_dt, pipeline_id, model_id=None, info=None
-):
-    """Build time-series buckets from CosmosDB-stored inline metrics when App Insights is unavailable.
-
-    Hour/day buckets come from the per-pipeline hourly rollup. Minute buckets, model
-    filters and pipelines recorded before the rollup existed fall back to the last 60
-    samples; ``info["coverage"]`` is set to "sampled" when that happens.
-    """
-    from collections import defaultdict
-
-    store = get_store()
-    doc = store.get("global", "metrics")
-    if not doc:
-        return []
-
-    pipelines_data = doc.get("pipelines", {})
-    if not pipelines_data:
-        return []
-
-    # Collect all recent entries from matching pipelines
-    entries = []
-    sampled = False
-    hour_floor = start_dt.replace(minute=0, second=0, microsecond=0)
-    for pid, pdata in pipelines_data.items():
-        if pipeline_id and pid != pipeline_id:
-            continue
-        hourly = pdata.get("hourly") if granularity != "minute" and not model_id else None
-        if hourly:
-            for hk, hv in hourly.items():
-                try:
-                    t_dt = datetime.fromisoformat(hk + ":00:00")
-                    if hour_floor <= t_dt <= end_dt:
-                        entries.append((t_dt, int(hv[0]), int(hv[1]), float(hv[2])))
-                except (ValueError, TypeError, IndexError):  # lgtm[py/empty-except]
-                    pass
-            continue
-        if pdata.get("recent"):
-            sampled = True
-        for entry in pdata.get("recent", []):
-            if model_id and entry.get("model_id") != model_id:
-                continue
-            t_str = entry.get("t", "")
-            n = entry.get("n", 0)
-            if t_str:
-                try:
-                    t_dt = datetime.fromisoformat(t_str)
-                    if start_dt <= t_dt <= end_dt:
-                        entries.append((
-                            t_dt, n, entry.get("failed", 0),
-                            entry.get("latency_ms", 0.0),
-                        ))
-                except (ValueError, TypeError):  # lgtm[py/empty-except]
-                    pass
-
-    if info is not None:
-        info["coverage"] = "sampled" if sampled else "hourly"
-    if not entries:
-        if info is not None:
-            info["coverage"] = "totals"
-        # No recent data - create a single summary bucket from totals
-        total_processed = 0
-        total_failed = 0
-        total_time_ms = 0.0
-        for pid, pdata in pipelines_data.items():
-            if pipeline_id and pid != pipeline_id:
-                continue
-            scope = pdata.get("models", {}).get(model_id, {}) if model_id else pdata
-            total_processed += scope.get("processed", 0)
-            total_failed += scope.get("failed", 0)
-            total_time_ms += scope.get("total_time_ms", 0.0)
-        if total_processed > 0:
-            avg_lat = round(total_time_ms / total_processed, 1) if total_processed > 0 else None  # lgtm[py/redundant-comparison]
-            return [{
-                "t": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:00"),
-                "processed": total_processed,
-                "failed": total_failed,
-                "throughput": round(total_processed / gran_seconds, 2),
-                "avg_latency_ms": avg_lat,
-            }]
-        return []
-
-    # Bucket entries by granularity
-    bucket_map = defaultdict(
-        lambda: {"processed": 0, "failed": 0, "processing_time_ms": 0.0})
-    for t_dt, n, failed, latency_ms in entries:
-        if granularity == "minute":
-            key = t_dt.strftime("%Y-%m-%dT%H:%M:00")
-        elif granularity == "hour":
-            key = t_dt.strftime("%Y-%m-%dT%H:00:00")
-        else:  # day
-            key = t_dt.strftime("%Y-%m-%dT00:00:00")
-        bucket_map[key]["processed"] += n
-        bucket_map[key]["failed"] += failed
-        bucket_map[key]["processing_time_ms"] += latency_ms
-
-    buckets = []
-    for t_str in sorted(bucket_map.keys()):
-        b = bucket_map[t_str]
-        avg_lat = (
-            round(b["processing_time_ms"] / b["processed"], 1)
-            if b["processed"] > 0 else None
-        )
-        buckets.append({
-            "t": t_str,
-            "processed": b["processed"],
-            "failed": b["failed"],
-            "throughput": round(b["processed"] / gran_seconds, 2) if b["processed"] > 0 else 0.0,
-            "avg_latency_ms": avg_lat,
-        })
-
-    return buckets
 
 @app.get("/api/metrics/timeseries")
 async def get_metrics_timeseries(
@@ -2062,18 +1977,26 @@ async def get_metrics_timeseries(
             raise HTTPException(status_code=400, detail=f"Invalid {name}")
         return f"| where tostring(customDimensions.{name}) == '{value}'"
 
-    pipeline_filter = metric_dimension_filter("pipeline_id", pipeline_id)
-    model_filter = metric_dimension_filter("model_id", model_id)
+    metric_dimension_filter("pipeline_id", pipeline_id)
+    metric_dimension_filter("model_id", model_id)
+    pipeline_filter = batch_metrics.dimension_filter("pipeline_id", pipeline_id)
+    model_filter = batch_metrics.dimension_filter("model_id", model_id)
+    cutoff = ""
+    if pipeline_id:
+        doc = await asyncio.to_thread(get_store().get, pipeline_id, "pipeline")
+        if doc:
+            cutoff = batch_metrics.cutoff_filter(doc.get("reset_at"))
 
     kql = f"""
-    customMetrics
-    | where name in ('omnivec.documents.embedded', 'omnivec.documents.failed', 'omnivec.embedding.latency')
+    embeddingBatches
     {pipeline_filter}
     {model_filter}
+    {cutoff}
+    | where timestamp between (datetime({start_iso}) .. datetime({end_iso}))
     | summarize
-        processed = sumif(value, name == 'omnivec.documents.embedded'),
-        failed = sumif(value, name == 'omnivec.documents.failed'),
-        avg_latency = avgif(value, name == 'omnivec.embedding.latency')
+        processed = sum(processed),
+        failed = sum(failed),
+        avg_latency = sum(total_time_ms) / sum(processed)
         by bin(timestamp, {gran_bin})
     | order by timestamp asc
     """
@@ -2081,23 +2004,15 @@ async def get_metrics_timeseries(
     rows = await asyncio.to_thread(_run_kql, kql, (start_dt, end_dt))
 
     if rows is None:
-        # Fallback: build buckets from CosmosDB inline metrics
-        info = {}
-        try:
-            buckets = _build_cosmos_metrics_buckets(
-                granularity, gran_seconds, start_dt, end_dt, pipeline_id, model_id, info
-            )
-        except Exception:
-            buckets = []
         return {
             "granularity": granularity,
             "start": start_iso,
             "end": end_iso,
             "pipeline_id": pipeline_id,
             "model_id": model_id,
-            "source": "cosmos_inline",
-            "coverage": info.get("coverage", "hourly"),
-            "buckets": buckets,
+            "source": "unavailable",
+            "coverage": "historical_telemetry_unavailable",
+            "buckets": [],
         }
 
     buckets = []
@@ -2122,6 +2037,7 @@ async def get_metrics_timeseries(
         "pipeline_id": pipeline_id,
         "model_id": model_id,
         "source": "app_insights",
+        "coverage": "deduplicated_worker_batches",
         "buckets": buckets,
     }
 
@@ -2184,6 +2100,11 @@ async def create_source(req: CreateSourceRequest):
             clean_config = CosmosDBSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == SourceType.GARNET:
+        try:
+            clean_config = GarnetSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
     elif req.type == SourceType.ONELAKE_ICEBERG:
         try:
             clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
@@ -2221,6 +2142,23 @@ async def create_source(req: CreateSourceRequest):
         except Exception as e:
             logger.warning("CosmosDB source validation raised %s", type(e).__name__)
             warnings.append("Could not connect to CosmosDB source. Check the endpoint, database, container and managed identity access.")
+    elif req.type == SourceType.GARNET:
+        try:
+            probe = await _test_garnet_vector_set(
+                clean_config,
+                require_vector_set=False,
+                hash_key=clean_config["hash_key"],
+                sample_count=1,
+            )
+            if not probe.get("success"):
+                warnings.append(
+                    "Garnet source validation failed. Check the endpoint, HASH key, credentials, and read/write permissions."
+                )
+        except Exception as e:
+            logger.warning("Garnet source validation raised %s", type(e).__name__)
+            warnings.append(
+                "Could not connect to the Garnet source. Check its endpoint, HASH key, and configured authentication."
+            )
     elif req.type == SourceType.SHAREPOINT:
         try:
             ok, result = await _test_sharepoint_connection(clean_config)
@@ -2281,6 +2219,11 @@ def update_source(source_id: str, req: CreateSourceRequest):
     if req.type == SourceType.COSMOSDB:
         try:
             clean_config = CosmosDBSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == SourceType.GARNET:
+        try:
+            clean_config = GarnetSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
     elif req.type == SourceType.ONELAKE_ICEBERG:
@@ -2559,6 +2502,16 @@ async def test_source(source_id: str):
     elif source.type == SourceType.COSMOSDB:
         from connectors.cosmosdb_connector import test_cosmosdb_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_cosmosdb_connection(source.config)))
+    elif source.type == SourceType.GARNET:
+        result = await _test_garnet_vector_set(
+            source.config,
+            require_vector_set=False,
+            hash_key=source.config.get("hash_key"),
+            sample_count=3,
+        )
+        ok = bool(result.get("success"))
+        if not ok:
+            result = result.get("error", "Garnet source connection failed.")
     elif source.type == SourceType.ONELAKE_ICEBERG:
         ok, result = await _test_onelake_iceberg_connection(source.config)
     elif source.type == SourceType.SHAREPOINT:
@@ -2605,6 +2558,20 @@ async def sample_source(source_id: str, limit: int = 5):
     stype = doc.get("type")
     cfg = doc.get("config", {}) or {}
     limit = max(1, min(int(limit or 5), 25))
+
+    if stype == "garnet":
+        result = await _test_garnet_vector_set(
+            cfg,
+            require_vector_set=False,
+            hash_key=cfg.get("hash_key"),
+            sample_count=limit,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=502, detail="Could not sample the Garnet source. Check its health and permissions.")
+        return {
+            "items": result.get("items", []),
+            "total_scanned": result.get("total_scanned", 0),
+        }
 
     def _run():
         if stype == "azure-blob":
@@ -2892,6 +2859,18 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
             if ok:
                 return result  # lgtm[py/stack-trace-exposure]
             raise Exception(result)
+
+        elif req.type == "garnet":
+            try:
+                config = GarnetSourceConfig(**req.config).model_dump(exclude_none=True)
+            except ValidationError:
+                return {"success": False, "error": "Invalid Garnet source configuration. Check the endpoint, HASH key, and polling limits."}
+            return await _test_garnet_vector_set(
+                config,
+                require_vector_set=False,
+                hash_key=config["hash_key"],
+                sample_count=3,
+            )
 
         elif req.type == "cosmosdb":
             from azure.cosmos import CosmosClient
@@ -3463,10 +3442,25 @@ async def _test_onelake_iceberg_connection(config: dict) -> tuple[bool, dict]:
         await credential.close()
 
 
-async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True) -> dict:
+async def _test_garnet_vector_set(
+    config: dict,
+    require_vector_set: bool = True,
+    hash_key: Optional[str] = None,
+    sample_count: int = 5,
+) -> dict:
     from redis.asyncio import Redis
     from redis_entraid.cred_provider import create_from_default_azure_credential
     from urllib.parse import urlsplit
+
+    if hash_key is not None:
+        try:
+            config = GarnetSourceConfig(**config).model_dump(exclude_none=True)
+            hash_key = config["hash_key"]
+        except (ValidationError, KeyError):
+            return {
+                "success": False,
+                "error": "Invalid Garnet source configuration. Check the endpoint, HASH key, and polling limits.",
+            }
 
     endpoint = str(config.get("endpoint", "")).strip()
     if not endpoint:
@@ -3505,6 +3499,38 @@ async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True)
     client = Redis(**kwargs)
     try:
         await client.ping()
+        if hash_key is not None:
+            cursor, values = await client.hscan(
+                hash_key,
+                cursor=0,
+                count=max(1, min(int(sample_count or 5), 25)),
+            )
+            items = []
+            for raw_ref, raw_value in values.items():
+                source_ref = raw_ref.decode("utf-8", errors="replace") if isinstance(raw_ref, bytes) else str(raw_ref)
+                try:
+                    record = json.loads(raw_value)
+                    if not isinstance(record, dict):
+                        continue
+                    content = record.get("content", "")
+                    items.append({
+                        "id": record.get("id"),
+                        "source_ref": source_ref,
+                        "version": record.get("version"),
+                        "deleted": record.get("deleted", False),
+                        "preview": _truncate(content),
+                        "fields": sorted(record.keys()),
+                    })
+                except (TypeError, ValueError, UnicodeDecodeError):
+                    items.append({"source_ref": source_ref, "warning": "Value is not a valid JSON object"})
+            return {
+                "success": True,
+                "message": "Connected successfully to the Garnet HASH source.",
+                "details": f"HASH: {hash_key}",
+                "items": items,
+                "total_scanned": len(values),
+                "cursor": cursor,
+            }
         if not require_vector_set:
             return {
                 "success": True,
@@ -3949,6 +3975,109 @@ async def _enforce_pipeline_dim_match(docgrok_ref: str, dest_doc: dict, vector_i
         )
 
 
+def _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
+    """Validate the supported native Garnet HASH to vector-set target pairing."""
+    resolved_sources = []
+    for binding in pipeline_sources or []:
+        source_id = binding.source_id if hasattr(binding, "source_id") else (
+            binding.get("source_id") if isinstance(binding, dict) else None
+        )
+        source_doc = store.get(source_id, "source") if source_id else None
+        if source_doc:
+            resolved_sources.append((binding, source_doc))
+    if not any(source.get("type") == "garnet" for _, source in resolved_sources):
+        return False
+    if len(resolved_sources) != 1 or resolved_sources[0][1].get("type") != "garnet":
+        raise HTTPException(
+            status_code=400,
+            detail="Native Garnet ingestion supports exactly one Garnet HASH source per pipeline.",
+        )
+    if not dest_doc or dest_doc.get("type") != "garnet":
+        raise HTTPException(
+            status_code=400,
+            detail="A Garnet HASH source requires a Garnet vector-set destination.",
+        )
+
+    source_config = resolved_sources[0][1].get("config", {}) or {}
+    destination_config = dest_doc.get("config", {}) or {}
+    hash_key = str(source_config.get("hash_key", "")).strip()
+    vector_set = str(destination_config.get("vector_set", "omnivec-vectors")).strip()
+    if not hash_key or hash_key.lower().startswith("__omnivec:source-checkpoints:"):
+        raise HTTPException(
+            status_code=400,
+            detail="The Garnet source HASH key is missing or uses OmniVec's reserved checkpoint namespace.",
+        )
+    if not vector_set or hash_key.casefold() == vector_set.casefold():
+        raise HTTPException(
+            status_code=400,
+            detail="The Garnet source HASH key and destination vector_set must be different keys.",
+        )
+    if vector_set.lower().startswith("__omnivec:source-checkpoints:"):
+        raise HTTPException(
+            status_code=400,
+            detail="The Garnet destination vector_set cannot use OmniVec's reserved checkpoint namespace.",
+        )
+
+    def endpoint_identity(config):
+        endpoint = str(config.get("endpoint", "")).strip()
+        parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+        if not parsed.hostname:
+            raise HTTPException(status_code=400, detail="Garnet endpoints must identify a host.")
+        tls = bool(config.get("tls", True))
+        return (
+            parsed.hostname.rstrip(".").lower(),
+            parsed.port or (6380 if tls else 6379),
+            tls,
+        )
+
+    try:
+        same_endpoint = endpoint_identity(source_config) == endpoint_identity(destination_config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Garnet endpoint configuration.") from exc
+    if not same_endpoint:
+        raise HTTPException(
+            status_code=400,
+            detail="Native Garnet ingestion requires source HASH and vector set on the same Garnet endpoint.",
+        )
+    return True
+
+
+def _require_garnet_pipeline_contract(store, pipeline, dest_doc):
+    """Reject unsupported queue, chunk, URL, and multi-source Garnet paths."""
+    is_garnet_source = False
+    for binding in getattr(pipeline, "sources", []) or []:
+        source_id = binding.source_id if hasattr(binding, "source_id") else (
+            binding.get("source_id") if isinstance(binding, dict) else None
+        )
+        source_doc = store.get(source_id, "source") if source_id else None
+        is_garnet_source |= bool(source_doc and source_doc.get("type") == "garnet")
+    if not is_garnet_source:
+        return
+
+    if str(getattr(pipeline, "processing_mode", "queue")).lower() != "inline":
+        raise HTTPException(
+            status_code=400,
+            detail="Garnet HASH sources are supported only in inline Garnet-to-Garnet pipelines; queue/Service Bus ingestion is not supported.",
+        )
+    if (str(getattr(pipeline, "content_strategy", "truncate")).lower() != "truncate"
+            or getattr(pipeline, "chunk_config", None) is not None):
+        raise HTTPException(
+            status_code=400,
+            detail="Garnet HASH sources support truncate-only embedding; chunking is not supported.",
+        )
+    _require_garnet_inline_pair(store, pipeline.sources, dest_doc)
+    binding = pipeline.sources[0]
+    fields = binding.content_fields if hasattr(binding, "content_fields") else binding.get("content_fields", ["content"])
+    mode = binding.content_mode if hasattr(binding, "content_mode") else binding.get("content_mode", "field")
+    type_field = binding.content_type_field if hasattr(binding, "content_type_field") else binding.get("content_type_field")
+    filters = binding.filters if hasattr(binding, "filters") else binding.get("filters", {})
+    if fields != ["content"] or str(mode).lower() != "field" or type_field or filters:
+        raise HTTPException(
+            status_code=400,
+            detail="Garnet HASH sources support only the content field in field mode; URL content and source filters are not supported.",
+        )
+
+
 def _is_inline_compatible(store, pipeline_sources, dest_doc) -> bool:
     """Return True iff every source points at the same physical store as the destination."""
     if not dest_doc:
@@ -3991,6 +4120,8 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
         return
     dtype = dest_doc.get("type")
     dcfg = dest_doc.get("config", {}) or {}
+    if _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
+        return
     for ps in pipeline_sources or []:
         sid = ps.source_id if hasattr(ps, "source_id") else (ps.get("source_id") if isinstance(ps, dict) else None)
         if not sid:
@@ -4171,6 +4302,15 @@ def _inline_write_target(source: dict) -> tuple:
             raise HTTPException(status_code=409, detail="Cannot determine inline source ownership: invalid port")
         schema = config.get("schema_name") or config.get("schema") or ("dbo" if kind == "mssql" else "public")
         return ("mssql" if kind == "mssql" else "postgresql", host, port, database, schema, config.get("table"))
+    if kind == "garnet":
+        from urllib.parse import urlsplit
+        endpoint = str(config.get("endpoint") or "").strip()
+        parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+        if not parsed.hostname:
+            raise HTTPException(status_code=409, detail="Cannot determine inline Garnet source ownership: invalid endpoint")
+        tls = bool(config.get("tls", True))
+        port = parsed.port or (6380 if tls else 6379)
+        return ("garnet", parsed.hostname.rstrip(".").lower(), port, config.get("hash_key"))
     return ("source", source["id"])
 
 
@@ -4216,11 +4356,20 @@ def _validate_cosmos_chunking(store, req, destination):
     from models import ChunkConfig
     from string import Formatter
     sources = [(entry, store.get(entry.source_id, "source") or {}) for entry in req.sources]
+    raw = req.chunk_config or {}
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+    if raw.get("cleanup_order", "insert-first") not in ("insert-first", "delete-first"):
+        raise HTTPException(status_code=400, detail="Invalid cleanup_order; use insert-first or delete-first")
     if not any(source.get("type") == "cosmosdb" for _, source in sources):
+        if raw.get("cleanup_order", "insert-first") != "insert-first":
+            raise HTTPException(status_code=400, detail="cleanup_order is supported only for Cosmos text chunking")
         return None
     if req.content_strategy not in ("truncate", "chunk"):
         raise HTTPException(status_code=400, detail="content_strategy must be truncate or chunk")
     if req.content_strategy != "chunk":
+        if raw.get("cleanup_order", "insert-first") != "insert-first":
+            raise HTTPException(status_code=400, detail="cleanup_order is supported only for Cosmos text chunking")
         return None
     if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
         raise HTTPException(status_code=400, detail="Cosmos text chunking requires queue processing and a Cosmos vector destination; chunk+inline is unsupported")
@@ -4228,10 +4377,7 @@ def _validate_cosmos_chunking(store, req, destination):
         if (source.get("type") != "cosmosdb" or entry.content_mode != "field"
                 or source.get("config", {}).get("attachments_field")):
             raise HTTPException(status_code=400, detail="Cosmos text chunking supports only Cosmos field-content sources, not URL/attachment/mixed sources")
-    raw = req.chunk_config or {}
-    if hasattr(raw, "model_dump"):
-        raw = raw.model_dump()
-    allowed = {"chunk_size", "chunk_overlap", "chunk_unit", "store_text", "text_field", "doc_id_pattern"}
+    allowed = {"chunk_size", "chunk_overlap", "chunk_unit", "store_text", "text_field", "doc_id_pattern", "cleanup_order"}
     if set(raw) - allowed:
         raise HTTPException(status_code=400, detail="Unknown Cosmos chunk_config options")
     try:
@@ -4482,6 +4628,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+    _require_garnet_pipeline_contract(store, req, dest_doc)
     _require_onelake_iceberg_pipeline(store, req, dest_doc)
     _require_onelake_iceberg_pipeline(store, req, dest_doc)
     _require_pipeline_source_identities(store, req)
@@ -4630,16 +4777,20 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
         req.partition_key_pattern = doc.get(
             "partition_key_pattern", "{source_partition}"
         )
-    if req.content_strategy == "chunk" and req.chunk_config is not None:
-        req.chunk_config = dict(req.chunk_config or {})
+    if req.content_strategy == "chunk":
         old_chunk_config = doc.get("chunk_config") or {}
+        req.chunk_config = {**old_chunk_config, **(req.chunk_config or {})}
         req.chunk_config.setdefault(
             "doc_id_pattern",
             old_chunk_config.get("doc_id_pattern", "{source}-chunk-{chunk}"),
         )
+        req.chunk_config.setdefault(
+            "cleanup_order", old_chunk_config.get("cleanup_order", "insert-first")
+        )
     _validate_pipeline_identity_policy(store, req, pipeline_id)
 
     chunk_destination = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    _require_garnet_pipeline_contract(store, req, chunk_destination)
     cosmos_chunk_config = _validate_cosmos_chunking(store, req, chunk_destination)
     if any((store.get(s.source_id, "source") or {}).get("type") == "cosmosdb" for s in req.sources):
         # A different strategy/text-storage contract requires migration of existing
@@ -4818,6 +4969,9 @@ def resume_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
+    _require_garnet_pipeline_contract(
+        store, pipeline, store.get(pipeline.destination_id, "destination")
+    )
     if pipeline.processing_mode == "inline":
         _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     pipeline.status = PipelineStatus.ACTIVE
@@ -4839,7 +4993,9 @@ def set_processing_mode(pipeline_id: str, mode: str):
         _require_blob_source_enabled("queue-mode pipeline")
     pipeline = _pipeline_from_doc(doc)
     proposed = pipeline.model_copy(update={"processing_mode": mode})
-    _validate_cosmos_chunking(store, proposed, store.get(pipeline.destination_id, "destination"))
+    proposed_destination = store.get(pipeline.destination_id, "destination")
+    _require_garnet_pipeline_contract(store, proposed, proposed_destination)
+    _validate_cosmos_chunking(store, proposed, proposed_destination)
     if mode == "inline":
         dest_doc_for_mode = store.get(pipeline.destination_id, "destination")
         _require_inline_compatible(store, pipeline.sources, dest_doc_for_mode)
@@ -4880,6 +5036,9 @@ async def run_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
+    _require_garnet_pipeline_contract(
+        store, pipeline, store.get(pipeline.destination_id, "destination")
+    )
     if pipeline.processing_mode == "inline":
         await asyncio.to_thread(_require_exclusive_inline_sources, store, pipeline.sources, pipeline_id)
 
@@ -4947,6 +5106,9 @@ def reset_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    _require_garnet_pipeline_contract(
+        store, pipeline, store.get(pipeline.destination_id, "destination")
+    )
     prior_status = pipeline.status
     if prior_status == PipelineStatus.ACTIVE and pipeline.processing_mode == "inline":
         _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
@@ -4976,16 +5138,6 @@ def reset_pipeline(pipeline_id: str):
                     continue
                 logger.exception("Failed to delete job %s during pipeline reset", j["id"])
                 raise HTTPException(status_code=503, detail="Job cleanup failed; pipeline remains paused. Retry reset.")
-
-    # Reset pipeline metrics
-    metrics_doc = store.get("global", "metrics")
-    if metrics_doc and pipeline_id in metrics_doc.get("pipelines", {}):
-        pip_metrics = metrics_doc["pipelines"][pipeline_id]
-        # Subtract pipeline counts from global totals
-        metrics_doc["events_processed"] = max(0, metrics_doc.get("events_processed", 0) - pip_metrics.get("processed", 0))
-        metrics_doc["events_failed"] = max(0, metrics_doc.get("events_failed", 0) - pip_metrics.get("failed", 0))
-        metrics_doc["pipelines"][pipeline_id] = {"processed": 0, "failed": 0, "total_time_ms": 0.0, "recent": [], "seen_batches": []}
-        store.upsert(metrics_doc)
 
     # If pipeline uses chunking, delete all chunk vector documents from destination
     chunks_deleted = 0
@@ -5020,6 +5172,8 @@ def reset_pipeline(pipeline_id: str):
     pipeline.status = prior_status
     pipeline.updated_at = reset_ts
     _replace_control_doc(store, doc, pipeline, "pipeline")
+    reset_pipeline_metrics(pipeline_id)
+    batch_metrics.invalidate()
     _pipeline_stats_cache.pop(pipeline_id, None)
 
     return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset — {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
@@ -5027,20 +5181,14 @@ def reset_pipeline(pipeline_id: str):
 
 @app.post("/api/pipelines/{pipeline_id}/metrics/inline")
 def report_inline_metrics(pipeline_id: str, payload: dict):
-    """Report authoritative worker metrics with bounded batch deduplication."""
-    from azure.cosmos.exceptions import (
-        CosmosAccessConditionFailedError,
-        CosmosResourceExistsError,
-    )
-
-    store = get_store()
+    """Enqueue best-effort telemetry for asynchronous App Insights export; no DB I/O."""
 
     def nonnegative(name, cast):
         try:
             value = cast(payload.get(name, 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise HTTPException(status_code=400, detail=f"{name} must be numeric")
-        if value < 0:
+        if not math.isfinite(value) or value < 0:
             raise HTTPException(status_code=400, detail=f"{name} must be non-negative")
         return value
 
@@ -5053,125 +5201,42 @@ def report_inline_metrics(pipeline_id: str, payload: dict):
     retry_count = nonnegative("retry_count", int)
     throttle_count = nonnegative("throttle_count", int)
     throttle_delay_ms = nonnegative("throttle_delay_ms", float)
-    batch_key = str(payload.get("batch_key", ""))[:512]
+    batch_key = str(payload.get("batch_key", ""))
+    if not batch_key or len(batch_key) > 512:
+        raise HTTPException(status_code=400, detail="batch_key must contain 1 to 512 characters")
     source_id = str(payload.get("source_id", ""))[:128]
     destination_id = str(payload.get("destination_id", ""))[:128]
     model_id = str(payload.get("model_id", ""))[:128]
     error_category = str(payload.get("error_category", ""))[:128]
     last_document = str(payload.get("last_document", ""))[:1024]
-    resource_policy = PipelineResourcePolicy(
-        weight=payload.get("resource_weight", 10),
-        max_concurrency_per_worker=payload.get("max_concurrency_per_worker", 2),
-        priority=payload.get("resource_priority", "normal"),
-        workload_class=payload.get("workload_class", "shared"),
-    ).model_dump()
+    try:
+        PipelineResourcePolicy(
+            weight=payload.get("resource_weight", 10),
+            max_concurrency_per_worker=payload.get("max_concurrency_per_worker", 2),
+            priority=payload.get("resource_priority", "normal"),
+            workload_class=payload.get("workload_class", "shared"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid resource policy") from exc
 
-    for attempt in range(5):
-        doc = store.get("global", "metrics")
-        is_new = not doc
-        if is_new:
-            doc = {
-                "id": "global", "doc_type": "metrics", "events_processed": 0,
-                "events_failed": 0, "pipelines": {}, "models": {},
-            }
-
-        if pipeline_id not in doc.get("pipelines", {}):
-            doc.setdefault("pipelines", {})[pipeline_id] = {
-                "processed": 0, "failed": 0, "total_time_ms": 0.0,
-                "tokens": 0, "input_bytes": 0, "requests": 0, "retries": 0,
-                "throttles": 0, "throttle_delay_ms": 0.0, "queue_wait_ms": 0.0,
-                "recent": [], "seen_batches": [], "models": {}, "error_types": {},
-            }
-
-        pip = doc["pipelines"][pipeline_id]
-        if batch_key:
-            seen = pip.get("seen_batches", [])
-            if batch_key in seen:
-                return {"ok": True, "dedup": True}
-            seen.append(batch_key)
-            pip["seen_batches"] = seen[-500:]
-
-        doc["events_processed"] = doc.get("events_processed", 0) + processed
-        doc["events_failed"] = doc.get("events_failed", 0) + failed
-        now = datetime.utcnow().isoformat()
-
-        def update_scope(scope):
-            scope["processed"] = scope.get("processed", 0) + processed
-            scope["failed"] = scope.get("failed", 0) + failed
-            scope["total_time_ms"] = scope.get("total_time_ms", 0.0) + processing_time_ms
-            scope["tokens"] = scope.get("tokens", 0) + tokens_used
-            scope["input_bytes"] = scope.get("input_bytes", 0) + input_bytes
-            scope["requests"] = scope.get("requests", 0) + 1
-            scope["retries"] = scope.get("retries", 0) + retry_count
-            scope["throttles"] = scope.get("throttles", 0) + throttle_count
-            scope["throttle_delay_ms"] = scope.get("throttle_delay_ms", 0.0) + throttle_delay_ms
-            scope["queue_wait_ms"] = scope.get("queue_wait_ms", 0.0) + queue_wait_ms
-            scope["updated_at"] = now
-            if last_document:
-                scope["last_document"] = last_document
-            if processed:
-                scope["last_success_at"] = now
-            if failed:
-                scope["last_failure_at"] = now
-            if error_category:
-                errors = scope.setdefault("error_types", {})
-                errors[error_category] = errors.get(error_category, 0) + max(failed, 1)
-            scope["last_resource_policy"] = resource_policy
-
-        update_scope(pip)
-        if model_id:
-            update_scope(doc.setdefault("models", {}).setdefault(model_id, {}))
-            update_scope(pip.setdefault("models", {}).setdefault(model_id, {}))
-
-        recent = pip.get("recent", [])
-        recent.append({
-            "t": now, "n": processed, "failed": failed,
-            "latency_ms": processing_time_ms, "tokens": tokens_used,
-            "model_id": model_id,
-        })
-        pip["recent"] = recent[-60:]
-        # "recent" holds only the last 60 reports, so charts need a durable
-        # hourly rollup: {"YYYY-MM-DDTHH": [processed, failed, latency_ms]}, 7 days.
-        hourly = pip.get("hourly")
-        if hourly is None:
-            hourly = {}
-            for e in recent[:-1]:
-                k = str(e.get("t", ""))[:13]
-                if len(k) == 13:
-                    hb = hourly.get(k) or [0, 0, 0.0]
-                    hourly[k] = [hb[0] + int(e.get("n") or 0), hb[1] + int(e.get("failed") or 0), round(hb[2] + float(e.get("latency_ms") or 0.0), 1)]
-        hb = hourly.get(now[:13]) or [0, 0, 0.0]
-        hourly[now[:13]] = [hb[0] + processed, hb[1] + failed, round(hb[2] + processing_time_ms, 1)]
-        pip["hourly"] = {k: hourly[k] for k in sorted(hourly)[-168:]}
-
-        try:
-            if is_new and hasattr(store, "create"):
-                store.create(doc)
-            elif doc.get("_etag") and hasattr(store, "replace_with_etag"):
-                store.replace_with_etag(doc, doc["_etag"])
-            else:
-                store.upsert(doc)
-            break
-        except (CosmosAccessConditionFailedError, CosmosResourceExistsError):
-            if attempt == 4:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Metrics were updated concurrently; retry the report",
-                )
-
-    _pipeline_stats_cache.pop(pipeline_id, None)
-
-    record_embedding_batch(
-        pipeline_id=pipeline_id, docs_embedded=processed, docs_failed=failed,
-        tokens_used=tokens_used, latency_ms=processing_time_ms,
-        source_id=source_id, model_id=model_id, destination_id=destination_id,
-        input_bytes=input_bytes, queue_wait_ms=queue_wait_ms,
-        retry_count=retry_count, throttle_count=throttle_count,
-        throttle_delay_ms=throttle_delay_ms, error_category=error_category,
-        last_document=last_document,
-    )
-
-    return {"ok": True}
+    reported_at = str(payload.get("reported_at") or datetime.utcnow().isoformat())
+    try:
+        datetime.fromisoformat(reported_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="reported_at must be an ISO timestamp") from exc
+    normalized = {
+        "processed": processed, "failed": failed, "processing_time_ms": processing_time_ms,
+        "tokens_used": tokens_used, "input_bytes": input_bytes, "queue_wait_ms": queue_wait_ms,
+        "retry_count": retry_count, "throttle_count": throttle_count,
+        "throttle_delay_ms": throttle_delay_ms, "batch_key": batch_key,
+        "source_id": source_id, "destination_id": destination_id, "model_id": model_id,
+        "error_category": error_category, "last_document": last_document, "reported_at": reported_at,
+    }
+    try:
+        return record_worker_batch(pipeline_id, normalized)
+    except RuntimeError as exc:
+        logger.error("Worker telemetry exporter unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Telemetry exporter unavailable") from exc
 
 
 # =============================================================================
@@ -8308,36 +8373,13 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                         reset_at = reset_at.isoformat()
                     reset_at = str(reset_at)
 
-                    # PREFER live CFP-reported inline metrics over a Cosmos
-                    # cross-partition COUNT(1). The COUNT scan can hit hundreds
-                    # of RU on a hot source container that the inline writer is
-                    # actively patching, which throttles the writer itself.
-                    # CFP now streams `inline_processed` per ~250-doc sub-batch
-                    # (~3s cadence) so this is always within a few seconds of
-                    # reality during an active run.
+                    # Exported telemetry is eventually consistent. Never scan the
+                    # hot vector container just because ingestion/export is delayed.
                     inline_processed = 0
-                    metrics_fresh = False
-                    try:
-                        m_doc = store.get("global", "metrics")
-                        if m_doc:
-                            pip_m = (m_doc.get("pipelines") or {}).get(pipeline_id) or {}
-                            inline_processed = int(pip_m.get("processed", 0))
-                            # Treat metrics as fresh if updated within the last 90s.
-                            from datetime import timezone
-                            updated_at = pip_m.get("updated_at")
-                            if updated_at:
-                                try:
-                                    upd = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
-                                    age_s = (datetime.now(timezone.utc) - upd).total_seconds()
-                                    metrics_fresh = age_s < 90
-                                except Exception:
-                                    metrics_fresh = inline_processed > 0
-                            else:
-                                metrics_fresh = inline_processed > 0
-                    except Exception:  # lgtm[py/empty-except]
-                        pass
+                    pip_m, telemetry_source = _reported_pipeline_metrics(pipeline_id, pipeline.reset_at)
+                    inline_processed = int(pip_m.get("processed") or 0)
 
-                    if metrics_fresh and pipeline.processing_mode == "inline":
+                    if pipeline.processing_mode == "inline":
                         # Fast path: trust the live metric, skip the COUNT scan.
                         embedded_count = inline_processed
                     else:
@@ -8460,8 +8502,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
     # deduplicated batch metrics after destination writes complete, so use
     # those counters whenever source-specific inventory is unavailable.
     try:
-        metrics_doc = store.get("global", "metrics")
-        reported = ((metrics_doc or {}).get("pipelines") or {}).get(pipeline_id) or {}
+        reported, telemetry_source = _reported_pipeline_metrics(pipeline_id, pipeline.reset_at)
         reported_processed = max(0, int(reported.get("processed", 0)))
         reported_failed = max(0, int(reported.get("failed", 0)))
         reported_time_ms = max(0.0, float(reported.get("total_time_ms", 0.0)))
@@ -8477,17 +8518,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         if avg_time is None and reported_processed > 0:
             avg_time = round(reported_time_ms / reported_processed, 1)
 
-        cutoff = datetime.utcnow() - timedelta(seconds=60)
-        recent_processed = 0
-        for sample in reported.get("recent", []):
-            try:
-                timestamp = datetime.fromisoformat(str(sample.get("t", "")).replace("Z", "+00:00"))
-                if timestamp.tzinfo is not None:
-                    timestamp = timestamp.replace(tzinfo=None)
-                if timestamp >= cutoff:
-                    recent_processed += max(0, int(sample.get("n", 0)))
-            except (TypeError, ValueError):
-                continue
+        recent_processed = max(0, int(reported.get("recent_processed") or 0))
         if recent_processed > 0:
             recent_throughput = round(recent_processed / 60.0, 1)
     except (TypeError, ValueError):
@@ -8509,6 +8540,8 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         lifetime_embedded_count = embedded_count
 
     return PipelineRunStats(
+        telemetry_source=telemetry_source,
+        telemetry_coverage="last_7_days_since_reset" if telemetry_source == "app_insights" else "process_local_since_restart",
         pipeline_id=pipeline_id,
         pipeline_name=pipeline.name,
         jobs=jobs,

@@ -156,6 +156,51 @@ def test_successful_connection_is_invalidated_when_configuration_changes(ui_page
     assert page.locator("#source-wizard-create").is_enabled()
 
 
+def test_classic_cleanup_order_creation_tracks_existing_and_new_source_types(ui_page):
+    page, _ = ui_page
+    page.evaluate("""async () => {
+        sources = [{id: 'src-cosmos', name: 'Cosmos source', type: 'cosmosdb',
+                    config: {endpoint: 'https://source.documents.azure.com', database: 'db', container: 'source'}}];
+        await showAddPipelineModal();
+        showPipelineStep('source');
+    }""")
+    page.select_option("#pipeline-source-select", "src-cosmos")
+    page.evaluate("showPipelineStep('options'); toggleChunkConfig('chunk')")
+    assert page.locator("#pl-chunk-cleanup-group").is_visible()
+    page.evaluate("showPipelineStep('source'); togglePipelineSourceMode('new')")
+    page.select_option("#pl-src-type", "cosmosdb")
+    page.evaluate("showPipelineStep('options')")
+    assert page.locator("#pl-chunk-cleanup-group").is_visible()
+    page.select_option('[name="chunk_cleanup_order"]', "delete-first")
+    page.evaluate("showPipelineStep('source')")
+    page.select_option("#pl-src-type", "azure-blob")
+    page.evaluate("showPipelineStep('options')")
+    assert not page.locator("#pl-chunk-cleanup-group").is_visible()
+
+
+def test_classic_cosmos_chunk_cleanup_order_survives_tab_changes(ui_page):
+    page, _ = ui_page
+    page.evaluate("""
+        sources = [{id: 'src-cosmos', name: 'Cosmos source', type: 'cosmosdb',
+                    config: {endpoint: 'https://source.documents.azure.com', database: 'db', container: 'source'}}];
+        destinations = [{id: 'dst-cosmos', name: 'Cosmos vectors', type: 'cosmosdb-vector',
+                         config: {endpoint: 'https://dest.documents.azure.com', database: 'db', container: 'dest'}}];
+        pipelines = [{id: 'pip-cosmos', name: 'Cosmos chunks', status: 'paused',
+                      sources: [{source_id: 'src-cosmos', content_mode: 'field'}],
+                      destination_id: 'dst-cosmos', docgrok_pipeline: 'mdl-test', processing_mode: 'queue',
+                      content_strategy: 'chunk', chunk_config: {chunk_size: 500, chunk_overlap: 50,
+                          store_text: true, text_field: 'text', cleanup_order: 'delete-first'}}];
+        showPipelineDetail('pip-cosmos');
+        switchPipelineDetailTab('chunking');
+    """)
+    page.select_option("#pip-detail-chunk-cleanup-order", "insert-first")
+    page.evaluate("switchPipelineDetailTab('general'); switchPipelineDetailTab('chunking');")
+    assert page.locator("#pip-detail-chunk-cleanup-order").input_value() == "insert-first"
+    config = page.evaluate("capturePipelineTabData(); editedPipelineData.chunk_config")
+    assert config["cleanup_order"] == "insert-first"
+    assert config["chunk_size"] == 500 and config["chunk_overlap"] == 50 and config["store_text"]
+
+
 def test_sharepoint_source_detail_uses_sharepoint_fields_and_payload(ui_page):
     page, requests = ui_page
     page.evaluate(

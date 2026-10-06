@@ -24,10 +24,15 @@ import logging
 import time
 import threading
 from collections import defaultdict, deque
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional  # lgtm[py/unused-import]
 
 logger = logging.getLogger(__name__)
+batch_logger = logging.getLogger("omnivec.metrics")
+_batch_lock = threading.Lock()
+_seen_batches = OrderedDict()
+_MAX_SEEN_BATCHES = 10000
 
 # ---------------------------------------------------------------------------
 # In-memory MetricsStore — always active, thread-safe
@@ -461,7 +466,19 @@ def init_telemetry():
         configure_azure_monitor(
             connection_string=conn_str,
             enable_live_metrics=True,
+            logger_name="omnivec.metrics",
+            enable_trace_based_sampling_for_logs=False,
         )
+        handlers = [handler for handler in batch_logger.handlers
+                    if type(handler).__module__.startswith("opentelemetry")]
+        if not handlers:
+            raise RuntimeError("Application Insights background log exporter is unavailable")
+        root = logging.getLogger()
+        if not any(type(handler).__module__.startswith("opentelemetry") for handler in root.handlers):
+            root.addHandler(handlers[0])
+        # The Azure SDK uses a bounded BatchLogRecordProcessor, never a request-time export.
+        batch_logger.setLevel(logging.INFO)
+        batch_logger.propagate = False
 
         _meter = metrics.get_meter("omnivec", "1.0.0")
         _tracer = trace.get_tracer("omnivec", "1.0.0")
@@ -574,6 +591,56 @@ def record_embedding_batch(pipeline_id: str = "", docs_embedded: int = 0,
         _ai_histogram("queue_wait", queue_wait_ms, attrs)
     if throttle_delay_ms > 0:
         _ai_histogram("throttle_delay", throttle_delay_ms, attrs)
+
+
+def record_worker_batch(pipeline_id: str, payload: dict) -> dict:
+    """Accept best-effort telemetry without database or network I/O.
+
+    Retry deduplication here is process-local and bounded. Historical queries
+    deduplicate batch keys across API replicas using the exported log records.
+    """
+    if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip() and not _initialized:
+        raise RuntimeError("Application Insights exporter is not initialized")
+    batch_key = payload["batch_key"]
+    identity = (pipeline_id, batch_key)
+    with _batch_lock:
+        if identity in _seen_batches:
+            return {"ok": True, "dedup": True}
+        record_embedding_batch(
+            pipeline_id=pipeline_id, docs_embedded=payload["processed"],
+            docs_failed=payload["failed"], tokens_used=payload["tokens_used"],
+            latency_ms=payload["processing_time_ms"], source_id=payload["source_id"],
+            model_id=payload["model_id"], destination_id=payload["destination_id"],
+            input_bytes=payload["input_bytes"], queue_wait_ms=payload["queue_wait_ms"],
+            retry_count=payload["retry_count"], throttle_count=payload["throttle_count"],
+            throttle_delay_ms=payload["throttle_delay_ms"],
+            error_category=payload["error_category"], last_document=payload["last_document"],
+        )
+        if _initialized:
+            batch_logger.info("omnivec.embedding.batch", extra={
+                **payload, "pipeline_id": pipeline_id, "schema_version": 1,
+                "microsoft.custom_event.name": "omnivec.embedding.batch",
+            })
+        _seen_batches[identity] = None
+        if len(_seen_batches) > _MAX_SEEN_BATCHES:
+            _seen_batches.popitem(last=False)
+    return {"ok": True}
+
+
+def reset_batch_dedup():
+    with _batch_lock:
+        _seen_batches.clear()
+
+
+def reset_pipeline_metrics(pipeline_id):
+    """Reset process-local display state; historical reset is a query-time cutoff."""
+    with metrics_store._lock:
+        metrics_store._pipelines.pop(pipeline_id, None)
+        for key in list(metrics_store._pipeline_models):
+            if key[0] == pipeline_id:
+                metrics_store._pipeline_models.pop(key, None)
+        metrics_store._pipeline_throughput.pop(pipeline_id, None)
+        metrics_store._pipeline_latency.pop(pipeline_id, None)
 
 
 def record_search(latency_ms: float = 0, embed_latency_ms: float = 0,

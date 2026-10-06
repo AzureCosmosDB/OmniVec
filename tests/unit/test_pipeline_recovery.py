@@ -84,6 +84,11 @@ def modules(api_app, monkeypatch):
     for name in ("controller", "checkpoint_manager", "progress_tracker"):
         monkeypatch.delitem(sys.modules, name, raising=False)
         loaded[name] = importlib.import_module(name)
+    import telemetry
+    telemetry.reset_batch_dedup()
+    telemetry.metrics_store.reset()
+    loaded["api"].batch_metrics.invalidate()
+    monkeypatch.setattr(loaded["api"], "_run_kql", lambda *a, **kw: None)
     return SimpleNamespace(**loaded)
 
 
@@ -122,7 +127,8 @@ def test_connector_metrics_are_deduplicated_and_visible_in_pipeline_stats(module
     assert stats.embedded_count == 3
     assert stats.lifetime_embedded_count == 3
     assert stats.avg_processing_time_ms == 100
-    assert stats.recent_throughput_docs_per_sec == 0.1
+    assert stats.telemetry_source == "in_memory"
+    assert store.get("global", "metrics") is None
 
 
 def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatch):
@@ -153,15 +159,7 @@ def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatc
         "ok": True, "dedup": True,
     }
 
-    persisted = store.get("global", "metrics")
-    pipeline_metrics = persisted["pipelines"]["pipeline"]
-    model_metrics = persisted["models"]["mdl-embedding"]
-    assert pipeline_metrics["processed"] == 4
-    assert pipeline_metrics["tokens"] == 120
-    assert pipeline_metrics["throttles"] == 1
-    assert pipeline_metrics["last_document"] == "document-4"
-    assert pipeline_metrics["models"]["mdl-embedding"]["retries"] == 2
-    assert model_metrics["processed"] == 4
+    assert store.get("global", "metrics") is None
 
     live = modules.api.get_live_metrics()
     assert live["pipelines"]["pipeline"]["embedded"] == 4
@@ -185,6 +183,7 @@ def test_worker_metrics_reject_negative_values(modules, monkeypatch):
 
 def test_metrics_timeseries_applies_pipeline_and_model_filters(modules, monkeypatch):
     captured = {}
+    attach(monkeypatch, modules.api, MemoryStore())
 
     def run_kql(query, _timespan):
         captured["query"] = query
@@ -195,13 +194,14 @@ def test_metrics_timeseries_applies_pipeline_and_model_filters(modules, monkeypa
         pipeline_id="pip-123", model_id="mdl-embedding",
     ))
 
-    assert "customDimensions.pipeline_id) == 'pip-123'" in captured["query"]
-    assert "customDimensions.model_id) == 'mdl-embedding'" in captured["query"]
+    assert 'pipeline_id == "pip-123"' in captured["query"]
+    assert 'model_id == "mdl-embedding"' in captured["query"]
+    assert "embeddingBatches" in captured["query"]
     assert result["pipeline_id"] == "pip-123"
     assert result["model_id"] == "mdl-embedding"
 
 
-def test_worker_metrics_retry_concurrent_cosmos_update(modules, monkeypatch):
+def test_worker_metrics_never_touch_cosmos_even_when_old_metrics_exist(modules, monkeypatch):
     metrics = {
         "id": "global",
         "doc_type": "metrics",
@@ -214,20 +214,16 @@ def test_worker_metrics_retry_concurrent_cosmos_update(modules, monkeypatch):
     store = MemoryStore(pipeline(), metrics)
     attach(monkeypatch, modules.api, store)
 
-    def concurrent_update():
-        current = store.get("global", "metrics")
-        current["events_processed"] = 11
-        store.upsert(current)
-
-    store.before_replace = concurrent_update
+    monkeypatch.setattr(store, "replace_with_etag", Mock(side_effect=AssertionError("metrics DB write")))
+    monkeypatch.setattr(store, "upsert", Mock(side_effect=AssertionError("metrics DB write")))
     assert modules.api.report_inline_metrics("pipeline", {
         "processed": 2,
         "batch_key": "concurrent-update",
     }) == {"ok": True}
 
     persisted = store.get("global", "metrics")
-    assert persisted["events_processed"] == 13
-    assert persisted["pipelines"]["pipeline"]["processed"] == 2
+    assert persisted["events_processed"] == 10
+    assert persisted["pipelines"] == {}
 
 
 def test_operator_resource_policy_and_insights(modules, monkeypatch):
@@ -267,6 +263,8 @@ def test_operator_resource_policy_and_insights(modules, monkeypatch):
     assert saved["resource_policy"]["weight"] == 20
     assert saved["resource_policy"]["max_concurrency_per_worker"] == 3
 
+    monkeypatch.setattr(modules.api.batch_metrics, "pipeline_summary",
+                        lambda *args, **kwargs: metrics["pipelines"])
     insights = modules.api.get_resource_insights()
     row = insights["pipelines"][0]
     assert row["policy"]["priority"] == "high"

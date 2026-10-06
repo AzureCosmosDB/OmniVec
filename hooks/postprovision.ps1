@@ -374,8 +374,9 @@ function Get-SourceBuildSpec {
             $dockerfile = Join-Path $context "Dockerfile"
         }
         "omnivec-changefeed" {
-            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\dotnet" $context
-            $dockerfile = Join-Path $context "Dockerfile"
+            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\dotnet" (Join-Path $context "connectors\ingestion\dotnet")
+            Copy-MinimalBuildTree "$RootDir\connectors\worker\dotnet" (Join-Path $context "connectors\worker\dotnet")
+            $dockerfile = Join-Path $context "connectors\ingestion\dotnet\Dockerfile"
         }
         "omnivec-dotnet-worker" {
             Copy-MinimalBuildTree "$RootDir\connectors\worker\dotnet" $context
@@ -515,7 +516,7 @@ function Build-MissingImages {
             "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
             "omnivec-search"          { Build-Image -Name $image -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest" }
             "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
-            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
+            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir" -Tag "latest" }
             "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
             "omnivec-onelake-iceberg-watcher" { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/onelake_iceberg/Dockerfile" -Context "$RootDir/connectors/ingestion/onelake_iceberg/" -Tag "latest" }
             "omnivec-agent"           { Build-Image -Name $image -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest" }

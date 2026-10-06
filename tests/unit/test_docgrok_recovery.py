@@ -1,7 +1,9 @@
 """Regression tests for document-processing and model-scheduler stalls."""
 import asyncio
+import base64
 import importlib.util
 import json
+import struct
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -106,6 +108,30 @@ async def test_document_embeddings_are_batched_in_order(processor, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_router_binary_embeddings_are_decoded_in_order(processor, monkeypatch):
+    def handle(request):
+        payload = json.loads(request.content)
+        assert request.headers["accept"] == processor.EMBEDDING_BINARY_MEDIA_TYPE
+        values = [float(text) for text in payload["texts"]]
+        body = struct.pack("<4sHHII", b"OVEC", 1, 0, len(values), 2)
+        body += b"".join(struct.pack("<ff", value, value + 0.5) for value in values)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": processor.EMBEDDING_BINARY_MEDIA_TYPE},
+            content=body,
+        )
+
+    router_stub(monkeypatch, processor, handle)
+    monkeypatch.setattr(processor, "EMBED_BATCH_SIZE", 2)
+    result = await processor.embed_via_router(
+        ["1", "2", "3"],
+        "model",
+        "http://local.invalid",
+    )
+    assert result == [[1.0, 1.5], [2.0, 2.5], [3.0, 3.5]]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 404, 413, 422, 429, 503])
 async def test_embedding_errors_preserve_retry_classification(processor, monkeypatch, status):
     router_stub(monkeypatch, processor, lambda _: httpx.Response(status, text="backend failure"))
@@ -124,6 +150,205 @@ async def test_incomplete_embedding_batches_fail(processor, monkeypatch, respons
     with pytest.raises(HTTPException) as error:
         await processor.embed_via_router(["text"], "model", "http://local.invalid")
     assert error.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_direct_embedding_batches_rotate_endpoints_and_preserve_order(processor, monkeypatch):
+    calls = []
+
+    def handle(request):
+        payload = json.loads(request.content)
+        calls.append((request.url.host, payload))
+        return httpx.Response(
+            200,
+            json=[[float(text)] for text in payload["inputs"]],
+        )
+
+    router_stub(monkeypatch, processor, handle)
+    result = await processor.embed_direct(
+        [str(i) for i in range(5)],
+        "mdl-ext-harrier",
+        {
+            "protocol": "tei",
+            "endpoints": ["http://gpu-a:8000", "http://gpu-b:8000"],
+            "batch_size": 2,
+            "concurrency": 2,
+        },
+    )
+
+    assert result == [[float(i)] for i in range(5)]
+    assert [host for host, _ in calls] == ["gpu-a", "gpu-b", "gpu-a"]
+    assert [len(payload["inputs"]) for _, payload in calls] == [2, 2, 1]
+    assert all(payload["truncate"] is True for _, payload in calls)
+
+
+@pytest.mark.asyncio
+async def test_direct_single_batches_rotate_endpoints_across_requests(processor, monkeypatch):
+    calls = []
+
+    def handle(request):
+        payload = json.loads(request.content)
+        calls.append(request.url.host)
+        return httpx.Response(
+            200,
+            json=[[float(text)] for text in payload["inputs"]],
+        )
+
+    router_stub(monkeypatch, processor, handle)
+    route = {
+        "protocol": "tei",
+        "endpoints": ["http://gpu-a:8000", "http://gpu-b:8000"],
+        "batch_size": 512,
+    }
+
+    assert await processor.embed_direct(["1"], "cross-request-model", route) == [[1.0]]
+    assert await processor.embed_direct(["2"], "cross-request-model", route) == [[2.0]]
+    assert calls == ["gpu-a", "gpu-b"]
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_embedding_uses_standard_contract(processor, monkeypatch):
+    def handle(request):
+        payload = json.loads(request.content)
+        assert request.url.path == "/v1/embeddings"
+        assert payload == {
+            "model": "harrier",
+            "input": ["1", "2"],
+            "encoding_format": "float",
+        }
+        return httpx.Response(200, json={
+            "object": "list",
+            "data": [
+                {"object": "embedding", "index": 1, "embedding": [2.0]},
+                {"object": "embedding", "index": 0, "embedding": [1.0]},
+            ],
+            "model": "harrier",
+        })
+
+    router_stub(monkeypatch, processor, handle)
+    result = await processor.embed_direct(
+        ["1", "2"],
+        "mdl-ext-harrier",
+        {
+            "protocol": "openai",
+            "model": "harrier",
+            "encoding_format": "float",
+            "endpoints": ["http://gpu:8000"],
+            "batch_size": 2,
+        },
+    )
+    assert result == [[1.0], [2.0]]
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_embedding_decodes_base64_float32(processor, monkeypatch):
+    encoded = base64.b64encode(struct.pack("<ff", 1.25, -2.5)).decode()
+
+    def handle(request):
+        payload = json.loads(request.content)
+        assert payload["encoding_format"] == "base64"
+        return httpx.Response(200, json={
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": encoded}],
+        })
+
+    router_stub(monkeypatch, processor, handle)
+    result = await processor.embed_direct(
+        ["text"],
+        "mdl-ext-harrier",
+        {
+            "protocol": "openai",
+            "endpoints": ["http://gpu:8000"],
+        },
+    )
+    assert result == [[1.25, -2.5]]
+
+
+@pytest.mark.asyncio
+async def test_worker_openai_endpoint_returns_binary_embeddings(processor, monkeypatch):
+    async def fake_embed(texts, model_id, router_url, **kwargs):
+        assert texts == ["first", "second"]
+        assert model_id == "mdl-ext-harrier"
+        assert router_url == processor.DOCGROK_ROUTER_URL
+        return [[1.0, 1.5], [2.0, 2.5]]
+
+    monkeypatch.setattr(processor, "embed_texts", fake_embed)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=processor.app),
+        base_url="http://worker",
+    ) as client:
+        response = await client.post(
+            "/v1/embeddings",
+            headers={"Accept": processor.EMBEDDING_BINARY_MEDIA_TYPE},
+            json={
+                "model": "mdl-ext-harrier",
+                "input": ["first", "second"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(processor.EMBEDDING_BINARY_MEDIA_TYPE)
+    assert processor._decode_binary_embeddings(response.content, 2) == [
+        [1.0, 1.5],
+        [2.0, 2.5],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_direct_embedding_failure_falls_back_to_router(processor, monkeypatch):
+    calls = []
+
+    def handle(request):
+        calls.append(request.url.host)
+        if request.url.host == "gpu":
+            return httpx.Response(503, text="unavailable")
+        payload = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"outputs": [[[float(text)]] for text in payload["texts"]]},
+        )
+
+    router_stub(monkeypatch, processor, handle)
+    monkeypatch.setattr(processor, "DIRECT_EMBEDDING_ROUTES", {
+        "mdl-ext-harrier": {
+            "protocol": "tei",
+            "endpoints": ["http://gpu:8000"],
+        },
+    })
+
+    result = await processor.embed_texts(
+        ["1", "2"],
+        "mdl-ext-harrier",
+        "http://router",
+        mode_override="direct-with-router-fallback",
+    )
+
+    assert result == [[1.0], [2.0]]
+    assert calls == ["gpu", "router"]
+
+
+@pytest.mark.asyncio
+async def test_unmapped_external_model_keeps_router_path(processor, monkeypatch):
+    calls = []
+
+    def handle(request):
+        calls.append(request.url.host)
+        return httpx.Response(200, json={"outputs": [[[0.5]]]})
+
+    router_stub(monkeypatch, processor, handle)
+    monkeypatch.setattr(processor, "DIRECT_EMBEDDING_ROUTES", {
+        "mdl-ext-harrier": "http://gpu:8000",
+    })
+
+    result = await processor.embed_texts(
+        ["text"],
+        "mdl-ext-openai",
+        "http://router",
+        mode_override="direct-with-router-fallback",
+    )
+
+    assert result == [[0.5]]
+    assert calls == ["router"]
 
 
 @pytest.mark.asyncio

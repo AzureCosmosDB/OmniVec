@@ -5,17 +5,25 @@ const { icon, esc, fmt, plural, api, need, invalidate, D, M, T, logo, empty, spi
 
 const STEPS = [['source','Source','Where content comes from'],['content','Content','What to index and how to split it'],['embed','Embedding','Model or processing recipe'],['store','Vector store','Where vectors go'],['review','Review & create','Name it and start']];
 let W = null;
-const fresh = () => ({ step:0, sourceId:null, fields:null, fileTypes:null, contentMode:'field', strategy:'chunk', chunk:{ size:1000, overlap:200, unit:'chars' }, spTenant:'', spClient:'',
+const fresh = () => ({ step:0, sourceId:null, fields:null, fileTypes:null, contentMode:'field', strategy:'chunk', chunk:{ size:1000, overlap:200, unit:'chars', cleanupOrder:'insert-first' }, spTenant:'', spClient:'',
   modelId:null, recipe:null, storeId:null, indexes:null, indexErr:null, vpath:null, mode:'queue', name:'', desc:'', processExisting:true,
   docId:'{source_hash}-{pipeline}', pk:'{source_partition}', chunkId:'{source_hash}-{pipeline}-chunk-{chunk}', collision:'reject', storeText:true, meta:['pipeline_name','embedding_dims','source_ref'], priority:'normal', sample:null, nameTouched:false });
 
 const src = () => M.SRC[W.sourceId]; const dst = () => M.DST[W.storeId]; const mdl = () => M.MDL[W.modelId];
+const cosmosTextChunks = () => src()?.type==='cosmosdb' && W.contentMode==='field' && !(src().config||{}).attachments_field;
 const embModels = () => M.models.filter(m => m.model_category !== 'chat').sort((a,b) => (!!b.embedding_dim - !!a.embedding_dim) || ((M.hm[b.id]||{}).status==='healthy') - ((M.hm[a.id]||{}).status==='healthy'));
 const hOk = (h) => !h ? null : h.status === 'healthy';
 function storeDims() { const d = dst(); if (!d) return null; const pick = (W.indexes||[]).find(i => (i.path||'').replace(/^\//,'') === W.vpath) || (W.indexes||[])[0];
   if (pick && pick.dimensions) return pick.dimensions; if (d.type==='pgvector') return (d.config||{}).vector_dimensions || null;
   const pol = ((M.hd[d.id]||{}).checks||[]).find(c => c.check==='vector_policy'); return pol ? pol.dimensions : null; }
 function sameContainer() { const s = src(), d = dst(); if (!s || !d) return false; const a = s.config||{}, b = d.config||{};
+  if (s.type==='garnet' && d.type==='garnet') {
+    const endpoint = value => (value||'').replace(/^rediss?:\/\//i,'').replace(/\/$/,'').toLowerCase();
+    return endpoint(a.endpoint)===endpoint(b.endpoint) && !!a.hash_key && !!b.vector_set &&
+      a.hash_key.toLowerCase()!==b.vector_set.toLowerCase() &&
+      !a.hash_key.toLowerCase().startsWith('__omnivec:source-checkpoints:') &&
+      !b.vector_set.toLowerCase().startsWith('__omnivec:source-checkpoints:');
+  }
   return s.type==='cosmosdb' && d.type==='cosmosdb-vector' && (a.endpoint||'').replace(/:443\/?$/,'').replace(/\/$/,'') === (b.endpoint||'').replace(/:443\/?$/,'').replace(/\/$/,'') && a.database===b.database && a.container===b.container; }
 
 function checks() {
@@ -30,7 +38,10 @@ function checks() {
   else out.push(['wait','Dimension match: waiting for model and store']);
   if (s && s.type==='sharepoint') out.push(['info','SharePoint needs queue mode and a Cosmos DB vector store. Set automatically.']);
   if (W.mode==='inline' && W.strategy==='chunk') out.push(['fail','Inline mode cannot chunk. Use queue mode.']);
-  if (W.mode==='inline' && d && !sameContainer()) out.push(['fail','Inline mode needs the source and store to be the same container.']);
+  if (s && s.type==='garnet' && W.mode!=='inline') out.push(['fail','Garnet HASH sources require inline Garnet-to-Garnet processing.']);
+  if (s && s.type==='garnet' && d && d.type!=='garnet') out.push(['fail','Garnet HASH sources require a Garnet vector-set destination.']);
+  if (s && s.type==='garnet' && W.strategy!=='truncate') out.push(['fail','Garnet HASH sources support whole-record embedding only; chunking is unsupported.']);
+  if (W.mode==='inline' && d && !sameContainer()) out.push(['fail',s && s.type==='garnet' ? 'Inline Garnet needs the source HASH and vector set on the same endpoint with different key names.' : 'Inline mode needs the source and store to be the same container.']);
   if (d && m) { const other = M.pipelines.filter(p => p.dst.id===d.id && p.model && p.model.id!==m.id); if (other.length) out.push(['warn',`${plural(other.length,'other pipeline')} write to this store with a different model. Scores won't be comparable.`]); }
   if (d && W.vpath && M.pipelines.some(p => p.dst.id===d.id && p.src.id===W.sourceId)) out.push(['warn','Another pipeline already writes this source to this store. Use a distinct document ID pattern.']);
   return out;
@@ -99,19 +110,22 @@ function initContent() { const s = src(); if (!s) return; const c = s.config||{}
   if (!W.nameTouched) W.name = ''; W.sample = null; }
 function stepContent() {
   const s = src(); if (!s) return empty('plug','Choose a source first','');
+  const nativeGarnet = s.type==='garnet';
   const files = ['azure-blob','sharepoint'].includes(s.type);
   const sampleKeys = W.sample && W.sample.length && typeof W.sample[0]==='object' ? Object.keys(W.sample[0]).filter(k => !k.startsWith('_')).slice(0, 14) : [];
   return `<div><h2 style="font-size:17px;margin:0">What should be indexed?</h2><div class="muted">${files ? 'Choose which files become searchable and how they are split.' : 'Choose which fields hold the text to embed and how it is split.'}</div></div>
-   ${files ? `<div class="fld"><label>File types</label><div class="tagbox" id="wft">${(W.fileTypes||[]).map(t => `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`).join('')}<input placeholder="Add, e.g. pdf"></div><span class="hint">PDF and Office files are text-extracted (with OCR fallback for scanned PDFs).</span></div>`
+   ${nativeGarnet ? `<div class="callout">${icon('info','ic')}<div>Each HASH value must be a JSON object with <code>id</code>, a positive increasing <code>version</code>, and string <code>content</code>. Embeddings use the content field; URL extraction and custom field selection are not supported.</div></div>` :
+    files ? `<div class="fld"><label>File types</label><div class="tagbox" id="wft">${(W.fileTypes||[]).map(t => `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`).join('')}<input placeholder="Add, e.g. pdf"></div><span class="hint">PDF and Office files are text-extracted (with OCR fallback for scanned PDFs).</span></div>`
     : `<div class="fld"><label>Text fields to embed</label><div class="tagbox" id="wcf">${(W.fields||[]).map(t => `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`).join('')}<input placeholder="Add a field name"></div>
        ${sampleKeys.length ? `<div class="row wrap small" style="margin-top:6px"><span class="muted">Fields in sample:</span>${sampleKeys.map(k => `<button class="badge out" data-addf="${esc(k)}">+ ${esc(k)}</button>`).join('')}</div>` : ''}<span class="hint">Multiple fields are concatenated in order.</span></div>`}
    <div class="callout">${icon('file','ic')}<div class="grow"><div class="row sp"><b>Preview</b><button class="btn sm" id="wsample">${W.sample ? 'Reload' : 'Load sample'}</button></div>
      <div id="wsampleout">${W.sample ? sampleHtml() : '<span class="muted">Load a few items to confirm this is the right data.</span>'}</div></div></div>
    <div class="fld"><label>How should documents be split?</label><div class="grid g2">
-     <div class="opt ${W.strategy==='chunk'?'on':''}" data-strat="chunk"><span class="tick">${icon('check','sm')}</span><div><div class="t">Chunks <span class="badge ok">Recommended</span></div><div class="d">Best for long documents and precise answers.</div></div></div>
+     ${nativeGarnet ? '' : `<div class="opt ${W.strategy==='chunk'?'on':''}" data-strat="chunk"><span class="tick">${icon('check','sm')}</span><div><div class="t">Chunks <span class="badge ok">Recommended</span></div><div class="d">Best for long documents and precise answers.</div></div></div>`}
      <div class="opt ${W.strategy==='truncate'?'on':''}" data-strat="truncate"><span class="tick">${icon('check','sm')}</span><div><div class="t">Whole document</div><div class="d">One vector per item, truncated to the model limit. Best for short records.</div></div></div></div></div>
    ${W.strategy==='chunk' ? `<div class="grid g3"><div class="fld"><label>Chunk size</label><input class="inp" type="number" id="wcs" value="${W.chunk.size}"></div><div class="fld"><label>Overlap</label><input class="inp" type="number" id="wco" value="${W.chunk.overlap}"></div>
      <div class="fld"><label>Unit</label><select class="sel" id="wcu"><option value="chars" ${W.chunk.unit==='chars'?'selected':''}>Characters</option><option value="tokens" ${W.chunk.unit==='tokens'?'selected':''}>Words (≈ tokens)</option></select></div></div>
+     ${cosmosTextChunks() ? `<div class="fld"><label>Chunk replacement order</label><select class="sel" id="wcko"><option value="insert-first" ${W.chunk.cleanupOrder!=='delete-first'?'selected':''}>Insert new chunks, then delete obsolete chunks</option><option value="delete-first" ${W.chunk.cleanupOrder==='delete-first'?'selected':''}>Delete old chunks, then insert new chunks</option></select><span class="hint">Insert-first can temporarily show mixed chunks. Delete-first can leave a search gap if insertion fails. Editable later; applies to newly queued work.</span></div>` : ''}
      ${W.chunk.overlap >= W.chunk.size ? '<div class="inline-err">Overlap must be smaller than the chunk size.</div>' : ''}` : ''}
    ${s.type==='sharepoint' ? `<details><summary class="link small">Site in another Microsoft Entra tenant?</summary><div class="grid g2" style="margin-top:10px"><div class="fld"><label>Tenant ID</label><input class="inp mono" id="wspt" value="${esc(W.spTenant)}"></div><div class="fld"><label>App (client) ID</label><input class="inp mono" id="wspc" value="${esc(W.spClient)}"></div></div><span class="hint">The app needs a federated credential for system:serviceaccount:omnivec:omnivec-api and Sites.Selected on the site.</span></details>` : ''}
    ${s.type==='cosmosdb' ? `<details><summary class="link small">Content is a URL to a file?</summary><div class="fld" style="margin-top:10px"><label>Content mode</label><select class="sel" id="wcm"><option value="field" ${W.contentMode==='field'?'selected':''}>Field holds the text</option><option value="blob_url" ${W.contentMode==='blob_url'?'selected':''}>Field holds a Blob Storage URL</option><option value="http_url" ${W.contentMode==='http_url'?'selected':''}>Field holds an HTTP URL</option></select></div></details>` : ''}`;
@@ -146,13 +160,15 @@ async function loadIndexes(v) {
 function stepStore() {
   const s = src(); const sp = s && s.type==='sharepoint';
   const inlineOk = sameContainer() && W.strategy!=='chunk' && !sp;
+  const nativeGarnet = s && s.type==='garnet';
+  const destinations = M.dests.filter(d => !nativeGarnet || d.type==='garnet');
   return `<div><h2 style="font-size:17px;margin:0">Where should vectors be written?</h2><div class="muted">Choose a vector store whose dimensions match the model.</div></div>
-   <div class="grid g2">${M.dests.map(d => { const n = M.pipelines.filter(p => p.dst.id===d.id).length; const dis = sp && d.type!=='cosmosdb-vector';
+   <div class="grid g2">${M.dests.map(d => { const n = M.pipelines.filter(p => p.dst.id===d.id).length; const dis = (sp && d.type!=='cosmosdb-vector') || (nativeGarnet && d.type!=='garnet');
      const vi = ((d.config||{}).vector_indexes||[])[0]; return `<div class="opt ${W.storeId===d.id?'on':''} ${dis?'dis':''}" ${dis?'':`data-store="${d.id}"`}><span class="tick">${icon('check','sm')}</span>${logo(d.type)}<div style="min-width:0"><div class="t trunc">${esc(d.name)}</div><div class="d">${esc(T(d.type).short)}${vi ? ` · ${vi.indexType} · ${vi.dimensions}d` : ''} · ${plural(n,'pipeline')}${dis ? ' · not supported for SharePoint' : ''}</div></div></div>`; }).join('')}
     <a class="opt" href="#/connections/new/store?then=new" style="border-style:dashed"><span class="logo" style="background:var(--accent-soft);color:var(--accent-text)">${icon('plus','sm')}</span><div><div class="t">Add a vector store</div><div class="d">Cosmos DB, pgvector or OneLake</div></div></a></div>
    ${W.storeId ? `<div class="grid g2"><div class="fld"><label>Vector field</label>${W.indexes===null ? `<div class="muted small">${spinner('Reading the vector policy…')}</div>` : W.indexes.length ? `<select class="sel" id="wvp">${W.indexes.map(i => { const p = (i.path||'').replace(/^\//,''); return `<option value="${esc(p)}" ${W.vpath===p?'selected':''}>/${esc(p)}${i.dimensions ? ` · ${i.dimensions}d` : ''}${i.indexType ? ' · '+esc(i.indexType) : ''}${i.distanceFunction ? ' · '+esc(i.distanceFunction) : ''}</option>`; }).join('')}</select>` : `<input class="inp mono" id="wvpi" value="${esc(W.vpath||'embedding')}"><span class="hint">No vector policy was found. Enter the vector path configured on the container.</span>`}
       ${W.indexErr ? `<div class="inline-err">${esc(W.indexErr)} · <a class="link" href="#/connections/store/${W.storeId}/access">Check access</a></div>` : ''}</div>
-     <div class="fld"><label>Processing mode</label><div class="seg" id="wmode"><button data-mode="queue" class="${W.mode==='queue'?'on':''}">Queue</button><button data-mode="inline" class="${W.mode==='inline'?'on':''}" ${inlineOk?'':'disabled title="Inline needs the same Cosmos DB container as source and store, and no chunking"'}>Inline</button></div>
+     <div class="fld"><label>Processing mode</label><div class="seg" id="wmode"><button data-mode="queue" class="${W.mode==='queue'?'on':''}" ${nativeGarnet?'disabled title="Garnet HASH sources do not use Service Bus or queue workers"':''}>Queue</button><button data-mode="inline" class="${W.mode==='inline'?'on':''}" ${inlineOk?'':'disabled title="Inline needs a compatible source and destination, and no chunking"'}>Inline</button></div>
       <span class="hint">${W.mode==='queue' ? 'Scales with the shared worker pool. Supports chunking and every source.' : 'Embeds in place inside the change-feed processor. Lowest latency.'}</span></div></div>` : ''}`;
 }
 function stepReview() {
@@ -180,6 +196,7 @@ function stepReview() {
 function captureInputs(v) {
   const g = id => $('#'+id, v);
   if (g('wcs')) { W.chunk.size = +g('wcs').value; W.chunk.overlap = +g('wco').value; W.chunk.unit = g('wcu').value; }
+  if (g('wcko')) W.chunk.cleanupOrder = g('wcko').value;
   if (g('wspt')) { W.spTenant = g('wspt').value.trim(); W.spClient = g('wspc').value.trim(); }
   if (g('wcm')) W.contentMode = g('wcm').value;
   if (g('wft')) W.fileTypes = $$('[data-tag]', g('wft')).map(b => b.dataset.tag);
@@ -192,7 +209,8 @@ function captureInputs(v) {
 function bind(v) {
   const body = $('#wbody', v);
   body.oninput = () => { captureInputs(v); drawSide(v); const n = $('#wnext', v); if (n) n.disabled = !canNext(W.step); };
-  $$('[data-src]', v).forEach(o => o.onclick = () => { if (W.sourceId !== o.dataset.src) { W.sourceId = o.dataset.src; W.fields = null; if (M.SRC[W.sourceId].type==='sharepoint') W.mode = 'queue'; } draw(v); });
+  const cm = $('#wcm', v); if (cm) cm.onchange = () => { captureInputs(v); draw(v); };
+  $$('[data-src]', v).forEach(o => o.onclick = () => { if (W.sourceId !== o.dataset.src) { const oldType=src()?.type; W.sourceId = o.dataset.src; W.fields = null; const nextType=M.SRC[W.sourceId].type; if (nextType==='sharepoint') W.mode = 'queue'; if (nextType==='garnet') { W.mode='inline'; W.strategy='truncate'; W.contentMode='field'; } else if (oldType==='garnet') W.mode='queue'; } draw(v); });
   $$('[data-strat]', v).forEach(o => o.onclick = () => { captureInputs(v); W.strategy = o.dataset.strat; if (W.strategy==='chunk') W.mode = 'queue'; draw(v); });
   $$('[data-model]', v).forEach(o => o.onclick = () => { W.modelId = o.dataset.model; W.recipe = null; draw(v); });
   $$('[data-recipe]', v).forEach(o => o.onclick = () => { W.recipe = o.dataset.recipe; W.modelId = null; draw(v); });
@@ -226,6 +244,7 @@ async function create(v, btn) {
     resource_policy:{ weight:10, max_concurrency_per_worker:2, priority:W.priority, workload_class:'shared' } };
   if (W.meta.length !== 3) body.metadata_fields = W.meta;
   if (W.strategy==='chunk') body.chunk_config = { chunk_size:W.chunk.size, chunk_overlap:W.chunk.overlap, chunk_unit:W.chunk.unit, store_text:W.storeText, text_field:'text', doc_id_pattern:W.chunkId };
+  if (W.strategy==='chunk' && cosmosTextChunks()) body.chunk_config.cleanup_order = W.chunk.cleanupOrder;
   btn.disabled = true; btn.innerHTML = spinner('Creating…');
   try { const r = await api('/api/pipelines', { method:'POST', body }); const p = (r && (r.pipeline || r)) || {};
     toast('Pipeline created. Backfill is starting.'); invalidate('pipelines','health','insights'); W = null; go('#/pipelines/'+(p.id || '')); }

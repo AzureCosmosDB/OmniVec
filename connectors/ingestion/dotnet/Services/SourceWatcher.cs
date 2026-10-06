@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Azure.Identity;
 using Microsoft.Azure.Cosmos;
 using Newtonsoft.Json.Linq;
@@ -77,6 +79,9 @@ public class SourceWatcher : ISourceWatcher
         HttpClient? docGrokClient = null,
         ServiceBusPublisher? sbPublisher = null)
     {
+        if (options.InlinePatchConcurrency is < 0 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(options.InlinePatchConcurrency),
+                "InlinePatchConcurrency must be between 0 and 256");
         _source = source;
         _options = options;
         _apiClient = apiClient;
@@ -515,69 +520,49 @@ public class SourceWatcher : ISourceWatcher
     {
         foreach (var pipeline in inlinePipelines)
         {
-            // Use smaller batches for external models to avoid rate limits.
-            // For native BGE we deliberately pick a small sub-batch size so
-            // each CFP change-feed page (~200 docs) splits into 4-5 sub-batches
-            // that we fire in parallel — this is the only way to amortize
-            // embed RTT across BGE replicas. Single 200-doc call benchmarked
-            // at ~250 d/s; 4× concurrent 50-doc calls benchmarks at ~850 d/s.
-            int embedSubBatchSize = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 50 : 50;
+            const int embedSubBatchSize = 50;
             int embedConcurrency = pipeline.DocgrokPipeline.StartsWith("mdl-ext-") ? 2 : 8;
 
             try
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                // Phase 1: Embed all docs in sub-batches, collect results.
-                // Use a SemaphoreSlim to cap concurrency, fire Tasks per sub-batch.
-                var embeddedSlots = new (string docId, string pkValue, JsonElement embedding, string contentHash)?[docs.Count];
-                var gate = new SemaphoreSlim(embedConcurrency, embedConcurrency);
-                var subBatchTasks = new List<Task>();
-
-                for (int offset = 0; offset < docs.Count; offset += embedSubBatchSize)
-                {
-                    int subOffset = offset;
-                    var chunk = docs.Skip(subOffset).Take(embedSubBatchSize).ToList();
-                    var chunkTexts = chunk.Select(d => d.content).ToList();
-
-                    await gate.WaitAsync(ct);
-                    subBatchTasks.Add(Task.Run(async () =>
+                var embeddedSlots = new InlineEmbeddedDocument?[docs.Count];
+                await Parallel.ForEachAsync(
+                    Enumerable.Range(0, (docs.Count + embedSubBatchSize - 1) / embedSubBatchSize),
+                    new ParallelOptions { MaxDegreeOfParallelism = embedConcurrency, CancellationToken = ct },
+                    async (index, token) =>
                     {
-                        try
+                        int offset = index * embedSubBatchSize;
+                        var chunk = docs.GetRange(offset, Math.Min(embedSubBatchSize, docs.Count - offset));
+                        var outputs = await InlineEmbeddingClient.EmbedAsync(
+                            _docGrokClient, pipeline.DocgrokPipeline, chunk.Select(d => d.content).ToList(), token);
+                        for (int i = 0; i < chunk.Count; i++)
                         {
-                            var outputs = await InlineEmbeddingClient.EmbedAsync(
-                                _docGrokClient, pipeline.DocgrokPipeline, chunkTexts, ct);
-
-                            for (int i = 0; i < chunk.Count; i++)
-                            {
-                                embeddedSlots[subOffset + i] = (chunk[i].docId, chunk[i].pkValue,
-                                    JsonSerializer.SerializeToElement(outputs[i]), chunk[i].contentHash);
-                            }
-                            // (Streaming progress is reported AFTER PATCH succeeds — see below.
-                            // Reporting pre-PATCH led to overcounts when lease takeover caused
-                            // the same docs to be re-embedded by a new owner.)
+                            embeddedSlots[offset + i] = new(
+                                chunk[i].docId, chunk[i].pkValue, outputs[i], chunk[i].contentHash);
                         }
-                        finally
-                        {
-                            gate.Release();
-                        }
-                    }));
-                }
-
-                await Task.WhenAll(subBatchTasks);
-                // Compact slots into a flat list (preserving order) for patching.
-                var embedded = new List<(string docId, string pkValue, JsonElement embedding, string contentHash)>(docs.Count);
+                    });
+                long embedMilliseconds = sw.ElapsedMilliseconds;
+                var embedded = new List<InlineEmbeddedDocument>(docs.Count);
                 for (int i = 0; i < embeddedSlots.Length; i++)
                 {
-                    if (embeddedSlots[i].HasValue) embedded.Add(embeddedSlots[i]!.Value);
+                    embedded.Add(embeddedSlots[i]
+                        ?? throw new InvalidOperationException($"Missing inline embedding for {docs[i].docId}"));
                 }
+                long prepareMilliseconds = sw.ElapsedMilliseconds - embedMilliseconds;
 
-                // Phase 2: Group by partition key, patch via TransactionalBatch
-                var (patched, failed) = await PatchByPartitionBatchAsync(embedded, pipeline, ct);
+                var patchStarted = sw.ElapsedMilliseconds;
+                var result = await PatchByPartitionBatchAsync(embedded, pipeline, ct);
+                int patched = result.Patched, failed = result.Failed;
 
                 sw.Stop();
                 _logger.LogInformation(
                     "Inline complete: {Patched}/{Total} docs patched ({Failed} failed) for pipeline={Pipeline} on partition {Partition} in {Elapsed}ms",
                     patched, docs.Count, failed, pipeline.Name, partition, sw.ElapsedMilliseconds);
+                _logger.LogInformation(
+                    "Inline stages pipeline={PipelineId} partition={Partition} docs={Count} embed_ms={EmbedMs} prepare_ms={PrepareMs} patch_ms={PatchMs} patch_ru={PatchRU} sdk_max_ms={SdkMaxMs}",
+                    pipeline.Id, partition, docs.Count, embedMilliseconds, prepareMilliseconds,
+                    sw.ElapsedMilliseconds - patchStarted, result.RequestCharge, result.MaxSdkMilliseconds);
 
                 // If any documents failed to patch, throw to prevent checkpoint — batch will retry
                 if (failed > 0)
@@ -586,18 +571,13 @@ public class SourceWatcher : ISourceWatcher
                         $"Patch failed for {failed}/{docs.Count} documents in pipeline {pipeline.Name} — aborting to prevent data loss");
                 }
 
-                // Report actual patched count AFTER PATCH succeeds. Using
-                // (firstDocId,count) as the batch_key dedups duplicate reports
-                // if a lease retake causes the same chunk to be replayed.
                 if (patched > 0)
                 {
-                    var okKey = $"{partition}:{docs[0].docId}:{docs.Count}:ok";
+                    var identities = docs.Select(doc => $"{doc.pkValue}:{doc.docId}:{doc.contentHash}")
+                        .OrderBy(identity => identity, StringComparer.Ordinal);
+                    var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", identities))));
+                    var okKey = $"cosmos:{pipeline.Id}:{pipeline.Generation}:{digest}";
                     _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, patched, 0, sw.ElapsedMilliseconds, okKey, CancellationToken.None);
-                }
-                if (failed > 0)
-                {
-                    var batchKey = $"{partition}:{docs[0].docId}:{docs.Count}:fail";
-                    _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, 0, failed, sw.ElapsedMilliseconds, batchKey, CancellationToken.None);
                 }
             }
             catch (Exception ex)
@@ -617,40 +597,75 @@ public class SourceWatcher : ISourceWatcher
     // TransactionalBatch limit: 100 operations per batch
     private const int MaxBatchOps = 100;
 
-    private async Task<(int patched, int failed)> PatchByPartitionBatchAsync(
-        List<(string docId, string pkValue, JsonElement embedding, string contentHash)> docs,
+    internal readonly record struct InlineEmbeddedDocument(
+        string DocId, string PartitionKey, float[] Embedding, string ContentHash);
+
+    internal readonly record struct InlinePatchResult(
+        int Patched, int Failed, double RequestCharge = 0, long MaxSdkMilliseconds = 0);
+
+    internal static TransactionalBatchPatchItemRequestOptions InlinePatchRequestOptions
+        => new() { EnableContentResponseOnWrite = false };
+
+    private Task<InlinePatchResult> PatchByPartitionBatchAsync(
+        List<InlineEmbeddedDocument> docs,
         Pipeline pipeline,
         CancellationToken ct)
     {
-        if (_sourceContainer is null) return (0, docs.Count);
-
-        // Group by partition key, then chunk into max 100 ops per batch
-        var groups = docs.GroupBy(d => d.pkValue);
-        var tasks = new List<Task<(int ok, int fail)>>();
-        foreach (var g in groups)
-        {
-            var items = g.ToList();
-            for (int i = 0; i < items.Count; i += MaxBatchOps)
-            {
-                var chunk = items.Skip(i).Take(MaxBatchOps).ToList();
-                tasks.Add(PatchPartitionWithRetryAsync(g.Key, chunk, pipeline, ct));
-            }
-        }
-
-        var results = await Task.WhenAll(tasks);
-        int totalOk = results.Sum(r => r.ok);
-        int totalFail = results.Sum(r => r.fail);
-        return (totalOk, totalFail);
+        if (_sourceContainer is null) return Task.FromResult(new InlinePatchResult(0, docs.Count));
+        return ExecuteInlinePatchBatchesAsync(docs, _options.InlinePatchConcurrency,
+            (pk, chunk, token) => PatchPartitionWithRetryAsync(pk, chunk, pipeline, token), ct);
     }
 
-    private async Task<(int ok, int fail)> PatchPartitionWithRetryAsync(
+    internal static async Task<InlinePatchResult> ExecuteInlinePatchBatchesAsync(
+        List<InlineEmbeddedDocument> docs, int concurrency,
+        Func<string, List<InlineEmbeddedDocument>, CancellationToken, Task<InlinePatchResult>> execute,
+        CancellationToken ct)
+    {
+        if (concurrency is < 0 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(concurrency));
+        var batches = docs.GroupBy(d => d.PartitionKey)
+            .SelectMany(group => group.Chunk(MaxBatchOps).Select(chunk => (group.Key, Docs: chunk.ToList())))
+            .ToArray();
+        var results = new InlinePatchResult[batches.Length];
+        await Parallel.ForEachAsync(Enumerable.Range(0, batches.Length),
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = concurrency == 0 ? Math.Max(1, batches.Length) : concurrency,
+                CancellationToken = ct,
+            },
+            async (index, token) =>
+                results[index] = await execute(batches[index].Key, batches[index].Docs, token));
+        return new(results.Sum(r => r.Patched), results.Sum(r => r.Failed),
+            results.Sum(r => r.RequestCharge), results.Select(r => r.MaxSdkMilliseconds).DefaultIfEmpty().Max());
+    }
+
+    internal static IReadOnlyList<PatchOperation> BuildInlinePatchOperations(
+        InlineEmbeddedDocument document, Pipeline pipeline, string timestamp)
+        => new List<PatchOperation>
+        {
+            PatchOperation.Set($"/{pipeline.VectorIndexPath.TrimStart('/')}", document.Embedding),
+            PatchOperation.Set("/embedded_at", timestamp),
+            PatchOperation.Set("/embedding_dims", document.Embedding.Length),
+            PatchOperation.Set("/pipeline_id", pipeline.Id),
+            PatchOperation.Set("/pipeline_name", pipeline.Name),
+            PatchOperation.Set("/content_hash", document.ContentHash),
+        };
+
+    internal static TimeSpan InlinePatchRetryDelay(int attempt, TimeSpan? retryAfter)
+        => retryAfter > TimeSpan.Zero
+            ? retryAfter.Value
+            : TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
+
+    private async Task<InlinePatchResult> PatchPartitionWithRetryAsync(
         string pkValue,
-        List<(string docId, string pkValue, JsonElement embedding, string contentHash)> docs,
+        List<InlineEmbeddedDocument> docs,
         Pipeline pipeline,
         CancellationToken ct)
     {
         var pk = new PartitionKey(pkValue);
         var now = DateTime.UtcNow.ToString("O");
+        double requestCharge = 0;
+        long maxSdkMilliseconds = 0;
 
         for (int attempt = 1; attempt <= MaxPatchRetries; attempt++)
         {
@@ -658,28 +673,23 @@ public class SourceWatcher : ISourceWatcher
             try
             {
                 var batch = _sourceContainer!.CreateTransactionalBatch(pk);
-                foreach (var (docId, _, embedding, contentHash) in docs)
+                foreach (var doc in docs)
                 {
-                    var floats = EmbeddingToFloatList(embedding);
-                    var ops = new List<PatchOperation>
-                    {
-                        PatchOperation.Set($"/{pipeline.VectorIndexPath.TrimStart('/')}", floats),                        PatchOperation.Set("/embedded_at", now),
-                        PatchOperation.Set("/embedding_dims", floats.Count),
-                        PatchOperation.Set("/pipeline_id", pipeline.Id),
-                        PatchOperation.Set("/pipeline_name", pipeline.Name),
-                        PatchOperation.Set("/content_hash", contentHash),
-                    };
-                    batch.PatchItem(docId, ops);
+                    batch.PatchItem(doc.DocId, BuildInlinePatchOperations(doc, pipeline, now),
+                        InlinePatchRequestOptions);
                 }
 
+                var sdkTimer = System.Diagnostics.Stopwatch.StartNew();
                 using var response = await batch.ExecuteAsync(ct);
+                maxSdkMilliseconds = Math.Max(maxSdkMilliseconds, sdkTimer.ElapsedMilliseconds);
+                requestCharge += response.RequestCharge;
                 if (response.IsSuccessStatusCode)
-                    return (docs.Count, 0);
+                    return new(docs.Count, 0, requestCharge, maxSdkMilliseconds);
 
                 var statusCode = (int)response.StatusCode;
                 if (statusCode == 429 || statusCode == 408 || statusCode == 503 || statusCode >= 500)
                 {
-                    var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
+                    var delay = InlinePatchRetryDelay(attempt, response.RetryAfter);
                     _logger.LogWarning(
                         "Batch {Status} pk={PK} ({Count} docs), attempt {Attempt}, retrying in {Delay}ms",
                         response.StatusCode, pkValue, docs.Count, attempt, delay.TotalMilliseconds);
@@ -689,7 +699,11 @@ public class SourceWatcher : ISourceWatcher
 
                 _logger.LogWarning("Batch failed (non-retryable): pk={PK}, status={Status}, {Count} docs",
                     pkValue, response.StatusCode, docs.Count);
-                return (0, docs.Count);
+                return new(0, docs.Count, requestCharge, maxSdkMilliseconds);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (CosmosException ex) when (
                 ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
@@ -697,7 +711,8 @@ public class SourceWatcher : ISourceWatcher
                 ex.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable ||
                 (int)ex.StatusCode >= 500)
             {
-                var delay = ex.RetryAfter ?? TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
+                requestCharge += ex.RequestCharge;
+                var delay = InlinePatchRetryDelay(attempt, ex.RetryAfter);
                 _logger.LogWarning("Batch exception {Status} pk={PK}, attempt {Attempt}, retrying in {Delay}ms",
                     ex.StatusCode, pkValue, attempt, delay.TotalMilliseconds);
                 await Task.Delay(delay, ct);
@@ -714,8 +729,7 @@ public class SourceWatcher : ISourceWatcher
             {
                 // Non-transient error — fail immediately, don't waste retries
                 _logger.LogError(ex, "CRITICAL: Batch non-transient error pk={PK}, failing immediately", pkValue);
-                _patchThrottle.Release();
-                return (0, docs.Count);
+                return new(0, docs.Count, requestCharge, maxSdkMilliseconds);
             }
             finally
             {
@@ -724,7 +738,7 @@ public class SourceWatcher : ISourceWatcher
         }
         _logger.LogError("CRITICAL: Patch failed after {MaxRetries} attempts for pk={PK}, {Count} documents NOT embedded",
             MaxPatchRetries, pkValue, docs.Count);
-        return (0, docs.Count);
+        return new(0, docs.Count, requestCharge, maxSdkMilliseconds);
     }
 
 

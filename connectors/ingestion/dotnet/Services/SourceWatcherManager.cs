@@ -205,6 +205,7 @@ public class SourceWatcherManager : IAsyncDisposable
             if (t == "azure-blob") return _options.EnableBlobSources;
             if (t == "databricks") return _options.EnableDatabricksSources;
             if (t == "sharepoint") return _options.EnableSharePointSources;
+            if (t == "garnet") return _options.EnableGarnetSources;
             return _options.EnableCosmosSources;
         }).ToList();
 
@@ -316,7 +317,7 @@ public class SourceWatcherManager : IAsyncDisposable
         CancellationToken ct, List<Source>? knownSources = null)
     {
         knownSources ??= await _apiClient.GetSourcesByTypesAsync(
-            new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks", "sharepoint" }, ct);
+            new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks", "sharepoint", "garnet" }, ct);
         var blocked = await RefuseInlineConflictsAsync(knownSources, activePipelines);
         if (blocked.Contains(sourceId)) return;
         if (string.Equals(source.Type, "sharepoint", StringComparison.OrdinalIgnoreCase))
@@ -390,7 +391,7 @@ public class SourceWatcherManager : IAsyncDisposable
     }
 
     internal static bool RequiresPollingLease(string? type)
-        => type?.ToLowerInvariant() is "azure-blob" or "databricks" or "sharepoint" or "mssql" or "postgresql";
+        => type?.ToLowerInvariant() is "azure-blob" or "databricks" or "sharepoint" or "mssql" or "postgresql" or "garnet";
 
     private ISourceWatcher CreateWatcher(WatcherPlan plan)
     {
@@ -429,6 +430,11 @@ public class SourceWatcherManager : IAsyncDisposable
                 sbPublisher: _sbPublisher,
                 pipelineSource: plan.SharePointSource,
                 stateScopeId: plan.StateScopeId),
+
+            "garnet" => new GarnetSourceWatcher(
+                source, _options, _apiClient, _hasher, _blobLeaseManager,
+                _loggerFactory.CreateLogger<GarnetSourceWatcher>(),
+                generation: generation),
 
             _ => new SourceWatcher(
                 source, _options, _apiClient, _leaseManager, _hasher,

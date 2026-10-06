@@ -54,7 +54,7 @@ public class SourceDiscoveryService : BackgroundService
             try
             {
                 var sources = await _apiClient.GetSourcesByTypesAsync(
-                    new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks", "sharepoint" }, ct);
+                    new[] { "cosmosdb", "mssql", "postgresql", "azure-blob", "databricks", "sharepoint", "garnet" }, ct);
                 var pipelines = await _apiClient.GetActivePipelinesAsync(ct);
                 var destinations = await _apiClient.GetDestinationsAsync(ct);
 
@@ -111,6 +111,7 @@ public class SourceDiscoveryService : BackgroundService
         if (type == "azure-blob") return _options.EnableBlobSources;
         if (type == "databricks") return _options.EnableDatabricksSources;
         if (type == "sharepoint") return _options.EnableSharePointSources;
+        if (type == "garnet") return _options.EnableGarnetSources;
         return _options.EnableCosmosSources;
     }
 
