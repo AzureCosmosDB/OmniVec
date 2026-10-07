@@ -186,6 +186,69 @@ internal static class InlineCosmosTests
             Check(failure is InvalidOperationException && failure.Message.Contains("Patch failed"),
                 "A missing destination must retain the checkpoint, not report indexed success");
         });
+        Test("Inline 512 KiB texts are split below the model JSON request limit without truncation", async () =>
+        {
+            var texts = Enumerable.Range(0, 8)
+                .Select(index => index.ToString() + new string('a', 512 * 1024 - 1)).ToList();
+            var seen = new List<string>();
+            var sizes = new List<int>();
+            using var client = new HttpClient(new Handler(async (request, token) =>
+            {
+                var bytes = await request.Content!.ReadAsByteArrayAsync(token);
+                Check(bytes.Length <= 2 * 1024 * 1024, "Actual serialized body must fit the limit");
+                using var payload = JsonDocument.Parse(bytes);
+                var batch = payload.RootElement.GetProperty("texts").EnumerateArray()
+                    .Select(value => value.GetString()!).ToList();
+                sizes.Add(batch.Count);
+                seen.AddRange(batch);
+                return new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(JsonSerializer.Serialize(new
+                    {
+                        outputs = batch.Select(text => new[] { (float)(text[0] - '0') }).ToArray(),
+                    })),
+                };
+            })) { BaseAddress = new("http://local.invalid") };
+            var outputs = await InlineEmbeddingClient.EmbedAsync(client, "mdl-ext-test", texts, default);
+            Check(sizes.SequenceEqual([3, 3, 2]));
+            Check(seen.SequenceEqual(texts), "Batching must preserve all text and ordering");
+            Check(outputs.Select(vector => vector[0]).SequenceEqual(Enumerable.Range(0, 8).Select(x => (float)x)));
+        });
+        Test("Inline body sizing accounts for JSON escaping and the 50-text cap", async () =>
+        {
+            var texts = Enumerable.Repeat(new string('\u4e2d', 200000), 3).ToList();
+            texts.AddRange(Enumerable.Repeat("short", 120));
+            var seen = new List<string>();
+            using var client = new HttpClient(new Handler(async (request, token) =>
+            {
+                var bytes = await request.Content!.ReadAsByteArrayAsync(token);
+                Check(bytes.Length <= 2 * 1024 * 1024);
+                using var payload = JsonDocument.Parse(bytes);
+                Check(payload.RootElement.GetProperty("pipeline").GetString() == "custom");
+                var batch = payload.RootElement.GetProperty("texts").EnumerateArray()
+                    .Select(value => value.GetString()!).ToList();
+                Check(batch.Count <= 50);
+                seen.AddRange(batch);
+                return new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(JsonSerializer.Serialize(new
+                    {
+                        outputs = batch.Select(_ => new[] { 0.1f }).ToArray(),
+                    })),
+                };
+            })) { BaseAddress = new("http://local.invalid") };
+            var outputs = await InlineEmbeddingClient.EmbedAsync(client, "custom", texts, default);
+            Check(outputs.Count == texts.Count && seen.SequenceEqual(texts));
+        });
+        Test("A single oversized inline text fails explicitly before sending HTTP", async () =>
+        {
+            using var client = new HttpClient(new Handler((_, _) =>
+                throw new Exception("Oversized texts must not reach HTTP")))
+                { BaseAddress = new("http://local.invalid") };
+            var failure = await Fails(() => InlineEmbeddingClient.EmbedAsync(client,
+                "mdl-test", [new string('x', 2 * 1024 * 1024)], default));
+            Check(failure is InvalidOperationException && failure.Message.Contains("request limit"));
+        });
 
         int failed = 0;
         foreach (var (name, run) in tests)

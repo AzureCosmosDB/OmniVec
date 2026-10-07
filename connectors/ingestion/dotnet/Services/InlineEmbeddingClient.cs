@@ -6,6 +6,38 @@ namespace OmniVec.ChangeFeed.Services;
 
 internal static class InlineEmbeddingClient
 {
+    private const int MaxRequestBytes = 2 * 1024 * 1024;
+    private const int MaxBatchTexts = 50;
+
+    private static IEnumerable<List<string>> RequestBatches(string model, List<string> texts)
+    {
+        var envelopeBytes = JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object>
+        {
+            [model.StartsWith("mdl-") ? "model_id" : "pipeline"] = model,
+            ["texts"] = Array.Empty<string>(),
+        }).Length;
+        var batch = new List<string>();
+        var bytes = envelopeBytes;
+        foreach (var text in texts)
+        {
+            var textBytes = JsonEncodedText.Encode(text).EncodedUtf8Bytes.Length + 2;
+            if (envelopeBytes + (long)textBytes > MaxRequestBytes)
+                throw new InvalidOperationException(
+                    "Inline embedding text exceeds the 2 MiB JSON request limit; use chunk processing");
+            if (batch.Count > 0 && (batch.Count == MaxBatchTexts
+                || bytes + (long)textBytes + 1 > MaxRequestBytes))
+            {
+                yield return batch;
+                batch = new List<string>();
+                bytes = envelopeBytes;
+            }
+            bytes += textBytes + (batch.Count > 0 ? 1 : 0);
+            batch.Add(text);
+        }
+        if (batch.Count > 0)
+            yield return batch;
+    }
+
     internal static bool HasCurrentEmbedding(Dictionary<string, object?> row,
         OmniVec.ChangeFeed.Models.Pipeline pipeline, string contentHash)
     {
@@ -21,7 +53,7 @@ internal static class InlineEmbeddingClient
     {
         delay ??= Task.Delay;
         var vectors = new List<float[]>();
-        foreach (var chunk in texts.Chunk(50))
+        foreach (var chunk in RequestBatches(model, texts))
         {
             JsonDocument response;
             for (var attempt = 1; ; attempt++)
@@ -50,7 +82,7 @@ internal static class InlineEmbeddingClient
             using (response)
             {
                 var outputs = response.RootElement.GetProperty("outputs");
-                if (outputs.GetArrayLength() != chunk.Length)
+                if (outputs.GetArrayLength() != chunk.Count)
                     throw new InvalidOperationException("Incomplete inline embeddings; retaining source checkpoint");
                 foreach (var output in outputs.EnumerateArray())
                 {

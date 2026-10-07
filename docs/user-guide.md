@@ -330,3 +330,14 @@ point-in-time snapshot. One polling lease owner handles each source, with bounde
 batch concurrency from `resource_policy.max_concurrency_per_worker` (capped at
 64). Logs separate read, model, writer/checkpoint, and metrics callback time.
 Memory-only Garnet deployment is not durable storage.
+
+## Large inline Cosmos documents
+
+Inline Cosmos processing retains the source document and writes one embedding
+back to it. In truncate mode, the model may embed only its token-limit portion;
+use chunk processing to embed all text. Inline model requests are bounded to
+50 texts and 2 MiB of serialized JSON, including JSON escaping. Large documents
+are split into smaller request batches without truncating their stored text.
+A single text that exceeds the request limit fails explicitly and requires
+chunk processing. Model output and required writes must complete before the
+source change-feed checkpoint advances.

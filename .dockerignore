@@ -27,8 +27,14 @@ tests/
 *.md
 !api/*.md
 
-# Ignore other connectors (not needed in API image)
-connectors/
+# Keep the two projects required by the repository-root ingestion build.
+connectors/*
+!connectors/ingestion/
+connectors/ingestion/*
+!connectors/ingestion/dotnet/
+!connectors/worker/
+connectors/worker/*
+!connectors/worker/dotnet/
 
 # Ignore CLI (not needed in API image)
 cli/
@@ -57,3 +63,5 @@ web/static/lib/
 .claude/
 connectors/ingestion/dotnet/bin/
 connectors/ingestion/dotnet/obj/
+connectors/worker/dotnet/bin/
+connectors/worker/dotnet/obj/
