@@ -119,7 +119,7 @@ jobs:
           python-version: '3.11'
       - name: Rendered mock deployment contracts
         run: |
-          pip install pytest pyyaml
+          pip install 'pytest>=8.0,<9.0' pyyaml hypothesis
           pytest tests/unit/test_mock_helm.py -q
       - name: Source and destination regressions
         run: dotnet run --project connectors/mock/Tests/OmniVec.Mock.Tests.csproj -c Release

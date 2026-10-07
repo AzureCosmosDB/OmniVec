@@ -11,6 +11,7 @@ var sourceConnectorFields = map[string][]string{
 	"sharepoint":      {"site_id", "drive_id"},
 	"onelake-iceberg": {"warehouse", "table"},
 	"cosmosdb":        {"endpoint", "database", "container"},
+	"garnet":          {"endpoint", "hash_key"},
 	"postgresql":      {"host", "database", "table"},
 }
 
