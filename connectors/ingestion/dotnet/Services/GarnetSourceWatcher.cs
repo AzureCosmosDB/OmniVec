@@ -74,7 +74,7 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
     private readonly BlobLeaseManager _leaseManager;
     private readonly ILogger<GarnetSourceWatcher> _logger;
     private readonly HttpClient _docGrokClient;
-    private readonly GarnetDestinationWriter _writer = new();
+    private readonly IDestinationWriter _writer;
     private readonly object _pipelineLock = new();
     private readonly object _destinationLock = new();
     private List<Pipeline> _pipelines = new();
@@ -94,7 +94,9 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
         ContentHasher hasher,
         BlobLeaseManager leaseManager,
         ILogger<GarnetSourceWatcher> logger,
-        string? generation = null)
+        string? generation = null,
+        IDestinationWriter? writer = null,
+        HttpClient? embeddingClient = null)
     {
         _source = source;
         _options = options;
@@ -103,12 +105,16 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
         _leaseManager = leaseManager;
         _logger = logger;
         Generation = generation ?? "0";
-        _docGrokClient = new HttpClient
+        _writer = writer ?? new GarnetDestinationWriter();
+        _ownsEmbeddingClient = embeddingClient is null;
+        _docGrokClient = embeddingClient ?? new HttpClient
         {
             BaseAddress = new Uri(options.DocGrokBaseUrl),
             Timeout = TimeSpan.FromMinutes(5),
         };
     }
+
+    private readonly bool _ownsEmbeddingClient;
 
     public void UpdatePipelines(List<Pipeline> pipelines)
     {
@@ -163,9 +169,9 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
         }
     }
 
-    private async Task PollOnceAsync(CancellationToken ct)
+    internal async Task PollOnceAsync(CancellationToken ct, IDatabase? sourceDatabase = null)
     {
-        var database = _database ?? throw new InvalidOperationException("Garnet watcher has not connected");
+        var database = sourceDatabase ?? _database ?? throw new InvalidOperationException("Garnet watcher has not connected");
         List<Pipeline> pipelines;
         List<Destination> destinations;
         lock (_pipelineLock) pipelines = _pipelines.ToList();
@@ -321,8 +327,11 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
         var vectorSet = destination.Config.TryGetValue("vector_set", out var vector)
             ? vector?.ToString() ?? "omnivec-vectors"
             : "omnivec-vectors";
+        var sourceTls = !_source.Config.TryGetValue("tls", out var sourceTlsValue) || sourceTlsValue.GetBoolean();
+        var destinationTls = !destination.Config.TryGetValue("tls", out var destinationTlsValue)
+            || bool.Parse(destinationTlsValue.ToString()!);
         if (sourceKey.StartsWith(ReservedCheckpointPrefix, StringComparison.OrdinalIgnoreCase)
-            || !SameEndpoint(sourceEndpoint, destinationEndpoint))
+            || GarnetEndpoint.Parse(sourceEndpoint, sourceTls) != GarnetEndpoint.Parse(destinationEndpoint, destinationTls))
             throw new InvalidOperationException("Garnet source and destination must use the same endpoint");
         if (string.Equals(sourceKey, vectorSet, StringComparison.OrdinalIgnoreCase)
             || vectorSet.StartsWith(ReservedCheckpointPrefix, StringComparison.OrdinalIgnoreCase))
@@ -471,7 +480,8 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
         var processingMs = stage.ReadMs + stage.ModelMs + stage.WriteMs;
         var metricClock = Stopwatch.StartNew();
         await _apiClient.ReportInlineMetricsAsync(
-            pipeline.Id, processed, failed, processingMs, batchKey, ct);
+            pipeline.Id, processed, failed, processingMs, batchKey, ct,
+            pipeline.DocgrokPipeline, _source.Id, pipeline.DestinationId);
         metricClock.Stop();
         return metricClock.ElapsedMilliseconds;
     }
@@ -493,20 +503,6 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
         return revision;
     }
 
-    private static bool SameEndpoint(string? source, string? destination)
-    {
-        if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(destination))
-            return false;
-        static string Normalize(string value)
-        {
-            value = value.Trim().TrimEnd('/');
-            if (value.StartsWith("rediss://", StringComparison.OrdinalIgnoreCase)) value = value[9..];
-            else if (value.StartsWith("redis://", StringComparison.OrdinalIgnoreCase)) value = value[8..];
-            return value.ToLowerInvariant();
-        }
-        return Normalize(source) == Normalize(destination);
-    }
-
     private static Dictionary<string, object> ToConfig(Dictionary<string, System.Text.Json.JsonElement> config)
         => config.ToDictionary(entry => entry.Key, entry => (object)entry.Value, StringComparer.Ordinal);
 
@@ -526,7 +522,7 @@ public sealed class GarnetSourceWatcher : ISourceWatcher
             _cts.Dispose();
             _cts = null;
         }
-        _docGrokClient.Dispose();
+        if (_ownsEmbeddingClient) _docGrokClient.Dispose();
         await _leaseManager.ReleaseAsync(SourceId, CancellationToken.None);
     }
 

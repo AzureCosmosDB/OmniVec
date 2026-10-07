@@ -105,16 +105,23 @@ internal static class MetricsTransportTests
             Check(Math.Abs((DateTimeOffset.UtcNow - reportedAt).TotalMinutes) < 1, "reported_at missing/not UTC now");
         });
 
-        await Test("Ingestion payload keeps the four inline fields plus reported_at and path", async () =>
+        await Test("Ingestion payload keeps inline fields, attribution, reported_at and path", async () =>
         {
             var handler = new RecordingHandler(_ => HttpStatusCode.OK);
             var api = new OmniVecApiClient(Http(handler), NullLogger<OmniVecApiClient>.Instance, Fast());
-            await api.ReportInlineMetricsAsync("pipe-2", 8, 2, 50, "ingest-key");
+            var admission = api.ReportInlineMetricsAsync("pipe-2", 8, 2, 50, "ingest-key",
+                modelId: "mdl-inline", sourceId: "src-inline", destinationId: "dst-inline");
+            Check(admission.IsCompletedSuccessfully, "Attribution must not await delivery");
+            await admission;
             Check(await api.MetricsTransport.FlushAsync(TimeSpan.FromSeconds(5)));
             var (path, body, _) = handler.Requests.Single();
             Check(path == "/api/pipelines/pipe-2/metrics/inline", path);
             var names = body.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(n => n).ToArray();
-            Check(names.SequenceEqual(new[] { "batch_key", "failed", "processed", "processing_time_ms", "reported_at" }), string.Join(",", names));
+            Check(names.SequenceEqual(new[] { "batch_key", "destination_id", "failed", "model_id",
+                "processed", "processing_time_ms", "reported_at", "source_id" }), string.Join(",", names));
+            Check(body.RootElement.GetProperty("model_id").GetString() == "mdl-inline");
+            Check(body.RootElement.GetProperty("source_id").GetString() == "src-inline");
+            Check(body.RootElement.GetProperty("destination_id").GetString() == "dst-inline");
             Check(DateTimeOffset.Parse(body.RootElement.GetProperty("reported_at").GetString()!).Offset == TimeSpan.Zero);
             Check(body.RootElement.GetProperty("processed").GetInt32() == 8 && body.RootElement.GetProperty("failed").GetInt32() == 2);
             Check(body.RootElement.GetProperty("processing_time_ms").GetInt64() == 50);

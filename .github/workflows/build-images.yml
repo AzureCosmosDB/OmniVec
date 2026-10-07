@@ -49,6 +49,15 @@ jobs:
           - image: docgrok-router
             context: docgrok/router
             dockerfile: docgrok/router/Dockerfile
+          - image: docgrok-mock-embedding
+            context: docgrok/services/embedding/mock
+            dockerfile: docgrok/services/embedding/mock/Dockerfile
+          - image: omnivec-mock-source
+            context: connectors/mock
+            dockerfile: connectors/mock/Source/Dockerfile
+          - image: omnivec-mock-destination
+            context: connectors/mock
+            dockerfile: connectors/mock/Destination/Dockerfile
           - image: docgrok-pipeline-worker
             context: docgrok/pipeline-worker
             dockerfile: docgrok/pipeline-worker/Dockerfile
@@ -130,8 +139,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${DIGEST}" ]]; then
-            echo "no digest from build step; skipping signing" >&2
-            exit 0
+            echo "no digest from build step; cannot sign release image" >&2
+            exit 1
           fi
           # The build step pushes multiple tags pointing at the same
           # digest, so we sign by digest once. Each unique repo:digest

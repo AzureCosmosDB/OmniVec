@@ -136,7 +136,8 @@ public class OmniVecApiClient
     /// A caller token that is already cancelled propagates as a cancelled task.</summary>
     public Task ReportInlineMetricsAsync(
         string pipelineId, int processed, int failed, long processingTimeMs,
-        string batchKey, CancellationToken ct = default)
+        string batchKey, CancellationToken ct = default,
+        string? modelId = null, string? sourceId = null, string? destinationId = null)
     {
         if (ct.IsCancellationRequested)
         {
@@ -145,7 +146,9 @@ public class OmniVecApiClient
         }
         try
         {
-            var payload = new { processed, failed, processing_time_ms = processingTimeMs, batch_key = batchKey, reported_at = MetricsTransport.ReportedAtNow() };
+            var payload = new { processed, failed, processing_time_ms = processingTimeMs,
+                batch_key = batchKey, reported_at = MetricsTransport.ReportedAtNow(),
+                model_id = modelId, source_id = sourceId, destination_id = destinationId };
             _metrics.TryEnqueue(pipelineId, batchKey, processed, failed, payload);
         }
         catch (Exception ex)

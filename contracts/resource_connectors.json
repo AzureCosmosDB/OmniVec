@@ -12,6 +12,9 @@
     "cosmosdb": {
       "required_fields": ["endpoint", "database", "container"]
     },
+    "garnet": {
+      "required_fields": ["endpoint", "hash_key"]
+    },
     "postgresql": {
       "required_fields": ["host", "database", "table"]
     }

@@ -34,6 +34,10 @@ spec:
             - containerPort: 8080
               protocol: TCP
           env:
+            - name: OMNIVEC_MOCK_ENABLED
+              value: {{ .Values.api.mockBenchmark.enabled | quote }}
+            - name: OMNIVEC_MOCK_SOURCE_URLS
+              value: {{ include "omnivec.mockSourceUrls" . | quote }}
             - name: OMNIVEC_CLOUD_DEPLOYMENTS_ENABLED
               value: {{ .Values.api.cloudDeployments.enabled | quote }}
             - name: OMNIVEC_DEPLOYMENT_SCOPES
@@ -122,6 +126,12 @@ spec:
               port: {{ .Values.api.probes.readiness.port }}
             initialDelaySeconds: {{ .Values.api.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.api.probes.readiness.periodSeconds }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.api.probes.startup.path }}
+              port: {{ .Values.api.probes.startup.port }}
+            periodSeconds: {{ .Values.api.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.api.probes.startup.failureThreshold }}
 ---
 apiVersion: v1
 kind: Service

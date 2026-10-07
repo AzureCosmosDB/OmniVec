@@ -82,7 +82,7 @@ X.agentPanel = (ctx = {}, prompt) => {
 
 /* ---------- models ---------- */
 const pid = () => ({ principal:((D.publish||{}).capabilities||{}).principal_id || null });
-route('models', { needs:[...X.CORE, 'transforms', 'publish'], render(parts) {
+route('models', { needs:[...X.CORE, 'caps', 'transforms', 'publish'], render(parts) {
   if (parts[0]==='new') return newModel();
   if (parts[0]==='recipes' && parts[1]) return X.recipeDetail(parts.slice(1).join('/'));
   if (parts[0] && parts[0]!=='recipes') return X.modelDetail(parts[0]);
@@ -122,6 +122,7 @@ function newModel() {
   return { crumbs:[['Models & recipes','#/models'],['Register model']], html:`<div class="page"><div class="ph"><div><h1>Register an Azure OpenAI model</h1><p>OmniVec calls the deployment with its managed identity, so no keys are stored unless you choose to.</p></div></div>
     <div class="grid g-main" style="align-items:start"><div class="card"><div class="card-b stack s12">
      <div class="fld"><label>Purpose</label><div class="seg" id="mcat"><button data-c="embedding" class="${cat==='embedding'?'on':''}">Embedding</button><button data-c="chat" class="${cat==='chat'?'on':''}">Chat (agent)</button></div></div>
+     ${cat==='embedding' && D.caps?.mock_enabled ? '<div class="fld"><label>Provider</label><select class="sel" id="mprovider"><option value="azure-openai">Azure OpenAI</option><option value="mock-embedding">Mock embedding (no inference)</option></select></div><div class="fld" id="mlatency-wrap" style="display:none"><label>Simulated latency (milliseconds)</label><input class="inp" id="mlatency" type="number" value="0" min="0" max="60000"></div>' : ''}
      <div class="grid g2"><div class="fld"><label>Display name</label><input class="inp" id="mn" placeholder="${cat==='chat'?'gpt-4o':'text-embedding-3-small'}"></div><div class="fld"><label>Deployment name</label><input class="inp mono" id="md" placeholder="${cat==='chat'?'gpt-4o':'text-embedding-3-small'}"></div></div>
      <div class="fld"><label>Endpoint</label><input class="inp mono" id="me" placeholder="https://<resource>.openai.azure.com/"></div>
      <div class="grid g2">${cat==='embedding' ? `<div class="fld"><label>Dimensions</label><input class="inp" type="number" id="mdim" value="1536"><span class="hint">Must match the vector store's index.</span></div>` : ''}<div class="fld"><label>API version</label><input class="inp mono" id="mv" value="2024-06-01"></div></div>
@@ -131,12 +132,24 @@ function newModel() {
      <div class="row sp" style="border-top:1px solid var(--border);padding-top:14px"><a class="btn" href="#/models">Cancel</a><button class="btn pri" id="msave">${icon('check','sm')}Register</button></div></div></div>
     <div class="card" style="position:sticky;top:12px"><div class="card-h"><h3>${icon('shield','sm')} Grant access</h3></div><div class="card-b">${X.perm.guideHtml('open','azure-openai', {}, pid())}</div></div></div></div>`,
     mount(v) { let auth = 'managed-identity';
+      const provider = $('#mprovider', v);
+      if (provider) provider.onchange = () => {
+        const mock = provider.value==='mock-embedding';
+        $('#mlatency-wrap', v).style.display = mock ? '' : 'none';
+        ['md','me','mv'].forEach(id => { const el=$('#'+id,v); el.disabled=mock; });
+        $('#mauth',v).style.display=mock?'none':'';
+        if (mock) { $('#mdim',v).value='1024'; $('#mn',v).value=$('#mn',v).value||'Mock embedding'; }
+      };
       $$('[data-c]', v).forEach(b => b.onclick = () => go('#/models/new?cat='+b.dataset.c+(qp.get('then') ? '&then='+qp.get('then') : '')));
       $$('[data-a]', v).forEach(b => b.onclick = () => { auth = b.dataset.a; $$('[data-a]', v).forEach(x => x.classList.toggle('on', x===b)); $('#mkey', v).style.display = auth==='key' ? '' : 'none'; });
       $('#md', v).oninput = e => { if (!$('#mn', v).dataset.t) $('#mn', v).value = e.target.value; }; $('#mn', v).oninput = e => e.target.dataset.t = 1;
       $('#msave', v).onclick = async e => { const b = e.currentTarget, g = id => ($('#'+id, v)||{}).value;
         const body = { name:(g('mn')||g('md')||'').trim(), deployment:(g('md')||'').trim(), endpoint:(g('me')||'').trim(), provider_type:'azure-openai', model_category:cat, auth_type:auth, api_version:g('mv'), ...(cat==='embedding' ? { embedding_dim:+g('mdim') } : {}), ...(auth==='key' ? { api_key:g('mk') } : {}) };
-        if (!body.deployment || !/^https:\/\//.test(body.endpoint)) { $('#merr', v).textContent = 'Enter the deployment name and an https endpoint.'; return; }
+        if (provider?.value==='mock-embedding') {
+          body.provider_type='mock-embedding'; body.auth_type='none'; body.endpoint=''; body.api_key='';
+          body.latency_ms=Number(g('mlatency'));
+          if (!body.name || !Number.isInteger(body.embedding_dim) || body.embedding_dim<1 || body.embedding_dim>65536) { $('#merr',v).textContent='Enter a name and dimensions between 1 and 65536.'; return; }
+        } else if (!body.deployment || !/^https:\/\//.test(body.endpoint)) { $('#merr', v).textContent = 'Enter the deployment name and an https endpoint.'; return; }
         b.disabled = true; b.innerHTML = spinner('Registering…');
         try { await api('/api/models', { method:'POST', body }); toast('Model registered'); invalidate('models','health'); go(qp.get('then')==='new' ? '#/new' : '#/models'); }
         catch (er) { $('#merr', v).textContent = er.message; b.disabled = false; b.innerHTML = icon('check','sm')+'Register'; } }; } };

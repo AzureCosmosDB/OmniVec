@@ -4,6 +4,7 @@ from enum import Enum
 import re
 import uuid
 from urllib.parse import urlsplit
+from garnet_endpoint import garnet_endpoint_identity
 from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
@@ -22,6 +23,7 @@ ALLOWED_METADATA_FIELDS = {"pipeline_name", "embedding_dims", "source_ref"}
 # =============================================================================
 
 class SourceType(str, Enum):
+    MOCK = "mock"
     AZURE_BLOB = "azure-blob"
     COSMOSDB = "cosmosdb"
     POSTGRESQL = "postgresql"
@@ -35,6 +37,7 @@ class SourceType(str, Enum):
 
 
 class DestinationType(str, Enum):
+    MOCK = "mock"
     COSMOSDB_VECTOR = "cosmosdb-vector"
     PGVECTOR = "pgvector"
     MSSQL = "mssql"
@@ -320,9 +323,7 @@ class GarnetSourceConfig(BaseModel):
     @classmethod
     def _validate_endpoint(cls, value: str) -> str:
         value = value.strip()
-        parsed = urlsplit(value if "://" in value else f"redis://{value}")
-        if not parsed.hostname or parsed.scheme not in ("redis", "rediss"):
-            raise ValueError("endpoint must be a Redis-compatible host[:port] or redis[s] URL")
+        garnet_endpoint_identity({"endpoint": value})
         return value
 
     @field_validator("hash_key")
@@ -402,9 +403,7 @@ class GarnetDestinationConfig(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("endpoint is required")
-        parsed = urlsplit(value if "://" in value else f"redis://{value}")
-        if not parsed.hostname or parsed.scheme not in ("redis", "rediss"):
-            raise ValueError("endpoint must be a Redis-compatible host[:port] or redis[s] URL")
+        garnet_endpoint_identity({"endpoint": value})
         return value
 
     @field_validator("vector_set")

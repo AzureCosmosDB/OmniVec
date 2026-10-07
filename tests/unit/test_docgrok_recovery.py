@@ -295,6 +295,44 @@ async def test_worker_openai_endpoint_returns_binary_embeddings(processor, monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", [None, "float", "base64"])
+async def test_worker_openai_json_encoding_preserves_order(processor, monkeypatch, encoding):
+    vectors = [[1.0, -1.5], [2.0, 2.5]]
+
+    async def embed(texts, model_id, router_url, **kwargs):
+        assert texts == ["first", "second"]
+        return vectors
+
+    monkeypatch.setattr(processor, "embed_texts", embed)
+    body = {"input": ["first", "second"], "model": "test"}
+    if encoding is not None:
+        body["encoding_format"] = encoding
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=processor.app), base_url="http://worker") as client:
+        response = await client.post("/v1/embeddings", json=body)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [entry["index"] for entry in data] == [0, 1]
+    embeddings = [entry["embedding"] for entry in data]
+    if encoding == "base64":
+        embeddings = [list(struct.unpack("<2f", base64.b64decode(value, validate=True))) for value in embeddings]
+    assert embeddings == vectors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [[], None, "text", {"input": "text", "encoding_format": "unsupported"},
+                                  {"input": "text", "encoding_format": None}])
+async def test_worker_openai_rejects_invalid_json_contract_before_inference(processor, monkeypatch, body):
+    async def no_inference(*args, **kwargs):
+        pytest.fail("Invalid request reached inference")
+
+    monkeypatch.setattr(processor, "embed_texts", no_inference)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=processor.app), base_url="http://worker") as client:
+        response = await client.post("/v1/embeddings", content=json.dumps(body),
+                                     headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_direct_embedding_failure_falls_back_to_router(processor, monkeypatch):
     calls = []
 

@@ -77,6 +77,86 @@ Shows connection config, vector policy details, and pipelines writing to this de
 
 ## 3. Pipelines
 
+### Synthetic payload benchmarks (opt-in)
+
+Enable `api.mockBenchmark.enabled` in the Helm chart to expose the console's
+**Mock** source, **Mock** sink, and **Mock embedding** model. The chart deploys
+a dedicated single-replica sink so its acceptance budget is shared by all producers.
+The destination uses its own HTTP server rather than the control-plane API;
+authentication, payload bounds, and the configured acceptance rate apply.
+This feature is disabled by default and intended for test environments.
+The chart deploys separate .NET `omnivec-mock-source` and
+`omnivec-mock-destination` images and a Rust `docgrok-mock-embedding` model.
+The API handles component registration, configuration and run receipt reads
+only; it does not generate documents or receive embedding batches.
+Set `api.adminToken` to authenticate component HTTP requests.
+The Rust DocGrok router forwards requests to that service; mock vector
+generation does not run in the router. The model receives registered dimensions
+and latency with each request and does not read metadata storage.
+Legacy unregistered `mock-embedding`/`mock-1536` router pipeline aliases are
+retired with an explicit error; use a registered model service instead.
+
+In the console, create a Mock source with document count, exact document size in
+bytes, generation rate, and batch size. Register a Mock embedding model with its
+embedding dimension and optional simulated latency. Create a Mock sink with the
+same dimension, acceptance rate, and burst capacity, then connect them in a normal
+registered pipeline using inline processing and whole-document content.
+
+Source and sink rates of `0` mean unlimited. A rate-limited sink rejects excess
+batches with HTTP 429 and Retry-After; the runner retries for at most 30 minutes.
+The source batch size must fit the sink's burst capacity when limiting is enabled.
+Each binary vector batch is limited to 4 MiB of FP32 values.
+
+The source's **Embedding response transport** defaults to `json`, retaining the
+normal DocGrok response path. Opt into `fp32` to receive the same full vectors in
+binary directly from the registered mock model. Both modes transmit every value
+over HTTP and validate finite FP32 values and dimensions at the runner and sink.
+The Rust router also supports FP32 responses for registered OpenAI-compatible
+embedding models. Select a real model such as Harrier to benchmark inference
+with synthetic input and a discard-only sink; transform recipes are not supported.
+Run receipts set `real_embeddings` to distinguish real inference from synthetic
+model output. Neither path persists vectors in the mock destination.
+
+Vectors travel over HTTP from the model through the Rust router as JSON or
+FP32, then to the sink as full
+little-endian FP32 payloads. The sink validates dimensions, every value, and a
+SHA256 receipt before discarding the vectors. There is no GPU inference or
+searchable vector persistence. Run receipts and checkpoints are persisted in
+metadata storage; sink replay receipts are in memory and can expire or be lost on
+restart, so this does not provide exactly-once persistent vector writes.
+
+The pipeline overview shows accepted documents, measured documents/second, and
+an authenticated full run receipt. `payload_bytes` counts source-to-sink binary
+bodies, including a 16-byte header per batch; it excludes model/router traffic
+and HTTP overhead. Measurement excludes initial metadata setup but includes
+generation, embedding HTTP calls, payload validation, throttling, and checkpoint
+writes. Pause/resume retains progress; reset starts a new generation.
+The receipt also includes batch count, stage mean/max milliseconds, cumulative
+stage seconds and component implementation names. Model and sink HTTP timings include
+service time and network wait; sink validation is a subset of sink HTTP time.
+Cumulative stage time overlaps across concurrent batches and should not be
+added to elapsed time.
+The synthetic sink coalesces metadata reads with a configurable cache interval:
+`api.mockBenchmark.configRefreshSeconds` in Helm or
+`OMNIVEC_MOCK_CONFIG_REFRESH_SECONDS` in the API environment (default 300 seconds,
+finite and at least 1). Each destination and replica expires independently at a
+random 80-100% of that interval, avoiding synchronized refreshes. Disabling a
+destination is observed after at most the configured interval plus metadata read time;
+failed refreshes return an error rather than accepting with stale configuration.
+Mock source/sink configuration and model dimensions/latency are locked while a
+pipeline references them. Create new components or remove referencing pipelines
+before changing those settings.
+
+For aggregate scale-out benchmarks, `api.mockBenchmark.shardCount` (1-32,
+default 1) deploys separate single-replica receivers and additional runners.
+Select a source's **Runner shard** and destination's **Receiver shard** in the
+advanced portal fields. Each destination belongs to exactly one receiver, so
+its acceptance budget and receipt cache are not multiplied by replica count.
+Each pipeline still has one leased runner; scale-out uses multiple registered
+pipelines. Report aggregate throughput over the earliest start to latest finish,
+not the sum of independently measured rates. It is distinct from single-pipeline
+throughput. Multi-node timestamps assume synchronized cluster clocks.
+
 A pipeline connects one or more sources to a destination through an embedding model.
 
 ### Creating a Pipeline
@@ -307,6 +387,7 @@ All UI operations are also available via the REST API:
 | `POST` | `/api/search` | Vector similarity search |
 | `GET` | `/api/deployments` | K8s deployment management |
 | `GET` | `/health` | System health |
+| `GET` | `/ready` | Metadata storage readiness (503 when unavailable) |
 # Garnet HASH sources (inline)
 
 A native `garnet` source polls a named HASH containing JSON documents. Configure

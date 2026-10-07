@@ -983,8 +983,9 @@ public sealed class OneLakeIcebergDestinationWriter : IDestinationWriter
         Dictionary<string, object> config,
         CancellationToken ct)
     {
-        var options = ConfigurationOptions.Parse(Required(config, "endpoint"));
-        options.Ssl = GetBool(config, "tls", true);
+        var endpoint = GarnetEndpoint.Parse(Required(config, "endpoint"), GetBool(config, "tls", true));
+        var options = new ConfigurationOptions { Ssl = endpoint.Tls };
+        options.EndPoints.Add(endpoint.Host, endpoint.Port);
         options.AbortOnConnectFail = false;
         options.Protocol = RedisProtocol.Resp2;
         options.AsyncTimeout = 60_000;

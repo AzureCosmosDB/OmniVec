@@ -91,6 +91,16 @@ class MetadataStore:
         """Return the raw CosmosDB container client (for Change Feed, etc.)."""
         return self._container
 
+    def check_readiness(self) -> None:
+        """Prove metadata data-plane access without writes or extended retries."""
+        self._container.read(retry_total=0, connection_timeout=2, read_timeout=2)
+        try:
+            self._container.read_item(
+                item="__omnivec_readiness__", partition_key="source",
+                retry_total=0, connection_timeout=2, read_timeout=2)
+        except CosmosResourceNotFoundError:
+            return
+
     @cosmos_retry()
     def replace_with_etag(self, doc: dict, etag: str) -> dict:
         """Replace a document with optimistic concurrency via etag.
