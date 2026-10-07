@@ -1266,6 +1266,11 @@ async def openai_embeddings(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
 
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+    encoding_format = body.get("encoding_format", "float")
+    if encoding_format not in ("float", "base64"):
+        raise HTTPException(status_code=400, detail="`encoding_format` must be float or base64")
     raw_input = body.get("input")
     if isinstance(raw_input, str):
         texts = [raw_input]
@@ -1305,7 +1310,10 @@ async def openai_embeddings(request: Request):
             {
                 "object": "embedding",
                 "index": index,
-                "embedding": vector,
+                "embedding": (
+                    base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode("ascii")
+                    if encoding_format == "base64" else vector
+                ),
             }
             for index, vector in enumerate(vectors)
         ],

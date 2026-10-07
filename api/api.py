@@ -64,6 +64,10 @@ from models import (  # lgtm[py/unused-import]
     SharePointSourceConfig,
 )
 from store import init_store, get_store
+from readiness import StorageReadiness
+from garnet_endpoint import garnet_endpoint_identity
+from mock_configs import MockSourceConfig, MockSinkConfig, MockEmbeddingConfig
+import hashlib
 from security_utils import safe_agent_segment, safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
 from urllib.parse import quote as _urlquote  # noqa: F401 — kept for downstream callers
 
@@ -106,7 +110,7 @@ logging.getLogger("azure").setLevel(logging.WARNING)
 
 _DEBUG = os.getenv("OMNIVEC_DEBUG", "").lower() in ("true", "1")
 app = FastAPI(
-    title="OmniVec", version="1.0.0", description="Universal Vector Ingestion Platform",
+    title="OmniVec", version="2.0.0", description="Universal Vector Ingestion Platform",
     docs_url="/docs" if _DEBUG else None,
     redoc_url="/redoc" if _DEBUG else None,
     openapi_url="/openapi.json" if _DEBUG else None,
@@ -123,6 +127,7 @@ _cloud_deployment_task = None
 # Paths that don't require authentication
 AUTH_SKIP_PATHS = {
     "/health",
+    "/ready",
     "/health/",
     "/openapi.json",
     "/docs",
@@ -1027,6 +1032,12 @@ def _require_blob_source_enabled(kind: str) -> None:
 
 # HTTP Client
 http_client: Optional[httpx.AsyncClient] = None
+storage_readiness = StorageReadiness(lambda: get_store().check_readiness())
+
+
+def _require_mock_enabled():
+    if os.getenv("OMNIVEC_MOCK_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=422, detail="Mock benchmark components are disabled in this deployment")
 
 
 @app.on_event("startup")
@@ -1039,10 +1050,13 @@ async def startup():
     EVENT_QUEUE = asyncio.Queue()
     # Initialize CosmosDB store
     try:
-        init_store()
+        await asyncio.to_thread(init_store)
         print("OmniVec API started - CosmosDB store initialized")
-    except Exception as e:
-        print(f"WARNING: CosmosDB store init failed ({e}). API will fail on data operations.")
+    except Exception:
+        logger.exception("Metadata store initialization failed; refusing API startup")
+        await http_client.aclose()
+        http_client = None
+        raise
     # Start the event processor worker
     asyncio.create_task(event_processor_worker())
     _cloud_deployment_task = asyncio.create_task(deployment_worker(get_store))
@@ -1093,7 +1107,14 @@ async def serve_ui():
 @app.get("/health")
 async def health():
     """Lightweight health check for K8s probes â€” no external calls."""
-    return {"status": "healthy", "service": "OmniVec", "version": "1.0.0"}
+    return {"status": "healthy", "service": "OmniVec", "version": "2.0.0"}
+
+
+@app.get("/ready", responses={503: {"description": "Metadata storage unavailable"}})
+async def ready():
+    if not await storage_readiness.ready():
+        return JSONResponse(status_code=503, content={"status": "not_ready", "service": "OmniVec"})
+    return {"status": "ready", "service": "OmniVec"}
 
 
 @app.get("/api/capabilities")
@@ -1106,7 +1127,11 @@ async def get_capabilities():
     ]
     if _BLOB_SOURCE_ENABLED:
         implemented_source_types.insert(0, "azure-blob")
+    mock_enabled = os.getenv("OMNIVEC_MOCK_ENABLED", "false").lower() == "true"
+    if mock_enabled:
+        implemented_source_types.append("mock")
     return {
+        "mock_enabled": mock_enabled,
         "blob_source_enabled": _BLOB_SOURCE_ENABLED,
         "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
         "agent_enabled": bool(os.getenv("AGENT_URL", "").strip()),
@@ -1116,6 +1141,19 @@ async def get_capabilities():
             ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
         ),
     }
+
+
+@app.get("/api/pipelines/{pipeline_id}/mock-run")
+async def mock_pipeline_run(pipeline_id: str):
+    store = get_store()
+    pipeline = await asyncio.to_thread(store.get, pipeline_id, "pipeline")
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+    generation = str(pipeline.get("reset_at") or "initial")
+    rid = "mock-" + hashlib.sha256(f"{pipeline_id}:{generation}".encode()).hexdigest()[:32]
+    run = await asyncio.to_thread(store.get, rid, "mock_run")
+    return {k: v for k, v in (run or {"status": "pending"}).items()
+            if not k.startswith("_") and k not in ("owner", "lease_until")}
 
 
 # =============================================================================
@@ -1504,7 +1542,7 @@ async def get_stats():
     return {  # lgtm[py/stack-trace-exposure]
         "status": "healthy",
         "service": "OmniVec",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docgrok": docgrok_status,
         "stats": {
             "sources": src_count,
@@ -2095,7 +2133,13 @@ async def create_source(req: CreateSourceRequest):
     source_id = f"src-{str(uuid.uuid4())[:8]}"
     # Strip whitespace from URL fields in config
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
-    if req.type == SourceType.COSMOSDB:
+    if req.type == SourceType.MOCK:
+        _require_mock_enabled()
+        try:
+            clean_config = MockSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == SourceType.COSMOSDB:
         try:
             clean_config = CosmosDBSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -2216,7 +2260,13 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
-    if req.type == SourceType.COSMOSDB:
+    if req.type == SourceType.MOCK:
+        _require_mock_enabled()
+        try:
+            clean_config = MockSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == SourceType.COSMOSDB:
         try:
             clean_config = CosmosDBSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -2240,6 +2290,11 @@ def update_source(source_id: str, req: CreateSourceRequest):
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
             clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
+    if (source.type == SourceType.MOCK or req.type == SourceType.MOCK) and (
+            source.type != req.type or source.config != clean_config):
+        if any(any(ref.get("source_id") == source_id for ref in p.get("sources", []))
+               for p in store.list("pipeline")):
+            raise HTTPException(409, "Mock source configuration is locked while referenced by a pipeline")
     source.name = req.name.strip()
     source.type = req.type
     source.config = clean_config
@@ -2496,7 +2551,12 @@ async def test_source(source_id: str):
 
     source = _source_from_doc(doc)
 
-    if source.type == SourceType.AZURE_BLOB:
+    if source.type == SourceType.MOCK:
+        _require_mock_enabled()
+        settings = MockSourceConfig(**source.config)
+        return {"success": True, "result": {"status": "synthetic", **settings.model_dump(),
+                                           "message": "Synthetic source; no external resource"}}
+    elif source.type == SourceType.AZURE_BLOB:
         from connectors.blob_connector import test_blob_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_blob_connection(source.config)))
     elif source.type == SourceType.COSMOSDB:
@@ -2559,6 +2619,20 @@ async def sample_source(source_id: str, limit: int = 5):
     cfg = doc.get("config", {}) or {}
     limit = max(1, min(int(limit or 5), 25))
 
+    if stype == "mock":
+        _require_mock_enabled()
+        settings = MockSourceConfig(**cfg)
+        source_urls = os.getenv("OMNIVEC_MOCK_SOURCE_URLS", "http://omnivec-mock-runner-0:8080").split(",")
+        if settings.runner_shard >= len(source_urls):
+            raise HTTPException(503, "Mock source shard is not deployed")
+        response = await http_client.post(
+            source_urls[settings.runner_shard].strip().rstrip("/") + "/preview",
+            headers={"Authorization": f"Bearer {os.environ.get('OMNIVEC_ADMIN_TOKEN', '')}"},
+            json={"document_size_bytes": settings.document_size_bytes, "seed": settings.seed,
+                  "count": min(limit, settings.document_count)})
+        if not response.is_success:
+            raise HTTPException(502, "Mock source preview failed")
+        return response.json()
     if stype == "garnet":
         result = await _test_garnet_vector_set(
             cfg,
@@ -2666,6 +2740,8 @@ async def sample_destination(dest_id: str, limit: int = 5):
     dtype = doc.get("type")
     cfg = doc.get("config", {}) or {}
     limit = max(1, min(int(limit or 5), 25))
+    if dtype == "mock":
+        return {"items": [], "message": "Mock sink validates transmitted vectors then discards them; no vector persistence.", "mock": True}
 
     def _run():
         if dtype == "cosmosdb-vector":
@@ -2860,6 +2936,11 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
                 return result  # lgtm[py/stack-trace-exposure]
             raise Exception(result)
 
+        elif req.type == "mock":
+            _require_mock_enabled()
+            settings = MockSourceConfig(**req.config)
+            return {"success": True, "mock": True, "message": "Synthetic source; no external data access",
+                    "document_count": settings.document_count}
         elif req.type == "garnet":
             try:
                 config = GarnetSourceConfig(**req.config).model_dump(exclude_none=True)
@@ -3069,7 +3150,13 @@ async def create_destination(req: CreateDestinationRequest):
 
     # Auto-probe CosmosDB container for partition key, vector field, and validate
     config = dict(req.config)
-    if req.type == "onelake-iceberg":
+    if req.type == "mock":
+        _require_mock_enabled()
+        try:
+            config = MockSinkConfig(**config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == "onelake-iceberg":
         try:
             config = OneLakeIcebergDestinationConfig(**config).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -3201,7 +3288,13 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
 
     destination = _destination_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
-    if req.type == "onelake-iceberg":
+    if req.type == "mock":
+        _require_mock_enabled()
+        try:
+            clean_config = MockSinkConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == "onelake-iceberg":
         try:
             clean_config = OneLakeIcebergDestinationConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -3216,6 +3309,10 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
         if clean_config.get(sensitive_key) == "***":
             clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
     destination.name = req.name
+    if (destination.type == "mock" or req.type == "mock") and (
+            destination.type != req.type or destination.config != clean_config):
+        if any(p.get("destination_id") == dest_id for p in store.list("pipeline")):
+            raise HTTPException(409, "Mock sink configuration is locked while referenced by a pipeline")
     destination.type = req.type
     destination.config = clean_config
     destination.enabled = req.enabled
@@ -3337,7 +3434,12 @@ async def test_destination(dest_id: str):
 
     destination = _destination_from_doc(doc)
 
-    if destination.type == "pgvector":
+    if destination.type == "mock":
+        _require_mock_enabled()
+        settings = MockSinkConfig(**destination.config)
+        return {"success": True, "result": {"status": "synthetic", **settings.model_dump(),
+                                           "message": "Full vector payloads validated and discarded"}}
+    elif destination.type == "pgvector":
         from connectors.postgres_connector import test_destination_connection as _test_pg
         ok, result = await _test_with_timeout(lambda: asyncio.run(_test_pg(destination.config)))
     elif destination.type == "mssql":
@@ -3450,7 +3552,6 @@ async def _test_garnet_vector_set(
 ) -> dict:
     from redis.asyncio import Redis
     from redis_entraid.cred_provider import create_from_default_azure_credential
-    from urllib.parse import urlsplit
 
     if hash_key is not None:
         try:
@@ -3465,11 +3566,14 @@ async def _test_garnet_vector_set(
     endpoint = str(config.get("endpoint", "")).strip()
     if not endpoint:
         return {"success": False, "error": "Garnet endpoint is required"}
-    parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+    try:
+        host, port, tls = garnet_endpoint_identity(config)
+    except ValueError:
+        return {"success": False, "error": "Invalid Garnet endpoint configuration"}
     kwargs = {
-        "host": parsed.hostname or endpoint,
-        "port": parsed.port or (6380 if config.get("tls", True) else 6379),
-        "ssl": bool(config.get("tls", True)),
+        "host": host,
+        "port": port,
+        "ssl": tls,
         "decode_responses": False,
         "protocol": 2,
     }
@@ -3696,6 +3800,12 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             finally:
                 await conn.close()
 
+        elif req.type == "mock":
+            _require_mock_enabled()
+            config = MockSinkConfig(**req.config)
+            return {"success": True, "mock": True, "message": "Mock sink validates full FP32 payloads, then discards vectors",
+                    "vector_indexes": [{"path": "/embedding", "dimensions": config.embedding_dimensions,
+                                        "indexType": "mock", "distanceFunction": "cosine"}]}
         elif req.type == "garnet":
             config = GarnetDestinationConfig(**req.config).model_dump(exclude_none=True)
             result = await _test_garnet_vector_set(config)
@@ -4018,20 +4128,8 @@ def _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
             detail="The Garnet destination vector_set cannot use OmniVec's reserved checkpoint namespace.",
         )
 
-    def endpoint_identity(config):
-        endpoint = str(config.get("endpoint", "")).strip()
-        parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
-        if not parsed.hostname:
-            raise HTTPException(status_code=400, detail="Garnet endpoints must identify a host.")
-        tls = bool(config.get("tls", True))
-        return (
-            parsed.hostname.rstrip(".").lower(),
-            parsed.port or (6380 if tls else 6379),
-            tls,
-        )
-
     try:
-        same_endpoint = endpoint_identity(source_config) == endpoint_identity(destination_config)
+        same_endpoint = garnet_endpoint_identity(source_config) == garnet_endpoint_identity(destination_config)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid Garnet endpoint configuration.") from exc
     if not same_endpoint:
@@ -4044,6 +4142,31 @@ def _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
 
 def _require_garnet_pipeline_contract(store, pipeline, dest_doc):
     """Reject unsupported queue, chunk, URL, and multi-source Garnet paths."""
+    resolved = [store.get(binding.source_id if hasattr(binding, "source_id") else binding.get("source_id"), "source")
+                for binding in getattr(pipeline, "sources", []) or []]
+    mock_source = any(source and source.get("type") == "mock" for source in resolved)
+    mock_sink = dest_doc and dest_doc.get("type") == "mock"
+    if mock_source or mock_sink:
+        _require_mock_enabled()
+        if (not mock_source or not mock_sink or len(resolved) != 1
+                or getattr(pipeline, "processing_mode", "queue") != "inline"
+                or getattr(pipeline, "content_strategy", "truncate") != "truncate"
+                or getattr(pipeline, "chunk_config", None) is not None):
+            raise HTTPException(400, "Mock benchmark pipelines require one mock source, a mock sink, inline mode and truncate")
+        model_ref = getattr(pipeline, "docgrok_pipeline", "")
+        model = store.get(model_ref, "docgrok_model")
+        if (not model or model.get("type") not in ("mock-embedding", "openai", "azure-openai")
+                or model.get("model_category", "embedding") != "embedding"):
+            raise HTTPException(400, "Benchmark pipeline requires a registered embedding model")
+        source_cfg = MockSourceConfig(**resolved[0]["config"])
+        sink_cfg = MockSinkConfig(**dest_doc["config"])
+        if model.get("embedding_dim") != sink_cfg.embedding_dimensions:
+            raise HTTPException(400, "Embedding model and mock sink dimensions must match")
+        if sink_cfg.accepted_documents_per_second and source_cfg.batch_size > sink_cfg.burst_documents:
+            raise HTTPException(400, "Mock source batch size must not exceed sink burst capacity")
+        if source_cfg.batch_size * sink_cfg.embedding_dimensions > 1048576:
+            raise HTTPException(400, "Mock vector batch exceeds 4 MiB; reduce batch size or dimensions")
+        return
     is_garnet_source = False
     for binding in getattr(pipeline, "sources", []) or []:
         source_id = binding.source_id if hasattr(binding, "source_id") else (
@@ -4119,6 +4242,12 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
     if not dest_doc:
         return
     dtype = dest_doc.get("type")
+    if dtype == "mock" and len(pipeline_sources) == 1:
+        binding = pipeline_sources[0]
+        sid = binding.source_id if hasattr(binding, "source_id") else binding["source_id"]
+        source = store.get(sid, "source")
+        if source and source.get("type") == "mock":
+            return
     dcfg = dest_doc.get("config", {}) or {}
     if _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
         return
@@ -4303,14 +4432,10 @@ def _inline_write_target(source: dict) -> tuple:
         schema = config.get("schema_name") or config.get("schema") or ("dbo" if kind == "mssql" else "public")
         return ("mssql" if kind == "mssql" else "postgresql", host, port, database, schema, config.get("table"))
     if kind == "garnet":
-        from urllib.parse import urlsplit
-        endpoint = str(config.get("endpoint") or "").strip()
-        parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
-        if not parsed.hostname:
-            raise HTTPException(status_code=409, detail="Cannot determine inline Garnet source ownership: invalid endpoint")
-        tls = bool(config.get("tls", True))
-        port = parsed.port or (6380 if tls else 6379)
-        return ("garnet", parsed.hostname.rstrip(".").lower(), port, config.get("hash_key"))
+        try:
+            return ("garnet", *garnet_endpoint_identity(config), config.get("hash_key"))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Cannot determine inline Garnet source ownership: invalid endpoint") from exc
     return ("source", source["id"])
 
 
@@ -6425,6 +6550,19 @@ def _replace_model_metadata(store, doc: dict):
 @app.post("/api/models")
 async def create_model(payload: dict):
     """Create an external model â€” proxied to DocGrok, persisted in CosmosDB."""
+    model_type = payload.get("provider_type", payload.get("type", "azure-openai"))
+    if model_type == "mock-embedding":
+        _require_mock_enabled()
+        try:
+            settings = MockEmbeddingConfig(embedding_dim=payload.get("embedding_dim", payload.get("dimensions", 1024)),
+                                           latency_ms=payload.get("latency_ms", 0))
+        except ValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if payload.get("model_category", "embedding") != "embedding":
+            raise HTTPException(422, "Mock model supports embeddings only")
+        payload = {**payload, **settings.model_dump(),
+                   "endpoint": os.getenv("OMNIVEC_MOCK_MODEL_URL", "http://omnivec-mock-embedding:8000").rstrip("/"),
+                   "auth_type": "none", "api_key": ""}
     try:
         # Map UI field names to DocGrok registry fields
         model_name = payload.get("name", payload.get("model", "")).strip()
@@ -6440,6 +6578,8 @@ async def create_model(payload: dict):
             "embedding_dim": int(payload.get("embedding_dim", payload.get("dimensions", 1536))),
             "api_version": payload.get("api_version", "2024-06-01"),
         }
+        if model_type == "mock-embedding":
+            reg_payload["latency_ms"] = payload["latency_ms"]
         if auth_type == "managed-identity":
             client_id = payload.get("client_id", "").strip()
             if client_id:
@@ -6537,9 +6677,21 @@ async def update_model(model_id: str, payload: dict):
             raise HTTPException(status_code=503, detail="Model registry is unavailable") from exc
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     doc = dict(doc)
+    if doc.get("type") == "mock-embedding":
+        _require_mock_enabled()
+        try:
+            mock_settings = MockEmbeddingConfig(
+                embedding_dim=payload.get("embedding_dim", doc["embedding_dim"]),
+                latency_ms=payload.get("latency_ms", doc.get("latency_ms", 0)))
+        except ValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        payload = {**payload, **mock_settings.model_dump()}
+        if any(payload[field] != doc.get(field, 0) for field in ("embedding_dim", "latency_ms")):
+            if any(p.get("docgrok_pipeline") == model_id for p in store.list("pipeline")):
+                raise HTTPException(409, "Mock model dimensions and latency are locked while referenced by a pipeline")
 
     # Merge updatable fields
-    updatable = ("api_key", "endpoint", "deployment", "api_version", "embedding_dim", "auth_type", "client_id")
+    updatable = ("api_key", "endpoint", "deployment", "api_version", "embedding_dim", "auth_type", "client_id", "latency_ms")
     changed = []
     new_api_key = None
     for field in updatable:
@@ -6586,6 +6738,8 @@ async def update_model(model_id: str, payload: dict):
             }
             if "client_id" in doc:
                 reg_payload["client_id"] = doc["client_id"]
+            if doc.get("type") == "mock-embedding":
+                reg_payload["latency_ms"] = doc.get("latency_ms", 0)
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail="DocGrok model update failed")
@@ -8257,6 +8411,25 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
 
     pipeline = _pipeline_from_doc(doc)
     jobs = JobStats()
+    mock_source = len(pipeline.sources) == 1 and store.get(pipeline.sources[0].source_id, "source")
+    if mock_source and mock_source.get("type") == "mock":
+        generation = str(doc.get("reset_at") or "initial")
+        rid = "mock-" + hashlib.sha256(f"{pipeline_id}:{generation}".encode()).hexdigest()[:32]
+        run = store.get(rid, "mock_run") or {}
+        total = int(mock_source["config"].get("document_count", 100000))
+        accepted = int(run.get("accepted", 0))
+        jobs.failed = int(run.get("status") == "failed")
+        jobs.completed = int(run.get("status") == "completed")
+        jobs.processing = int(run.get("status") == "running")
+        jobs.total = jobs.failed + jobs.completed + jobs.processing
+        return PipelineRunStats(
+            pipeline_id=pipeline_id, pipeline_name=pipeline.name, jobs=jobs,
+            documents_processed=accepted, embedded_count=accepted, lifetime_embedded_count=accepted,
+            source_doc_count=total, completion_pct=100 * accepted / total,
+            throughput_docs_per_sec=run.get("throughput_docs_per_second"),
+            telemetry_source="mock_sink_receipts",
+            telemetry_coverage=("real_embeddings_no_vector_persistence" if run.get("real_embeddings")
+                                else "synthetic_no_vector_persistence"))
 
     # Use aggregate query instead of fetching all 76K+ job docs
     query = (

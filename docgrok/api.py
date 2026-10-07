@@ -557,6 +557,8 @@ async def embed_batch(request: Request):
     """
     try:
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Embedding request must be an object")
         texts = body.get("texts", [])
         if not texts:
             raise HTTPException(status_code=400, detail="'texts' list is required and must be non-empty")

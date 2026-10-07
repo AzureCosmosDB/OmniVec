@@ -326,7 +326,7 @@ async def test_capabilities_are_authoritative_and_unsupported_sources_fail_close
     capabilities = await api.get_capabilities()
     assert capabilities["allowed_source_types"] == [
         "azure-blob", "cosmosdb", "postgresql", "mssql",
-        "databricks", "onelake-iceberg", "sharepoint",
+        "databricks", "onelake-iceberg", "sharepoint", "garnet",
     ]
     assert capabilities["unsupported_source_types"] == ["s3", "http"]
     monkeypatch.setattr(api, "get_store", lambda: SimpleNamespace(list=lambda _: []))

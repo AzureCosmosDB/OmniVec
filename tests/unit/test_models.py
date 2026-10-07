@@ -24,12 +24,12 @@ class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
             "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks",
-            "onelake-iceberg", "sharepoint", "garnet"
+            "onelake-iceberg", "sharepoint", "garnet", "mock"
         }
 
     def test_destination_type_values(self, api_models):
         assert {e.value for e in api_models.DestinationType} == {
-            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg", "garnet"
+            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg", "garnet", "mock"
         }
 
     def test_job_status_values(self, api_models):

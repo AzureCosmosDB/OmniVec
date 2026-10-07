@@ -19,6 +19,9 @@ MSSQL              ─┘
 
 This guide walks you through deploying OmniVec and running your first end-to-end pipeline.
 
+See the [v2.0.0 release notes](docs/releases/v2.0.0.md) for cumulative fixes,
+breaking changes, upgrade instructions, and measured benchmark results.
+
 ### Operations console
 
 The desktop console uses a Web3-inspired visual design with persistent dark/light

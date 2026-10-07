@@ -167,6 +167,8 @@ const TYPES = {
   'pgvector':{label:'PostgreSQL + pgvector',short:'pgvector',logo:'l-pg',abbr:'PGV'},
   'garnet':{label:'Microsoft Garnet · Vector Sets',short:'Garnet',logo:'l-vec',abbr:'GAR'},
   'azure-openai':{label:'Azure OpenAI',short:'Azure OpenAI',logo:'l-aoai',abbr:'AI'},
+  'mock':{label:'Mock benchmark',short:'Mock',logo:'l-aoai',abbr:'MK'},
+  'mock-embedding':{label:'Mock embedding',short:'Mock embedding',logo:'l-aoai',abbr:'MK'},
   'openai':{label:'OpenAI',short:'OpenAI',logo:'l-aoai',abbr:'AI'},
   'native':{label:'In-cluster model',short:'In-cluster',logo:'l-aoai',abbr:'ML'},
   'recipe':{label:'Processing recipe',short:'Recipe',logo:'l-aoai',abbr:'RC'},

@@ -7,6 +7,14 @@ const { icon, esc, fmt, ago, plural, api, need, invalidate, D, M, T, logo, dot, 
 const F = (k, label, o = {}) => ({ k, label, ...o });
 const FORMS = {
   source: {
+    'mock': { blurb:'Synthetic benchmark documents. No external data source.', fields:[
+      F('document_count','Document count',{type:'number',def:100000,req:1}),
+      F('document_size_bytes','Document size (bytes)',{type:'number',def:8,req:1}),
+      F('documents_per_second','Generation rate (documents/second)',{type:'number',def:0,hint:'0 = unlimited'}),
+      F('batch_size','Batch size',{type:'number',def:50}),
+      F('embedding_transport','Embedding response transport',{type:'select',opts:['json','fp32'],def:'json',hint:'FP32 transmits full binary vectors without the JSON conversion round trip.'}),
+      F('runner_shard','Runner shard',{type:'number',def:0,adv:1,hint:'Requires a deployed benchmark runner with the same shard index.'}),
+      F('seed','Content seed',{type:'number',def:0,adv:1}) ] },
     'cosmosdb': { blurb:'Operational JSON documents. Changes stream in through the change feed.', fields:[
       F('endpoint','Account endpoint',{ req:1, ph:'https://<account>.documents.azure.com:443/' }), F('database','Database',{ req:1 }), F('container','Container',{ req:1 }),
       F('query','Initial query',{ def:'SELECT * FROM c', adv:1, hint:'Used for the first backfill. Later changes come from the change feed.' }) ], extra:{ use_change_feed:true } },
@@ -39,6 +47,11 @@ const FORMS = {
       F('content_fields','Content fields',{ type:'tags', def:['content'] }), F('id_field','ID field',{ def:'id' }), F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:60, adv:1 }) ] },
   },
   destination: {
+    'mock': { blurb:'Receives and validates full vector payloads, then discards them. No vector storage.', fields:[
+      F('embedding_dimensions','Expected embedding dimensions',{type:'number',def:1024,req:1}),
+      F('accepted_documents_per_second','Acceptance rate (documents/second)',{type:'number',def:0,hint:'0 = unlimited. Exceeding the rate returns HTTP 429; the pipeline retries.'}),
+      F('burst_documents','Burst capacity (documents)',{type:'number',def:2048,hint:'Must be at least the source batch size.'}),
+      F('receiver_shard','Receiver shard',{type:'number',def:0,adv:1,hint:'Each destination routes to exactly one deployed receiver, preserving its rate budget and deduplication.'}) ] },
     'cosmosdb-vector': { blurb:'Vectors stored next to your data with DiskANN or quantized flat indexes.', fields:[
       F('endpoint','Account endpoint',{ req:1, ph:'https://<account>.documents.azure.com:443/' }), F('database','Database',{ req:1 }), F('container','Container',{ req:1, hint:'Must have a vector embedding policy and vector index.' }) ], extra:{ auth_type:'managed-identity' } },
     'pgvector': { blurb:'PostgreSQL with the pgvector extension (HNSW or IVFFlat).', fields:[
@@ -203,7 +216,7 @@ function addPage(kind, editId) {
   const noun = kind==='source' ? 'source' : 'vector store';
   const existing = editId ? (kind==='source' ? M.SRC : M.DST)[editId] : null;
   const caps = (D.caps || {}).allowed_source_types;
-  const types = Object.keys(FORMS[kind]).filter(t => kind!=='source' || !caps || caps.includes(t));
+  const types = Object.keys(FORMS[kind]).filter(t => (t!=='mock' || D.caps?.mock_enabled) && (kind!=='source' || !caps || caps.includes(t)));
   const qp = X.query(); const then = qp.get('then'); const qType = qp.get('type');
   const st = { type: existing ? existing.type : types.find(t => t === qType) || null, tested:null, perm:null };
   const html = `<div class="page"><div class="ph"><div><h1>${existing ? 'Edit '+esc(existing.name) : 'Add '+noun}</h1><p>${kind==='source' ? 'Connect where your content lives. OmniVec reads it with its managed identity, so no keys are stored for Azure services.' : 'Choose where embeddings are written. Pipelines can share one vector store.'}</p></div></div>
@@ -240,9 +253,14 @@ function addPage(kind, editId) {
         <div class="inline-err" id="aerr"></div>
         <div class="row sp"><a class="btn" href="${existing ? `#/connections/${kind==='source'?'source':'store'}/${existing.id}` : '#/connections'}">Cancel</a><button class="btn pri" id="asave">${existing ? 'Save changes' : 'Create '+noun}</button></div>` : ''}`;
       if (st.type) {
+        if (st.type==='mock') {
+          $('#aguide', v).innerHTML = '<div class="callout warn">Benchmark only. Synthetic documents and vectors are not searchable or persisted. Actual embedding payloads are transmitted to the mock sink.</div>';
+          $('#aperm', v).innerHTML = '<div class="muted">No external resource permissions required.</div>';
+        } else {
         $('#aguide', v).innerHTML = X.perm.guideHtml(kind, st.type, config(), {});
-        X.perm.identity().then(id => { if (v.isConnected && st.type) $('#aguide', v).innerHTML = X.perm.guideHtml(kind, st.type, config(), id); });
+        X.perm.identity().then(id => { const guide = $('#aguide', v); if (guide && v.isConnected && st.type && st.type!=='mock') guide.innerHTML = X.perm.guideHtml(kind, st.type, config(), id); });
         X.perm.permAssistant($('#aperm', v), { kind, type:st.type, getConfig:config, noGuide:true, onResult:r => { st.perm = r; drawChecks(); } });
+        }
       }
       drawChecks(); bind();
     };
@@ -250,7 +268,12 @@ function addPage(kind, editId) {
       $$('[data-type]', v).forEach(o => o.onclick = () => { st.type = o.dataset.type; st.tested = null; st.perm = null; draw(); });
       $$('.tagbox', v).forEach(tb => { const inp = $('input', tb); tb.onclick = e => { const b = e.target.closest('[data-tag]'); if (b) { b.remove(); drawChecks(); } else inp.focus(); };
         inp.onkeydown = e => { if ((e.key==='Enter' || e.key===',') && inp.value.trim()) { e.preventDefault(); const t = inp.value.trim().replace(/^\./,''); inp.insertAdjacentHTML('beforebegin', `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`); inp.value = ''; } }; });
-      const form = $('#aform', v); form.oninput = () => { st.tested = null; drawChecks(); clearTimeout(form._t); form._t = setTimeout(() => { if (st.type) X.perm.identity().then(id => $('#aguide', v).innerHTML = X.perm.guideHtml(kind, st.type, config(), id)); }, 400); };
+      const form = $('#aform', v); form.oninput = () => { st.tested = null; drawChecks(); clearTimeout(form._t); form._t = setTimeout(() => {
+        if (st.type && st.type!=='mock' && form.isConnected) X.perm.identity().then(id => {
+          const guide = $('#aguide', v);
+          if (guide && form.isConnected && st.type && st.type!=='mock') guide.innerHTML = X.perm.guideHtml(kind, st.type, config(), id);
+        });
+      }, 400); };
       const tb = $('#atest', v); if (tb) tb.onclick = async () => { tb.disabled = true; tb.innerHTML = spinner('Testing…'); const out = $('#atestout', v);
         try { const body = { type:st.type, config:config() }; if (existing) body[kind==='source'?'source_id':'destination_id'] = existing.id;
           const r = await api(`/api/${kind==='source'?'sources':'destinations'}/test-connection`, { method:'POST', body }); st.tested = r.success !== false;

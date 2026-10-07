@@ -4179,6 +4179,7 @@
                     sharepoint: ['site_id', 'drive_id'],
                     'onelake-iceberg': ['warehouse', 'table'],
                     cosmosdb: ['endpoint', 'database', 'container'],
+                    garnet: ['endpoint', 'hash_key'],
                     postgresql: ['host', 'database', 'table'],
                 }
                 : {
@@ -8471,10 +8472,41 @@
             infoDiv.innerHTML = info;
         }
 
+        function garnetSourceFields(prefix) {
+            return `
+                <div class="form-group"><label class="form-label">Endpoint</label>
+                    <input type="text" class="form-input" id="${prefix}-endpoint" name="endpoint" placeholder="host:6380" required></div>
+                <div class="form-group"><label class="form-label">Source HASH key</label>
+                    <input type="text" class="form-input" id="${prefix}-hash-key" name="hash_key" placeholder="documents" required></div>
+                <div class="form-group"><label class="form-label">Poll Interval (seconds)</label>
+                    <input type="number" class="form-input" id="${prefix}-poll-interval" name="poll_interval_seconds" value="10" min="1" max="3600"></div>
+                <label><input type="checkbox" id="${prefix}-tls" name="garnet_tls" checked> TLS</label>
+                <label><input type="checkbox" id="${prefix}-entra" name="garnet_entra"> Microsoft Entra authentication (only when supported)</label>
+                <div class="form-group"><label class="form-label">Username (optional)</label>
+                    <input type="text" class="form-input" id="${prefix}-username" name="garnet_username"></div>
+                <div class="form-group"><label class="form-label">Password secret reference (optional)</label>
+                    <input type="text" class="form-input" id="${prefix}-password-secret-ref" name="garnet_password_secret_ref" placeholder="kv://vault/secret"></div>
+                <p>Records must contain id, positive version, and content. Use versioned tombstones for deletes. Requires inline whole-record embedding into a separate vector set on the same endpoint.</p>`;
+        }
+
+        function collectGarnetSourceConfig(prefix) {
+            const value = field => document.getElementById(`${prefix}-${field}`)?.value || '';
+            return {
+                endpoint: value('endpoint'), hash_key: value('hash-key'),
+                tls: document.getElementById(`${prefix}-tls`)?.checked === true,
+                use_entra_auth: document.getElementById(`${prefix}-entra`)?.checked === true,
+                username: value('username') || undefined,
+                password_secret_ref: value('password-secret-ref') || undefined,
+                poll_interval_seconds: parseInt(value('poll-interval')) || 10,
+            };
+        }
+
         function updateSourceConfigInline(type, prefix) {
             if (prefix === 'pl-src') updateChunkCleanupVisibility();
             const container = document.getElementById(`${prefix}-config-fields`);
-            if (type === 'azure-blob') {
+            if (type === 'garnet') {
+                container.innerHTML = garnetSourceFields(prefix);
+            } else if (type === 'azure-blob') {
                 container.innerHTML = `
                     <div class="form-group"><label class="form-label">Account URL</label>
                         <input type="text" class="form-input" id="${prefix}-account-url" placeholder="https://account.blob.core.windows.net"></div>
@@ -8621,7 +8653,13 @@
             const testBtn = document.getElementById(`${prefix}-test-btn`);
             const type = document.getElementById(`${prefix}-type`).value;
             let config = {};
-            if (type === 'azure-blob') {
+            if (type === 'garnet') {
+                config = collectGarnetSourceConfig(prefix);
+                if (!config.endpoint || !config.hash_key) {
+                    resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Endpoint and Source HASH key</div>';
+                    return;
+                }
+            } else if (type === 'azure-blob') {
                 config = { account_url: document.getElementById(`${prefix}-account-url`)?.value || '', container: document.getElementById(`${prefix}-container`)?.value || '' };
                 if (!config.account_url || !config.container) { resultDiv.innerHTML = '<div style="color:var(--warning);font-size:12px;">Please fill in Account URL and Container</div>'; return; }
             } else if (type === 'sharepoint') {
@@ -8694,7 +8732,9 @@
         function collectInlineSourceData(prefix) {
             const sourceType = document.getElementById(`${prefix}-type`).value;
             let config = {};
-            if (sourceType === 'azure-blob') {
+            if (sourceType === 'garnet') {
+                config = collectGarnetSourceConfig(prefix);
+            } else if (sourceType === 'azure-blob') {
                 config = {
                     account_url: document.getElementById(`${prefix}-account-url`)?.value || '',
                     container: document.getElementById(`${prefix}-container`)?.value || '',
@@ -8993,7 +9033,9 @@
 
             let config = {};
 
-            if (sourceType === 'azure-blob') {
+            if (sourceType === 'garnet') {
+                config = collectGarnetSourceConfig('source');
+            } else if (sourceType === 'azure-blob') {
                 config = {
                     account_url: formData.get('account_url'),
                     container: formData.get('container'),
@@ -9573,7 +9615,9 @@
         function updateSourceConfig(type) {
             // Update config fields based on source type
             const container = document.getElementById('source-config-fields');
-            if (type === 'azure-blob') {
+            if (type === 'garnet') {
+                container.innerHTML = garnetSourceFields('source');
+            } else if (type === 'azure-blob') {
                 container.innerHTML = `
                     <div class="form-group">
                         <label class="form-label">Account URL</label>
@@ -9706,7 +9750,7 @@
                     </div>
                 `;
             }
-            const managedIdentityOnly = type === 'sharepoint' || type === 'onelake-iceberg';
+            const managedIdentityOnly = type === 'sharepoint' || type === 'onelake-iceberg' || type === 'garnet';
             const managedIdentityInput = document.querySelector('input[name="auth_type"][value="managed-identity"]');
             const connectionStringInput = document.querySelector('input[name="auth_type"][value="connection-string"]');
             connectionStringInput.disabled = managedIdentityOnly;
@@ -9800,7 +9844,9 @@
 
             // Build config based on type
             let config = { auth_type: authType };
-            if (type === 'azure-blob') {
+            if (type === 'garnet') {
+                config = collectGarnetSourceConfig('source');
+            } else if (type === 'azure-blob') {
                 config.account_url = formData.get('account_url');
                 config.container = formData.get('container');
                 config.prefix = formData.get('prefix') || '';
@@ -9839,6 +9885,11 @@
             }
 
             // Validate required fields
+            if (type === 'garnet' && (!config.endpoint || !config.hash_key)) {
+                resultDiv.innerHTML = '<div style="color:var(--warning);">Please fill in Endpoint and Source HASH key</div>';
+                resultDiv.style.display = 'block';
+                return;
+            }
             if (type === 'azure-blob' && (!config.account_url || !config.container)) {
                 resultDiv.innerHTML = `<div style="background: var(--warning-muted); border: 1px solid var(--warning); padding: 12px; border-radius: var(--radius-md); color: var(--warning);">Please fill in Account URL and Container</div>`;
                 resultDiv.style.display = 'block';

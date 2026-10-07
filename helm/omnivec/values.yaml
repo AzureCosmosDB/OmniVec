@@ -67,11 +67,45 @@ api:
       initialDelaySeconds: 10
       periodSeconds: 30
     readiness:
-      path: /health
+      path: /ready
       port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
+    startup:
+      path: /ready
+      port: 8080
+      periodSeconds: 5
+      failureThreshold: 60
   adminToken: ""  # Set via --set api.adminToken=<token> during deploy
+  mockBenchmark:
+    enabled: false
+    configRefreshSeconds: 300
+    shardCount: 1
+    sourceImage:
+      repository: omnivec-mock-source
+      tag: latest
+    destinationImage:
+      repository: omnivec-mock-destination
+      tag: latest
+    model:
+      replicaCount: 1
+      image:
+        repository: docgrok-mock-embedding
+        tag: latest
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "128Mi"
+        limits:
+          cpu: "2"
+          memory: "512Mi"
+    sinkResources:
+      requests:
+        cpu: "1"
+        memory: "512Mi"
+      limits:
+        cpu: "4"
+        memory: "2Gi"
   entra:
     enabled: false
     tenantId: ""

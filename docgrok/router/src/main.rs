@@ -53,10 +53,6 @@ struct AppState {
     namespace: String,
     /// CosmosDB config for model persistence
     cosmos: Option<CosmosConfig>,
-    /// Pre-serialized mock embedding JSON: "[[0.123,0.456,...]]" (1536 dims)
-    mock_1536_single: Arc<String>,
-    /// Pre-serialized mock embedding JSON: "[[0.1,0.2,...]]" (128 dims)
-    mock_128_single: Arc<String>,
     /// URL to reach the DocGrok controller (router mode only)
     controller_url: String,
     /// URL to reach the pipeline-worker (used to forward blob/data
@@ -132,6 +128,8 @@ struct RegisterModelRequest {
     embedding_dim: u32,
     #[serde(default)]
     disable_keepalive: Option<bool>,
+    #[serde(default)]
+    latency_ms: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -349,13 +347,6 @@ async fn main() {
     let model_health: Arc<DashMap<String, Value>> = Arc::new(DashMap::new());
     let last_health_check: Arc<RwLock<Option<std::time::Instant>>> = Arc::new(RwLock::new(None));
 
-    // Pre-compute mock embedding vectors once at startup (avoids per-request alloc + RNG + serialization)
-    let mock_1536_vec: Vec<f64> = (0..1536).map(|i| (i as f64 * 0.001).sin()).collect();
-    let mock_1536_single = Arc::new(serde_json::to_string(&json!([mock_1536_vec])).unwrap());
-    let mock_128_vec: Vec<f64> = (0..128).map(|i| (i as f64 * 0.01).sin()).collect();
-    let mock_128_single = Arc::new(serde_json::to_string(&json!([mock_128_vec])).unwrap());
-    info!("Pre-computed mock embeddings: 1536-dim ({}B), 128-dim ({}B)", mock_1536_single.len(), mock_128_single.len());
-
     let state = AppState {
         registry: registry.clone(),
         pipelines: pipelines.clone(),
@@ -366,8 +357,6 @@ async fn main() {
         k8s,
         namespace,
         cosmos,
-        mock_1536_single,
-        mock_128_single,
         controller_url,
         pipeline_worker_url,
         model_health,
@@ -960,6 +949,10 @@ async fn call_model(
         };
 
         let (url, headers) = match model_type {
+            "mock-embedding" => (
+                format!("{}/embeddings", endpoint.trim_end_matches('/')),
+                reqwest::header::HeaderMap::new(),
+            ),
             "azure-openai" => {
                 let url = format!(
                     "{endpoint}/openai/deployments/{deployment}/embeddings?api-version={api_version}"
@@ -1000,6 +993,10 @@ async fn call_model(
         };
 
         let mut payload = json!({"input": input_data});
+        if model_type == "mock-embedding" {
+            payload["dimensions"] = cfg["embedding_dim"].clone();
+            payload["latency_ms"] = cfg.get("latency_ms").cloned().unwrap_or(json!(0));
+        }
         if model_type != "azure-openai" {
             payload["model"] = json!(name);
         }
@@ -1210,29 +1207,10 @@ async fn handle_embed(
         return Ok(Json(result));
     }
 
-    // Mock pipeline routing
     if let Some(pipeline) = &req.pipeline {
-        if pipeline == "mock-embedding" {
-            let dim: usize = env::var("MOCK_EMBEDDING_DIM")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(128);
-            let vec: Vec<f64> = (0..dim).map(|_| rand::random_range(0.0..1.0f64)).collect();
-            return Ok(Json(json!({
-                "output": [vec],
-                "requestId": req.request_id,
-                "pipeline": "mock-embedding",
-                "model": {"name": "mock", "embeddingDim": dim},
-            })));
-        }
-        if pipeline == "mock-1536" {
-            let vec: Vec<f64> = (0..1536).map(|_| rand::random_range(0.0..1.0f64)).collect();
-            return Ok(Json(json!({
-                "output": [vec],
-                "requestId": req.request_id,
-                "pipeline": "mock-1536",
-                "model": {"name": "mock-1536", "embeddingDim": 1536},
-            })));
+        if pipeline == "mock-embedding" || pipeline == "mock-1536" {
+            return Err(AppError(StatusCode::BAD_REQUEST,
+                "Built-in mock aliases are retired; use a registered mock model service".into()));
         }
 
         // Real pipeline — look up config
@@ -1338,31 +1316,59 @@ async fn handle_embed_batch(
         ));
     }
 
-    // Mock pipeline routing — uses pre-computed embeddings, builds response via string concat
-    // Zero per-request allocation: no RNG, no Value tree, no serde serialization
+    // Registered model services generate vectors; the router only forwards
+    // negotiated binary responses without constructing a JSON vector tree.
+    if let Some(model_id) = &req.model_id {
+        if model_id.starts_with("mdl-ext-") && !state.registry.contains_key(model_id) {
+            load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        }
+        let cfg = state.registry.get(model_id).map(|entry| entry.value().clone());
+        if let Some(cfg) = cfg.filter(|cfg| cfg["type"] == "mock-embedding") {
+            if accepts_binary_embeddings(&headers) {
+                let endpoint = cfg["endpoint"].as_str().ok_or_else(||
+                    AppError(StatusCode::INTERNAL_SERVER_ERROR, "Missing model endpoint".into()))?;
+                let mut upstream = model_http_client(&state, endpoint, false)
+                    .post(format!("{}/embeddings", endpoint.trim_end_matches('/')))
+                    .header(header::ACCEPT, EMBEDDING_BINARY_MEDIA_TYPE)
+                    .json(&json!({"input": req.texts, "dimensions": cfg["embedding_dim"],
+                        "latency_ms": cfg.get("latency_ms").unwrap_or(&json!(0))}))
+                    .send().await?;
+                if !upstream.status().is_success() {
+                    let status = upstream.status();
+                    return Err(AppError(status, format!("Model service error: {}", upstream.text().await?)));
+                }
+                if upstream.headers().get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.split(';').next()) != Some(EMBEDDING_BINARY_MEDIA_TYPE) {
+                    return Err(AppError(StatusCode::BAD_GATEWAY, "Model did not return requested FP32 transport".into()));
+                }
+                let mut body = Vec::new();
+                while let Some(chunk) = upstream.chunk().await? {
+                    if body.len() + chunk.len() > 4 * 1024 * 1024 + EMBEDDING_BINARY_HEADER_SIZE {
+                        return Err(AppError(StatusCode::BAD_GATEWAY, "Model FP32 response exceeds 4 MiB vector limit".into()));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                let dimensions = cfg["embedding_dim"].as_u64().unwrap_or(0) as usize;
+                if body.len() != EMBEDDING_BINARY_HEADER_SIZE + req.texts.len() * dimensions * 4
+                    || body.get(..4) != Some(EMBEDDING_BINARY_MAGIC.as_slice())
+                    || body.get(4..8) != Some(&[1, 0, 0, 0])
+                    || body.get(8..12) != Some((req.texts.len() as u32).to_le_bytes().as_slice())
+                    || body.get(12..16) != Some((dimensions as u32).to_le_bytes().as_slice()) {
+                    return Err(AppError(StatusCode::BAD_GATEWAY, "Model FP32 response shape mismatch".into()));
+                }
+                return Ok(([
+                    (header::CONTENT_TYPE, EMBEDDING_BINARY_MEDIA_TYPE),
+                    (header::CONTENT_ENCODING, "identity"),
+                ], body).into_response());
+            }
+        }
+    }
+
     if let Some(pipeline) = &req.pipeline {
         if pipeline == "mock-embedding" || pipeline == "mock-1536" {
-            let single = if pipeline == "mock-1536" {
-                &state.mock_1536_single
-            } else {
-                &state.mock_128_single
-            };
-            let n = req.texts.len();
-            let mut buf = String::with_capacity(single.len() * n + 100);
-            buf.push_str(r#"{"outputs":["#);
-            for i in 0..n {
-                if i > 0 { buf.push(','); }
-                buf.push_str(single);
-            }
-            buf.push_str(r#"],"pipeline":""#);
-            buf.push_str(pipeline);
-            buf.push_str(r#"","batch_size":"#);
-            buf.push_str(&n.to_string());
-            buf.push('}');
-            return Ok((
-                [(header::CONTENT_TYPE, "application/json")],
-                buf,
-            ).into_response());
+            return Err(AppError(StatusCode::BAD_REQUEST,
+                "Built-in mock aliases are retired; use a registered mock model service".into()));
         }
 
         // Real pipeline — resolve model_id from pipeline config and batch embed via model
@@ -1591,6 +1597,16 @@ async fn register_model(
     State(state): State<AppState>,
     Json(req): Json<RegisterModelRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if req.model_type == "mock-embedding" {
+        if !(1..=65536).contains(&req.embedding_dim)
+            || req.latency_ms.is_some_and(|value| !value.is_finite() || !(0.0..=60000.0).contains(&value)) {
+            return Err(AppError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid mock dimensions or latency_ms".into()));
+        }
+        if !reqwest::Url::parse(&req.endpoint).is_ok_and(|url|
+            matches!(url.scheme(), "http" | "https") && url.host_str().is_some()) {
+            return Err(AppError(StatusCode::UNPROCESSABLE_ENTITY, "Mock model requires an HTTP model-service endpoint".into()));
+        }
+    }
     let model_id = req.id.unwrap_or_else(|| {
         let hash = format!("{:x}", md5_hash(&req.name));
         format!("mdl-ext-{}", &hash[..8])
@@ -1644,6 +1660,15 @@ async fn register_model(
     }
     if let Some(disable_keepalive) = req.disable_keepalive {
         fields.insert("disable_keepalive".into(), json!(disable_keepalive));
+    }
+    if req.model_type == "mock-embedding" {
+        fields.insert("auth_type".into(), json!("none"));
+        fields.insert("api_key".into(), json!(""));
+        if let Some(latency) = req.latency_ms {
+            fields.insert("latency_ms".into(), json!(latency));
+        } else {
+            fields.entry("latency_ms").or_insert(json!(0));
+        }
     }
 
     // Keep lookup/merge/persist/cache under one lock without recursively calling
@@ -1752,6 +1777,12 @@ async fn healthcheck_model(
             "status": 0,
             "detail": "No endpoint configured"
         })));
+    }
+    if model_type == "mock-embedding" {
+        let response = state.http.get(format!("{endpoint}/health"))
+            .timeout(Duration::from_secs(10)).send().await?;
+        return Ok(Json(json!({"ok": response.status().is_success(),
+            "status": response.status().as_u16(), "detail": "Remote synthetic model service", "mock": true})));
     }
 
     let test_url = match model_type.as_str() {
@@ -2295,9 +2326,11 @@ async fn run_model_health_checks(state: &AppState) {
                 _ => endpoint.clone(),
             };
 
-            let mut req = state.http.post(&test_url)
-                .timeout(Duration::from_secs(10))
-                .json(&json!({"input": "health", "model": &deployment}));
+            let mut req = if model_type == "mock-embedding" {
+                state.http.get(format!("{}/health", endpoint.trim_end_matches('/')))
+            } else {
+                state.http.post(&test_url).json(&json!({"input": "health", "model": &deployment}))
+            }.timeout(Duration::from_secs(10));
 
             if model_type == "azure-openai" {
                 if !api_key.is_empty() {
@@ -2578,6 +2611,64 @@ mod registry_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[tokio::test]
+    async fn registered_mock_routes_json_binary_and_health_to_a_separate_service() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model_calls = calls.clone();
+        let backend = Router::new()
+            .route("/health", get(|| async { Json(json!({"implementation": "rust"})) }))
+            .route("/embeddings", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let calls = model_calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(body["dimensions"], 4);
+                    assert_eq!(body["latency_ms"].as_f64(), Some(25.0));
+                    assert_eq!(body["input"], json!(["a", "b"]));
+                    if accepts_binary_embeddings(&headers) {
+                        binary_embeddings_response(&[json!([0.5, 0.5, 0.5, 0.5]), json!([0.5, 0.5, 0.5, 0.5])], 2, "backend")
+                            .unwrap_or_else(|_| panic!("Backend binary failed"))
+                    } else {
+                        Json(json!({"data": [{"embedding": [0.5, 0.5, 0.5, 0.5]},
+                            {"embedding": [0.5, 0.5, 0.5, 0.5]}]})).into_response()
+                    }
+                }
+            }));
+        let (mut state, server) = test_state(backend).await;
+        let endpoint = state.cosmos.as_ref().unwrap().endpoint.clone();
+        state.cosmos = None;
+        let request: RegisterModelRequest = serde_json::from_value(json!({
+            "id": "mdl-ext-mock", "name": "Mock", "type": "mock-embedding",
+            "endpoint": endpoint, "embedding_dim": 4, "latency_ms": 25,
+        })).unwrap();
+        register_model(State(state.clone()), Json(request)).await
+            .unwrap_or_else(|_| panic!("Registration failed"));
+        assert_eq!(state.registry.get("mdl-ext-mock").unwrap()["latency_ms"].as_f64(), Some(25.0));
+        for binary in [false, true] {
+            let mut headers = HeaderMap::new();
+            if binary {
+                headers.insert(header::ACCEPT, EMBEDDING_BINARY_MEDIA_TYPE.parse().unwrap());
+            }
+            let req = EmbedBatchRequest { texts: vec!["a".into(), "b".into()],
+                model_id: Some("mdl-ext-mock".into()), pipeline: None };
+            let response = handle_embed_batch(State(state.clone()), headers, Json(req)).await
+                .unwrap_or_else(|_| panic!("Routing failed"));
+            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            if binary {
+                assert_eq!(body.len(), 48);
+                assert_eq!(&body[..4], b"OVEC");
+            } else {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["outputs"], json!([[[0.5, 0.5, 0.5, 0.5]], [[0.5, 0.5, 0.5, 0.5]]]));
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let response = healthcheck_model(State(state), Path("mdl-ext-mock".into())).await
+            .unwrap_or_else(|_| panic!("Health probe failed")).into_response();
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["ok"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn binary_embedding_response_has_versioned_little_endian_shape() {
         let response = binary_embeddings_response(
             &[
@@ -2853,8 +2944,6 @@ mod registry_tests {
             cosmos: Some(CosmosConfig {
                 endpoint: endpoint.clone(), database: "test".into(), container: "metadata".into(), api_key: String::new(),
             }),
-            mock_1536_single: Arc::new(String::new()),
-            mock_128_single: Arc::new(String::new()),
             controller_url: endpoint.clone(),
             pipeline_worker_url: endpoint,
             model_health: Arc::new(DashMap::new()),

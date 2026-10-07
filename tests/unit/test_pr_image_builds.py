@@ -23,6 +23,9 @@ def test_required_pr_image_builds_are_reported_without_publishing():
         "build (omnivec-api, ., Dockerfile)",
         "build (omnivec-web, web, web/Dockerfile)",
         "build (omnivec-changefeed, ., connectors/ingestion/dotnet/Dockerfile)",
+        "build (docgrok-mock-embedding, docgrok/services/embedding/mock, docgrok/services/embedding/mock/Dockerfile)",
+        "build (omnivec-mock-source, connectors/mock, connectors/mock/Source/Dockerfile)",
+        "build (omnivec-mock-destination, connectors/mock, connectors/mock/Destination/Dockerfile)",
     }
     steps = job["steps"]
     build = next(s for s in steps if s.get("uses", "").startswith("docker/build-push-action@"))

@@ -87,7 +87,12 @@ async def check_source(source: Source, last_event_age_seconds: float = None) -> 
     result["checks"].append({"check": "enabled", "status": "pass", "detail": "Source is enabled"})
 
     try:
-        if source.type == SourceType.AZURE_BLOB:
+        if source.type == SourceType.MOCK:
+            from mock_configs import MockSourceConfig
+            MockSourceConfig(**source.config)
+            result["checks"].append({"check": "connectivity", "status": "pass",
+                                     "detail": "Synthetic benchmark source; no external resource"})
+        elif source.type == SourceType.AZURE_BLOB:
             config = source.config
             if config.get("connection_string"):
                 client = BlobServiceClient.from_connection_string(config["connection_string"])
@@ -226,7 +231,13 @@ async def check_destination(destination: Destination, last_write_age_seconds: fl
         dest_type = destination.type
         config = destination.config
 
-        if dest_type == DestinationType.COSMOSDB_VECTOR:
+        if dest_type == DestinationType.MOCK:
+            from mock_configs import MockSinkConfig
+            settings = MockSinkConfig(**config)
+            result["checks"].append({"check": "vector_policy", "status": "pass",
+                                     "detail": "Mock sink validates and discards transmitted FP32 vectors",
+                                     "dimensions": settings.embedding_dimensions, "vector_field": "embedding"})
+        elif dest_type == DestinationType.COSMOSDB_VECTOR:
             credential = DefaultAzureCredential()
             client = CosmosClient(config["endpoint"], credential=credential)
             database = client.get_database_client(config["database"])

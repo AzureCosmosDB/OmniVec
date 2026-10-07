@@ -102,3 +102,30 @@ jobs:
       - name: Run CLI tests
         working-directory: cli
         run: go test ./...
+
+  mock-components:
+    name: Isolated mock source / model / destination
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: azure/setup-helm@v4.3.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Rendered mock deployment contracts
+        run: |
+          pip install 'pytest>=8.0,<9.0' pyyaml hypothesis
+          pytest tests/unit/test_mock_helm.py -q
+      - name: Source and destination regressions
+        run: dotnet run --project connectors/mock/Tests/OmniVec.Mock.Tests.csproj -c Release
+      - name: Standalone Rust model regressions
+        working-directory: docgrok/services/embedding/mock
+        run: cargo test --locked
+      - name: Rust router regressions
+        working-directory: docgrok/router
+        run: cargo test --locked

@@ -52,6 +52,7 @@ def _sanitize_schema(schema: dict) -> dict:
 # ---------------------------------------------------------------------------
 API_REQUIRED_ROUTES = [
     ("get", "/health"),
+    ("get", "/ready"),
     ("get", "/api/pipelines"),
     ("post", "/api/pipelines"),
     ("get", "/api/sources"),

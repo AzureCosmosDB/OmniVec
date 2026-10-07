@@ -437,7 +437,8 @@ public class MsSqlCdcWatcher : ISourceWatcher
 
             var batchKey = $"mssql:{_source.Id}:{docs[0].docId}:{docs.Count}";
             _ = _apiClient.ReportInlineMetricsAsync(
-                pipeline.Id, docs.Count, 0, sw.ElapsedMilliseconds, batchKey, ct);
+                pipeline.Id, docs.Count, 0, sw.ElapsedMilliseconds, batchKey, ct,
+                pipeline.DocgrokPipeline, _source.Id, pipeline.DestinationId);
         }
     }
 

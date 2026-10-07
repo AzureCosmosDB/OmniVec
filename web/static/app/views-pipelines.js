@@ -196,6 +196,7 @@ function overview(p) {
   const st = p.st, h = M.hp[p.id], L = p.live || {}, obs = (p.ins||{}).observed || {};
   const cfg = p.chunk_config || {}; const srcRef = (p.sources||[])[0] || {};
   return `<div class="grid g-main" style="align-items:start"><div class="stack">
+   ${p.src.type==='mock' ? `<div class="callout warn"><div><b>Synthetic-source payload benchmark</b>Full embeddings from the selected model are transmitted over HTTP, validated by the mock sink, and discarded. See the run receipt for real versus synthetic model output. No searchable vector persistence.<div style="margin-top:8px"><b>${fmt(st.throughput_docs_per_sec)} documents/second</b> · ${fmt(st.embedded_count)} accepted documents</div><button class="btn sm" id="mock-receipt">Full run receipt and payload byte count</button><pre id="mock-receipt-out" class="small" style="white-space:pre-wrap" hidden></pre></div></div>` : ''}
    <div class="card"><div class="card-h"><h3>Progress</h3><div class="acts muted small">${p.paused ? 'Paused' : p.progress>=100 ? 'Backfill complete · syncing changes' : p.progress!=null ? 'Backfilling' : 'Syncing changes'}</div></div>
     <div class="card-b">${ladder(p)}
      <div class="stats" style="margin-top:18px;border-top:1px solid var(--border)">
@@ -225,6 +226,13 @@ function overview(p) {
   </div></div>`;
 }
 function mountOverview(p, t) {
+  const receipt = $('#mock-receipt', t);
+  if (receipt) receipt.onclick = async () => {
+    const out = $('#mock-receipt-out', t); receipt.disabled = true;
+    try { const run = await api(`/api/pipelines/${encodeURIComponent(p.id)}/mock-run`); out.textContent = JSON.stringify(run, null, 2); out.hidden = false; }
+    catch (e) { toast(e.message, 'err'); }
+    finally { receipt.disabled = false; }
+  };
   const b = $('#rechk', t); if (b) b.onclick = async () => { b.disabled = true; b.innerHTML = spinner('Checking…');
     try { D.health = await api('/api/health/checks/run?section=pipelines', { method:'POST' }); toast('Checks complete'); invalidate('health'); render({ force:true, silent:true }); }
     catch (e) { toast(e.message, 'err'); b.disabled = false; b.textContent = 'Re-check'; } };

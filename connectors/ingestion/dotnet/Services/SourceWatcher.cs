@@ -577,7 +577,8 @@ public class SourceWatcher : ISourceWatcher
                         .OrderBy(identity => identity, StringComparer.Ordinal);
                     var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", identities))));
                     var okKey = $"cosmos:{pipeline.Id}:{pipeline.Generation}:{digest}";
-                    _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, patched, 0, sw.ElapsedMilliseconds, okKey, CancellationToken.None);
+                    _ = _apiClient.ReportInlineMetricsAsync(pipeline.Id, patched, 0, sw.ElapsedMilliseconds,
+                        okKey, CancellationToken.None, pipeline.DocgrokPipeline, _source.Id, pipeline.DestinationId);
                 }
             }
             catch (Exception ex)

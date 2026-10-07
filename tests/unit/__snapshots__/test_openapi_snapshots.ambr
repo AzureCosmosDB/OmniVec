@@ -1944,6 +1944,7 @@
         }),
         'DestinationType': dict({
           'enum': list([
+            'mock',
             'cosmosdb-vector',
             'pgvector',
             'mssql',
@@ -2369,6 +2370,7 @@
         }),
         'SourceType': dict({
           'enum': list([
+            'mock',
             'azure-blob',
             'cosmosdb',
             'postgresql',
@@ -2378,6 +2380,7 @@
             'databricks',
             'onelake-iceberg',
             'sharepoint',
+            'garnet',
           ]),
           'title': 'SourceType',
           'type': 'string',
@@ -5869,7 +5872,7 @@
       }),
       '/api/operations/resource-insights': dict({
         'get': dict({
-          'description': 'Recommend operator-adjustable fairness settings from durable telemetry.',
+          'description': 'Recommend operator-adjustable fairness settings from exported worker batches.',
           'operationId': 'get_resource_insights_api_operations_resource_insights_get',
           'responses': dict({
             '200': dict({
@@ -6167,7 +6170,7 @@
       }),
       '/api/pipelines/{pipeline_id}/metrics/inline': dict({
         'post': dict({
-          'description': 'Report authoritative worker metrics with bounded batch deduplication.',
+          'description': 'Enqueue best-effort telemetry for asynchronous App Insights export; no DB I/O.',
           'operationId': 'report_inline_metrics_api_pipelines__pipeline_id__metrics_inline_post',
           'parameters': list([
             dict({
@@ -6214,6 +6217,44 @@
             }),
           }),
           'summary': 'Report Inline Metrics',
+        }),
+      }),
+      '/api/pipelines/{pipeline_id}/mock-run': dict({
+        'get': dict({
+          'operationId': 'mock_pipeline_run_api_pipelines__pipeline_id__mock_run_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'pipeline_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Pipeline Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Mock Pipeline Run',
         }),
       }),
       '/api/pipelines/{pipeline_id}/pause': dict({
@@ -7371,6 +7412,26 @@
           'summary': 'Health',
         }),
       }),
+      '/ready': dict({
+        'get': dict({
+          'operationId': 'ready_ready_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '503': dict({
+              'description': 'Metadata storage unavailable',
+            }),
+          }),
+          'summary': 'Ready',
+        }),
+      }),
       '/ui': dict({
         'get': dict({
           'description': 'Serve the OmniVec web UI.',
@@ -8446,6 +8507,17 @@
       ]),
     ),
     tuple(
+      'get',
+      '/api/pipelines/{pipeline_id}/mock-run',
+      list([
+        'pipeline_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'post',
       '/api/pipelines/{pipeline_id}/pause',
       list([
@@ -8775,6 +8847,16 @@
       ]),
       list([
         '200',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/ready',
+      list([
+      ]),
+      list([
+        '200',
+        '503',
       ]),
     ),
     tuple(

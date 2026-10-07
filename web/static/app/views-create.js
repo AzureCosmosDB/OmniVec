@@ -17,9 +17,20 @@ function storeDims() { const d = dst(); if (!d) return null; const pick = (W.ind
   if (pick && pick.dimensions) return pick.dimensions; if (d.type==='pgvector') return (d.config||{}).vector_dimensions || null;
   const pol = ((M.hd[d.id]||{}).checks||[]).find(c => c.check==='vector_policy'); return pol ? pol.dimensions : null; }
 function sameContainer() { const s = src(), d = dst(); if (!s || !d) return false; const a = s.config||{}, b = d.config||{};
+  if (s.type==='mock' && d.type==='mock') return true;
   if (s.type==='garnet' && d.type==='garnet') {
-    const endpoint = value => (value||'').replace(/^rediss?:\/\//i,'').replace(/\/$/,'').toLowerCase();
-    return endpoint(a.endpoint)===endpoint(b.endpoint) && !!a.hash_key && !!b.vector_set &&
+    const endpoint = config => {
+      try {
+        const value = (config.endpoint||'').trim();
+        const url = new URL(value.includes('://') ? value : 'redis://'+value);
+        if (!['redis:', 'rediss:'].includes(url.protocol) || !url.hostname || url.username || url.password ||
+            (url.pathname && url.pathname!=='/') || url.search || url.hash) return null;
+        const tls = config.tls !== false, port = url.port ? Number(url.port) : (tls ? 6380 : 6379);
+        if (port < 1 || port > 65535) return null;
+        return JSON.stringify([url.hostname.toLowerCase().replace(/\.$/,''), port, tls]);
+      } catch (_) { return null; }
+    };
+    return endpoint(a)!==null && endpoint(a)===endpoint(b) && !!a.hash_key && !!b.vector_set &&
       a.hash_key.toLowerCase()!==b.vector_set.toLowerCase() &&
       !a.hash_key.toLowerCase().startsWith('__omnivec:source-checkpoints:') &&
       !b.vector_set.toLowerCase().startsWith('__omnivec:source-checkpoints:');
@@ -37,6 +48,12 @@ function checks() {
   else if (d && m) out.push(!sd ? ['info','Store dimensions unknown: test the store to confirm'] : sd===md ? ['pass',`Dimensions match (${md})`] : ['fail',`Dimension mismatch: model ${md}, store ${sd}`]);
   else out.push(['wait','Dimension match: waiting for model and store']);
   if (s && s.type==='sharepoint') out.push(['info','SharePoint needs queue mode and a Cosmos DB vector store. Set automatically.']);
+  if (s && s.type==='mock') {
+    out.push(['info','Synthetic benchmark: full vectors move over HTTP but the sink discards them.']);
+    if (W.mode!=='inline' || W.strategy!=='truncate') out.push(['fail','Mock pipelines require inline whole-document processing.']);
+    if (d && d.type!=='mock') out.push(['fail','Mock source requires a mock sink.']);
+    if (m && (!['mock-embedding','openai','azure-openai'].includes(m.type) || m.category==='chat')) out.push(['fail','Benchmark requires a registered embedding model.']);
+  } else if (d && d.type==='mock') out.push(['fail','Mock sink requires a mock source.']);
   if (W.mode==='inline' && W.strategy==='chunk') out.push(['fail','Inline mode cannot chunk. Use queue mode.']);
   if (s && s.type==='garnet' && W.mode!=='inline') out.push(['fail','Garnet HASH sources require inline Garnet-to-Garnet processing.']);
   if (s && s.type==='garnet' && d && d.type!=='garnet') out.push(['fail','Garnet HASH sources require a Garnet vector-set destination.']);
@@ -110,11 +127,11 @@ function initContent() { const s = src(); if (!s) return; const c = s.config||{}
   if (!W.nameTouched) W.name = ''; W.sample = null; }
 function stepContent() {
   const s = src(); if (!s) return empty('plug','Choose a source first','');
-  const nativeGarnet = s.type==='garnet';
+  const nativeGarnet = s.type==='garnet' || s.type==='mock';
   const files = ['azure-blob','sharepoint'].includes(s.type);
   const sampleKeys = W.sample && W.sample.length && typeof W.sample[0]==='object' ? Object.keys(W.sample[0]).filter(k => !k.startsWith('_')).slice(0, 14) : [];
   return `<div><h2 style="font-size:17px;margin:0">What should be indexed?</h2><div class="muted">${files ? 'Choose which files become searchable and how they are split.' : 'Choose which fields hold the text to embed and how it is split.'}</div></div>
-   ${nativeGarnet ? `<div class="callout">${icon('info','ic')}<div>Each HASH value must be a JSON object with <code>id</code>, a positive increasing <code>version</code>, and string <code>content</code>. Embeddings use the content field; URL extraction and custom field selection are not supported.</div></div>` :
+   ${nativeGarnet ? `<div class="callout">${icon('info','ic')}<div>${s.type==='mock' ? 'The mock source generates exact-size synthetic text using its configured document count and rate. Each document produces one full vector; the mock sink validates the transmitted payload and discards it.' : 'Each HASH value must be a JSON object with <code>id</code>, a positive increasing <code>version</code>, and string <code>content</code>. Embeddings use the content field; URL extraction and custom field selection are not supported.'}</div></div>` :
     files ? `<div class="fld"><label>File types</label><div class="tagbox" id="wft">${(W.fileTypes||[]).map(t => `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`).join('')}<input placeholder="Add, e.g. pdf"></div><span class="hint">PDF and Office files are text-extracted (with OCR fallback for scanned PDFs).</span></div>`
     : `<div class="fld"><label>Text fields to embed</label><div class="tagbox" id="wcf">${(W.fields||[]).map(t => `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`).join('')}<input placeholder="Add a field name"></div>
        ${sampleKeys.length ? `<div class="row wrap small" style="margin-top:6px"><span class="muted">Fields in sample:</span>${sampleKeys.map(k => `<button class="badge out" data-addf="${esc(k)}">+ ${esc(k)}</button>`).join('')}</div>` : ''}<span class="hint">Multiple fields are concatenated in order.</span></div>`}
@@ -151,6 +168,7 @@ async function loadIndexes(v) {
       W.indexes = r.vector_indexes || cfgIdx || []; if (r.success === false) W.indexErr = r.error || r.message; }
     else if (d.type==='pgvector') W.indexes = [{ path:(d.config||{}).vector_column||'embedding', dimensions:(d.config||{}).vector_dimensions, indexType:(d.config||{}).index_type }];
     else if (d.type==='garnet') W.indexes = [{ path:(d.config||{}).vector_set||'omnivec-vectors', dimensions:(d.config||{}).vector_dimensions, indexType:'garnet-vector-set', distanceFunction:((d.config||{}).distance_metric||'COSINE').toLowerCase() }];
+    else if (d.type==='mock') W.indexes = [{path:'embedding', dimensions:d.config.embedding_dimensions, indexType:'mock', distanceFunction:'cosine'}];
     else W.indexes = cfgIdx || [{ path:'embedding' }];
   } catch (e) { W.indexes = cfgIdx || []; W.indexErr = e.message; }
   if (!W.indexes.length) { const pol = ((M.hd[d.id]||{}).checks||[]).find(c => c.check==='vector_policy'); if (pol && pol.vector_field) W.indexes = [{ path:'/'+pol.vector_field, dimensions:pol.dimensions }]; }
@@ -160,10 +178,10 @@ async function loadIndexes(v) {
 function stepStore() {
   const s = src(); const sp = s && s.type==='sharepoint';
   const inlineOk = sameContainer() && W.strategy!=='chunk' && !sp;
-  const nativeGarnet = s && s.type==='garnet';
+  const nativeGarnet = s && (s.type==='garnet' || s.type==='mock');
   const destinations = M.dests.filter(d => !nativeGarnet || d.type==='garnet');
   return `<div><h2 style="font-size:17px;margin:0">Where should vectors be written?</h2><div class="muted">Choose a vector store whose dimensions match the model.</div></div>
-   <div class="grid g2">${M.dests.map(d => { const n = M.pipelines.filter(p => p.dst.id===d.id).length; const dis = (sp && d.type!=='cosmosdb-vector') || (nativeGarnet && d.type!=='garnet');
+   <div class="grid g2">${M.dests.map(d => { const n = M.pipelines.filter(p => p.dst.id===d.id).length; const dis = (sp && d.type!=='cosmosdb-vector') || (nativeGarnet && d.type!==s.type) || (d.type==='mock' && s?.type!=='mock');
      const vi = ((d.config||{}).vector_indexes||[])[0]; return `<div class="opt ${W.storeId===d.id?'on':''} ${dis?'dis':''}" ${dis?'':`data-store="${d.id}"`}><span class="tick">${icon('check','sm')}</span>${logo(d.type)}<div style="min-width:0"><div class="t trunc">${esc(d.name)}</div><div class="d">${esc(T(d.type).short)}${vi ? ` · ${vi.indexType} · ${vi.dimensions}d` : ''} · ${plural(n,'pipeline')}${dis ? ' · not supported for SharePoint' : ''}</div></div></div>`; }).join('')}
     <a class="opt" href="#/connections/new/store?then=new" style="border-style:dashed"><span class="logo" style="background:var(--accent-soft);color:var(--accent-text)">${icon('plus','sm')}</span><div><div class="t">Add a vector store</div><div class="d">Cosmos DB, pgvector or OneLake</div></div></a></div>
    ${W.storeId ? `<div class="grid g2"><div class="fld"><label>Vector field</label>${W.indexes===null ? `<div class="muted small">${spinner('Reading the vector policy…')}</div>` : W.indexes.length ? `<select class="sel" id="wvp">${W.indexes.map(i => { const p = (i.path||'').replace(/^\//,''); return `<option value="${esc(p)}" ${W.vpath===p?'selected':''}>/${esc(p)}${i.dimensions ? ` · ${i.dimensions}d` : ''}${i.indexType ? ' · '+esc(i.indexType) : ''}${i.distanceFunction ? ' · '+esc(i.distanceFunction) : ''}</option>`; }).join('')}</select>` : `<input class="inp mono" id="wvpi" value="${esc(W.vpath||'embedding')}"><span class="hint">No vector policy was found. Enter the vector path configured on the container.</span>`}
@@ -210,7 +228,7 @@ function bind(v) {
   const body = $('#wbody', v);
   body.oninput = () => { captureInputs(v); drawSide(v); const n = $('#wnext', v); if (n) n.disabled = !canNext(W.step); };
   const cm = $('#wcm', v); if (cm) cm.onchange = () => { captureInputs(v); draw(v); };
-  $$('[data-src]', v).forEach(o => o.onclick = () => { if (W.sourceId !== o.dataset.src) { const oldType=src()?.type; W.sourceId = o.dataset.src; W.fields = null; const nextType=M.SRC[W.sourceId].type; if (nextType==='sharepoint') W.mode = 'queue'; if (nextType==='garnet') { W.mode='inline'; W.strategy='truncate'; W.contentMode='field'; } else if (oldType==='garnet') W.mode='queue'; } draw(v); });
+  $$('[data-src]', v).forEach(o => o.onclick = () => { if (W.sourceId !== o.dataset.src) { const oldType=src()?.type; W.sourceId = o.dataset.src; W.fields = null; const nextType=M.SRC[W.sourceId].type; if (nextType==='sharepoint') W.mode = 'queue'; if (['garnet','mock'].includes(nextType)) { W.mode='inline'; W.strategy='truncate'; W.contentMode='field'; } else if (['garnet','mock'].includes(oldType)) W.mode='queue'; } draw(v); });
   $$('[data-strat]', v).forEach(o => o.onclick = () => { captureInputs(v); W.strategy = o.dataset.strat; if (W.strategy==='chunk') W.mode = 'queue'; draw(v); });
   $$('[data-model]', v).forEach(o => o.onclick = () => { W.modelId = o.dataset.model; W.recipe = null; draw(v); });
   $$('[data-recipe]', v).forEach(o => o.onclick = () => { W.recipe = o.dataset.recipe; W.modelId = null; draw(v); });
