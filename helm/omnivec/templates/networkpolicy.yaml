@@ -10,7 +10,7 @@
   deployment template in this chart.
 */ -}}
 {{- if .Values.networkPolicy.enabled }}
-{{- $ns := .Release.Namespace -}}
+{{- $ns := .Values.global.namespace -}}
 {{- $ingNsSel := .Values.networkPolicy.ingressControllerNamespaceSelector | default (dict "matchLabels" (dict "kubernetes.io/metadata.name" "ingress-nginx")) -}}
 ---
 apiVersion: networking.k8s.io/v1
@@ -45,7 +45,7 @@ spec:
               app: omnivec-search
       ports:
         - protocol: TCP
-          port: 8000
+          port: {{ .Values.api.service.targetPort }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -87,7 +87,7 @@ spec:
             {{- toYaml $ingNsSel | nindent 12 }}
       ports:
         - protocol: TCP
-          port: 3000
+          port: {{ .Values.web.service.targetPort }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -96,8 +96,10 @@ metadata:
   namespace: {{ $ns }}
 spec:
   podSelector:
-    matchLabels:
-      app: docgrok-router
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [docgrok, docgrok-router]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -109,7 +111,7 @@ spec:
               app: omnivec-search
         - podSelector:
             matchLabels:
-              app: omnivec-ingestor
+              app: omnivec-blob-ingestor
         - podSelector:
             matchLabels:
               app: omnivec-dotnet-worker
@@ -137,6 +139,8 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchLabels:
-              app: docgrok-router
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [docgrok, docgrok-router]
 {{- end }}

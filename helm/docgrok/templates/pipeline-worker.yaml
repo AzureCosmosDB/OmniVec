@@ -37,6 +37,14 @@ spec:
           value: {{ .Values.pipelineWorker.env.DOCGROK_MAX_BUFFERED_BLOB_BYTES | quote }}
         - name: DOCGROK_MAX_STREAMED_BLOB_BYTES
           value: {{ .Values.pipelineWorker.env.DOCGROK_MAX_STREAMED_BLOB_BYTES | quote }}
+        - name: DOCGROK_EMBED_MODE
+          value: {{ .Values.pipelineWorker.env.DOCGROK_EMBED_MODE | quote }}
+        - name: DOCGROK_DIRECT_EMBEDDING_ROUTES
+          value: {{ .Values.pipelineWorker.env.DOCGROK_DIRECT_EMBEDDING_ROUTES | quote }}
+        - name: DOCGROK_DIRECT_EMBED_CONCURRENCY
+          value: {{ .Values.pipelineWorker.env.DOCGROK_DIRECT_EMBED_CONCURRENCY | quote }}
+        - name: DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS
+          value: {{ .Values.pipelineWorker.env.DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS | quote }}
         {{- if .Values.azure.workloadIdentity.clientId }}
         - name: AZURE_CLIENT_ID
           value: {{ .Values.azure.workloadIdentity.clientId | quote }}

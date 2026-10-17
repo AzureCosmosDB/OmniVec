@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Json, Path, Query, Request, State},
-    http::{header, Method, StatusCode, Uri},
+    http::{header, HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Router,
@@ -25,6 +25,10 @@ use tracing::{error, info, warn};
 
 // 50 MiB raw input expands to ~66.7 MiB base64, plus JSON metadata.
 const MAX_REQUEST_BODY_BYTES: usize = 70 * 1024 * 1024;
+const EMBEDDING_BINARY_MEDIA_TYPE: &str = "application/vnd.omnivec.embeddings.f32";
+const EMBEDDING_BINARY_MAGIC: &[u8; 4] = b"OVEC";
+const EMBEDDING_BINARY_VERSION: u16 = 1;
+const EMBEDDING_BINARY_HEADER_SIZE: usize = 16;
 
 fn with_request_body_limits<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Router<S> {
     router
@@ -52,16 +56,17 @@ struct AppState {
     native_endpoint_counter: Arc<AtomicUsize>,
     /// Attempts across independently resolved native backend endpoints
     native_max_attempts: usize,
+    /// Model HTTP client without idle connection reuse. Used selectively for
+    /// in-cluster services where kube-proxy balances each new connection.
+    unpooled_model_http: Client,
+    /// Model endpoint hosts that should use request-level connection balancing.
+    unpooled_model_hosts: Arc<HashSet<String>>,
     /// K8s client (None if not in cluster)
     k8s: Option<kube::Client>,
     /// K8s namespace for model deployments
     namespace: String,
     /// CosmosDB config for model persistence
     cosmos: Option<CosmosConfig>,
-    /// Pre-serialized mock embedding JSON: "[[0.123,0.456,...]]" (1536 dims)
-    mock_1536_single: Arc<String>,
-    /// Pre-serialized mock embedding JSON: "[[0.1,0.2,...]]" (128 dims)
-    mock_128_single: Arc<String>,
     /// URL to reach the DocGrok controller (router mode only)
     controller_url: String,
     /// URL to reach the pipeline-worker (used to forward blob/data
@@ -141,6 +146,10 @@ struct RegisterModelRequest {
     context_window_tokens: Option<u32>,
     #[serde(default)]
     max_batch_tokens: Option<u32>,
+    #[serde(default)]
+    disable_keepalive: Option<bool>,
+    #[serde(default)]
+    latency_ms: Option<f64>,
 }
 
 fn default_model_max_batch_size() -> u32 {
@@ -183,6 +192,104 @@ impl From<reqwest::Error> for AppError {
     }
 }
 
+fn accepts_binary_embeddings(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(|part| part.split(';').next().unwrap_or("").trim())
+                .any(|media_type| media_type.eq_ignore_ascii_case(EMBEDDING_BINARY_MEDIA_TYPE))
+        })
+}
+
+fn binary_embeddings_response(
+    embeddings: &[Value],
+    expected_count: usize,
+    model_id: &str,
+) -> Result<Response, AppError> {
+    if embeddings.len() != expected_count {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            "Embedding result count does not match input".into(),
+        ));
+    }
+    let dimension = embeddings
+        .first()
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if dimension == 0 {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            "Embedding vectors must have a positive dimension".into(),
+        ));
+    }
+    let value_count = expected_count.checked_mul(dimension).ok_or_else(|| {
+        AppError(
+            StatusCode::BAD_GATEWAY,
+            "Embedding payload is too large".into(),
+        )
+    })?;
+    let payload_bytes = value_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_GATEWAY,
+                "Embedding payload is too large".into(),
+            )
+        })?;
+    let mut body = Vec::with_capacity(EMBEDDING_BINARY_HEADER_SIZE + payload_bytes);
+    body.extend_from_slice(EMBEDDING_BINARY_MAGIC);
+    body.extend_from_slice(&EMBEDDING_BINARY_VERSION.to_le_bytes());
+    body.extend_from_slice(&0u16.to_le_bytes());
+    body.extend_from_slice(&(expected_count as u32).to_le_bytes());
+    body.extend_from_slice(&(dimension as u32).to_le_bytes());
+
+    for embedding in embeddings {
+        let values = embedding.as_array().ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_GATEWAY,
+                "Embedding vector is not an array".into(),
+            )
+        })?;
+        if values.len() != dimension {
+            return Err(AppError(
+                StatusCode::BAD_GATEWAY,
+                "Embedding vectors have inconsistent dimensions".into(),
+            ));
+        }
+        for value in values {
+            let number = value.as_f64().ok_or_else(|| {
+                AppError(
+                    StatusCode::BAD_GATEWAY,
+                    "Embedding contains a non-numeric value".into(),
+                )
+            })?;
+            let number = number as f32;
+            if !number.is_finite() {
+                return Err(AppError(
+                    StatusCode::BAD_GATEWAY,
+                    "Embedding contains a non-finite value".into(),
+                ));
+            }
+            body.extend_from_slice(&number.to_le_bytes());
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        [
+            ("content-type", EMBEDDING_BINARY_MEDIA_TYPE),
+            ("content-encoding", "identity"),
+            ("x-omnivec-embedding-model", model_id),
+        ],
+        body,
+    )
+        .into_response())
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -212,6 +319,21 @@ async fn main() {
         .timeout(Duration::from_secs(300))
         .build()
         .expect("Failed to build HTTP client");
+    let unpooled_model_http = Client::builder()
+        .pool_max_idle_per_host(0)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("Failed to build unpooled model HTTP client");
+    let unpooled_model_hosts = Arc::new(
+        env::var("DOCGROK_UNPOOLED_MODEL_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<HashSet<_>>(),
+    );
 
     let native_pool_max_idle_per_host = env::var("NATIVE_BACKEND_MAX_IDLE_PER_HOST")
         .ok()
@@ -313,17 +435,6 @@ async fn main() {
     let model_health: Arc<DashMap<String, Value>> = Arc::new(DashMap::new());
     let last_health_check: Arc<RwLock<Option<std::time::Instant>>> = Arc::new(RwLock::new(None));
 
-    // Pre-compute mock embedding vectors once at startup (avoids per-request alloc + RNG + serialization)
-    let mock_1536_vec: Vec<f64> = (0..1536).map(|i| (i as f64 * 0.001).sin()).collect();
-    let mock_1536_single = Arc::new(serde_json::to_string(&json!([mock_1536_vec])).unwrap());
-    let mock_128_vec: Vec<f64> = (0..128).map(|i| (i as f64 * 0.01).sin()).collect();
-    let mock_128_single = Arc::new(serde_json::to_string(&json!([mock_128_vec])).unwrap());
-    info!(
-        "Pre-computed mock embeddings: 1536-dim ({}B), 128-dim ({}B)",
-        mock_1536_single.len(),
-        mock_128_single.len()
-    );
-
     let state = AppState {
         registry: registry.clone(),
         pipelines: pipelines.clone(),
@@ -332,11 +443,11 @@ async fn main() {
         native_http,
         native_endpoint_counter: Arc::new(AtomicUsize::new(0)),
         native_max_attempts,
+        unpooled_model_http,
+        unpooled_model_hosts,
         k8s,
         namespace,
         cosmos,
-        mock_1536_single,
-        mock_128_single,
         controller_url,
         pipeline_worker_url,
         model_health,
@@ -972,7 +1083,24 @@ fn validate_model_request(
     Ok(())
 }
 
-async fn checked_native_response(response: reqwest::Response) -> Result<reqwest::Response, AppError> {
+fn validate_registered_model_request(text: &TextInput, cfg: &Value) -> Result<(), AppError> {
+    validate_model_request(
+        text,
+        cfg["max_batch_size"]
+            .as_u64()
+            .unwrap_or(default_model_max_batch_size().into()),
+        cfg["context_window_tokens"]
+            .as_u64()
+            .unwrap_or(default_model_context_window().into()),
+        cfg["max_batch_tokens"]
+            .as_u64()
+            .unwrap_or(default_model_max_batch_tokens().into()),
+    )
+}
+
+async fn checked_native_response(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, AppError> {
     if response.status().is_success() {
         return Ok(response);
     }
@@ -1042,8 +1170,10 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
                                     "model_id": model_id,
                                 }));
                             }
-                            return Err(AppError(StatusCode::BAD_GATEWAY,
-                                "Native model returned an incorrect embedding count".into()));
+                            return Err(AppError(
+                                StatusCode::BAD_GATEWAY,
+                                "Native model returned an incorrect embedding count".into(),
+                            ));
                         }
                         Ok(r) if r.status().is_server_error() => continue,
                         Ok(r) if matches!(r.status().as_u16(), 404 | 405) => {
@@ -1054,7 +1184,8 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
                             let status = r.status();
                             let body = r.text().await?;
                             return Err(AppError(
-                                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                                StatusCode::from_u16(status.as_u16())
+                                    .unwrap_or(StatusCode::BAD_GATEWAY),
                                 format!("Native model error: {body}"),
                             ));
                         }
@@ -1062,15 +1193,22 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
                     }
                 }
                 if !legacy_endpoint {
-                    return Err(AppError(StatusCode::SERVICE_UNAVAILABLE,
-                        "Native model is unavailable after bounded retries".into()));
+                    return Err(AppError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Native model is unavailable after bounded retries".into(),
+                    ));
                 }
 
                 // Preserve compatibility with native backends that expose the
                 // older OmniVec batch endpoint instead of the OpenAI shape.
                 let payload = json!({"texts": texts, "model_id": model_id});
                 let endpoint = native_backend_url(state, url, "/embed/batch").await;
-                let r = state.native_http.post(endpoint).json(&payload).send().await?;
+                let r = state
+                    .native_http
+                    .post(endpoint)
+                    .json(&payload)
+                    .send()
+                    .await?;
                 if !matches!(r.status().as_u16(), 404 | 405) {
                     let r = checked_native_response(r).await?;
                     if r.status().is_success() {
@@ -1083,8 +1221,10 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
                                 }));
                             }
                         }
-                        return Err(AppError(StatusCode::BAD_GATEWAY,
-                            "Native legacy batch returned an incorrect embedding count".into()));
+                        return Err(AppError(
+                            StatusCode::BAD_GATEWAY,
+                            "Native legacy batch returned an incorrect embedding count".into(),
+                        ));
                     }
                 }
 
@@ -1107,8 +1247,12 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
                         .and_then(|v| v.as_array())
                         .and_then(|a| a.first())
                         .cloned()
-                        .ok_or_else(|| AppError(StatusCode::BAD_GATEWAY,
-                            "Native model returned no embedding for an input".into()))?;
+                        .ok_or_else(|| {
+                            AppError(
+                                StatusCode::BAD_GATEWAY,
+                                "Native model returned no embedding for an input".into(),
+                            )
+                        })?;
                     results.push(embedding);
                 }
                 Ok(json!({
@@ -1147,18 +1291,12 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
         let api_key = cfg["api_key"].as_str().unwrap_or("");
         let embedding_dim = cfg["embedding_dim"].as_u64().unwrap_or(0);
         let name = cfg["name"].as_str().unwrap_or(model_id);
-        validate_model_request(
-            &text,
-            cfg["max_batch_size"]
-                .as_u64()
-                .unwrap_or(default_model_max_batch_size().into()),
-            cfg["context_window_tokens"]
-                .as_u64()
-                .unwrap_or(default_model_context_window().into()),
-            cfg["max_batch_tokens"]
-                .as_u64()
-                .unwrap_or(default_model_max_batch_tokens().into()),
-        )?;
+        validate_registered_model_request(&text, &cfg)?;
+        let model_http = model_http_client(
+            state,
+            endpoint,
+            cfg["disable_keepalive"].as_bool().unwrap_or(false),
+        );
 
         let input_data = match &text {
             TextInput::Single(t) => json!([t]),
@@ -1166,6 +1304,10 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
         };
 
         let (url, headers) = match model_type {
+            "mock-embedding" => (
+                format!("{}/embeddings", endpoint.trim_end_matches('/')),
+                reqwest::header::HeaderMap::new(),
+            ),
             "azure-openai" => {
                 let url = format!(
                     "{endpoint}/openai/deployments/{deployment}/embeddings?api-version={api_version}"
@@ -1203,12 +1345,15 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
         };
 
         let mut payload = json!({"input": input_data});
+        if model_type == "mock-embedding" {
+            payload["dimensions"] = cfg["embedding_dim"].clone();
+            payload["latency_ms"] = cfg.get("latency_ms").cloned().unwrap_or(json!(0));
+        }
         if model_type != "azure-openai" {
             payload["model"] = json!(name);
         }
 
-        let resp = state
-            .http
+        let resp = model_http
             .post(&url)
             .headers(headers)
             .json(&payload)
@@ -1260,6 +1405,20 @@ async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result
 enum TextInput {
     Single(String),
     Batch(Vec<String>),
+}
+
+fn model_http_client<'a>(state: &'a AppState, endpoint: &str, force_unpooled: bool) -> &'a Client {
+    let configured_unpooled = reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            state.unpooled_model_hosts.contains("*") || state.unpooled_model_hosts.contains(&host)
+        });
+    if force_unpooled || configured_unpooled {
+        &state.unpooled_model_http
+    } else {
+        &state.http
+    }
 }
 
 fn pipeline_model_id(config: &Value) -> Option<&str> {
@@ -1422,29 +1581,12 @@ async fn handle_embed(
         return Ok(Json(result));
     }
 
-    // Mock pipeline routing
     if let Some(pipeline) = &req.pipeline {
-        if pipeline == "mock-embedding" {
-            let dim: usize = env::var("MOCK_EMBEDDING_DIM")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(128);
-            let vec: Vec<f64> = (0..dim).map(|_| rand::random_range(0.0..1.0f64)).collect();
-            return Ok(Json(json!({
-                "output": [vec],
-                "requestId": req.request_id,
-                "pipeline": "mock-embedding",
-                "model": {"name": "mock", "embeddingDim": dim},
-            })));
-        }
-        if pipeline == "mock-1536" {
-            let vec: Vec<f64> = (0..1536).map(|_| rand::random_range(0.0..1.0f64)).collect();
-            return Ok(Json(json!({
-                "output": [vec],
-                "requestId": req.request_id,
-                "pipeline": "mock-1536",
-                "model": {"name": "mock-1536", "embeddingDim": 1536},
-            })));
+        if pipeline == "mock-embedding" || pipeline == "mock-1536" {
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "Built-in mock aliases are retired; use a registered mock model service".into(),
+            ));
         }
 
         // Real pipeline — look up config
@@ -1550,6 +1692,7 @@ async fn handle_embed(
 
 async fn handle_embed_batch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<EmbedBatchRequest>,
 ) -> Result<Response, AppError> {
     if req.texts.is_empty() {
@@ -1559,30 +1702,95 @@ async fn handle_embed_batch(
         ));
     }
 
-    // Mock pipeline routing — uses pre-computed embeddings, builds response via string concat
-    // Zero per-request allocation: no RNG, no Value tree, no serde serialization
+    // Registered model services generate vectors; the router only forwards
+    // negotiated binary responses without constructing a JSON vector tree.
+    if let Some(model_id) = &req.model_id {
+        if model_id.starts_with("mdl-ext-") && !state.registry.contains_key(model_id) {
+            load_models_from_cosmos(&state)
+                .await
+                .map_err(registry_unavailable)?;
+        }
+        let cfg = state
+            .registry
+            .get(model_id)
+            .map(|entry| entry.value().clone());
+        if let Some(cfg) = cfg.filter(|cfg| cfg["type"] == "mock-embedding") {
+            if accepts_binary_embeddings(&headers) {
+                validate_registered_model_request(&TextInput::Batch(req.texts.clone()), &cfg)?;
+                let endpoint = cfg["endpoint"].as_str().ok_or_else(|| {
+                    AppError(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Missing model endpoint".into(),
+                    )
+                })?;
+                let mut upstream = model_http_client(&state, endpoint, false)
+                    .post(format!("{}/embeddings", endpoint.trim_end_matches('/')))
+                    .header(header::ACCEPT, EMBEDDING_BINARY_MEDIA_TYPE)
+                    .json(
+                        &json!({"input": req.texts, "dimensions": cfg["embedding_dim"],
+                        "latency_ms": cfg.get("latency_ms").unwrap_or(&json!(0))}),
+                    )
+                    .send()
+                    .await?;
+                if !upstream.status().is_success() {
+                    let status = upstream.status();
+                    return Err(AppError(
+                        status,
+                        format!("Model service error: {}", upstream.text().await?),
+                    ));
+                }
+                if upstream
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.split(';').next())
+                    != Some(EMBEDDING_BINARY_MEDIA_TYPE)
+                {
+                    return Err(AppError(
+                        StatusCode::BAD_GATEWAY,
+                        "Model did not return requested FP32 transport".into(),
+                    ));
+                }
+                let mut body = Vec::new();
+                while let Some(chunk) = upstream.chunk().await? {
+                    if body.len() + chunk.len() > 4 * 1024 * 1024 + EMBEDDING_BINARY_HEADER_SIZE {
+                        return Err(AppError(
+                            StatusCode::BAD_GATEWAY,
+                            "Model FP32 response exceeds 4 MiB vector limit".into(),
+                        ));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                let dimensions = cfg["embedding_dim"].as_u64().unwrap_or(0) as usize;
+                if body.len() != EMBEDDING_BINARY_HEADER_SIZE + req.texts.len() * dimensions * 4
+                    || body.get(..4) != Some(EMBEDDING_BINARY_MAGIC.as_slice())
+                    || body.get(4..8) != Some(&[1, 0, 0, 0])
+                    || body.get(8..12) != Some((req.texts.len() as u32).to_le_bytes().as_slice())
+                    || body.get(12..16) != Some((dimensions as u32).to_le_bytes().as_slice())
+                {
+                    return Err(AppError(
+                        StatusCode::BAD_GATEWAY,
+                        "Model FP32 response shape mismatch".into(),
+                    ));
+                }
+                return Ok((
+                    [
+                        (header::CONTENT_TYPE, EMBEDDING_BINARY_MEDIA_TYPE),
+                        (header::CONTENT_ENCODING, "identity"),
+                    ],
+                    body,
+                )
+                    .into_response());
+            }
+        }
+    }
+
     if let Some(pipeline) = &req.pipeline {
         if pipeline == "mock-embedding" || pipeline == "mock-1536" {
-            let single = if pipeline == "mock-1536" {
-                &state.mock_1536_single
-            } else {
-                &state.mock_128_single
-            };
-            let n = req.texts.len();
-            let mut buf = String::with_capacity(single.len() * n + 100);
-            buf.push_str(r#"{"outputs":["#);
-            for i in 0..n {
-                if i > 0 {
-                    buf.push(',');
-                }
-                buf.push_str(single);
-            }
-            buf.push_str(r#"],"pipeline":""#);
-            buf.push_str(pipeline);
-            buf.push_str(r#"","batch_size":"#);
-            buf.push_str(&n.to_string());
-            buf.push('}');
-            return Ok(([(header::CONTENT_TYPE, "application/json")], buf).into_response());
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "Built-in mock aliases are retired; use a registered mock model service".into(),
+            ));
         }
 
         // Real pipeline — resolve model_id from pipeline config and batch embed via model
@@ -1605,6 +1813,9 @@ async fn handle_embed_batch(
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                if accepts_binary_embeddings(&headers) {
+                    return binary_embeddings_response(&embeddings, req.texts.len(), model_id);
+                }
                 let outputs: Vec<Value> = embeddings.iter().map(|e| json!([e])).collect();
                 return Ok(Json(json!({
                     "outputs": outputs,
@@ -1631,6 +1842,9 @@ async fn handle_embed_batch(
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        if accepts_binary_embeddings(&headers) {
+            return binary_embeddings_response(&embeddings, req.texts.len(), model_id);
+        }
         let outputs: Vec<Value> = embeddings.iter().map(|e| json!([e])).collect();
         return Ok(Json(json!({
             "outputs": outputs,
@@ -1802,6 +2016,7 @@ async fn list_registry_models(
             "endpoint": cfg["endpoint"].as_str().unwrap_or(""),
             "deployment": cfg["deployment"].as_str().unwrap_or(""),
             "embedding_dim": cfg["embedding_dim"].as_u64().unwrap_or(0),
+            "disable_keepalive": cfg["disable_keepalive"].as_bool().unwrap_or(false),
             "api_version": cfg["api_version"].as_str().unwrap_or(""),
             "max_batch_size": cfg["max_batch_size"].as_u64().unwrap_or(default_model_max_batch_size().into()),
             "context_window_tokens": cfg["context_window_tokens"].as_u64().unwrap_or(default_model_context_window().into()),
@@ -1817,12 +2032,40 @@ async fn register_model(
     State(state): State<AppState>,
     Json(req): Json<RegisterModelRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if req.max_batch_size.is_some_and(|value| !(1..=4096).contains(&value))
-        || req.context_window_tokens.is_some_and(|value| !(1..=2_000_000).contains(&value))
-        || req.max_batch_tokens.is_some_and(|value| !(1..=2_000_000).contains(&value))
+    if req
+        .max_batch_size
+        .is_some_and(|value| !(1..=4096).contains(&value))
+        || req
+            .context_window_tokens
+            .is_some_and(|value| !(1..=2_000_000).contains(&value))
+        || req
+            .max_batch_tokens
+            .is_some_and(|value| !(1..=2_000_000).contains(&value))
     {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            "Model request limits are outside supported ranges".into()));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "Model request limits are outside supported ranges".into(),
+        ));
+    }
+    if req.model_type == "mock-embedding" {
+        if !(1..=65536).contains(&req.embedding_dim)
+            || req
+                .latency_ms
+                .is_some_and(|value| !value.is_finite() || !(0.0..=60000.0).contains(&value))
+        {
+            return Err(AppError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid mock dimensions or latency_ms".into(),
+            ));
+        }
+        if !reqwest::Url::parse(&req.endpoint)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+        {
+            return Err(AppError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Mock model requires an HTTP model-service endpoint".into(),
+            ));
+        }
     }
     let model_id = req.id.unwrap_or_else(|| {
         let hash = format!("{:x}", md5_hash(&req.name));
@@ -1891,6 +2134,18 @@ async fn register_model(
     }
     if let Some(client_id) = req.client_id {
         fields.insert("client_id".into(), json!(client_id));
+    }
+    if let Some(disable_keepalive) = req.disable_keepalive {
+        fields.insert("disable_keepalive".into(), json!(disable_keepalive));
+    }
+    if req.model_type == "mock-embedding" {
+        fields.insert("auth_type".into(), json!("none"));
+        fields.insert("api_key".into(), json!(""));
+        if let Some(latency) = req.latency_ms {
+            fields.insert("latency_ms".into(), json!(latency));
+        } else {
+            fields.entry("latency_ms").or_insert(json!(0));
+        }
     }
 
     // Keep lookup/merge/persist/cache under one lock without recursively calling
@@ -2027,6 +2282,16 @@ async fn healthcheck_model(
             "status": 0,
             "detail": "No endpoint configured"
         })));
+    }
+    if model_type == "mock-embedding" {
+        let response = state
+            .http
+            .get(format!("{endpoint}/health"))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+        return Ok(Json(json!({"ok": response.status().is_success(),
+            "status": response.status().as_u16(), "detail": "Remote synthetic model service", "mock": true})));
     }
 
     let test_url = match model_type.as_str() {
@@ -2637,11 +2902,17 @@ async fn run_model_health_checks(state: &AppState) {
                 _ => endpoint.clone(),
             };
 
-            let mut req = state
-                .http
-                .post(&test_url)
-                .timeout(Duration::from_secs(10))
-                .json(&json!({"input": "health", "model": &deployment}));
+            let mut req = if model_type == "mock-embedding" {
+                state
+                    .http
+                    .get(format!("{}/health", endpoint.trim_end_matches('/')))
+            } else {
+                state
+                    .http
+                    .post(&test_url)
+                    .json(&json!({"input": "health", "model": &deployment}))
+            }
+            .timeout(Duration::from_secs(10));
 
             if model_type == "azure-openai" {
                 if !api_key.is_empty() {
@@ -2972,6 +3243,149 @@ async fn proxy_pipeline_worker(
 mod registry_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn registered_mock_routes_json_binary_and_health_to_a_separate_service() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model_calls = calls.clone();
+        let backend = Router::new()
+            .route(
+                "/health",
+                get(|| async { Json(json!({"implementation": "rust"})) }),
+            )
+            .route(
+                "/embeddings",
+                post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let calls = model_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(body["dimensions"], 4);
+                        assert_eq!(body["latency_ms"].as_f64(), Some(25.0));
+                        assert_eq!(body["input"], json!(["a", "b"]));
+                        if accepts_binary_embeddings(&headers) {
+                            binary_embeddings_response(
+                                &[json!([0.5, 0.5, 0.5, 0.5]), json!([0.5, 0.5, 0.5, 0.5])],
+                                2,
+                                "backend",
+                            )
+                            .unwrap_or_else(|_| panic!("Backend binary failed"))
+                        } else {
+                            Json(json!({"data": [{"embedding": [0.5, 0.5, 0.5, 0.5]},
+                            {"embedding": [0.5, 0.5, 0.5, 0.5]}]}))
+                            .into_response()
+                        }
+                    }
+                }),
+            );
+        let (mut state, server) = test_state(backend).await;
+        let endpoint = state.cosmos.as_ref().unwrap().endpoint.clone();
+        state.cosmos = None;
+        let request: RegisterModelRequest = serde_json::from_value(json!({
+            "id": "mdl-ext-mock", "name": "Mock", "type": "mock-embedding",
+            "endpoint": endpoint, "embedding_dim": 4, "latency_ms": 25,
+            "max_batch_size": 2, "context_window_tokens": 2, "max_batch_tokens": 3,
+        }))
+        .unwrap();
+        register_model(State(state.clone()), Json(request))
+            .await
+            .unwrap_or_else(|_| panic!("Registration failed"));
+        assert_eq!(
+            state.registry.get("mdl-ext-mock").unwrap()["latency_ms"].as_f64(),
+            Some(25.0)
+        );
+        for binary in [false, true] {
+            let mut headers = HeaderMap::new();
+            if binary {
+                headers.insert(header::ACCEPT, EMBEDDING_BINARY_MEDIA_TYPE.parse().unwrap());
+            }
+            let req = EmbedBatchRequest {
+                texts: vec!["a".into(), "b".into()],
+                model_id: Some("mdl-ext-mock".into()),
+                pipeline: None,
+            };
+            let response = handle_embed_batch(State(state.clone()), headers, Json(req))
+                .await
+                .unwrap_or_else(|_| panic!("Routing failed"));
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            if binary {
+                assert_eq!(body.len(), 48);
+                assert_eq!(&body[..4], b"OVEC");
+            } else {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    body["outputs"],
+                    json!([[[0.5, 0.5, 0.5, 0.5]], [[0.5, 0.5, 0.5, 0.5]]])
+                );
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        for binary in [false, true] {
+            for texts in [vec!["a", "b", "c"], vec!["abcdefg"], vec!["abcd", "abcd"]] {
+                let mut headers = HeaderMap::new();
+                if binary {
+                    headers.insert(header::ACCEPT, EMBEDDING_BINARY_MEDIA_TYPE.parse().unwrap());
+                }
+                let req = EmbedBatchRequest {
+                    texts: texts.into_iter().map(String::from).collect(),
+                    model_id: Some("mdl-ext-mock".into()),
+                    pipeline: None,
+                };
+                let error = handle_embed_batch(State(state.clone()), headers, Json(req))
+                    .await
+                    .err()
+                    .expect("Oversized request must be rejected");
+                assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let response = healthcheck_model(State(state), Path("mdl-ext-mock".into()))
+            .await
+            .unwrap_or_else(|_| panic!("Health probe failed"))
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["ok"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn binary_embedding_response_has_versioned_little_endian_shape() {
+        let response =
+            binary_embeddings_response(&[json!([1.0, 2.5]), json!([-3.0, 4.25])], 2, "mdl-test")
+                .unwrap_or_else(|_| panic!("Binary response failed"));
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            EMBEDDING_BINARY_MEDIA_TYPE
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "identity"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[0..4], EMBEDDING_BINARY_MAGIC);
+        assert_eq!(u16::from_le_bytes(body[4..6].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(body[6..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(body[8..12].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(body[12..16].try_into().unwrap()), 2);
+        let values: Vec<f32> = body[16..]
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![1.0, 2.5, -3.0, 4.25]);
+    }
+
+    #[test]
+    fn binary_embedding_response_rejects_inconsistent_dimensions() {
+        let error = binary_embeddings_response(&[json!([1.0, 2.0]), json!([3.0])], 2, "mdl-test")
+            .err()
+            .unwrap();
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+    }
 
     fn registration_request(key: Option<&str>) -> RegisterModelRequest {
         let mut request = json!({
@@ -3312,6 +3726,12 @@ mod registry_tests {
                     .unwrap(),
                 native_endpoint_counter: Arc::new(AtomicUsize::new(0)),
                 native_max_attempts: 3,
+                unpooled_model_http: Client::builder()
+                    .pool_max_idle_per_host(0)
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+                unpooled_model_hosts: Arc::new(HashSet::new()),
                 k8s: None,
                 namespace: "test".into(),
                 cosmos: Some(CosmosConfig {
@@ -3320,8 +3740,6 @@ mod registry_tests {
                     container: "metadata".into(),
                     api_key: String::new(),
                 }),
-                mock_1536_single: Arc::new(String::new()),
-                mock_128_single: Arc::new(String::new()),
                 controller_url: endpoint.clone(),
                 pipeline_worker_url: endpoint,
                 model_health: Arc::new(DashMap::new()),
@@ -3350,10 +3768,16 @@ mod registry_tests {
                 }
             }));
         let (mut state, server) = test_state(app).await;
-        state.native_urls = Arc::new(HashMap::from([
-            ("bge-small".into(), state.controller_url.clone()),
-        ]));
-        let result = call_model(&state, "mdl-native-bge-small", TextInput::Batch(vec!["hello".into()])).await;
+        state.native_urls = Arc::new(HashMap::from([(
+            "bge-small".into(),
+            state.controller_url.clone(),
+        )]));
+        let result = call_model(
+            &state,
+            "mdl-native-bge-small",
+            TextInput::Batch(vec!["hello".into()]),
+        )
+        .await;
         let error = result.err().expect("Expected preserved context error");
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert!(error.1.contains("context_length_exceeded"));
@@ -3373,12 +3797,20 @@ mod registry_tests {
             }
         });
         let (mut state, server) = test_state(app).await;
-        state.native_urls = Arc::new(HashMap::from([
-            ("bge-small".into(), state.controller_url.clone()),
-        ]));
-        let result = call_model(&state, "mdl-native-bge-small",
-            TextInput::Batch(vec!["one".into(), "two".into()])).await;
-        assert_eq!(result.err().expect("Expected unavailable model").0, StatusCode::SERVICE_UNAVAILABLE);
+        state.native_urls = Arc::new(HashMap::from([(
+            "bge-small".into(),
+            state.controller_url.clone(),
+        )]));
+        let result = call_model(
+            &state,
+            "mdl-native-bge-small",
+            TextInput::Batch(vec!["one".into(), "two".into()]),
+        )
+        .await;
+        assert_eq!(
+            result.err().expect("Expected unavailable model").0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(calls.load(Ordering::SeqCst), state.native_max_attempts);
         server.abort();
     }

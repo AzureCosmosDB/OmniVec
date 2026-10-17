@@ -7,6 +7,14 @@ const { icon, esc, nameLabel, fmt, ago, plural, api, need, invalidate, D, M, T, 
 const F = (k, label, o = {}) => ({ k, label, ...o });
 const FORMS = {
   source: {
+    'mock': { blurb:'Synthetic benchmark documents. No external data source.', fields:[
+      F('document_count','Document count',{type:'number',def:100000,req:1}),
+      F('document_size_bytes','Document size (bytes)',{type:'number',def:8,req:1}),
+      F('documents_per_second','Generation rate (documents/second)',{type:'number',def:0,hint:'0 = unlimited'}),
+      F('batch_size','Batch size',{type:'number',def:50}),
+      F('embedding_transport','Embedding response transport',{type:'select',opts:['json','fp32'],def:'json',hint:'FP32 transmits full binary vectors without the JSON conversion round trip.'}),
+      F('runner_shard','Runner shard',{type:'number',def:0,adv:1,hint:'Requires a deployed benchmark runner with the same shard index.'}),
+      F('seed','Content seed',{type:'number',def:0,adv:1}) ] },
     'cosmosdb': { blurb:'Operational JSON documents. Changes stream in through the change feed.', fields:[
       F('endpoint','Account endpoint',{ req:1, ph:'https://<account>.documents.azure.com:443/' }), F('database','Database',{ req:1 }), F('container','Container',{ req:1 }),
       F('query','Initial query',{ def:'SELECT * FROM c', adv:1, hint:'Used for the first backfill. Later changes come from the change feed.' }) ], extra:{ use_change_feed:true } },
@@ -22,6 +30,18 @@ const FORMS = {
       F('host','Host',{ req:1, ph:'<server>.postgres.database.azure.com' }), F('port','Port',{ type:'number', def:5432 }), F('database','Database',{ req:1 }), F('table','Table',{ req:1, ph:'public.documents' }),
       F('id_column','ID column',{ def:'id' }), F('timestamp_column','Updated-at column',{ def:'updated_at' }), F('user','User',{ req:1 }), F('password','Password',{ type:'password' }),
       F('ssl_mode','SSL mode',{ type:'select', opts:['require','verify-full','prefer','disable'], def:'require', adv:1 }), F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:60, adv:1 }) ] },
+    'garnet': { blurb:'Versioned JSON records in a Garnet HASH, polled into a separate Garnet vector set.', fields:[
+      F('endpoint','Endpoint',{ req:1, ph:'garnet.omnivec.svc.cluster.local:6379' }),
+      F('hash_key','Source HASH key',{ req:1, ph:'documents', hint:'HASH field names are stable source references. Reserve the __omnivec:source-checkpoints: namespace.' }),
+      F('tls','TLS',{ type:'select', opts:['true','false'], def:'true', adv:1 }),
+      F('use_entra_auth','Microsoft Entra auth',{ type:'select', opts:['false','true'], def:'false', adv:1 }),
+      F('username','Username',{ adv:1 }), F('password_secret_ref','Password secret reference',{ ph:'kv://<vault>/<secret>', adv:1 }),
+      F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:10, adv:1 }),
+      F('scan_page_size','HSCAN page size',{ type:'number', def:500, adv:1 }),
+      F('batch_size','Embedding batch size (max 50)',{ type:'number', def:50, adv:1 }) ],
+      build: v => ({ endpoint:v.endpoint, hash_key:v.hash_key, tls:String(v.tls)!=='false', use_entra_auth:String(v.use_entra_auth)==='true',
+        username:v.username||undefined, password_secret_ref:v.password_secret_ref||undefined,
+        poll_interval_seconds:+v.poll_interval_seconds||10, scan_page_size:+v.scan_page_size||500, batch_size:+v.batch_size||50 }) },
     'onelake-iceberg': { blurb:'Apache Iceberg tables in a Microsoft Fabric lakehouse.', fields:[
       F('warehouse','Workspace / lakehouse',{ req:1, ph:'<workspace-id>/<lakehouse-id>' }), F('namespace','Namespace',{ def:'dbo' }), F('table','Table',{ req:1 }),
       F('content_fields','Content fields',{ type:'tags', def:['content'] }), F('id_field','ID field',{ def:'id' }), F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:60, adv:1 }) ] },
@@ -35,6 +55,11 @@ const FORMS = {
       build: v => ({ benchmark_only:true, document_count:+v.document_count||10000, message_size_bytes:+v.message_size_bytes||1024, docs_per_second:Number(v.docs_per_second), content_pattern:v.content_pattern||'deterministic', mock_embedding:String(v.mock_embedding)==='true', mock_embedding_dimensions:+v.mock_embedding_dimensions||384 }) },
   },
   destination: {
+    'mock': { blurb:'Receives and validates full vector payloads, then discards them. No vector storage.', fields:[
+      F('embedding_dimensions','Expected embedding dimensions',{type:'number',def:1024,req:1}),
+      F('accepted_documents_per_second','Acceptance rate (documents/second)',{type:'number',def:0,hint:'0 = unlimited. Exceeding the rate returns HTTP 429; the pipeline retries.'}),
+      F('burst_documents','Burst capacity (documents)',{type:'number',def:2048,hint:'Must be at least the source batch size.'}),
+      F('receiver_shard','Receiver shard',{type:'number',def:0,adv:1,hint:'Each destination routes to exactly one deployed receiver, preserving its rate budget and deduplication.'}) ] },
     'cosmosdb-vector': { blurb:'Vectors stored next to your data with DiskANN or quantized flat indexes.', fields:[
       F('endpoint','Account endpoint',{ req:1, ph:'https://<account>.documents.azure.com:443/' }), F('database','Database',{ req:1 }), F('container','Container',{ req:1, hint:'Must have a vector embedding policy and vector index.' }) ], extra:{ auth_type:'managed-identity' } },
     'pgvector': { blurb:'PostgreSQL with the pgvector extension (HNSW or IVFFlat).', fields:[
@@ -70,7 +95,7 @@ const listOf = kind => kind==='source' ? M.sources : M.dests;
 const healthOf = (kind, id) => (kind==='source' ? M.hs : M.hd)[id];
 const hdot = h => dot(!h ? '' : h.status==='healthy' ? 'ok' : h.status==='warning' ? 'warn' : 'err');
 const keyInfo = (x) => { const c = x.config||{};
-  return x.type==='azure-blob' ? `${c.container||'—'}${c.prefix?' / '+c.prefix:''}` : x.type==='sharepoint' ? (c.folder_path||'Document library') : x.type==='onelake-iceberg' ? (c.table||c.target_table||'—') : x.type==='garnet' ? `${c.endpoint||'—'} / ${c.vector_set||'omnivec-vectors'}`
+  return x.type==='azure-blob' ? `${c.container||'—'}${c.prefix?' / '+c.prefix:''}` : x.type==='sharepoint' ? (c.folder_path||'Document library') : x.type==='onelake-iceberg' ? (c.table||c.target_table||'—') : x.type==='garnet' ? `${c.endpoint||'—'} / ${c.hash_key||c.vector_set||'omnivec-vectors'}`
     : c.container ? `${c.database||''} / ${c.container}` : c.table ? `${c.database||''} / ${c.table}` : '—'; };
 
 /* ---------- list ---------- */
@@ -99,7 +124,7 @@ route('connections', { needs:[...X.CORE, 'caps'], render(parts) {
        <td class="r"><button class="btn ghost sm icon" data-rm="${x.id}">${icon('more','sm')}</button></td></tr>`; }).join('')}</tbody></table>`
     : empty('search', 'No matches', 'Try another filter.');
   const firstRun = !list.length;
-  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','onelake-iceberg','mssql','synthetic'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
+  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','garnet','onelake-iceberg','mssql','synthetic'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
     .map(t => `<a class="opt" href="#/connections/new/${path}?type=${t}">${logo(t)}<div><div class="t">${esc(T(t).label)}</div><div class="d">Guided setup with a permissions check</div></div></a>`).join('');
   const html = `<div class="page">
    <div class="ph"><div><h1>Connections</h1><p>Sources are where content comes from. Vector stores are where embeddings are written and searched. Each can be reused by many pipelines.</p></div>
@@ -205,7 +230,7 @@ function addPage(kind, editId) {
   const noun = kind==='source' ? 'source' : 'vector store';
   const existing = editId ? (kind==='source' ? M.SRC : M.DST)[editId] : null;
   const caps = (D.caps || {}).allowed_source_types;
-  const types = Object.keys(FORMS[kind]).filter(t => kind!=='source' || !caps || caps.includes(t));
+  const types = Object.keys(FORMS[kind]).filter(t => (t!=='mock' || D.caps?.mock_enabled) && (kind!=='source' || !caps || caps.includes(t)));
   const qp = X.query(); const then = qp.get('then'); const qType = qp.get('type');
   const st = { type: existing ? existing.type : types.find(t => t === qType) || null, tested:null, perm:null };
   const html = `<div class="page"><div class="ph"><div><h1>${existing ? 'Edit '+esc(existing.name) : 'Add '+noun}</h1><p>${kind==='source' ? 'Connect where your content lives. OmniVec reads it with its managed identity, so no keys are stored for Azure services.' : 'Choose where embeddings are written. Pipelines can share one vector store.'}</p></div></div>
@@ -242,9 +267,14 @@ function addPage(kind, editId) {
         <div class="inline-err" id="aerr"></div>
         <div class="row sp"><a class="btn" href="${existing ? `#/connections/${kind==='source'?'source':'store'}/${existing.id}` : '#/connections'}">Cancel</a><button class="btn pri" id="asave">${existing ? 'Save changes' : 'Create '+noun}</button></div>` : ''}`;
       if (st.type) {
+        if (st.type==='mock') {
+          $('#aguide', v).innerHTML = '<div class="callout warn">Benchmark only. Synthetic documents and vectors are not searchable or persisted. Actual embedding payloads are transmitted to the mock sink.</div>';
+          $('#aperm', v).innerHTML = '<div class="muted">No external resource permissions required.</div>';
+        } else {
         $('#aguide', v).innerHTML = X.perm.guideHtml(kind, st.type, config(), {});
-        X.perm.identity().then(id => { if (v.isConnected && st.type) $('#aguide', v).innerHTML = X.perm.guideHtml(kind, st.type, config(), id); });
+        X.perm.identity().then(id => { const guide = $('#aguide', v); if (guide && v.isConnected && st.type && st.type!=='mock') guide.innerHTML = X.perm.guideHtml(kind, st.type, config(), id); });
         X.perm.permAssistant($('#aperm', v), { kind, type:st.type, getConfig:config, noGuide:true, onResult:r => { st.perm = r; drawChecks(); } });
+        }
       }
       drawChecks(); bind();
     };
@@ -252,7 +282,12 @@ function addPage(kind, editId) {
       $$('[data-type]', v).forEach(o => o.onclick = () => { st.type = o.dataset.type; st.tested = null; st.perm = null; draw(); });
       $$('.tagbox', v).forEach(tb => { const inp = $('input', tb); tb.onclick = e => { const b = e.target.closest('[data-tag]'); if (b) { b.remove(); drawChecks(); } else inp.focus(); };
         inp.onkeydown = e => { if ((e.key==='Enter' || e.key===',') && inp.value.trim()) { e.preventDefault(); const t = inp.value.trim().replace(/^\./,''); inp.insertAdjacentHTML('beforebegin', `<span class="badge acc" data-tag="${esc(t)}">${esc(t)} ${icon('x','sm')}</span>`); inp.value = ''; } }; });
-      const form = $('#aform', v); form.oninput = () => { st.tested = null; drawChecks(); clearTimeout(form._t); form._t = setTimeout(() => { if (st.type) X.perm.identity().then(id => $('#aguide', v).innerHTML = X.perm.guideHtml(kind, st.type, config(), id)); }, 400); };
+      const form = $('#aform', v); form.oninput = () => { st.tested = null; drawChecks(); clearTimeout(form._t); form._t = setTimeout(() => {
+        if (st.type && st.type!=='mock' && form.isConnected) X.perm.identity().then(id => {
+          const guide = $('#aguide', v);
+          if (guide && form.isConnected && st.type && st.type!=='mock') guide.innerHTML = X.perm.guideHtml(kind, st.type, config(), id);
+        });
+      }, 400); };
       const tb = $('#atest', v); if (tb) tb.onclick = async () => { tb.disabled = true; tb.innerHTML = spinner('Testing…'); const out = $('#atestout', v);
         try { const body = { type:st.type, config:config() }; if (existing) body[kind==='source'?'source_id':'destination_id'] = existing.id;
           const r = await api(`/api/${kind==='source'?'sources':'destinations'}/test-connection`, { method:'POST', body }); st.tested = r.success !== false;

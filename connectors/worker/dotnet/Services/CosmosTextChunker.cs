@@ -20,8 +20,9 @@ internal static class CosmosTextChunker
     internal static void Validate(TextChunkConfig config)
     {
         if (config.Size < 100 || config.Overlap < 0 || config.Overlap >= config.Size
-            || config.Unit is not ("chars" or "tokens") || config.Extra?.Count > 0)
-            throw new ArgumentException("Invalid Cosmos chunk config: size >= 100, 0 <= overlap < size, unit chars/tokens; no unknown options");
+            || config.Unit is not ("chars" or "tokens")
+            || config.CleanupOrder is not ("insert-first" or "delete-first") || config.Extra?.Count > 0)
+            throw new ArgumentException("Invalid Cosmos chunk config: size >= 100, 0 <= overlap < size, unit chars/tokens, cleanup_order insert-first/delete-first; no unknown options");
         if (string.IsNullOrWhiteSpace(config.TextField) || config.TextField.Contains('/')
             || Reserved.Contains(config.TextField) || config.TextField.StartsWith('_'))
             throw new ArgumentException("Chunk text_field conflicts with Cosmos metadata");

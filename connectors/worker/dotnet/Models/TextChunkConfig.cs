@@ -10,6 +10,8 @@ public sealed class TextChunkConfig
     public int Overlap { get; set; } = 200;
     [JsonPropertyName("chunk_unit")]
     public string Unit { get; set; } = "chars";
+    [JsonPropertyName("cleanup_order")]
+    public string CleanupOrder { get; set; } = "insert-first";
     [JsonPropertyName("store_text")]
     public bool StoreText { get; set; }
     [JsonPropertyName("text_field")]

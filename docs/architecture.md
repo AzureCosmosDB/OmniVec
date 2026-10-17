@@ -99,6 +99,18 @@ Cosmos patch-feedback detection uses content hash, pipeline identity, and reset
 metadata. An existing embedding timestamp alone does not mean changed content
 can be skipped.
 
+Inline Cosmos requests contain at most 50 texts and 2 MiB of serialized JSON,
+with bounded parallel model calls (2 external or 8 native by default). All
+required PATCH writes must succeed before advancing the feed checkpoint.
+`ChangeFeed__InlinePatchConcurrency` is per feed range: `0` chooses the default;
+explicit values accept 1-256. Same-partition transactions contain at most 100
+operations, and throttled writes honor Retry-After.
+
+Native Garnet sources also use inline processing, but write to a separate vector
+set on the same endpoint rather than overwriting the source HASH. Versioned
+documents and explicit tombstones drive polling convergence. Isolated mock
+sources use their own inline HTTP runner and discard-only sink.
+
 ### Connector-specific paths
 
 | Source/path | Change tracking and important boundary |
@@ -112,6 +124,8 @@ can be skipped.
 | OneLake | Iceberg scans; optional separate long-running Spark CDF publisher for live changes |
 | OneLake write-back | Worker stages embeddings durably; a separate Fabric Spark MERGE updates existing source rows asynchronously |
 | Synthetic | Explicit benchmark publication, not a continuously watched customer store |
+| Garnet HASH | Polls versioned JSON records; source checkpoints advance after version-fenced vector writes |
+| Isolated mock | Separate source/model/sink services; inline HTTP benchmark, no vector persistence |
 
 SharePoint requires queue mode and a Cosmos vector container with a dedicated
 document partition key, such as `/document_id`. OneLake write-back is restricted
@@ -124,6 +138,9 @@ contracts for their additional permissions and ordering behavior.
 Control-plane records use the Cosmos `metadata` container, partitioned by
 `/doc_type`. Sources, destinations, pipelines, models, auth records, and other
 control entities are distinct from customer vector data.
+
+API `/health` reports liveness; `/ready` checks metadata storage and returns 503
+when it is unavailable. Liveness alone does not establish pipeline readiness.
 
 The ingestion service uses preprovisioned shared containers:
 

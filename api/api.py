@@ -5,6 +5,7 @@ import os
 import json  # lgtm[py/unused-import]
 import uuid
 import time
+import math
 import asyncio
 import logging
 import hashlib
@@ -14,6 +15,8 @@ import httpx
 from azure.core.exceptions import AzureError
 import concurrent.futures
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
+import batch_metrics
 from typing import Optional, List, Dict, Any, Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # lgtm[py/unused-import]
@@ -27,6 +30,7 @@ try:
         init_telemetry, metrics_store,
         record_embedding_batch, record_search, record_error,
         record_request, record_failure,
+        record_worker_batch, reset_pipeline_metrics,
         track_metric, track_histogram, track_event, Timer,
     )
     init_telemetry()
@@ -41,6 +45,10 @@ except ImportError:
     def record_request(**kw): pass
     def record_failure(**kw): pass
     metrics_store = None  # lgtm[py/unused-global-variable]
+    def record_worker_batch(*args, **kwargs):
+        raise RuntimeError("Telemetry module is unavailable")
+    def reset_pipeline_metrics(pipeline_id):
+        logger.warning("Telemetry module unavailable while resetting pipeline %s", pipeline_id)
     class Timer:
         def __init__(self, *a, **kw): pass
         def __enter__(self): return self
@@ -54,13 +62,17 @@ from models import (  # lgtm[py/unused-import]
     SyncSourceRequest, SyntheticGenerateRequest, PipelineRunStats,
     PipelineStatus, SourceType,
     ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
-    CosmosDBSourceConfig, GarnetDestinationConfig, OneLakeIcebergSourceConfig,
+    CosmosDBSourceConfig, GarnetSourceConfig, GarnetDestinationConfig, OneLakeIcebergSourceConfig,
     OneLakeIcebergDestinationConfig,
     SharePointSourceConfig, SyntheticSourceConfig,
 )
 from synthetic_source import build_synthetic_message, publish_synthetic_messages
 from omnivec_queue import QUEUE_POLICY_FIELDS
 from store import init_store, get_store
+from readiness import StorageReadiness
+from garnet_endpoint import garnet_endpoint_identity
+from mock_configs import MockSourceConfig, MockSinkConfig, MockEmbeddingConfig
+import hashlib
 from security_utils import safe_agent_segment, safe_url_segment, validate_outbound_url, validate_sql_identifier  # lgtm[py/unused-import]
 from urllib.parse import quote as _urlquote  # noqa: F401 — kept for downstream callers
 
@@ -103,7 +115,7 @@ logging.getLogger("azure").setLevel(logging.WARNING)
 
 _DEBUG = os.getenv("OMNIVEC_DEBUG", "").lower() in ("true", "1")
 app = FastAPI(
-    title="OmniVec", version="1.0.0", description="Universal Vector Ingestion Platform",
+    title="OmniVec", version="2.0.0", description="Universal Vector Ingestion Platform",
     docs_url="/docs" if _DEBUG else None,
     redoc_url="/redoc" if _DEBUG else None,
     openapi_url="/openapi.json" if _DEBUG else None,
@@ -120,6 +132,7 @@ _cloud_deployment_task = None
 # Paths that don't require authentication
 AUTH_SKIP_PATHS = {
     "/health",
+    "/ready",
     "/health/",
     "/openapi.json",
     "/docs",
@@ -1034,6 +1047,12 @@ def _require_blob_source_enabled(kind: str) -> None:
 
 # HTTP Client
 http_client: Optional[httpx.AsyncClient] = None
+storage_readiness = StorageReadiness(lambda: get_store().check_readiness())
+
+
+def _require_mock_enabled():
+    if os.getenv("OMNIVEC_MOCK_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=422, detail="Mock benchmark components are disabled in this deployment")
 
 
 @app.on_event("startup")
@@ -1046,10 +1065,13 @@ async def startup():
     EVENT_QUEUE = asyncio.Queue()
     # Initialize CosmosDB store
     try:
-        init_store()
+        await asyncio.to_thread(init_store)
         print("OmniVec API started - CosmosDB store initialized")
-    except Exception as e:
-        print(f"WARNING: CosmosDB store init failed ({e}). API will fail on data operations.")
+    except Exception:
+        logger.exception("Metadata store initialization failed; refusing API startup")
+        await http_client.aclose()
+        http_client = None
+        raise
     # Start the event processor worker
     asyncio.create_task(event_processor_worker())
     _cloud_deployment_task = asyncio.create_task(deployment_worker(get_store))
@@ -1100,7 +1122,14 @@ async def serve_ui():
 @app.get("/health")
 async def health():
     """Lightweight health check for K8s probes â€” no external calls."""
-    return {"status": "healthy", "service": "OmniVec", "version": "1.0.0"}
+    return {"status": "healthy", "service": "OmniVec", "version": "2.0.0"}
+
+
+@app.get("/ready", responses={503: {"description": "Metadata storage unavailable"}})
+async def ready():
+    if not await storage_readiness.ready():
+        return JSONResponse(status_code=503, content={"status": "not_ready", "service": "OmniVec"})
+    return {"status": "ready", "service": "OmniVec"}
 
 
 @app.get("/api/capabilities")
@@ -1109,11 +1138,15 @@ async def get_capabilities():
     that require infra we didn't provision (e.g. blob source / queue mode)."""
     implemented_source_types = [
         "cosmosdb", "postgresql", "mssql", "databricks",
-        "onelake-iceberg", "sharepoint",
+        "onelake-iceberg", "sharepoint", "garnet",
     ]
     if _BLOB_SOURCE_ENABLED:
         implemented_source_types.insert(0, "azure-blob")
+    mock_enabled = os.getenv("OMNIVEC_MOCK_ENABLED", "false").lower() == "true"
+    if mock_enabled:
+        implemented_source_types.append("mock")
     return {
+        "mock_enabled": mock_enabled,
         "blob_source_enabled": _BLOB_SOURCE_ENABLED,
         "queue_mode_enabled": _BLOB_SOURCE_ENABLED,  # queue mode needs Service Bus (bundled with blob)
         "agent_enabled": bool(os.getenv("AGENT_URL", "").strip()),
@@ -1123,6 +1156,19 @@ async def get_capabilities():
             ["queue", "inline"] if _BLOB_SOURCE_ENABLED else ["inline"]
         ),
     }
+
+
+@app.get("/api/pipelines/{pipeline_id}/mock-run")
+async def mock_pipeline_run(pipeline_id: str):
+    store = get_store()
+    pipeline = await asyncio.to_thread(store.get, pipeline_id, "pipeline")
+    if not pipeline:
+        raise HTTPException(404, "Pipeline not found")
+    generation = str(pipeline.get("reset_at") or "initial")
+    rid = "mock-" + hashlib.sha256(f"{pipeline_id}:{generation}".encode()).hexdigest()[:32]
+    run = await asyncio.to_thread(store.get, rid, "mock_run")
+    return {k: v for k, v in (run or {"status": "pending"}).items()
+            if not k.startswith("_") and k not in ("owner", "lease_until")}
 
 
 # =============================================================================
@@ -1489,9 +1535,9 @@ async def get_stats():
         docgrok_status = f"error: {str(e)}"
 
     store = get_store()
-    runtime_metrics = await get_metrics()
-    events_processed = runtime_metrics.get("events_processed", 0)
-    events_failed = runtime_metrics.get("events_failed", 0)
+    telemetry = await get_metrics()
+    events_processed = telemetry.get("events_processed")
+    events_failed = telemetry.get("events_failed")
 
     def _count(doc_type):
         result = store.query(
@@ -1511,7 +1557,7 @@ async def get_stats():
     return {  # lgtm[py/stack-trace-exposure]
         "status": "healthy",
         "service": "OmniVec",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docgrok": docgrok_status,
         "stats": {
             "sources": src_count,
@@ -1519,6 +1565,8 @@ async def get_stats():
             "pipelines": pip_count,
             "events_processed": events_processed,
             "events_failed": events_failed,
+            "telemetry_source": telemetry.get("source"),
+            "telemetry_coverage": telemetry.get("coverage"),
             "jobs": job_stats.model_dump()
         }
     }
@@ -1598,10 +1646,13 @@ def _run_kql(kql: str, timespan=None):
         from azure.monitor.query import LogsQueryStatus
         if "customMetrics" in kql:
             kql = _APPMETRICS_AS_CUSTOM_METRICS + kql
+        if "embeddingBatches" in kql:
+            kql = batch_metrics.BATCHES_KQL + kql
         resp = client.query_workspace(ws_id, kql, timespan=timespan)
         if resp.status == LogsQueryStatus.SUCCESS and resp.tables:
             return [[_kql_cell(c) for c in row] for row in resp.tables[0].rows]
-        return []
+        logger.warning("Log Analytics returned incomplete metrics query results")
+        return None
     except Exception as e:
         logger.warning(f"KQL query failed: {e}")
         return None
@@ -1664,18 +1715,7 @@ async def get_metrics():
     rows = await asyncio.to_thread(_run_kql, kql, timedelta(days=7))
 
     if rows is None:
-        return {
-            "events_processed": 0,
-            "events_failed": 0,
-            "avg_processing_time_ms": None,
-            "throughput_docs_per_sec": 0,
-            "search_queries": 0,
-            "latency": {"embedding": {}, "search": {}, "request": {}},
-            "tokens": {"total": 0},
-            "skipped": {"total": 0},
-            "errors": {"total": 0},
-            "source": "unavailable",
-        }
+        return _local_metrics_response()
 
     m = {}
     for row in rows:
@@ -1684,7 +1724,7 @@ async def get_metrics():
 
     throughput_1m = m.get("throughput_1m", 0)
 
-    return {
+    result = {
         "events_processed": int(m.get("embedded", 0)),
         "events_failed": int(m.get("failed", 0)),
         "avg_processing_time_ms": round(m.get("embed_lat_avg", 0), 1) if m.get("embed_lat_cnt", 0) > 0 else None,
@@ -1700,6 +1740,56 @@ async def get_metrics():
         "errors": {"total": int(m.get("errors", 0))},
         "source": "app_insights",
     }
+    summary = await asyncio.to_thread(batch_metrics.pipeline_summary, _run_kql)
+    if summary is not None:
+        result["events_processed"] = sum(int(p.get("processed") or 0) for p in summary.values())
+        result["events_failed"] = sum(int(p.get("failed") or 0) for p in summary.values())
+        result["throughput_docs_per_sec"] = round(
+            sum(int(p.get("recent_processed") or 0) for p in summary.values()) / 60, 2)
+        result["coverage"] = "deduplicated_worker_batches_last_7_days"
+    else:
+        result["coverage"] = "worker_batch_telemetry_unavailable"
+        result["events_processed"] = None
+        result["events_failed"] = None
+        result["throughput_docs_per_sec"] = None
+    return result
+
+
+def _local_metrics_response():
+    snapshot = metrics_store.snapshot() if metrics_store is not None else {}
+    return {
+        "events_processed": snapshot.get("documents_embedded", 0),
+        "events_failed": snapshot.get("documents_failed", 0),
+        "avg_processing_time_ms": snapshot.get("embedding_latency", {}).get("avg"),
+        "throughput_docs_per_sec": snapshot.get("throughput_docs_per_sec", 0),
+        "search_queries": snapshot.get("search_queries", 0),
+        "latency": {"embedding": snapshot.get("embedding_latency", {}),
+                    "search": snapshot.get("search_latency", {}),
+                    "request": snapshot.get("request_latency", {})},
+        "tokens": snapshot.get("tokens", {"total": 0}),
+        "skipped": snapshot.get("skipped", {"total": 0}),
+        "errors": {"total": snapshot.get("documents_failed", 0)},
+        "source": "in_memory" if snapshot else "unavailable",
+        "coverage": "process_local_since_restart",
+        "warning": "Historical telemetry unavailable; these are not cluster-wide totals.",
+    }
+
+
+def _reported_pipeline_metrics(pipeline_id, reset_at=None):
+    summaries = batch_metrics.pipeline_summary(_run_kql, pipeline_id, reset_at)
+    if summaries is not None:
+        return summaries.get(pipeline_id, {}), "app_insights"
+    snapshot = metrics_store.snapshot() if metrics_store is not None else {}
+    scope = snapshot.get("pipelines", {}).get(pipeline_id, {})
+    if reset_at:
+        # A different API replica cannot isolate its local counters by reset epoch.
+        # Do not present old process-local totals as the new generation's progress.
+        scope = {}
+    return {
+        **scope, "processed": scope.get("embedded", 0),
+        "updated_at": scope.get("last_activity_at"),
+        "recent_processed": 0,
+    }, "in_memory"
 
 
 @app.get("/api/metrics/live")
@@ -1745,94 +1835,9 @@ def _deployed_worker_concurrency() -> Optional[int]:
         return None
 
 
-_app_insights_pipeline_cache: dict = {}
-_APP_INSIGHTS_PIPELINE_CACHE_TTL = 15.0
-
-
-def _get_app_insights_pipeline_metrics(
-    pipeline_id: str, start_at=None,
-) -> dict:
-    """Read durable per-pipeline runtime telemetry from Application Insights."""
-    if len(pipeline_id) > 128 or any(
-        not (character.isalnum() or character in "-_.:")
-        for character in pipeline_id
-    ):
-        return {}
-
-    if start_at is None:
-        start_dt = datetime.utcnow() - timedelta(days=30)
-    elif isinstance(start_at, datetime):
-        start_dt = start_at.replace(tzinfo=None)
-    else:
-        try:
-            start_dt = datetime.fromisoformat(
-                str(start_at).replace("Z", "+00:00"),
-            ).replace(tzinfo=None)
-        except ValueError:
-            start_dt = datetime.utcnow() - timedelta(days=30)
-
-    cache_key = (pipeline_id, start_dt.isoformat())
-    cached = _app_insights_pipeline_cache.get(cache_key)
-    now_ts = time.time()
-    if cached and now_ts - cached[1] < _APP_INSIGHTS_PIPELINE_CACHE_TTL:
-        return cached[0]
-
-    kql = f"""
-    customMetrics
-    | where tostring(customDimensions.pipeline_id) == '{pipeline_id}'
-    | where name in (
-        'omnivec.documents.embedded', 'omnivec.documents.failed',
-        'omnivec.pipeline.requests', 'omnivec.pipeline.processing_time',
-        'omnivec.tokens.used', 'omnivec.pipeline.input_bytes',
-        'omnivec.model.retries', 'omnivec.model.throttles',
-        'omnivec.queue.wait')
-    | summarize
-        processed = sumif(valueSum, name == 'omnivec.documents.embedded'),
-        failed = sumif(valueSum, name == 'omnivec.documents.failed'),
-        requests = sumif(valueSum, name == 'omnivec.pipeline.requests'),
-        total_time_ms = sumif(valueSum, name == 'omnivec.pipeline.processing_time'),
-        tokens = sumif(valueSum, name == 'omnivec.tokens.used'),
-        input_bytes = sumif(valueSum, name == 'omnivec.pipeline.input_bytes'),
-        retries = sumif(valueSum, name == 'omnivec.model.retries'),
-        throttles = sumif(valueSum, name == 'omnivec.model.throttles'),
-        queue_wait_ms = sumif(valueSum, name == 'omnivec.queue.wait'),
-        recent_processed = sumif(
-            valueSum,
-            name == 'omnivec.documents.embedded' and timestamp > ago(1m)),
-        last_seen = max(timestamp)
-    """
-    rows = _run_kql(kql, (start_dt, datetime.utcnow()))
-    if not rows:
-        result = {}
-    else:
-        row = rows[0]
-        result = {
-            "processed": max(0, int(row[0] or 0)),
-            "failed": max(0, int(row[1] or 0)),
-            "requests": max(0, int(row[2] or 0)),
-            "total_time_ms": max(0.0, float(row[3] or 0)),
-            "tokens": max(0, int(row[4] or 0)),
-            "input_bytes": max(0, int(row[5] or 0)),
-            "retries": max(0, int(row[6] or 0)),
-            "throttles": max(0, int(row[7] or 0)),
-            "queue_wait_ms": max(0.0, float(row[8] or 0)),
-            "recent_processed": max(0, int(row[9] or 0)),
-            "last_seen": row[10],
-            "recent": [],
-        }
-        if result["processed"] and result["total_time_ms"]:
-            result["recent"] = [{
-                "n": result["processed"],
-                "latency_ms": result["total_time_ms"],
-            }]
-
-    _app_insights_pipeline_cache[cache_key] = (result, now_ts)
-    return result
-
-
 @app.get("/api/operations/resource-insights")
 def get_resource_insights():
-    """Recommend operator-adjustable fairness settings from durable telemetry."""
+    """Recommend operator-adjustable fairness settings from exported worker batches."""
     store = get_store()
     pipelines = [_pipeline_from_doc(doc) for doc in store.list("pipeline")]
     active = [p for p in pipelines if p.status == PipelineStatus.ACTIVE]
@@ -1847,9 +1852,7 @@ def get_resource_insights():
     rows = []
     for pipeline in sorted(active, key=lambda p: p.name.lower()):
         policy = pipeline.resource_policy
-        observed = _get_app_insights_pipeline_metrics(
-            pipeline.id, pipeline.reset_at,
-        )
+        observed, telemetry_source = _reported_pipeline_metrics(pipeline.id, pipeline.reset_at)
         requests = max(0, int(observed.get("requests", 0)))
         processed = max(0, int(observed.get("processed", 0)))
         failed = max(0, int(observed.get("failed", 0)))
@@ -1944,6 +1947,8 @@ def get_resource_insights():
             * class_factor[policy.workload_class]
         )
         rows.append({
+            "telemetry_source": telemetry_source,
+            "coverage": "last_7_days_since_reset" if telemetry_source == "app_insights" else "process_local_since_restart",
             "pipeline_id": pipeline.id,
             "pipeline_name": pipeline.name,
             "model_id": pipeline.docgrok_pipeline,
@@ -2090,9 +2095,10 @@ async def get_changefeed_metrics():
     if rows is None or not rows:
         return {"total_eligible": 0, "total_failed": 0, "total_skipped": 0, "total_jobs_created": 0, "source": "unavailable"}
     row = rows[0]
+    summary = await asyncio.to_thread(batch_metrics.pipeline_summary, _run_kql)
     return {
-        "total_eligible": int(row[0] or 0),
-        "total_failed": int(row[1] or 0),
+        "total_eligible": sum(int(p.get("processed") or 0) for p in summary.values()) if summary is not None else None,
+        "total_failed": sum(int(p.get("failed") or 0) for p in summary.values()) if summary is not None else None,
         "total_skipped": int(row[2] or 0),
         "total_jobs_created": int(row[3] or 0),
         "source": "app_insights",
@@ -2137,18 +2143,26 @@ async def get_metrics_timeseries(
             raise HTTPException(status_code=400, detail=f"Invalid {name}")
         return f"| where tostring(customDimensions.{name}) == '{value}'"
 
-    pipeline_filter = metric_dimension_filter("pipeline_id", pipeline_id)
-    model_filter = metric_dimension_filter("model_id", model_id)
+    metric_dimension_filter("pipeline_id", pipeline_id)
+    metric_dimension_filter("model_id", model_id)
+    pipeline_filter = batch_metrics.dimension_filter("pipeline_id", pipeline_id)
+    model_filter = batch_metrics.dimension_filter("model_id", model_id)
+    cutoff = ""
+    if pipeline_id:
+        doc = await asyncio.to_thread(get_store().get, pipeline_id, "pipeline")
+        if doc:
+            cutoff = batch_metrics.cutoff_filter(doc.get("reset_at"))
 
     kql = f"""
-    customMetrics
-    | where name in ('omnivec.documents.embedded', 'omnivec.documents.failed', 'omnivec.embedding.latency')
+    embeddingBatches
     {pipeline_filter}
     {model_filter}
+    {cutoff}
+    | where timestamp between (datetime({start_iso}) .. datetime({end_iso}))
     | summarize
-        processed = sumif(value, name == 'omnivec.documents.embedded'),
-        failed = sumif(value, name == 'omnivec.documents.failed'),
-        avg_latency = avgif(value, name == 'omnivec.embedding.latency')
+        processed = sum(processed),
+        failed = sum(failed),
+        avg_latency = sum(total_time_ms) / sum(processed)
         by bin(timestamp, {gran_bin})
     | order by timestamp asc
     """
@@ -2163,7 +2177,7 @@ async def get_metrics_timeseries(
             "pipeline_id": pipeline_id,
             "model_id": model_id,
             "source": "unavailable",
-            "coverage": "unavailable",
+            "coverage": "historical_telemetry_unavailable",
             "buckets": [],
         }
 
@@ -2189,6 +2203,7 @@ async def get_metrics_timeseries(
         "pipeline_id": pipeline_id,
         "model_id": model_id,
         "source": "app_insights",
+        "coverage": "deduplicated_worker_batches",
         "buckets": buckets,
     }
 
@@ -2253,9 +2268,20 @@ async def create_source(req: CreateSourceRequest):
     source_id = f"src-{str(uuid.uuid4())[:8]}"
     # Strip whitespace from URL fields in config
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
-    if req.type == SourceType.COSMOSDB:
+    if req.type == SourceType.MOCK:
+        _require_mock_enabled()
+        try:
+            clean_config = MockSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == SourceType.COSMOSDB:
         try:
             clean_config = CosmosDBSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == SourceType.GARNET:
+        try:
+            clean_config = GarnetSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
     elif req.type == SourceType.ONELAKE_ICEBERG:
@@ -2297,6 +2323,23 @@ async def create_source(req: CreateSourceRequest):
         except Exception as e:
             logger.warning("CosmosDB source validation raised %s", type(e).__name__)
             warnings.append("Could not connect to CosmosDB source. Check the endpoint, database, container and managed identity access.")
+    elif req.type == SourceType.GARNET:
+        try:
+            probe = await _test_garnet_vector_set(
+                clean_config,
+                require_vector_set=False,
+                hash_key=clean_config["hash_key"],
+                sample_count=1,
+            )
+            if not probe.get("success"):
+                warnings.append(
+                    "Garnet source validation failed. Check the endpoint, HASH key, credentials, and read/write permissions."
+                )
+        except Exception as e:
+            logger.warning("Garnet source validation raised %s", type(e).__name__)
+            warnings.append(
+                "Could not connect to the Garnet source. Check its endpoint, HASH key, and configured authentication."
+            )
     elif req.type == SourceType.SHAREPOINT:
         try:
             ok, result = await _test_sharepoint_connection(clean_config)
@@ -2354,9 +2397,20 @@ def update_source(source_id: str, req: CreateSourceRequest):
 
     source = _source_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
-    if req.type == SourceType.COSMOSDB:
+    if req.type == SourceType.MOCK:
+        _require_mock_enabled()
+        try:
+            clean_config = MockSourceConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == SourceType.COSMOSDB:
         try:
             clean_config = CosmosDBSourceConfig(**clean_config).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == SourceType.GARNET:
+        try:
+            clean_config = GarnetSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
     elif req.type == SourceType.ONELAKE_ICEBERG:
@@ -2375,6 +2429,11 @@ def update_source(source_id: str, req: CreateSourceRequest):
     for sensitive_key in _SENSITIVE_CONFIG_KEYS:
         if clean_config.get(sensitive_key) == "***":
             clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
+    if (source.type == SourceType.MOCK or req.type == SourceType.MOCK) and (
+            source.type != req.type or source.config != clean_config):
+        if any(any(ref.get("source_id") == source_id for ref in p.get("sources", []))
+               for p in store.list("pipeline")):
+            raise HTTPException(409, "Mock source configuration is locked while referenced by a pipeline")
     source.name = req.name.strip()
     source.type = req.type
     source.config = clean_config
@@ -2860,12 +2919,27 @@ async def test_source(source_id: str):
 
     source = _source_from_doc(doc)
 
-    if source.type == SourceType.AZURE_BLOB:
+    if source.type == SourceType.MOCK:
+        _require_mock_enabled()
+        settings = MockSourceConfig(**source.config)
+        return {"success": True, "result": {"status": "synthetic", **settings.model_dump(),
+                                           "message": "Synthetic source; no external resource"}}
+    elif source.type == SourceType.AZURE_BLOB:
         from connectors.blob_connector import test_blob_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_blob_connection(source.config)))
     elif source.type == SourceType.COSMOSDB:
         from connectors.cosmosdb_connector import test_cosmosdb_connection
         ok, result = await _test_with_timeout(lambda: asyncio.run(test_cosmosdb_connection(source.config)))
+    elif source.type == SourceType.GARNET:
+        result = await _test_garnet_vector_set(
+            source.config,
+            require_vector_set=False,
+            hash_key=source.config.get("hash_key"),
+            sample_count=3,
+        )
+        ok = bool(result.get("success"))
+        if not ok:
+            result = result.get("error", "Garnet source connection failed.")
     elif source.type == SourceType.ONELAKE_ICEBERG:
         ok, result = await _test_onelake_iceberg_connection(source.config)
     elif source.type == SourceType.SHAREPOINT:
@@ -2920,6 +2994,34 @@ async def sample_source(source_id: str, limit: int = 5):
     stype = doc.get("type")
     cfg = doc.get("config", {}) or {}
     limit = max(1, min(int(limit or 5), 25))
+
+    if stype == "mock":
+        _require_mock_enabled()
+        settings = MockSourceConfig(**cfg)
+        source_urls = os.getenv("OMNIVEC_MOCK_SOURCE_URLS", "http://omnivec-mock-runner-0:8080").split(",")
+        if settings.runner_shard >= len(source_urls):
+            raise HTTPException(503, "Mock source shard is not deployed")
+        response = await http_client.post(
+            source_urls[settings.runner_shard].strip().rstrip("/") + "/preview",
+            headers={"Authorization": f"Bearer {os.environ.get('OMNIVEC_ADMIN_TOKEN', '')}"},
+            json={"document_size_bytes": settings.document_size_bytes, "seed": settings.seed,
+                  "count": min(limit, settings.document_count)})
+        if not response.is_success:
+            raise HTTPException(502, "Mock source preview failed")
+        return response.json()
+    if stype == "garnet":
+        result = await _test_garnet_vector_set(
+            cfg,
+            require_vector_set=False,
+            hash_key=cfg.get("hash_key"),
+            sample_count=limit,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=502, detail="Could not sample the Garnet source. Check its health and permissions.")
+        return {
+            "items": result.get("items", []),
+            "total_scanned": result.get("total_scanned", 0),
+        }
 
     def _run():
         if stype == "azure-blob":
@@ -3014,6 +3116,8 @@ async def sample_destination(dest_id: str, limit: int = 5):
     dtype = doc.get("type")
     cfg = doc.get("config", {}) or {}
     limit = max(1, min(int(limit or 5), 25))
+    if dtype == "mock":
+        return {"items": [], "message": "Mock sink validates transmitted vectors then discards them; no vector persistence.", "mock": True}
 
     def _run():
         if dtype == "cosmosdb-vector":
@@ -3207,6 +3311,23 @@ async def test_source_connection_before_save(req: TestConnectionRequest):
             if ok:
                 return result  # lgtm[py/stack-trace-exposure]
             raise Exception(result)
+
+        elif req.type == "mock":
+            _require_mock_enabled()
+            settings = MockSourceConfig(**req.config)
+            return {"success": True, "mock": True, "message": "Synthetic source; no external data access",
+                    "document_count": settings.document_count}
+        elif req.type == "garnet":
+            try:
+                config = GarnetSourceConfig(**req.config).model_dump(exclude_none=True)
+            except ValidationError:
+                return {"success": False, "error": "Invalid Garnet source configuration. Check the endpoint, HASH key, and polling limits."}
+            return await _test_garnet_vector_set(
+                config,
+                require_vector_set=False,
+                hash_key=config["hash_key"],
+                sample_count=3,
+            )
 
         elif req.type == "cosmosdb":
             from azure.cosmos import CosmosClient
@@ -3405,7 +3526,13 @@ async def create_destination(req: CreateDestinationRequest):
 
     # Auto-probe CosmosDB container for partition key, vector field, and validate
     config = dict(req.config)
-    if req.type == "onelake-iceberg":
+    if req.type == "mock":
+        _require_mock_enabled()
+        try:
+            config = MockSinkConfig(**config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == "onelake-iceberg":
         try:
             config = OneLakeIcebergDestinationConfig(**config).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -3560,7 +3687,13 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
 
     destination = _destination_from_doc(doc)
     clean_config = {k: v.strip() if isinstance(v, str) else v for k, v in req.config.items()}
-    if req.type == "onelake-iceberg":
+    if req.type == "mock":
+        _require_mock_enabled()
+        try:
+            clean_config = MockSinkConfig(**clean_config).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif req.type == "onelake-iceberg":
         try:
             clean_config = OneLakeIcebergDestinationConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -3575,6 +3708,10 @@ def update_destination(dest_id: str, req: CreateDestinationRequest):
         if clean_config.get(sensitive_key) == "***":
             clean_config[sensitive_key] = doc.get("config", {}).get(sensitive_key, "")
     destination.name = req.name
+    if (destination.type == "mock" or req.type == "mock") and (
+            destination.type != req.type or destination.config != clean_config):
+        if any(p.get("destination_id") == dest_id for p in store.list("pipeline")):
+            raise HTTPException(409, "Mock sink configuration is locked while referenced by a pipeline")
     destination.type = req.type
     destination.config = clean_config
     destination.enabled = req.enabled
@@ -3696,7 +3833,12 @@ async def test_destination(dest_id: str):
 
     destination = _destination_from_doc(doc)
 
-    if destination.type == "pgvector":
+    if destination.type == "mock":
+        _require_mock_enabled()
+        settings = MockSinkConfig(**destination.config)
+        return {"success": True, "result": {"status": "synthetic", **settings.model_dump(),
+                                           "message": "Full vector payloads validated and discarded"}}
+    elif destination.type == "pgvector":
         from connectors.postgres_connector import test_destination_connection as _test_pg
         ok, result = await _test_with_timeout(lambda: asyncio.run(_test_pg(destination.config)))
     elif destination.type == "mssql":
@@ -3801,19 +3943,36 @@ async def _test_onelake_iceberg_connection(config: dict) -> tuple[bool, dict]:
         await credential.close()
 
 
-async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True) -> dict:
+async def _test_garnet_vector_set(
+    config: dict,
+    require_vector_set: bool = True,
+    hash_key: Optional[str] = None,
+    sample_count: int = 5,
+) -> dict:
     from redis.asyncio import Redis
     from redis_entraid.cred_provider import create_from_default_azure_credential
-    from urllib.parse import urlsplit
+
+    if hash_key is not None:
+        try:
+            config = GarnetSourceConfig(**config).model_dump(exclude_none=True)
+            hash_key = config["hash_key"]
+        except (ValidationError, KeyError):
+            return {
+                "success": False,
+                "error": "Invalid Garnet source configuration. Check the endpoint, HASH key, and polling limits.",
+            }
 
     endpoint = str(config.get("endpoint", "")).strip()
     if not endpoint:
         return {"success": False, "error": "Garnet endpoint is required"}
-    parsed = urlsplit(endpoint if "://" in endpoint else f"redis://{endpoint}")
+    try:
+        host, port, tls = garnet_endpoint_identity(config)
+    except ValueError:
+        return {"success": False, "error": "Invalid Garnet endpoint configuration"}
     kwargs = {
-        "host": parsed.hostname or endpoint,
-        "port": parsed.port or (6380 if config.get("tls", True) else 6379),
-        "ssl": bool(config.get("tls", True)),
+        "host": host,
+        "port": port,
+        "ssl": tls,
         "decode_responses": False,
         "protocol": 2,
     }
@@ -3843,6 +4002,38 @@ async def _test_garnet_vector_set(config: dict, require_vector_set: bool = True)
     client = Redis(**kwargs)
     try:
         await client.ping()
+        if hash_key is not None:
+            cursor, values = await client.hscan(
+                hash_key,
+                cursor=0,
+                count=max(1, min(int(sample_count or 5), 25)),
+            )
+            items = []
+            for raw_ref, raw_value in values.items():
+                source_ref = raw_ref.decode("utf-8", errors="replace") if isinstance(raw_ref, bytes) else str(raw_ref)
+                try:
+                    record = json.loads(raw_value)
+                    if not isinstance(record, dict):
+                        continue
+                    content = record.get("content", "")
+                    items.append({
+                        "id": record.get("id"),
+                        "source_ref": source_ref,
+                        "version": record.get("version"),
+                        "deleted": record.get("deleted", False),
+                        "preview": _truncate(content),
+                        "fields": sorted(record.keys()),
+                    })
+                except (TypeError, ValueError, UnicodeDecodeError):
+                    items.append({"source_ref": source_ref, "warning": "Value is not a valid JSON object"})
+            return {
+                "success": True,
+                "message": "Connected successfully to the Garnet HASH source.",
+                "details": f"HASH: {hash_key}",
+                "items": items,
+                "total_scanned": len(values),
+                "cursor": cursor,
+            }
         if not require_vector_set:
             return {
                 "success": True,
@@ -4008,6 +4199,12 @@ async def test_destination_connection_before_save(req: TestDestConnectionRequest
             finally:
                 await conn.close()
 
+        elif req.type == "mock":
+            _require_mock_enabled()
+            config = MockSinkConfig(**req.config)
+            return {"success": True, "mock": True, "message": "Mock sink validates full FP32 payloads, then discards vectors",
+                    "vector_indexes": [{"path": "/embedding", "dimensions": config.embedding_dimensions,
+                                        "indexType": "mock", "distanceFunction": "cosine"}]}
         elif req.type == "garnet":
             config = GarnetDestinationConfig(**req.config).model_dump(exclude_none=True)
             result = await _test_garnet_vector_set(config)
@@ -4320,6 +4517,122 @@ async def _enforce_pipeline_dim_match(docgrok_ref: str, dest_doc: dict, vector_i
         )
 
 
+def _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
+    """Validate the supported native Garnet HASH to vector-set target pairing."""
+    resolved_sources = []
+    for binding in pipeline_sources or []:
+        source_id = binding.source_id if hasattr(binding, "source_id") else (
+            binding.get("source_id") if isinstance(binding, dict) else None
+        )
+        source_doc = store.get(source_id, "source") if source_id else None
+        if source_doc:
+            resolved_sources.append((binding, source_doc))
+    if not any(source.get("type") == "garnet" for _, source in resolved_sources):
+        return False
+    if len(resolved_sources) != 1 or resolved_sources[0][1].get("type") != "garnet":
+        raise HTTPException(
+            status_code=400,
+            detail="Native Garnet ingestion supports exactly one Garnet HASH source per pipeline.",
+        )
+    if not dest_doc or dest_doc.get("type") != "garnet":
+        raise HTTPException(
+            status_code=400,
+            detail="A Garnet HASH source requires a Garnet vector-set destination.",
+        )
+
+    source_config = resolved_sources[0][1].get("config", {}) or {}
+    destination_config = dest_doc.get("config", {}) or {}
+    hash_key = str(source_config.get("hash_key", "")).strip()
+    vector_set = str(destination_config.get("vector_set", "omnivec-vectors")).strip()
+    if not hash_key or hash_key.lower().startswith("__omnivec:source-checkpoints:"):
+        raise HTTPException(
+            status_code=400,
+            detail="The Garnet source HASH key is missing or uses OmniVec's reserved checkpoint namespace.",
+        )
+    if not vector_set or hash_key.casefold() == vector_set.casefold():
+        raise HTTPException(
+            status_code=400,
+            detail="The Garnet source HASH key and destination vector_set must be different keys.",
+        )
+    if vector_set.lower().startswith("__omnivec:source-checkpoints:"):
+        raise HTTPException(
+            status_code=400,
+            detail="The Garnet destination vector_set cannot use OmniVec's reserved checkpoint namespace.",
+        )
+
+    try:
+        same_endpoint = garnet_endpoint_identity(source_config) == garnet_endpoint_identity(destination_config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Garnet endpoint configuration.") from exc
+    if not same_endpoint:
+        raise HTTPException(
+            status_code=400,
+            detail="Native Garnet ingestion requires source HASH and vector set on the same Garnet endpoint.",
+        )
+    return True
+
+
+def _require_garnet_pipeline_contract(store, pipeline, dest_doc):
+    """Reject unsupported queue, chunk, URL, and multi-source Garnet paths."""
+    resolved = [store.get(binding.source_id if hasattr(binding, "source_id") else binding.get("source_id"), "source")
+                for binding in getattr(pipeline, "sources", []) or []]
+    mock_source = any(source and source.get("type") == "mock" for source in resolved)
+    mock_sink = dest_doc and dest_doc.get("type") == "mock"
+    if mock_source or mock_sink:
+        _require_mock_enabled()
+        if (not mock_source or not mock_sink or len(resolved) != 1
+                or getattr(pipeline, "processing_mode", "queue") != "inline"
+                or getattr(pipeline, "content_strategy", "truncate") != "truncate"
+                or getattr(pipeline, "chunk_config", None) is not None):
+            raise HTTPException(400, "Mock benchmark pipelines require one mock source, a mock sink, inline mode and truncate")
+        model_ref = getattr(pipeline, "docgrok_pipeline", "")
+        model = store.get(model_ref, "docgrok_model")
+        if (not model or model.get("type") not in ("mock-embedding", "openai", "azure-openai")
+                or model.get("model_category", "embedding") != "embedding"):
+            raise HTTPException(400, "Benchmark pipeline requires a registered embedding model")
+        source_cfg = MockSourceConfig(**resolved[0]["config"])
+        sink_cfg = MockSinkConfig(**dest_doc["config"])
+        if model.get("embedding_dim") != sink_cfg.embedding_dimensions:
+            raise HTTPException(400, "Embedding model and mock sink dimensions must match")
+        if sink_cfg.accepted_documents_per_second and source_cfg.batch_size > sink_cfg.burst_documents:
+            raise HTTPException(400, "Mock source batch size must not exceed sink burst capacity")
+        if source_cfg.batch_size * sink_cfg.embedding_dimensions > 1048576:
+            raise HTTPException(400, "Mock vector batch exceeds 4 MiB; reduce batch size or dimensions")
+        return
+    is_garnet_source = False
+    for binding in getattr(pipeline, "sources", []) or []:
+        source_id = binding.source_id if hasattr(binding, "source_id") else (
+            binding.get("source_id") if isinstance(binding, dict) else None
+        )
+        source_doc = store.get(source_id, "source") if source_id else None
+        is_garnet_source |= bool(source_doc and source_doc.get("type") == "garnet")
+    if not is_garnet_source:
+        return
+
+    if str(getattr(pipeline, "processing_mode", "queue")).lower() != "inline":
+        raise HTTPException(
+            status_code=400,
+            detail="Garnet HASH sources are supported only in inline Garnet-to-Garnet pipelines; queue/Service Bus ingestion is not supported.",
+        )
+    if (str(getattr(pipeline, "content_strategy", "truncate")).lower() != "truncate"
+            or getattr(pipeline, "chunk_config", None) is not None):
+        raise HTTPException(
+            status_code=400,
+            detail="Garnet HASH sources support truncate-only embedding; chunking is not supported.",
+        )
+    _require_garnet_inline_pair(store, pipeline.sources, dest_doc)
+    binding = pipeline.sources[0]
+    fields = binding.content_fields if hasattr(binding, "content_fields") else binding.get("content_fields", ["content"])
+    mode = binding.content_mode if hasattr(binding, "content_mode") else binding.get("content_mode", "field")
+    type_field = binding.content_type_field if hasattr(binding, "content_type_field") else binding.get("content_type_field")
+    filters = binding.filters if hasattr(binding, "filters") else binding.get("filters", {})
+    if fields != ["content"] or str(mode).lower() != "field" or type_field or filters:
+        raise HTTPException(
+            status_code=400,
+            detail="Garnet HASH sources support only the content field in field mode; URL content and source filters are not supported.",
+        )
+
+
 def _is_inline_compatible(store, pipeline_sources, dest_doc) -> bool:
     """Return True iff every source points at the same physical store as the destination."""
     if not dest_doc:
@@ -4361,7 +4674,15 @@ def _require_inline_compatible(store, pipeline_sources, dest_doc):
     if not dest_doc:
         return
     dtype = dest_doc.get("type")
+    if dtype == "mock" and len(pipeline_sources) == 1:
+        binding = pipeline_sources[0]
+        sid = binding.source_id if hasattr(binding, "source_id") else binding["source_id"]
+        source = store.get(sid, "source")
+        if source and source.get("type") == "mock":
+            return
     dcfg = dest_doc.get("config", {}) or {}
+    if _require_garnet_inline_pair(store, pipeline_sources, dest_doc):
+        return
     for ps in pipeline_sources or []:
         sid = ps.source_id if hasattr(ps, "source_id") else (ps.get("source_id") if isinstance(ps, dict) else None)
         if not sid:
@@ -4542,6 +4863,11 @@ def _inline_write_target(source: dict) -> tuple:
             raise HTTPException(status_code=409, detail="Cannot determine inline source ownership: invalid port")
         schema = config.get("schema_name") or config.get("schema") or ("dbo" if kind == "mssql" else "public")
         return ("mssql" if kind == "mssql" else "postgresql", host, port, database, schema, config.get("table"))
+    if kind == "garnet":
+        try:
+            return ("garnet", *garnet_endpoint_identity(config), config.get("hash_key"))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Cannot determine inline Garnet source ownership: invalid endpoint") from exc
     return ("source", source["id"])
 
 
@@ -4587,11 +4913,20 @@ def _validate_cosmos_chunking(store, req, destination):
     from models import ChunkConfig
     from string import Formatter
     sources = [(entry, store.get(entry.source_id, "source") or {}) for entry in req.sources]
+    raw = req.chunk_config or {}
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+    if raw.get("cleanup_order", "insert-first") not in ("insert-first", "delete-first"):
+        raise HTTPException(status_code=400, detail="Invalid cleanup_order; use insert-first or delete-first")
     if not any(source.get("type") == "cosmosdb" for _, source in sources):
+        if raw.get("cleanup_order", "insert-first") != "insert-first":
+            raise HTTPException(status_code=400, detail="cleanup_order is supported only for Cosmos text chunking")
         return None
     if req.content_strategy not in ("truncate", "chunk"):
         raise HTTPException(status_code=400, detail="content_strategy must be truncate or chunk")
     if req.content_strategy != "chunk":
+        if raw.get("cleanup_order", "insert-first") != "insert-first":
+            raise HTTPException(status_code=400, detail="cleanup_order is supported only for Cosmos text chunking")
         return None
     if req.processing_mode != "queue" or (destination or {}).get("type") != "cosmosdb-vector":
         raise HTTPException(status_code=400, detail="Cosmos text chunking requires queue processing and a Cosmos vector destination; chunk+inline is unsupported")
@@ -4599,10 +4934,7 @@ def _validate_cosmos_chunking(store, req, destination):
         if (source.get("type") != "cosmosdb" or entry.content_mode != "field"
                 or source.get("config", {}).get("attachments_field")):
             raise HTTPException(status_code=400, detail="Cosmos text chunking supports only Cosmos field-content sources, not URL/attachment/mixed sources")
-    raw = req.chunk_config or {}
-    if hasattr(raw, "model_dump"):
-        raw = raw.model_dump()
-    allowed = {"chunk_size", "chunk_overlap", "chunk_unit", "store_text", "text_field", "doc_id_pattern"}
+    allowed = {"chunk_size", "chunk_overlap", "chunk_unit", "store_text", "text_field", "doc_id_pattern", "cleanup_order"}
     if set(raw) - allowed:
         raise HTTPException(status_code=400, detail="Unknown Cosmos chunk_config options")
     try:
@@ -4853,6 +5185,7 @@ async def create_pipeline(req: CreatePipelineRequest):
             status_code=400,
             detail=f"Destination '{req.destination_id}' not found"
         )
+    _require_garnet_pipeline_contract(store, req, dest_doc)
     _require_onelake_iceberg_pipeline(store, req, dest_doc)
     _require_onelake_iceberg_pipeline(store, req, dest_doc)
     _require_pipeline_source_identities(store, req)
@@ -5003,16 +5336,20 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
         req.partition_key_pattern = doc.get(
             "partition_key_pattern", "{source_partition}"
         )
-    if req.content_strategy == "chunk" and req.chunk_config is not None:
-        req.chunk_config = dict(req.chunk_config or {})
+    if req.content_strategy == "chunk":
         old_chunk_config = doc.get("chunk_config") or {}
+        req.chunk_config = {**old_chunk_config, **(req.chunk_config or {})}
         req.chunk_config.setdefault(
             "doc_id_pattern",
             old_chunk_config.get("doc_id_pattern", "{source}-chunk-{chunk}"),
         )
+        req.chunk_config.setdefault(
+            "cleanup_order", old_chunk_config.get("cleanup_order", "insert-first")
+        )
     _validate_pipeline_identity_policy(store, req, pipeline_id)
 
     chunk_destination = await asyncio.to_thread(store.get, req.destination_id, "destination")
+    _require_garnet_pipeline_contract(store, req, chunk_destination)
     cosmos_chunk_config = _validate_cosmos_chunking(store, req, chunk_destination)
     if any((store.get(s.source_id, "source") or {}).get("type") == "cosmosdb" for s in req.sources):
         # A different strategy/text-storage contract requires migration of existing
@@ -5208,6 +5545,9 @@ def resume_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
+    _require_garnet_pipeline_contract(
+        store, pipeline, store.get(pipeline.destination_id, "destination")
+    )
     if pipeline.processing_mode == "inline":
         _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
     pipeline.status = PipelineStatus.ACTIVE
@@ -5229,7 +5569,9 @@ def set_processing_mode(pipeline_id: str, mode: str):
         _require_blob_source_enabled("queue-mode pipeline")
     pipeline = _pipeline_from_doc(doc)
     proposed = pipeline.model_copy(update={"processing_mode": mode})
-    _validate_cosmos_chunking(store, proposed, store.get(pipeline.destination_id, "destination"))
+    proposed_destination = store.get(pipeline.destination_id, "destination")
+    _require_garnet_pipeline_contract(store, proposed, proposed_destination)
+    _validate_cosmos_chunking(store, proposed, proposed_destination)
     if mode == "inline":
         dest_doc_for_mode = store.get(pipeline.destination_id, "destination")
         _require_inline_compatible(store, pipeline.sources, dest_doc_for_mode)
@@ -5270,6 +5612,9 @@ async def run_pipeline(pipeline_id: str):
 
     pipeline = _pipeline_from_doc(doc)
     _validate_cosmos_chunking(store, pipeline, store.get(pipeline.destination_id, "destination"))
+    _require_garnet_pipeline_contract(
+        store, pipeline, store.get(pipeline.destination_id, "destination")
+    )
     if pipeline.processing_mode == "inline":
         await asyncio.to_thread(_require_exclusive_inline_sources, store, pipeline.sources, pipeline_id)
 
@@ -5337,6 +5682,9 @@ def reset_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
     pipeline = _pipeline_from_doc(doc)
+    _require_garnet_pipeline_contract(
+        store, pipeline, store.get(pipeline.destination_id, "destination")
+    )
     prior_status = pipeline.status
     if prior_status == PipelineStatus.ACTIVE and pipeline.processing_mode == "inline":
         _require_exclusive_inline_sources(store, pipeline.sources, pipeline_id)
@@ -5400,6 +5748,8 @@ def reset_pipeline(pipeline_id: str):
     pipeline.status = prior_status
     pipeline.updated_at = reset_ts
     _replace_control_doc(store, doc, pipeline, "pipeline")
+    reset_pipeline_metrics(pipeline_id)
+    batch_metrics.invalidate()
     _pipeline_stats_cache.pop(pipeline_id, None)
 
     return {"success": True, "deleted_jobs": deleted, "chunks_deleted": chunks_deleted, "message": f"Pipeline reset — {deleted} jobs deleted, {chunks_deleted} chunks cleaned, CFP will restart"}
@@ -5407,14 +5757,14 @@ def reset_pipeline(pipeline_id: str):
 
 @app.post("/api/pipelines/{pipeline_id}/metrics/inline")
 def report_inline_metrics(pipeline_id: str, payload: dict):
-    """Record worker telemetry in Application Insights and process-local metrics."""
+    """Enqueue best-effort telemetry for asynchronous App Insights export; no DB I/O."""
 
     def nonnegative(name, cast):
         try:
             value = cast(payload.get(name, 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise HTTPException(status_code=400, detail=f"{name} must be numeric")
-        if value < 0:
+        if not math.isfinite(value) or value < 0:
             raise HTTPException(status_code=400, detail=f"{name} must be non-negative")
         return value
 
@@ -5427,26 +5777,42 @@ def report_inline_metrics(pipeline_id: str, payload: dict):
     retry_count = nonnegative("retry_count", int)
     throttle_count = nonnegative("throttle_count", int)
     throttle_delay_ms = nonnegative("throttle_delay_ms", float)
-    batch_key = str(payload.get("batch_key", ""))[:512]
+    batch_key = str(payload.get("batch_key", ""))
+    if not batch_key or len(batch_key) > 512:
+        raise HTTPException(status_code=400, detail="batch_key must contain 1 to 512 characters")
     source_id = str(payload.get("source_id", ""))[:128]
     destination_id = str(payload.get("destination_id", ""))[:128]
     model_id = str(payload.get("model_id", ""))[:128]
     error_category = str(payload.get("error_category", ""))[:128]
     last_document = str(payload.get("last_document", ""))[:1024]
+    try:
+        PipelineResourcePolicy(
+            weight=payload.get("resource_weight", 10),
+            max_concurrency_per_worker=payload.get("max_concurrency_per_worker", 2),
+            priority=payload.get("resource_priority", "normal"),
+            workload_class=payload.get("workload_class", "shared"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid resource policy") from exc
 
-    _pipeline_stats_cache.pop(pipeline_id, None)
-
-    record_embedding_batch(
-        pipeline_id=pipeline_id, docs_embedded=processed, docs_failed=failed,
-        tokens_used=tokens_used, latency_ms=processing_time_ms,
-        source_id=source_id, model_id=model_id, destination_id=destination_id,
-        input_bytes=input_bytes, queue_wait_ms=queue_wait_ms,
-        retry_count=retry_count, throttle_count=throttle_count,
-        throttle_delay_ms=throttle_delay_ms, error_category=error_category,
-        last_document=last_document, batch_key=batch_key,
-    )
-
-    return {"ok": True}
+    reported_at = str(payload.get("reported_at") or datetime.utcnow().isoformat())
+    try:
+        datetime.fromisoformat(reported_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="reported_at must be an ISO timestamp") from exc
+    normalized = {
+        "processed": processed, "failed": failed, "processing_time_ms": processing_time_ms,
+        "tokens_used": tokens_used, "input_bytes": input_bytes, "queue_wait_ms": queue_wait_ms,
+        "retry_count": retry_count, "throttle_count": throttle_count,
+        "throttle_delay_ms": throttle_delay_ms, "batch_key": batch_key,
+        "source_id": source_id, "destination_id": destination_id, "model_id": model_id,
+        "error_category": error_category, "last_document": last_document, "reported_at": reported_at,
+    }
+    try:
+        return record_worker_batch(pipeline_id, normalized)
+    except RuntimeError as exc:
+        logger.error("Worker telemetry exporter unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Telemetry exporter unavailable") from exc
 
 
 # =============================================================================
@@ -6703,6 +7069,19 @@ def _pipeline_with_current_model_limits(store, doc: dict) -> Pipeline:
 @app.post("/api/models")
 async def create_model(payload: dict):
     """Create an external model â€” proxied to DocGrok, persisted in CosmosDB."""
+    model_type = payload.get("provider_type", payload.get("type", "azure-openai"))
+    if model_type == "mock-embedding":
+        _require_mock_enabled()
+        try:
+            settings = MockEmbeddingConfig(embedding_dim=payload.get("embedding_dim", payload.get("dimensions", 1024)),
+                                           latency_ms=payload.get("latency_ms", 0))
+        except ValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if payload.get("model_category", "embedding") != "embedding":
+            raise HTTPException(422, "Mock model supports embeddings only")
+        payload = {**payload, **settings.model_dump(),
+                   "endpoint": os.getenv("OMNIVEC_MOCK_MODEL_URL", "http://omnivec-mock-embedding:8000").rstrip("/"),
+                   "auth_type": "none", "api_key": ""}
     try:
         # Map UI field names to DocGrok registry fields
         model_name = payload.get("name", payload.get("model", "")).strip()
@@ -6720,6 +7099,8 @@ async def create_model(payload: dict):
             "api_version": payload.get("api_version", "2024-06-01"),
             **request_limits.model_dump(),
         }
+        if model_type == "mock-embedding":
+            reg_payload["latency_ms"] = payload["latency_ms"]
         if auth_type == "managed-identity":
             client_id = payload.get("client_id", "").strip()
             if client_id:
@@ -6822,12 +7203,24 @@ async def update_model(model_id: str, payload: dict):
             raise HTTPException(status_code=503, detail="Model registry is unavailable") from exc
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     doc = dict(doc)
+    if doc.get("type") == "mock-embedding":
+        _require_mock_enabled()
+        try:
+            mock_settings = MockEmbeddingConfig(
+                embedding_dim=payload.get("embedding_dim", doc["embedding_dim"]),
+                latency_ms=payload.get("latency_ms", doc.get("latency_ms", 0)))
+        except ValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        payload = {**payload, **mock_settings.model_dump()}
+        if any(payload[field] != doc.get(field, 0) for field in ("embedding_dim", "latency_ms")):
+            if any(p.get("docgrok_pipeline") == model_id for p in store.list("pipeline")):
+                raise HTTPException(409, "Mock model dimensions and latency are locked while referenced by a pipeline")
 
     # Merge updatable fields
     updatable = (
         "api_key", "endpoint", "deployment", "api_version", "embedding_dim",
         "auth_type", "client_id", "max_batch_size", "context_window_tokens",
-        "max_batch_tokens",
+        "max_batch_tokens", "latency_ms",
     )
     changed = []
     new_api_key = None
@@ -6879,6 +7272,8 @@ async def update_model(model_id: str, payload: dict):
             }
             if "client_id" in doc:
                 reg_payload["client_id"] = doc["client_id"]
+            if doc.get("type") == "mock-embedding":
+                reg_payload["latency_ms"] = doc.get("latency_ms", 0)
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail="DocGrok model update failed")
@@ -8554,6 +8949,25 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
 
     pipeline = _pipeline_from_doc(doc)
     jobs = JobStats()
+    mock_source = len(pipeline.sources) == 1 and store.get(pipeline.sources[0].source_id, "source")
+    if mock_source and mock_source.get("type") == "mock":
+        generation = str(doc.get("reset_at") or "initial")
+        rid = "mock-" + hashlib.sha256(f"{pipeline_id}:{generation}".encode()).hexdigest()[:32]
+        run = store.get(rid, "mock_run") or {}
+        total = int(mock_source["config"].get("document_count", 100000))
+        accepted = int(run.get("accepted", 0))
+        jobs.failed = int(run.get("status") == "failed")
+        jobs.completed = int(run.get("status") == "completed")
+        jobs.processing = int(run.get("status") == "running")
+        jobs.total = jobs.failed + jobs.completed + jobs.processing
+        return PipelineRunStats(
+            pipeline_id=pipeline_id, pipeline_name=pipeline.name, jobs=jobs,
+            documents_processed=accepted, embedded_count=accepted, lifetime_embedded_count=accepted,
+            source_doc_count=total, completion_pct=100 * accepted / total,
+            throughput_docs_per_sec=run.get("throughput_docs_per_second"),
+            telemetry_source="mock_sink_receipts",
+            telemetry_coverage=("real_embeddings_no_vector_persistence" if run.get("real_embeddings")
+                                else "synthetic_no_vector_persistence"))
 
     # Use aggregate query instead of fetching all 76K+ job docs
     query = (
@@ -8670,35 +9084,13 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
                         reset_at = reset_at.isoformat()
                     reset_at = str(reset_at)
 
-                    # PREFER live CFP-reported inline metrics over a Cosmos
-                    # cross-partition COUNT(1). The COUNT scan can hit hundreds
-                    # of RU on a hot source container that the inline writer is
-                    # actively patching, which throttles the writer itself.
-                    # CFP now streams `inline_processed` per ~250-doc sub-batch
-                    # (~3s cadence) so this is always within a few seconds of
-                    # reality during an active run.
+                    # Exported telemetry is eventually consistent. Never scan the
+                    # hot vector container just because ingestion/export is delayed.
                     inline_processed = 0
-                    metrics_fresh = False
-                    try:
-                        pip_m = _get_app_insights_pipeline_metrics(
-                            pipeline_id, pipeline.reset_at,
-                        )
-                        inline_processed = int(pip_m.get("processed", 0))
-                        updated_at = pip_m.get("last_seen")
-                        if updated_at:
-                            if hasattr(updated_at, "replace") and not isinstance(updated_at, str):
-                                upd = updated_at.replace(tzinfo=None)
-                            else:
-                                upd = datetime.fromisoformat(
-                                    str(updated_at).replace("Z", "+00:00"),
-                                ).replace(tzinfo=None)
-                            metrics_fresh = (
-                                datetime.utcnow() - upd
-                            ).total_seconds() < 90
-                    except Exception:  # lgtm[py/empty-except]
-                        pass
+                    pip_m, telemetry_source = _reported_pipeline_metrics(pipeline_id, pipeline.reset_at)
+                    inline_processed = int(pip_m.get("processed") or 0)
 
-                    if metrics_fresh and pipeline.processing_mode == "inline":
+                    if pipeline.processing_mode == "inline":
                         # Fast path: trust the live metric, skip the COUNT scan.
                         embedded_count = inline_processed
                     else:
@@ -8821,9 +9213,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
     # batch telemetry after destination writes complete, so use Application
     # Insights counters whenever source-specific inventory is unavailable.
     try:
-        reported = _get_app_insights_pipeline_metrics(
-            pipeline_id, pipeline.reset_at,
-        )
+        reported, telemetry_source = _reported_pipeline_metrics(pipeline_id, pipeline.reset_at)
         reported_processed = max(0, int(reported.get("processed", 0)))
         reported_failed = max(0, int(reported.get("failed", 0)))
         reported_time_ms = max(0.0, float(reported.get("total_time_ms", 0.0)))
@@ -8839,7 +9229,7 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         if avg_time is None and reported_processed > 0:
             avg_time = round(reported_time_ms / reported_processed, 1)
 
-        recent_processed = max(0, int(reported.get("recent_processed", 0)))
+        recent_processed = max(0, int(reported.get("recent_processed") or 0))
         if recent_processed > 0:
             recent_throughput = round(recent_processed / 60.0, 1)
     except (TypeError, ValueError):
@@ -8861,6 +9251,8 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
         lifetime_embedded_count = embedded_count
 
     return PipelineRunStats(
+        telemetry_source=telemetry_source,
+        telemetry_coverage="last_7_days_since_reset" if telemetry_source == "app_insights" else "process_local_since_restart",
         pipeline_id=pipeline_id,
         pipeline_name=pipeline.name,
         jobs=jobs,

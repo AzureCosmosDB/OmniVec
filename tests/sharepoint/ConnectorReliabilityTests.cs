@@ -1,6 +1,5 @@
 using System.Net;
 using System.Collections.Concurrent;
-using System.Diagnostics.Metrics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -516,7 +515,7 @@ internal static class ConnectorReliabilityTests
                     Check(calls == 4, $"{path}: {calls} attempts");
                 }
             });
-        Test("DocGrok telemetry uses the local meter without synchronous HTTP", async () =>
+        Test("DocGrok telemetry is delivered without synchronous HTTP", async () =>
         {
             var metricCalls = 0;
             var metricHandler = new LocalHttpHandler(_ =>
@@ -538,7 +537,11 @@ internal static class ConnectorReliabilityTests
                 "mdl-test", ["hello"], default,
                 "pipeline", "source", "destination", "document"));
 
-            Check(metricCalls == 0);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(metricCalls == 4);
+            Check(metricHandler.LastBody?.Contains("\"model_id\":\"mdl-test\"") == true);
+            Check(metricHandler.LastBody?.Contains("\"throttle_count\":1") == true);
+            Check(metricHandler.LastBody?.Contains("\"error_category\":\"http_429\"") == true);
         });
         Test("Transport failure retries are bounded and cancellation interrupts retry delay", async () =>
         {
@@ -763,7 +766,28 @@ internal static class ConnectorReliabilityTests
             var message = TextMessage();
             await Invoke(worker, "ProcessBatchAsync", receiver,
                 new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message, "poison-1")) }, CancellationToken.None);
-            Check(receiver.DeadLettered == 1 && receiver.Completed == 0 && reports.Count == 0);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(receiver.DeadLettered == 1 && receiver.Completed == 0 && reports.Count == 1);
+            Check(reports[0].GetProperty("processed").GetInt32() == 0);
+            Check(reports[0].GetProperty("failed").GetInt32() == 1);
+            Check(reports[0].GetProperty("batch_key").GetString() == "worker-dlq:poison-1");
+        });
+        Test("Worker batch completes while the metrics endpoint is blocked (non-blocking reporting)", async () =>
+        {
+            var blocked = new MetricsTransportTests.BlockedHandler();
+            var metrics = new MetricsReporter(new HttpClient(blocked) { BaseAddress = new("http://local.invalid") },
+                NullLogger<MetricsReporter>.Instance);
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+                new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.25,0.5]]}""") })), metrics: metrics);
+            var receiver = new ReliabilityReceiver();
+            var message = TextMessage();
+            await Invoke(worker, "ProcessBatchAsync", receiver,
+                new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message)) }, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Check(receiver.Completed == 1 && metrics.Transport.Sent == 0, "batch waited on metrics I/O");
+            await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            blocked.Release();
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)) && metrics.Transport.Sent == 1);
         });
         Test("Failed dead-letter settlement does not claim terminal-failure metrics", async () =>
         {
@@ -775,48 +799,21 @@ internal static class ConnectorReliabilityTests
             var receiver = new ReliabilityReceiver { FailDeadLetter = true };
             await Fails(() => Invoke(worker, "DeadLetterWithMetricsAsync", receiver, Delivery(TextMessage()),
                 "Poison", "bad input", CancellationToken.None));
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(reports == 0 && receiver.DeadLettered == 0);
         });
-        Test("Metrics recording does not invoke the legacy API callback", async () =>
+        Test("Metrics delivery failures do not fail local admission", async () =>
         {
             var calls = 0;
+            var logger = new MetricsLogger();
             var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ =>
                 { calls++; return new(HttpStatusCode.Unauthorized); }))
-                { BaseAddress = new("http://local.invalid") }, NullLogger<MetricsReporter>.Instance);
+                { BaseAddress = new("http://local.invalid") }, logger);
             await metrics.ReportInlineMetricsAsync("pipeline", 0, 1, 0, "failure");
-            Check(calls == 0);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(calls == 1 && metrics.Transport.Failed == 1 && logger.Warnings == 1);
         });
-        Test("Metrics reporter emits the standard OpenTelemetry instruments", async () =>
-        {
-            var measurements = new ConcurrentQueue<(string Name, double Value)>();
-            using var listener = new MeterListener();
-            listener.InstrumentPublished = (instrument, current) =>
-            {
-                if (instrument.Meter.Name == MetricsReporter.MeterName)
-                    current.EnableMeasurementEvents(instrument);
-            };
-            listener.SetMeasurementEventCallback<long>((instrument, value, _, _) =>
-                measurements.Enqueue((instrument.Name, value)));
-            listener.SetMeasurementEventCallback<double>((instrument, value, _, _) =>
-                measurements.Enqueue((instrument.Name, value)));
-            listener.Start();
-
-            var metrics = new MetricsReporter(new HttpClient(), NullLogger<MetricsReporter>.Instance);
-            await metrics.ReportInlineMetricsAsync(
-                "pipeline", 2, 1, 3, "batch", tokensUsed: 4,
-                inputBytes: 5, queueWaitMs: 6, retryCount: 7,
-                throttleCount: 8, throttleDelayMs: 9);
-
-            Check(measurements.Any(item =>
-                item == ("omnivec.documents.embedded", 2)));
-            Check(measurements.Any(item =>
-                item == ("omnivec.documents.failed", 1)));
-            Check(measurements.Any(item =>
-                item == ("omnivec.pipeline.requests", 1)));
-            Check(measurements.Any(item =>
-                item == ("omnivec.queue.wait", 6)));
-        });
-        Test("Concurrent metric recording completes locally", async () =>
+        Test("Concurrent metric admission completes and drains", async () =>
         {
             var calls = 0;
             var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ =>
@@ -825,16 +822,8 @@ internal static class ConnectorReliabilityTests
             var pending = Enumerable.Range(0, 20).Select(index =>
                 metrics.ReportInlineMetricsAsync($"pipeline-{index % 2}", 1, 0, 1, $"batch-{index}")).ToArray();
             await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(5));
-            Check(calls == 0 && pending.All(task => task.IsCompletedSuccessfully));
-        });
-        Test("Metric recording is independent of exporter transport", async () =>
-        {
-            var calls = 0;
-            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ =>
-                { calls++; return new(HttpStatusCode.Conflict); }))
-                { BaseAddress = new("http://local.invalid") }, NullLogger<MetricsReporter>.Instance);
-            await metrics.ReportInlineMetricsAsync("pipeline", 1, 0, 1, "");
-            Check(calls == 0);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(calls == 20 && pending.All(task => task.IsCompletedSuccessfully));
         });
         Test("Scheduler wait does not consume the admitted processing budget", async () =>
         {
@@ -938,7 +927,7 @@ internal static class ConnectorReliabilityTests
             await Invoke(worker, "ReceiveLoopAsync", receiver, cancellation.Token);
             Check(calls == 4 && receiver.Receives == 2 && receiver.Abandoned == 1 && receiver.Completed == 0);
         });
-        Test("Local receive-loop end-to-end: permanent and timeout failures emit telemetry while healthy queue work progresses", async () =>
+        Test("Local receive-loop end-to-end: completed work and permanent failures emit telemetry while timeouts remain recoverable", async () =>
         {
             var timeoutCalls = 0;
             var client = Client(new AsyncHandler(async (request, ct) =>
@@ -954,10 +943,11 @@ internal static class ConnectorReliabilityTests
                 }
                 return new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.25,0.5]]}""") };
             }));
-            var metricsHttpCalls = 0;
-            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ =>
+            var reports = new List<JsonElement>();
+            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(request =>
             {
-                metricsHttpCalls++;
+                using var body = JsonDocument.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+                reports.Add(body.RootElement.Clone());
                 return new(HttpStatusCode.OK);
             })) { BaseAddress = new("http://local.invalid") }, NullLogger<MetricsReporter>.Instance);
             var logs = new WorkerLogger();
@@ -984,7 +974,13 @@ internal static class ConnectorReliabilityTests
             Check(receiver.DeadLettered == 1 && receiver.DeadLetterIds.Single() == "permanent");
             Check(receiver.Abandoned == 1 && receiver.AbandonedIds.Single() == "timeout");
             Check(writer.Written.Count == 2 && writer.Written.All(result => result.PipelineId == "healthy"));
-            Check(metricsHttpCalls == 0);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(reports.Count == 3);
+            Check(reports.Where(report => report.GetProperty("model_id").GetString() == "mdl-healthy")
+                .Sum(report => report.GetProperty("processed").GetInt32()) == 2);
+            Check(reports.Single(report => report.GetProperty("model_id").GetString() == "mdl-permanent")
+                .GetProperty("failed").GetInt32() == 1);
+            Check(reports.All(report => report.GetProperty("model_id").GetString() != "mdl-timeout"));
             Check(logs.Entries.Any(entry => entry.Level == LogLevel.Error
                 && entry.Error is TimeoutException && entry.Message.Contains("mdl-timeout")));
         });

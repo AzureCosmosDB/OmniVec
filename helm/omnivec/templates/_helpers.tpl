@@ -5,6 +5,30 @@ Expand the name of the chart.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "omnivec.mockSinkUrls" -}}
+{{- $count := int .Values.api.mockBenchmark.shardCount -}}
+{{- if or (lt $count 1) (gt $count 32) -}}
+{{- fail "api.mockBenchmark.shardCount must be between 1 and 32" -}}
+{{- end -}}
+{{- $urls := list "http://omnivec-mock-sink:8080" -}}
+{{- range $shard := until $count -}}
+{{- if gt $shard 0 -}}{{- $urls = append $urls (printf "http://omnivec-mock-sink-%d:8080" $shard) -}}{{- end -}}
+{{- end -}}
+{{- join "," $urls -}}
+{{- end -}}
+
+{{- define "omnivec.mockSourceUrls" -}}
+{{- $count := int .Values.api.mockBenchmark.shardCount -}}
+{{- if or (lt $count 1) (gt $count 32) -}}
+{{- fail "api.mockBenchmark.shardCount must be between 1 and 32" -}}
+{{- end -}}
+{{- $urls := list -}}
+{{- range $shard := until $count -}}
+{{- $urls = append $urls (printf "http://omnivec-mock-runner-%d:8080" $shard) -}}
+{{- end -}}
+{{- join "," $urls -}}
+{{- end -}}
+
 {{/*
 Create a default fully qualified app name.
 */}}

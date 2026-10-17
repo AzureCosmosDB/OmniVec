@@ -1,0 +1,77 @@
+{{- if and .Values.api.enabled .Values.api.mockBenchmark.enabled }}
+{{- $root := . }}
+{{- range $shard := until (int .Values.api.mockBenchmark.shardCount) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-mock-runner-{{ $shard }}
+  namespace: {{ $root.Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omnivec-mock-runner-{{ $shard }}
+      omnivec-mock-component: source
+  template:
+    metadata:
+      labels:
+        app: omnivec-mock-runner-{{ $shard }}
+        omnivec-mock-component: source
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ include "omnivec.serviceAccountName" $root }}
+      containers:
+        - name: runner
+          image: {{ $root.Values.global.imageRegistry }}/{{ $root.Values.api.mockBenchmark.sourceImage.repository }}:{{ $root.Values.api.mockBenchmark.sourceImage.tag }}
+          env:
+            - name: OMNIVEC_MOCK_RUNNER_SHARD
+              value: {{ $shard | quote }}
+            - name: OMNIVEC_MOCK_SINK_URLS
+              value: {{ include "omnivec.mockSinkUrls" $root | quote }}
+            - name: OMNIVEC_MOCK_CONFIG_REFRESH_SECONDS
+              value: {{ $root.Values.api.mockBenchmark.configRefreshSeconds | quote }}
+            - name: OMNIVEC_CLOUD_DEPLOYMENTS_ENABLED
+              value: "false"
+            - name: DOCGROK_URL
+              value: {{ $root.Values.api.env.DOCGROK_URL | quote }}
+            - name: COSMOS_ENDPOINT
+              value: {{ $root.Values.azure.cosmos.endpoint | quote }}
+            - name: COSMOS_DATABASE
+              value: {{ $root.Values.azure.cosmos.database | quote }}
+            - name: AZURE_CLIENT_ID
+              value: {{ $root.Values.azure.workloadIdentity.clientId | quote }}
+            - name: OMNIVEC_ADMIN_TOKEN
+              value: {{ required "api.adminToken is required for mock component HTTP authentication" $root.Values.api.adminToken | quote }}
+          resources:
+            {{- toYaml $root.Values.api.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            timeoutSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            timeoutSeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnivec-mock-runner-{{ $shard }}
+  namespace: {{ $root.Values.global.namespace }}
+spec:
+  selector:
+    app: omnivec-mock-runner-{{ $shard }}
+  ports:
+    - port: 8080
+      targetPort: 8080
+{{- end }}
+{{- end }}

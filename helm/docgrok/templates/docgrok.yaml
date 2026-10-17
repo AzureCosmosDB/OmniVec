@@ -47,6 +47,8 @@ spec:
           value: {{ .Values.docgrok.env.NATIVE_BACKEND_IDLE_TIMEOUT_SECONDS | quote }}
         - name: NATIVE_BACKEND_MAX_ATTEMPTS
           value: {{ .Values.docgrok.env.NATIVE_BACKEND_MAX_ATTEMPTS | quote }}
+        - name: DOCGROK_UNPOOLED_MODEL_HOSTS
+          value: {{ .Values.docgrok.env.DOCGROK_UNPOOLED_MODEL_HOSTS | quote }}
         - name: NAMESPACE
           value: {{ .Values.global.namespace | quote }}
         - name: PROVIDERS_CONFIG_PATH

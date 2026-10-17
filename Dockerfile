@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY api/ .
+COPY omnivec_queue/ omnivec_queue/
 COPY --from=mcp-package /mcp-cosmos.zip /app/mcp-cosmos.zip
 
 EXPOSE 8080

@@ -4,6 +4,7 @@ from enum import Enum
 import re
 import uuid
 from urllib.parse import urlsplit
+from garnet_endpoint import garnet_endpoint_identity
 from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
@@ -23,6 +24,7 @@ ALLOWED_METADATA_FIELDS = {"pipeline_name", "embedding_dims", "source_ref"}
 # =============================================================================
 
 class SourceType(str, Enum):
+    MOCK = "mock"
     AZURE_BLOB = "azure-blob"
     COSMOSDB = "cosmosdb"
     POSTGRESQL = "postgresql"
@@ -33,9 +35,11 @@ class SourceType(str, Enum):
     ONELAKE_ICEBERG = "onelake-iceberg"
     SHAREPOINT = "sharepoint"
     SYNTHETIC = "synthetic"
+    GARNET = "garnet"
 
 
 class DestinationType(str, Enum):
+    MOCK = "mock"
     COSMOSDB_VECTOR = "cosmosdb-vector"
     PGVECTOR = "pgvector"
     MSSQL = "mssql"
@@ -317,6 +321,45 @@ class SyntheticSourceConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class GarnetSourceConfig(BaseModel):
+    """A versioned JSON document collection stored in a Garnet HASH."""
+    endpoint: str
+    hash_key: str
+    tls: bool = True
+    use_entra_auth: bool = False
+    username: Optional[str] = None
+    password_secret_ref: Optional[str] = None
+    poll_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    scan_page_size: int = Field(default=500, ge=1, le=10000)
+    batch_size: int = Field(default=50, ge=1, le=50)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint(cls, value: str) -> str:
+        value = value.strip()
+        garnet_endpoint_identity({"endpoint": value})
+        return value
+
+    @field_validator("hash_key")
+    @classmethod
+    def _validate_hash_key(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", value):
+            raise ValueError("hash_key must contain only letters, numbers, ':', '_' or '-'")
+        if value.lower().startswith("__omnivec:source-checkpoints:"):
+            raise ValueError("hash_key cannot use OmniVec's reserved internal checkpoint namespace")
+        return value
+
+    @field_validator("password_secret_ref")
+    @classmethod
+    def _validate_garnet_password_secret_ref(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.startswith("kv://"):
+            raise ValueError("password_secret_ref must use kv://<vault>/<secret>")
+        return value
+
+
 # =============================================================================
 # DESTINATION CONFIGURATIONS
 # =============================================================================
@@ -377,9 +420,7 @@ class GarnetDestinationConfig(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("endpoint is required")
-        parsed = urlsplit(value if "://" in value else f"redis://{value}")
-        if not parsed.hostname or parsed.scheme not in ("redis", "rediss"):
-            raise ValueError("endpoint must be a Redis-compatible host[:port] or redis[s] URL")
+        garnet_endpoint_identity({"endpoint": value})
         return value
 
     @field_validator("vector_set")
@@ -540,6 +581,7 @@ class ChunkConfig(BaseModel):
     chunk_size: int = 1000         # Max characters per chunk
     chunk_overlap: int = 200       # Overlap between adjacent chunks
     chunk_unit: str = "chars"      # "chars" or "tokens"
+    cleanup_order: Literal["insert-first", "delete-first"] = "insert-first"
     store_text: bool = False       # Store chunk text in vector docs
     text_field: str = "text"       # Field name for stored text in vector doc
     doc_id_pattern: str = "{source}-chunk-{chunk}"  # Legacy-safe fallback; new pipelines set an explicit collision-safe pattern
@@ -872,6 +914,8 @@ class PipelineRunStats(BaseModel):
     avg_processing_time_ms: Optional[float] = None
     throughput_docs_per_sec: Optional[float] = None
     recent_throughput_docs_per_sec: Optional[float] = None  # last 60s
+    telemetry_source: str = "unavailable"
+    telemetry_coverage: str = "unavailable"
 
 
 # =============================================================================

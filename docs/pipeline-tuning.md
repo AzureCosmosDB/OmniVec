@@ -64,9 +64,13 @@ Size memory before raising file-processing concurrency.
 
 ### Metrics and capacity estimates
 
-Metrics reports await a four-request concurrency gate. Transient failures retry
-at most three times with the same deduplication key. This introduces bounded
-telemetry backpressure; exhausted failures are logged, not durably queued.
+Workers enqueue metrics into a bounded, nonblocking transport; telemetry I/O
+does not run on the processing path. Background delivery uses stable
+deduplication keys and bounded retries. The API asynchronously exports batch
+events to Application Insights without writing metrics to Cosmos metadata.
+Queue saturation and exhausted delivery failures are logged, not durably queued.
+Historical totals use deduplicated batch events; fallback counters are local to
+one API process since restart, not cluster-wide history.
 
 Capacity estimates use the lower percentile of recent completed batches and
 70% utilization, capped at the smaller of pipeline and deployed worker
@@ -304,15 +308,17 @@ registration, source partition, and document. The ID does not replace the origin
 `source_ref`. `/id` and supported single top-level non-metadata partition keys
 are allowed.
 
-After replacement chunks are written, obsolete chunks for that exact source and
-pipeline are removed. Empty text removes the previous set. Failed embedding,
+By default, replacement chunks are written before obsolete chunks for that exact
+source and pipeline are removed (`cleanup_order: "insert-first"`).
+`cleanup_order: "delete-first"` removes the old set first and can leave a
+temporary gap if subsequent work fails. Empty text removes the previous set. Failed embedding,
 writing, or cleanup is retried or dead-lettered, not acknowledged as success.
 Replacement across `/id` partitions is **not atomic or revision-fenced**:
 overlapping/out-of-order updates can race. This differs from SharePoint's
 revision-fenced replacement.
 
 Create a new pipeline to change strategy, text-storage opt-in/field, or chunk ID
-template. Size, overlap (including zero), and unit can change for future
+template. Size, overlap (including zero), unit, and cleanup order can change for future
 processing; they do not automatically reprocess existing vectors.
 
 The CLI exposes `--chunk-size`, `--chunk-overlap`, `--chunk-unit`, `--store-text`,

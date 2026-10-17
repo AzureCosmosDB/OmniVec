@@ -212,7 +212,8 @@ This is a readiness threshold, not proof that a large or empty source has
 completed a full enumeration.
 
 Implemented types are `azure-blob`, `cosmosdb`, `postgresql`, `mssql`,
-`databricks`, `sharepoint`, `onelake-iceberg`, and benchmark-only `synthetic`.
+`databricks`, `sharepoint`, `onelake-iceberg`, `garnet`, and benchmark-only
+`synthetic` and `mock` (the latter requires the isolated mock components).
 `s3` and standalone `http` creation are rejected. Use the
 [source configuration table](user-guide.md#supported-sources) for required fields,
 permissions, and watcher prerequisites.

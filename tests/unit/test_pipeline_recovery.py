@@ -84,6 +84,11 @@ def modules(api_app, monkeypatch):
     for name in ("controller", "checkpoint_manager", "progress_tracker"):
         monkeypatch.delitem(sys.modules, name, raising=False)
         loaded[name] = importlib.import_module(name)
+    import telemetry
+    telemetry.reset_batch_dedup()
+    telemetry.metrics_store.reset()
+    loaded["api"].batch_metrics.invalidate()
+    monkeypatch.setattr(loaded["api"], "_run_kql", lambda *a, **kw: None)
     return SimpleNamespace(**loaded)
 
 
@@ -105,36 +110,20 @@ def test_connector_metrics_are_recorded_without_metadata_writes(modules, monkeyp
     store = MemoryStore(pipeline())
     attach(monkeypatch, modules.api, store)
     modules.api._pipeline_stats_cache.clear()
-    recorded = []
-    monkeypatch.setattr(
-        modules.api, "record_embedding_batch",
-        lambda **kwargs: recorded.append(kwargs),
-    )
-
     payload = {
         "processed": 3, "failed": 0, "processing_time_ms": 300,
         "batch_key": "worker:pipeline:stable",
     }
     assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True}
+    assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True, "dedup": True}
+
+    stats = modules.api._compute_pipeline_stats("pipeline")
+    assert stats.documents_processed == 3
+    assert stats.embedded_count == 3
+    assert stats.lifetime_embedded_count == 3
+    assert stats.avg_processing_time_ms == 100
+    assert stats.telemetry_source == "in_memory"
     assert store.get("global", "metrics") is None
-    assert recorded == [{
-        "pipeline_id": "pipeline",
-        "docs_embedded": 3,
-        "docs_failed": 0,
-        "tokens_used": 0,
-        "latency_ms": 300.0,
-        "source_id": "",
-        "model_id": "",
-        "destination_id": "",
-        "input_bytes": 0,
-        "queue_wait_ms": 0.0,
-        "retry_count": 0,
-        "throttle_count": 0,
-        "throttle_delay_ms": 0.0,
-        "error_category": "",
-        "last_document": "",
-        "batch_key": "worker:pipeline:stable",
-    }]
 
 
 def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatch):
@@ -161,6 +150,10 @@ def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatc
     }
 
     assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True}
+    assert modules.api.report_inline_metrics("pipeline", payload) == {
+        "ok": True, "dedup": True,
+    }
+
     assert store.get("global", "metrics") is None
 
     live = modules.api.get_live_metrics()
@@ -185,6 +178,7 @@ def test_worker_metrics_reject_negative_values(modules, monkeypatch):
 
 def test_metrics_timeseries_applies_pipeline_and_model_filters(modules, monkeypatch):
     captured = {}
+    attach(monkeypatch, modules.api, MemoryStore())
 
     def run_kql(query, _timespan):
         captured["query"] = query
@@ -195,21 +189,35 @@ def test_metrics_timeseries_applies_pipeline_and_model_filters(modules, monkeypa
         pipeline_id="pip-123", model_id="mdl-embedding",
     ))
 
-    assert "customDimensions.pipeline_id) == 'pip-123'" in captured["query"]
-    assert "customDimensions.model_id) == 'mdl-embedding'" in captured["query"]
+    assert 'pipeline_id == "pip-123"' in captured["query"]
+    assert 'model_id == "mdl-embedding"' in captured["query"]
+    assert "embeddingBatches" in captured["query"]
     assert result["pipeline_id"] == "pip-123"
     assert result["model_id"] == "mdl-embedding"
 
 
-def test_worker_metrics_do_not_read_or_write_cosmos(modules, monkeypatch):
-    store = MemoryStore(pipeline())
+def test_worker_metrics_never_touch_cosmos_even_when_old_metrics_exist(modules, monkeypatch):
+    metrics = {
+        "id": "global",
+        "doc_type": "metrics",
+        "_etag": "1",
+        "events_processed": 10,
+        "events_failed": 0,
+        "pipelines": {},
+        "models": {},
+    }
+    store = MemoryStore(pipeline(), metrics)
     attach(monkeypatch, modules.api, store)
     original = deepcopy(store.docs)
+
+    monkeypatch.setattr(store, "replace_with_etag", Mock(side_effect=AssertionError("metrics DB write")))
+    monkeypatch.setattr(store, "upsert", Mock(side_effect=AssertionError("metrics DB write")))
     assert modules.api.report_inline_metrics("pipeline", {
         "processed": 2,
         "batch_key": "app-insights-only",
     }) == {"ok": True}
     assert store.docs == original
+    assert store.get("global", "metrics")["events_processed"] == 10
 
 
 def test_synthetic_source_requires_benchmark_only(modules, monkeypatch):
@@ -301,8 +309,8 @@ def test_operator_resource_policy_and_insights(modules, monkeypatch):
     store = MemoryStore(pipeline())
     attach(monkeypatch, modules.api, store)
     monkeypatch.setattr(
-        modules.api, "_get_app_insights_pipeline_metrics",
-        lambda *_args: observed,
+        modules.api, "_reported_pipeline_metrics",
+        lambda *_args: (observed, "app_insights"),
     )
     monkeypatch.setattr(modules.api, "_deployed_worker_concurrency", lambda: 10)
     policy = modules.api.PipelineResourcePolicy(

@@ -597,7 +597,10 @@ var cosmosSourceFailures = await CosmosSourceContentTests.RunAsync();
 var blobPollingFailures = await BlobPollingTests.RunAsync();
 var cosmosChunkFailures = await CosmosChunkTests.RunAsync();
 var laneFailures = await PipelineLaneTests.RunAsync();
-return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures + laneFailures == 0 ? 0 : 1;
+var inlineCosmosFailures = await InlineCosmosTests.RunAsync();
+var garnetSourceFailures = await GarnetSourceTests.RunAsync();
+var metricsTransportFailures = await MetricsTransportTests.RunAsync();
+return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures + laneFailures + inlineCosmosFailures + garnetSourceFailures + metricsTransportFailures == 0 ? 0 : 1;
 
 sealed class MemorySyncStore : ISharePointSyncStore
 {

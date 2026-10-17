@@ -40,6 +40,8 @@ spec:
               value: "true"
             - name: ChangeFeed__EnableBlobSources
               value: "false"
+            - name: ChangeFeed__EnableGarnetSources
+              value: {{ .Values.changefeed.enableGarnetSources | quote }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             {{- if .Values.azure.serviceBus.namespace }}

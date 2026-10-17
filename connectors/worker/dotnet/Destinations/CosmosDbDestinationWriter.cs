@@ -1,13 +1,19 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Text;
 using Azure.Identity;
 using Microsoft.Azure.Cosmos;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace OmniVec.Worker.Destinations;
 
 public partial class CosmosDbDestinationWriter : IDestinationWriter
 {
     private const string CosmosDataUserAgent = "OmniVec-DataCosmos/1.0";
-    private const int MaxBatchRetryAttempts = 12;
+    private const int MaxUpsertRetryAttempts = 5;
+    private const int TransactionPayloadBudgetBytes = 1_500_000;
+    private const int MaxDocumentPayloadBytes = 2 * 1024 * 1024;
 
     private readonly ILogger<CosmosDbDestinationWriter> _logger;
     private static readonly ConcurrentDictionary<string, CosmosClient> _clients = new();
@@ -29,17 +35,29 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
             || vectorField == pkField
             || chunks.Any(c => c.ContentField == pkField || c.ContentField == vectorField))
             throw new NotSupportedException("Cosmos chunk fields conflict with partition/vector/metadata fields");
+        _ = BuildUpsertBatches(chunks, pkField, vectorField, DateTime.UtcNow.ToString("O"));
         await ReplaceTextChunksInStoreAsync(chunks,
             items => WriteBatchAsync(config, items, ct),
-            keep => DeleteByRefAsync(config, [source with { KeepIds = keep }], ct));
+            keep => DeleteByRefAsync(config, [source with { KeepIds = keep }], ct),
+            source.ChunkCleanupOrder);
     }
 
     internal static async Task ReplaceTextChunksInStoreAsync(List<EmbeddingResult> chunks,
-        Func<List<EmbeddingResult>, Task> write, Func<HashSet<string>, Task> cleanup)
+        Func<List<EmbeddingResult>, Task> write, Func<HashSet<string>, Task> cleanup,
+        string cleanupOrder = "insert-first")
     {
-        // Never erase the last good set until every new vector has been persisted.
-        await write(chunks);
-        await cleanup(chunks.Select(c => c.DocId).ToHashSet(StringComparer.Ordinal));
+        if (cleanupOrder == "delete-first")
+        {
+            await cleanup(new(StringComparer.Ordinal));
+            await write(chunks);
+        }
+        else if (cleanupOrder == "insert-first")
+        {
+            await write(chunks);
+            await cleanup(chunks.Select(c => c.DocId).ToHashSet(StringComparer.Ordinal));
+        }
+        else
+            throw new ArgumentException("Unknown Cosmos chunk cleanup_order");
     }
 
     public CosmosDbDestinationWriter(ILogger<CosmosDbDestinationWriter> logger)
@@ -67,18 +85,13 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         var pkPath = await GetPartitionKeyPathAsync(container, cacheKey, ct);
         var pkField = pkPath.TrimStart('/');
 
-        // Group by partition key value
-        var groups = results.GroupBy(r => DestinationPartitionKey(r, pkField));
-        var tasks = new List<Task>();
-
-        foreach (var group in groups)
-        {
-            var now = DateTime.UtcNow.ToString("O");
-            foreach (var chunk in BuildPatchBatches(group, pkField, vectorField, now))
-                tasks.Add(WriteBatchWithRetryAsync(container, group.Key, chunk, pkField, vectorField, now, ct));
-        }
-
-        await Task.WhenAll(tasks);
+        var now = DateTime.UtcNow.ToString("O");
+        var batches = results.GroupBy(r => DestinationPartitionKey(r, pkField))
+            .SelectMany(group => BuildUpsertBatches(group, pkField, vectorField, now)
+                .Select(documents => (Partition: group.Key, Documents: documents)))
+            .ToList();
+        await Task.WhenAll(batches.Select(batch => UpsertBatchWithRetryAsync(
+            container, batch.Partition, batch.Documents, ct)));
     }
 
     private static async Task<string> GetPartitionKeyPathAsync(Container container, string cacheKey, CancellationToken ct)
@@ -101,115 +114,27 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         string id, string? storedPartitionKey, string sourcePartition, string pkPath)
         => pkPath == "/id" ? id : storedPartitionKey ?? sourcePartition;
 
-    private Task WriteBatchWithRetryAsync(
-        Container container,
-        string pkValue,
-        List<DocumentPatch> docs,
-        string pkField,
-        string vectorField,
-        string now,
-        CancellationToken ct)
-    {
-        var pk = new PartitionKey(pkValue);
-        return WritePatchBatchWithRetryAsync(docs, pkValue, async (items, token) =>
-        {
-            var batch = container.CreateTransactionalBatch(pk);
-            foreach (var doc in items)
-                foreach (var ops in doc.Operations)
-                    batch.PatchItem(doc.Document.DocId, ops);
-            using var response = await batch.ExecuteAsync(token);
-            return response.StatusCode;
-        }, (doc, token) => UpsertBatchWithRetryAsync(container, pk, [doc], pkField, vectorField, now, token), ct);
-    }
-
-    internal async Task WritePatchBatchWithRetryAsync(
-        List<DocumentPatch> docs,
-        string pkValue,
-        Func<List<DocumentPatch>, CancellationToken, Task<System.Net.HttpStatusCode>> patch,
-        Func<EmbeddingResult, CancellationToken, Task> upsertMissing,
-        CancellationToken ct)
-    {
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                // Always try patch first — preserves existing document fields.
-                // Only fall back to upsert if patch fails with NotFound.
-                var status = await patch(docs, ct);
-                var statusCode = (int)status;
-                if (statusCode is >= 200 and <= 299)
-                    return;
-
-                // A missing item rolls back the whole transaction. Retry items
-                // separately so upserting a missing item cannot replace its neighbors.
-                if (status == System.Net.HttpStatusCode.NotFound)
-                {
-                    if (docs.Count > 1)
-                    {
-                        await Task.WhenAll(docs.Select(doc => WritePatchBatchWithRetryAsync(
-                            [doc], pkValue, patch, upsertMissing, ct)));
-                        return;
-                    }
-                    _logger.LogInformation("Patch NotFound pk={PK}, falling back to upsert", pkValue);
-                    await upsertMissing(docs[0].Document, ct);
-                    return;
-                }
-
-                if (statusCode == 429 || statusCode >= 500)
-                {
-                    if (attempt >= MaxBatchRetryAttempts)
-                        throw new InvalidOperationException($"Cosmos patch retries exhausted: {status}");
-                    var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
-                    _logger.LogWarning("Batch {Status} pk={PK}, attempt {Attempt}, retrying in {Delay}ms",
-                        status, pkValue, attempt, delay.TotalMilliseconds);
-                    await Task.Delay(delay, ct);
-                    continue;
-                }
-
-                _logger.LogError("Batch failed (non-retryable): pk={PK}, status={Status}", pkValue, status);
-                throw new Exception($"Batch patch failed: {status}");
-            }
-            catch (CosmosException ex) when (
-                attempt < MaxBatchRetryAttempts && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
-                ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
-                ex.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable ||
-                (int)ex.StatusCode >= 500))
-            {
-                var delay = ex.RetryAfter ?? TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
-                _logger.LogWarning("Batch exception {Status} pk={PK}, attempt {Attempt}, retrying",
-                    ex.StatusCode, pkValue, attempt);
-                await Task.Delay(delay, ct);
-            }
-            catch (OperationCanceledException) { throw; }
-        }
-    }
-
-    internal sealed record DocumentPatch(EmbeddingResult Document, List<PatchOperation[]> Operations);
-
-    internal static List<List<DocumentPatch>> BuildPatchBatches(
+    internal static List<List<JObject>> BuildUpsertBatches(
         IEnumerable<EmbeddingResult> docs, string pkField, string vectorField, string now)
     {
-        var batches = new List<List<DocumentPatch>>();
-        var batch = new List<DocumentPatch>();
-        var operationCount = 0;
+        var batches = new List<List<JObject>>();
+        var batch = new List<JObject>();
+        var bytes = 0;
         foreach (var doc in docs)
         {
-            var operations = BuildDocumentFields(doc, pkField, vectorField, now, false)
-                .Select(field => PatchOperation.Set(
-                    "/" + field.Key.Replace("~", "~0").Replace("/", "~1"), field.Value))
-                .Chunk(10).ToList();
-            // All patches for an item must commit together; never split an item
-            // across transactions, even at the 100-operation batch boundary.
-            if (operations.Count > 100)
-                throw new InvalidOperationException($"Document '{doc.DocId}' exceeds the 1000-field atomic patch limit");
-            if (operationCount + operations.Count > 100)
+            var item = JObject.FromObject(BuildDocumentFields(doc, pkField, vectorField, now, true));
+            var size = Encoding.UTF8.GetByteCount(item.ToString(Formatting.None));
+            // Reserve room for Cosmos's transaction envelope below its 2 MiB limit.
+            if (size > MaxDocumentPayloadBytes)
+                throw new InvalidOperationException($"Document '{doc.DocId}' exceeds the Cosmos 2 MiB item limit");
+            if (batch.Count > 0 && (batch.Count == 100 || bytes + size > TransactionPayloadBudgetBytes))
             {
                 batches.Add(batch);
                 batch = new();
-                operationCount = 0;
+                bytes = 0;
             }
-            batch.Add(new(doc, operations));
-            operationCount += operations.Count;
+            batch.Add(item);
+            bytes += size;
         }
         if (batch.Count > 0)
             batches.Add(batch);
@@ -263,49 +188,59 @@ public partial class CosmosDbDestinationWriter : IDestinationWriter
         return item;
     }
 
-    /// <summary>
-    /// Fallback: upsert documents that don't exist yet (separate destination container).
-    /// </summary>
-    private async Task UpsertBatchWithRetryAsync(
-        Container container,
-        PartitionKey pk,
-        List<EmbeddingResult> docs,
-        string pkField,
-        string vectorField,
-        string now,
+    private Task UpsertBatchWithRetryAsync(
+        Container container, string pkValue, List<JObject> docs, CancellationToken ct)
+        => WriteUpsertBatchWithRetryAsync(docs, pkValue, async (items, token) =>
+        {
+            if (items.Count == 1
+                && Encoding.UTF8.GetByteCount(items[0].ToString(Formatting.None)) > TransactionPayloadBudgetBytes)
+            {
+                var itemResponse = await container.UpsertItemAsync(items[0], new PartitionKey(pkValue),
+                    cancellationToken: token);
+                return (itemResponse.StatusCode, null);
+            }
+            var batch = container.CreateTransactionalBatch(new PartitionKey(pkValue));
+            foreach (var item in items) batch.UpsertItem(item);
+            using var response = await batch.ExecuteAsync(token);
+            return (response.StatusCode, response.RetryAfter);
+        }, ct);
+
+    internal async Task WriteUpsertBatchWithRetryAsync(
+        List<JObject> docs, string pkValue,
+        Func<List<JObject>, CancellationToken, Task<(HttpStatusCode Status, TimeSpan? RetryAfter)>> execute,
         CancellationToken ct)
     {
         for (int attempt = 1; ; attempt++)
         {
             try
             {
-                var batch = container.CreateTransactionalBatch(pk);
-                foreach (var doc in docs)
-                    batch.UpsertItem(BuildDocumentFields(doc, pkField, vectorField, now, true));
-
-                using var response = await batch.ExecuteAsync(ct);
-                if (response.IsSuccessStatusCode)
+                var (status, retryAfter) = await execute(docs, ct);
+                var statusCode = (int)status;
+                if (statusCode is >= 200 and <= 299)
                     return;
 
-                var statusCode = (int)response.StatusCode;
-                if (statusCode == 429 || statusCode >= 500)
+                if (statusCode is 429 or 408 || statusCode >= 500)
                 {
-                    if (attempt >= 5) throw new InvalidOperationException($"Cosmos upsert retries exhausted: {response.StatusCode}");
-                    var delay = TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
+                    if (attempt >= MaxUpsertRetryAttempts)
+                        throw new InvalidOperationException($"Cosmos upsert retries exhausted: {status}");
+                    var delay = retryAfter is { } retry && retry > TimeSpan.Zero
+                        ? retry : TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
                     _logger.LogWarning("Upsert {Status} pk={PK}, attempt {Attempt}, retrying",
-                        response.StatusCode, pk, attempt);
+                        status, pkValue, attempt);
                     await Task.Delay(delay, ct);
                     continue;
                 }
 
-                throw new Exception($"Batch upsert failed: {response.StatusCode}");
+                _logger.LogError("Cosmos upsert failed: pk={PK}, status={Status}", pkValue, status);
+                throw new InvalidOperationException($"Batch upsert failed: {status}");
             }
             catch (CosmosException ex) when (
-                attempt < 5 && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
+                attempt < MaxUpsertRetryAttempts && (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests ||
                 ex.StatusCode == System.Net.HttpStatusCode.RequestTimeout ||
                 (int)ex.StatusCode >= 500))
             {
                 var delay = ex.RetryAfter ?? TimeSpan.FromMilliseconds(Math.Min(500 * Math.Pow(2, attempt), 30_000));
+                _logger.LogWarning(ex, "Cosmos upsert exception: pk={PK}, attempt {Attempt}", pkValue, attempt);
                 await Task.Delay(delay, ct);
             }
             catch (OperationCanceledException) { throw; }

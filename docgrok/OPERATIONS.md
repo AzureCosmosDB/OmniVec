@@ -50,12 +50,37 @@ prove that an ingestion pipeline is making progress.
 
 The document processor sends chunks through `/embed/batch` rather than
 issuing one model request per chunk. `DOCGROK_EMBED_BATCH_SIZE` defaults to
-`16` and accepts values from `1` to `128`. Lower it for models with smaller
+`16` and accepts values from `1` to `2048`. Lower it for models with smaller
 batch/token budgets or limited GPU memory. Each batch retains the existing
 120-second HTTP timeout; this is not a whole-document execution deadline.
 Incomplete batch responses fail rather than silently dropping chunks.
 Backend client errors, throttling, and server errors retain their HTTP status
 so the queue worker can distinguish permanent failures from retryable ones.
+
+Internal embedding models can bypass the router data path while retaining it
+as a fallback and control plane. Configure the pipeline-worker with:
+
+```yaml
+DOCGROK_EMBED_MODE: direct-with-router-fallback
+DOCGROK_DIRECT_EMBEDDING_ROUTES: >-
+  {"mdl-ext-harrier":{"protocol":"openai","model":"microsoft/harrier-oss-v1-0.6b","endpoints":["http://harrier-embedding:8000"],"batch_size":512,"concurrency":8}}
+DOCGROK_DIRECT_EMBED_CONCURRENCY: "8"
+DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS: "180"
+```
+
+`router` remains the default mode. `direct` fails if the mapped endpoint is
+unavailable; `direct-with-router-fallback` retries through the existing router.
+Only explicitly mapped model IDs use the direct path. External OpenAI and Azure
+OpenAI models therefore continue through the router for credentials, managed
+identity, provider-specific URLs, and error normalization.
+
+The pipeline-worker requests the versioned
+`application/vnd.omnivec.embeddings.f32` router response. Updated routers send
+a 16-byte `OVEC` header followed by contiguous little-endian float32 vectors;
+older routers continue returning JSON and remain compatible. Set
+`DOCGROK_UNPOOLED_MODEL_HOSTS` on routers to a comma-separated list of
+in-cluster model hosts, such as `harrier-embedding`, when router fallback
+should open a new connection for Kubernetes request-level balancing.
 
 Chunk sizes must be positive; overlap must be nonnegative and smaller than
 the configured chunk size. Invalid settings fail explicitly instead of

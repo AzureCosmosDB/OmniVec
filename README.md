@@ -21,6 +21,9 @@ Not every source/destination pair supports every processing or search mode.
 Start with the Cosmos DB walkthrough below, then use the connector guides for
 other combinations.
 
+See the [v2.0.0 release notes](docs/releases/v2.0.0.md) for cumulative fixes,
+breaking changes, upgrade instructions, and measured benchmark results.
+
 ## Start here
 
 | I want to... | Read |
@@ -214,6 +217,8 @@ is enabled or every pair is compatible. Queue pipelines require Service Bus and
 | Databricks Delta | `databricks` | Snapshot and Delta CDF through a SQL Warehouse; dedicated watcher |
 | SharePoint Online | `sharepoint` | Microsoft Graph delta polling; Graph grants and dedicated watcher |
 | Fabric OneLake | `onelake-iceberg` | Iceberg scans; optional separately deployed Fabric Spark Delta CDF job |
+| Garnet HASH | `garnet` | Versioned JSON documents; inline polling to a vector set on the same endpoint |
+| Isolated mock service | `mock` | Opt-in inline benchmark source with separate model and sink services |
 | Synthetic traffic | `synthetic` | Explicit API-triggered publication for controlled benchmarks only |
 
 `s3` and standalone `http` are declared API types but **not implemented**;
@@ -227,6 +232,7 @@ HTTP source.
 | SQL Server / Azure SQL | `mssql` | Serialized embedding arrays and metadata; no OmniVec Search support |
 | Garnet Vector Sets | `garnet` | Preview vector storage/search; requires `--enable-vector-set-preview`, not generic Redis |
 | OneLake write-back | `onelake-iceberg` | Asynchronous Spark MERGE into existing source rows; search through an optional Garnet mirror |
+| Isolated mock sink | `mock` | Opt-in HTTP benchmark sink; no persistence or search |
 | Null sink | `null` | Benchmark-only discard sink; no persistence or search |
 
 SharePoint supports Cosmos DB Vector destinations only. OneLake write-back

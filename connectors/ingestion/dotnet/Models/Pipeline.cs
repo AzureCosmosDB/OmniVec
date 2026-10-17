@@ -34,6 +34,9 @@ public class Pipeline
     [JsonPropertyName("reset_at")]
     public string? ResetAt { get; set; }
 
+    [JsonPropertyName("updated_at")]
+    public string? UpdatedAt { get; set; }
+
     [JsonPropertyName("generation")]
     public string Generation { get; set; } = "1";
 

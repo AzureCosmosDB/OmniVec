@@ -196,6 +196,7 @@ function overview(p) {
   const st = p.st, h = M.hp[p.id], L = p.live || {}, obs = (p.ins||{}).observed || {};
   const cfg = p.chunk_config || {}; const srcRef = (p.sources||[])[0] || {};
   return `<div class="grid g-main" style="align-items:start"><div class="stack">
+   ${p.src.type==='mock' ? `<div class="callout warn"><div><b>Synthetic-source payload benchmark</b>Full embeddings from the selected model are transmitted over HTTP, validated by the mock sink, and discarded. See the run receipt for real versus synthetic model output. No searchable vector persistence.<div style="margin-top:8px"><b>${fmt(st.throughput_docs_per_sec)} documents/second</b> · ${fmt(st.embedded_count)} accepted documents</div><button class="btn sm" id="mock-receipt">Full run receipt and payload byte count</button><pre id="mock-receipt-out" class="small" style="white-space:pre-wrap" hidden></pre></div></div>` : ''}
    <div class="card"><div class="card-h"><h3>Progress</h3><div class="acts muted small">${p.paused ? 'Paused' : p.progress>=100 ? 'Backfill complete · syncing changes' : p.progress!=null ? 'Backfilling' : 'Syncing changes'}</div></div>
     <div class="card-b">${ladder(p)}
      <div class="stats" style="margin-top:18px;border-top:1px solid var(--border)">
@@ -225,6 +226,13 @@ function overview(p) {
   </div></div>`;
 }
 function mountOverview(p, t) {
+  const receipt = $('#mock-receipt', t);
+  if (receipt) receipt.onclick = async () => {
+    const out = $('#mock-receipt-out', t); receipt.disabled = true;
+    try { const run = await api(`/api/pipelines/${encodeURIComponent(p.id)}/mock-run`); out.textContent = JSON.stringify(run, null, 2); out.hidden = false; }
+    catch (e) { toast(e.message, 'err'); }
+    finally { receipt.disabled = false; }
+  };
   const b = $('#rechk', t); if (b) b.onclick = async () => { b.disabled = true; b.innerHTML = spinner('Checking…');
     try { D.health = await api('/api/health/checks/run?section=pipelines', { method:'POST' }); toast('Checks complete'); invalidate('health'); render({ force:true, silent:true }); }
     catch (e) { toast(e.message, 'err'); b.disabled = false; b.textContent = 'Re-check'; } };
@@ -303,6 +311,7 @@ function settings(p, t) {
   t.innerHTML = `<div class="grid g-main" style="align-items:start"><div class="card"><div class="card-b stack">
     <div class="grid g2"><div class="fld"><label>Name</label><input class="inp" id="sn" value="${esc(p.name)}"></div><div class="fld"><label>Description</label><input class="inp" id="sd" value="${esc(p.description||'')}"></div></div>
     ${p.content_strategy==='chunk' ? `<div class="grid g3"><div class="fld"><label>Chunk size</label><input class="inp" type="number" id="scs" value="${cfg.chunk_size||1000}"></div><div class="fld"><label>Overlap</label><input class="inp" type="number" id="sco" value="${cfg.chunk_overlap||0}"></div><div class="fld"><label>Unit</label><select class="sel" id="scu"><option value="chars" ${cfg.chunk_unit!=='tokens'?'selected':''}>Characters</option><option value="tokens" ${cfg.chunk_unit==='tokens'?'selected':''}>Words (approx. tokens)</option></select></div></div>` : ''}
+    ${p.content_strategy==='chunk' && p.src.type==='cosmosdb' ? `<div class="fld"><label>Chunk replacement order</label><select class="sel" id="scko"><option value="insert-first" ${cfg.cleanup_order!=='delete-first'?'selected':''}>Insert new chunks, then delete obsolete chunks</option><option value="delete-first" ${cfg.cleanup_order==='delete-first'?'selected':''}>Delete old chunks, then insert new chunks</option></select><span class="hint">Insert-first can temporarily show mixed chunks. Delete-first can leave a search gap if insertion fails. Applies to newly queued work; in-flight work retains its order.</span></div>` : ''}
     <div class="grid g2"><div class="fld"><label>On document ID collision</label><select class="sel" id="scol"><option value="reject" ${p.collision_policy!=='overwrite'?'selected':''}>Reject (safer)</option><option value="overwrite" ${p.collision_policy==='overwrite'?'selected':''}>Overwrite</option></select></div>
      <div class="fld"><label>Extra metadata on each vector</label><div class="row wrap">${['pipeline_name','embedding_dims','source_ref'].map(f => `<label class="check"><input type="checkbox" value="${f}" class="smeta" ${meta.includes(f)?'checked':''}> ${f}</label>`).join('')}</div></div></div>
     <div class="callout">${icon('info','ic')}<div>Source, model, vector store and content strategy define what is in the index, so they cannot be changed in place. To change them, create a new pipeline and delete this one when it's verified.</div></div>
@@ -315,6 +324,7 @@ function settings(p, t) {
     const patch = { name:$('#sn',t).value.trim(), description:$('#sd',t).value, collision_policy:$('#scol',t).value, metadata_fields:$$('.smeta',t).filter(x=>x.checked).map(x=>x.value) };
     if (!patch.name) { $('#serr', t).textContent = 'Name is required.'; return; }
     if (p.content_strategy==='chunk') patch.chunk_config = { ...cfg, chunk_size:+$('#scs',t).value, chunk_overlap:+$('#sco',t).value, chunk_unit:$('#scu',t).value };
+    if ($('#scko',t)) patch.chunk_config.cleanup_order = $('#scko',t).value;
     b.disabled = true; b.innerHTML = spinner('Saving…');
     try { await api(`/api/pipelines/${p.id}`, { method:'PUT', body:payloadFrom(p, patch) }); toast('Pipeline saved'); invalidate('pipelines'); render({ force:true, silent:true }); }
     catch (err) { $('#serr', t).textContent = err.message; b.disabled = false; b.textContent = 'Save changes'; } };

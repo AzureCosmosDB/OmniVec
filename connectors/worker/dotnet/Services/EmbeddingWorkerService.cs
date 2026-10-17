@@ -583,7 +583,8 @@ public class EmbeddingWorkerService : BackgroundService
             if (results.Select(r => r.Embedding.Length).Distinct().Count() > 1)
                 throw new InvalidOperationException("Chunk embedding dimensions are inconsistent");
             await writer.ReplaceTextChunksAsync(msg.DestinationConfig,
-                new(msg.SourceId, msg.SourceRef, msg.PartitionKeyValue, msg.PipelineId), results, ct);
+                new(msg.SourceId, msg.SourceRef, msg.PartitionKeyValue, msg.PipelineId,
+                    ChunkCleanupOrder: config.CleanupOrder), results, ct);
             await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, 1, 0, 0, $"chunk:{msg.MessageId}", ct,
                 sourceId: msg.SourceId, destinationId: msg.DestinationId,
@@ -1089,7 +1090,7 @@ public class EmbeddingWorkerService : BackgroundService
                 "Worker batch complete: {Count} docs for pipeline={Pipeline} in {Elapsed}ms",
                 batch.Count, batch[0].msg.PipelineName, sw.ElapsedMilliseconds);
 
-            // Phase 4: Make metrics durable before acknowledging broker deliveries.
+            // Phase 4: Queue best-effort metrics without waiting for HTTP delivery.
             var batchKey = BuildMetricsBatchKey(pipelineId, batch.Select(item => item.msg));
             var tokensUsed = texts.Sum(TokenEstimator.Estimate);
             var inputBytes = texts.Sum(text => Encoding.UTF8.GetByteCount(text));

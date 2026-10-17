@@ -1,11 +1,9 @@
 using Azure.Identity;
 using Azure.Messaging.ServiceBus;
-using Azure.Monitor.OpenTelemetry.Exporter;
 using Microsoft.Extensions.Options;
 using OmniVec.Worker.Configuration;
 using OmniVec.Worker.Destinations;
 using OmniVec.Worker.Services;
-using OpenTelemetry.Metrics;
 
 ThreadPool.SetMinThreads(500, 500);
 
@@ -39,18 +37,12 @@ builder.Services.AddHttpClient<DocGrokClient>((sp, client) =>
     client.Timeout = opts.GetDocGrokRequestTimeout();
 });
 
-builder.Services.AddSingleton(sp => new MetricsReporter(
-    new HttpClient(), sp.GetRequiredService<ILogger<MetricsReporter>>()));
-var appInsightsConnectionString =
-    builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
-if (!string.IsNullOrWhiteSpace(appInsightsConnectionString))
-{
-    builder.Services.AddOpenTelemetry()
-        .WithMetrics(metrics => metrics
-            .AddMeter(MetricsReporter.MeterName)
-            .AddAzureMonitorMetricExporter(options =>
-                options.ConnectionString = appInsightsConnectionString));
-}
+// Metrics: singleton bounded non-blocking transport (hosted, registered before the
+// worker so it stops after it and drains final reports) + singleton reporter facade.
+builder.Services.AddMetricsTransport(builder.Configuration,
+    sp => sp.GetRequiredService<IOptions<WorkerOptions>>().Value.OmniVecApiBaseUrl);
+builder.Services.AddSingleton<MetricsReporter>(sp => new MetricsReporter(
+    sp.GetRequiredService<MetricsTransport>(), sp.GetRequiredService<ILogger<MetricsReporter>>()));
 builder.Services.AddHttpClient("FabricJobs", client => client.Timeout = TimeSpan.FromSeconds(30));
 
 builder.Services.AddHttpClient<SharePointContentClient>(client =>
