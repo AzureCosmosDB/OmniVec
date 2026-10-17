@@ -1,6 +1,6 @@
 /* OmniVec console: Home */
 (() => {
-const { icon, esc, fmt, ms, ago, plural, D, M, T, logo, statusBadge, chipFlow, spark, chart, empty, loadErr, route, session } = window.OVX;
+const { icon, esc, nameLabel, fmt, ms, ago, plural, D, M, T, logo, statusBadge, chipFlow, spark, chart, empty, loadErr, route, session } = window.OVX;
 
 function greeting() { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; }
 
@@ -72,7 +72,7 @@ route('home', { needs:[...window.OVX.CORE, 'series'], render() {
    <div class="grid g-main" style="margin-top:16px;align-items:start">
     <div class="card"><div class="card-h"><h3>Needs attention</h3>${attention.length ? `<span class="badge warn">${attention.length}</span>` : ''}<div class="acts"><a class="btn ghost sm" href="#/pipelines">All pipelines${icon('chev','sm')}</a></div></div>
      ${attention.length ? `<table class="tbl hide-c2"><thead><tr><th>Pipeline</th><th>Flow</th><th>Signal</th><th class="r">Vectors</th><th>Last write</th><th></th></tr></thead><tbody>
-      ${attention.slice(0,7).map(p => `<tr class="clickrow" data-href="#/pipelines/${p.id}"><td><div class="nm trunc" style="max-width:240px">${esc(p.name)}</div><div class="id">${p.id}</div></td><td>${chipFlow(p)}</td>
+      ${attention.slice(0,7).map(p => `<tr class="clickrow" data-href="#/pipelines/${p.id}"><td><div class="nm trunc" style="max-width:240px">${nameLabel(p.name)}</div><div class="id">${p.id}</div></td><td>${chipFlow(p)}</td>
         <td><span class="badge ${p.problems[0].sev==='err'?'err':'warn'}">${esc(p.problems[0].title)}</span>${p.problems.length>1?` <span class="muted small">+${p.problems.length-1}</span>`:''}</td><td class="r num">${fmt(p.vectors)}</td><td class="muted">${ago(p.lastWrite)}</td>
         <td class="r"><a class="btn sm" href="#/pipelines/${p.id}">Fix</a></td></tr>`).join('')}
       ${attention.length > 7 ? `<tr><td colspan="6" class="muted small"><a class="link" href="#/pipelines?f=attention">+ ${attention.length-7} more</a></td></tr>` : ''}</tbody></table>`

@@ -8,6 +8,7 @@ from garnet_endpoint import garnet_endpoint_identity
 from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
+from omnivec_queue import queue_publish_policy
 
 
 # Optional informational metadata fields that destination writers may persist
@@ -33,6 +34,7 @@ class SourceType(str, Enum):
     DATABRICKS = "databricks"
     ONELAKE_ICEBERG = "onelake-iceberg"
     SHAREPOINT = "sharepoint"
+    SYNTHETIC = "synthetic"
     GARNET = "garnet"
 
 
@@ -43,6 +45,7 @@ class DestinationType(str, Enum):
     MSSQL = "mssql"
     ONELAKE_ICEBERG = "onelake-iceberg"
     GARNET = "garnet"
+    NULL = "null"
 
 
 class TriggerType(str, Enum):
@@ -305,6 +308,19 @@ class SharePointSourceConfig(BaseModel):
         return normalized
 
 
+class SyntheticSourceConfig(BaseModel):
+    """Benchmark-only source that emits deterministic Service Bus messages."""
+    benchmark_only: Literal[True]
+    document_count: int = Field(default=10_000, ge=1, le=1_000_000)
+    message_size_bytes: int = Field(default=1024, ge=1024, le=200_000)
+    docs_per_second: float = Field(default=100, ge=0, le=100_000)
+    content_pattern: Literal["repeated", "deterministic"] = "deterministic"
+    mock_embedding: bool = False
+    mock_embedding_dimensions: int = Field(default=384, ge=1, le=4096)
+
+    model_config = {"extra": "forbid"}
+
+
 class GarnetSourceConfig(BaseModel):
     """A versioned JSON document collection stored in a Garnet HASH."""
     endpoint: str
@@ -391,6 +407,7 @@ class GarnetDestinationConfig(BaseModel):
     quantization: Literal["NOQUANT", "Q8", "BIN"] = "NOQUANT"
     m: int = Field(default=16, ge=4, le=4096)
     ef: int = Field(default=200, ge=1, le=1_000_000)
+    write_concurrency: int = Field(default=16, ge=1, le=128)
     search_ef: int = Field(default=100, ge=1, le=1_000_000)
     filter_ef: int = Field(default=16, ge=4, le=256)
     vector_indexes: List[Dict[str, Any]] = Field(default_factory=list)
@@ -659,12 +676,28 @@ class PipelineSource(BaseModel):
 
 
 class PipelineResourcePolicy(BaseModel):
-    """Operator-adjustable fairness policy for the shared worker pool."""
+    """Operator-adjustable fairness, model batching and queue packing controls."""
 
     weight: int = Field(default=10, ge=1, le=100)
     max_concurrency_per_worker: int = Field(default=2, ge=1, le=32)
+    embed_batch_size: int = Field(default=50, ge=1, le=4096)
+    queue_documents_per_message: int = Field(default=1, ge=1, le=1000)
+    queue_max_envelope_bytes: int = Field(default=224 * 1024, ge=1024, le=960 * 1024, strict=True)
+    queue_send_batch_max_bytes: int = Field(default=240 * 1024, ge=1024, le=1024 * 1024, strict=True)
+    queue_publish_batch_size: int = Field(default=200, ge=1, le=1000, strict=True)
     priority: Literal["low", "normal", "high", "critical"] = "normal"
     workload_class: Literal["shared", "burst", "dedicated"] = "shared"
+
+    @model_validator(mode="after")
+    def _validate_queue_capacity(self):
+        queue_publish_policy(self.model_dump())
+        return self
+
+
+class ModelRequestLimits(BaseModel):
+    max_batch_size: int = Field(default=256, ge=1, le=4096)
+    context_window_tokens: int = Field(default=8191, ge=1, le=2_000_000)
+    max_batch_tokens: int = Field(default=6000, ge=1, le=2_000_000)
 
 
 class Pipeline(BaseModel):
@@ -702,6 +735,7 @@ class Pipeline(BaseModel):
     # Allowed values: see ALLOWED_METADATA_FIELDS.
     metadata_fields: Optional[List[str]] = None
     resource_policy: PipelineResourcePolicy = Field(default_factory=PipelineResourcePolicy)
+    model_limits: ModelRequestLimits = Field(default_factory=ModelRequestLimits)
     generation: str = "1"  # Incremented on reset - docs with mismatched generation are reprocessed
     reset_at: Optional[datetime] = None  # Set when pipeline is reset for reprocessing
     created_at: Optional[datetime] = None
@@ -855,6 +889,16 @@ class SyncSourceRequest(BaseModel):
         le=1_000_000,
         description="Minimum current-generation embeddings required before the sync operation is ready",
     )
+
+
+class SyntheticGenerateRequest(BaseModel):
+    pipeline_id: Optional[str] = None
+    document_count: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    message_size_bytes: Optional[int] = Field(default=None, ge=1024, le=200_000)
+    docs_per_second: Optional[float] = Field(default=None, ge=0, le=100_000)
+    content_pattern: Optional[Literal["repeated", "deterministic"]] = None
+    mock_embedding: Optional[bool] = None
+    mock_embedding_dimensions: Optional[int] = Field(default=None, ge=1, le=4096)
 
 
 class PipelineRunStats(BaseModel):

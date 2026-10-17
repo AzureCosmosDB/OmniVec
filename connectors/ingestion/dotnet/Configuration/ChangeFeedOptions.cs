@@ -2,6 +2,8 @@ namespace OmniVec.ChangeFeed.Configuration;
 
 public class ChangeFeedOptions
 {
+    public bool PipelineLanesEnabled { get; set; } = false;
+    public string PipelineLanesTopicName { get; set; } = "";
     /// <summary>OmniVec API base URL (internal K8s service)</summary>
     public string OmniVecApiBaseUrl { get; set; } = "http://omnivec-api:80";
 

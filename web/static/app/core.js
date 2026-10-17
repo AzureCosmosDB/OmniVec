@@ -45,6 +45,7 @@ const P = {
 };
 const icon = (n, c='') => `<svg class="i ${c}" viewBox="0 0 24 24">${P[n]||''}</svg>`;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const nameLabel = window.OVNames.render;
 const fmt = n => n==null || Number.isNaN(n) ? '—' : Number(n).toLocaleString('en-US');
 const ms = v => v==null ? '—' : v >= 10000 ? (v/1000).toFixed(0)+'s' : v >= 1000 ? (v/1000).toFixed(1)+'s' : Math.round(v)+'ms';
 const toDate = v => { if (v==null || v==='') return null; if (typeof v === 'number') return new Date(v < 1e12 ? v*1000 : v);
@@ -159,6 +160,7 @@ const TYPES = {
   'cosmosdb':{label:'Azure Cosmos DB',short:'Cosmos DB',logo:'l-cosmos',abbr:'CDB'},
   'azure-blob':{label:'Azure Blob Storage',short:'Blob Storage',logo:'l-blob',abbr:'BLB'},
   'sharepoint':{label:'SharePoint Online',short:'SharePoint',logo:'l-sp',abbr:'SP'},
+  'synthetic':{label:'Synthetic benchmark',short:'Synthetic',logo:'l-queue',abbr:'SYN'},
   'postgresql':{label:'PostgreSQL',short:'PostgreSQL',logo:'l-pg',abbr:'PG'},
   'mssql':{label:'Azure SQL / SQL Server',short:'SQL Server',logo:'l-pg',abbr:'SQL'},
   'databricks':{label:'Azure Databricks',short:'Databricks',logo:'l-onelake',abbr:'DBX'},
@@ -284,7 +286,7 @@ const statusBadge = p => p.paused ? `<span class="badge">${icon('pause','sm')}Pa
   : p.health==='err' ? `<span class="badge err">${dot('err')}${esc(p.problems[0] && p.problems[0].code==='failures' ? 'Failing' : 'Broken')}</span>`
   : p.health==='warn' ? `<span class="badge warn">${dot('warn')}${esc(p.problems[0] ? (p.problems[0].code==='queue_wait' ? 'Slow' : p.problems[0].code==='trigger' ? 'No trigger' : 'Attention') : 'Attention')}</span>`
   : p.health==='ok' ? `<span class="badge ok">${dot('ok')}Healthy</span>` : `<span class="badge out">${dot()}Not checked</span>`;
-const chipFlow = p => `<span class="chip-flow">${logo(p.src.type,'sm')}<span class="arrow">→</span>${logo(p.model ? p.model.type : 'recipe','sm')}<span class="arrow">→</span>${logo(p.dst.type,'sm')}<span class="trunc muted" style="max-width:150px">${esc(p.dst.name)}</span></span>`;
+const chipFlow = p => `<span class="chip-flow">${logo(p.src.type,'sm')}<span class="arrow">→</span>${logo(p.model ? p.model.type : 'recipe','sm')}<span class="arrow">→</span>${logo(p.dst.type,'sm')}<span class="trunc muted" style="max-width:150px">${nameLabel(p.dst.name)}</span></span>`;
 const spark = (vals, w=90, h=24, color='var(--accent)') => {
   if (!vals || vals.length < 2) return '';
   const mx = Math.max(...vals, 1), st = w/(vals.length-1);
@@ -380,7 +382,7 @@ async function render(opts = {}) {
   try { res = await def.render(parts.slice(1)); }
   catch (e) { console.error(e); res = { crumbs:[['Error']], html:`<div class="page">${empty('alert','This page could not be displayed', esc(e.message), '<button class="btn" data-act="reload">Retry</button>')}</div>` }; }
   if (seq !== renderSeq) return;
-  $('#crumbs').innerHTML = (res.crumbs||[]).map((c,i,a) => i < a.length-1 ? `<a href="${c[1]}">${esc(c[0])}</a><span class="sep">/</span>` : `<span class="cur">${esc(c[0])}</span>`).join('');
+  $('#crumbs').innerHTML = (res.crumbs||[]).map((c,i,a) => i < a.length-1 ? `<a href="${c[1]}">${nameLabel(c[0])}</a><span class="sep">/</span>` : `<span class="cur">${nameLabel(c[0])}</span>`).join('');
   document.title = ((res.crumbs||[]).slice(-1)[0]||['OmniVec'])[0] + ' · OmniVec';
   const top = view.scrollTop;
   view.innerHTML = `<div class="fade-in">${res.html}</div>`;
@@ -398,7 +400,7 @@ async function render(opts = {}) {
 function combo(host, { items, value = '', all, placeholder = 'Search', width = 200, onPick }) {
   if (!host) return;
   const cur = () => items.find(i => i.v === value);
-  const label = () => { const c = cur(); return c ? `${c.lg ? logo(c.lg, 'sm') : ''}<span class="trunc">${esc(c.l)}</span>` : `<span class="trunc ${all ? '' : 'muted'}">${esc(all || placeholder)}</span>`; };
+  const label = () => { const c = cur(); return c ? `${c.lg ? logo(c.lg, 'sm') : ''}<span class="trunc">${nameLabel(c.l)}</span>` : `<span class="trunc ${all ? '' : 'muted'}">${esc(all || placeholder)}</span>`; };
   host.classList.add('msel'); host.innerHTML = `<button class="sel msel-btn" type="button" style="min-width:0;width:${width}px">${label()}</button>`;
   const btn = host.firstElementChild;
   btn.onclick = e => { e.stopPropagation();
@@ -412,7 +414,7 @@ function combo(host, { items, value = '', all, placeholder = 'Search', width = 2
     const paint = () => { const q = (inp ? inp.value : '').toLowerCase();
       const list = (all && !q ? [{ v:'', l:all }] : []).concat(items.filter(i => !q || (i.l + ' ' + (i.s||'') + ' ' + i.v).toLowerCase().includes(q))).slice(0, 300);
       hi = Math.min(hi, Math.max(0, list.length - 1));
-      $('.msel-list', pop).innerHTML = list.map((i, n) => `<div class="msel-it ${i.v===value?'on':''} ${n===hi?'hi':''}" data-v="${esc(i.v)}">${i.lg ? logo(i.lg,'sm') : ''}<div class="grow" style="min-width:0"><div class="trunc" style="font-weight:${i.v===value?600:450}">${esc(i.l)}</div>${i.s ? `<div class="muted small trunc">${esc(i.s)}</div>` : ''}</div>${i.v===value ? icon('check','sm') : ''}</div>`).join('') || '<div class="muted small" style="padding:12px">No matches</div>';
+      $('.msel-list', pop).innerHTML = list.map((i, n) => `<div class="msel-it ${i.v===value?'on':''} ${n===hi?'hi':''}" data-v="${esc(i.v)}">${i.lg ? logo(i.lg,'sm') : ''}<div class="grow" style="min-width:0"><div class="trunc" style="font-weight:${i.v===value?600:450}">${nameLabel(i.l)}</div>${i.s ? `<div class="muted small trunc">${esc(i.s)}</div>` : ''}</div>${i.v===value ? icon('check','sm') : ''}</div>`).join('') || '<div class="muted small" style="padding:12px">No matches</div>';
       $$('.msel-it', pop).forEach(el => el.onclick = () => pick(el.dataset.v)); return list; };
     const pick = v => { pop.remove(); if (v === value) return; value = v; btn.innerHTML = label(); onPick && onPick(v); };
     let list = paint();
@@ -561,7 +563,7 @@ function palette() {
   const m = openModal(`<input id="pq" placeholder="Search pipelines, connections, issues, actions…" autocomplete="off">${icon('search','pi')}<div class="res" id="pr"></div>`, 'palette');
   const q = $('#pq', m), r = $('#pr', m); let sel = 0, list = [];
   const draw = () => { const t = q.value.toLowerCase().trim(); list = items.filter(i => !t || (i.l+' '+(i.s||'')+' '+i.g).toLowerCase().includes(t)).slice(0, 50); sel = Math.max(0, Math.min(sel, list.length-1));
-    let g = ''; r.innerHTML = list.map((i, ix) => (i.g!==g ? `<div class="grp">${g=i.g}</div>` : '') + `<div class="it ${ix===sel?'on':''}" data-ix="${ix}">${icon(i.ic)}<span class="trunc">${esc(i.l)}</span><small>${esc(i.s||'')}</small></div>`).join('') || '<div class="empty" style="padding:24px">No matches</div>';
+    let g = ''; r.innerHTML = list.map((i, ix) => (i.g!==g ? `<div class="grp">${g=i.g}</div>` : '') + `<div class="it ${ix===sel?'on':''}" data-ix="${ix}">${icon(i.ic)}<span class="trunc">${nameLabel(i.l)}</span><small>${esc(i.s||'')}</small></div>`).join('') || '<div class="empty" style="padding:24px">No matches</div>';
     const on = $('.it.on', r); on && on.scrollIntoView({ block:'nearest' }); };
   const pick = i => { closeOverlay(); if (i.h==='agent') openAgent(); else if (i.h==='theme') toggleTheme(); else if (i.h.startsWith('/')) location.href = i.h; else go(i.h); };
   q.oninput = () => { sel = 0; draw(); };
@@ -604,7 +606,7 @@ async function boot() {
   buildShell(); render();
 }
 
-window.OVX = { icon, esc, fmt, ms, ago, when, plural, toDate, $, $$, api, need, invalidate, D, M, errs, T, logo, TYPES, usedBy, QW_SLOW, humanCheck,
+window.OVX = { icon, esc, nameLabel, fmt, ms, ago, when, plural, toDate, $, $$, api, need, invalidate, D, M, errs, T, logo, TYPES, usedBy, QW_SLOW, humanCheck,
   dot, statusBadge, chipFlow, spark, chart, empty, codebox, loadErr, spinner, openDrawer, openModal, closeOverlay, toast, confirmAction, menu, copy,
   route, go, render, palette, openAgent, session, combo, current: () => current, query: () => query, boot, CORE };
 })();

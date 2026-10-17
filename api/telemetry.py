@@ -501,6 +501,12 @@ def init_telemetry():
             "omnivec.model.retries", unit="retries")
         _counters["throttles"] = _meter.create_counter(
             "omnivec.model.throttles", unit="throttles")
+        _counters["pipeline_requests"] = _meter.create_counter(
+            "omnivec.pipeline.requests", unit="requests")
+        _counters["processing_time"] = _meter.create_counter(
+            "omnivec.pipeline.processing_time", unit="ms")
+        _counters["input_bytes"] = _meter.create_counter(
+            "omnivec.pipeline.input_bytes", unit="bytes")
 
         _histograms["embedding_latency"] = _meter.create_histogram(
             "omnivec.embedding.latency", unit="ms")
@@ -550,12 +556,14 @@ def record_embedding_batch(pipeline_id: str = "", docs_embedded: int = 0,
                            queue_wait_ms: float = 0, retry_count: int = 0,
                            throttle_count: int = 0, throttle_delay_ms: float = 0,
                            error_category: str = "", last_document: str = "",
-                           request_count: int = 1):
+                           request_count: int = 1, batch_key: str = ""):
     """Record a changefeed embedding batch — primary metrics event."""
     attrs = {
         "pipeline_id": pipeline_id, "source_id": source_id,
         "model_id": model_id, "destination_id": destination_id,
     }
+    if batch_key:
+        attrs["batch_key"] = batch_key
 
     # In-memory
     metrics_store.record_embedding_batch(
@@ -587,6 +595,12 @@ def record_embedding_batch(pipeline_id: str = "", docs_embedded: int = 0,
         _ai_counter("retries", retry_count, attrs)
     if throttle_count:
         _ai_counter("throttles", throttle_count, attrs)
+    if request_count:
+        _ai_counter("pipeline_requests", request_count, attrs)
+    if latency_ms:
+        _ai_counter("processing_time", latency_ms, attrs)
+    if input_bytes:
+        _ai_counter("input_bytes", input_bytes, attrs)
     if queue_wait_ms > 0:
         _ai_histogram("queue_wait", queue_wait_ms, attrs)
     if throttle_delay_ms > 0:

@@ -1,9 +1,23 @@
 # MCP and Foundry deployment from the console
 
+[README](../README.md) | [CLI cloud commands](cli-guide.md#mcp-and-foundry-cloud-jobs) | [SharePoint example](../examples/sharepoint-foundry/README.md)
+
 The **MCP servers** and **Foundry agents** sections execute approved Azure
 operations through the API workload identity. They do not run commands on the
 operator's workstation. Opening either section, refreshing status, and preparing
 a plan never provision Azure resources.
+
+## Workflow at a glance
+
+1. Confirm source ingestion and search work in the chosen Cosmos destination.
+2. Configure the deployment allowlist and have an Azure administrator grant
+   the required deployer permissions.
+3. Prepare, review, and approve an MCP deployment plan.
+4. Prepare and approve a separate plan connecting it to an existing Foundry project.
+5. Separately approve a test question and inspect the answer's retrieval evidence.
+
+These steps can create billable resources and perform inference. The MCP model
+must match the model that generated the stored vectors, not merely its dimensions.
 
 ## Operator setup
 
@@ -95,13 +109,19 @@ check. Source references do not by themselves certify the answer's factual
 correctness; compare the answer with the source.
 
 For fresh isolation, **MCP servers > Need a new isolated Cosmos vector container?**
-can provision a new `/id`-partitioned cosine/DiskANN container in an existing
-database through a separate approved plan. It refuses to adopt an existing
-unowned container. Register the new container as a destination after completion.
-It neither creates a Cosmos account/database nor changes their throughput.
+can prepare a separate plan for a new cosine/DiskANN container in an existing
+database. The partition key defaults to `/id`. **For SharePoint, explicitly
+choose `/document_id` (or another supported dedicated key), not that default.**
+The API plan field is `partition_key_path`; the CLI exposes
+`omnivec cloud plan container --partition-key-path /document_id`.
+Review the saved plan's partition key before approval.
+
+The builder refuses to adopt an existing unowned container. Register the new
+container as a destination after completion. It neither creates a Cosmos
+account/database nor changes their throughput.
 
 See the [synthetic SharePoint example](../examples/sharepoint-foundry/README.md)
-for the upload-once, all-remaining-steps-in-OmniVec workflow.
+for the scoped upload, ingestion, and retrieval workflow and its prerequisites.
 
 ## Recovery and limitations
 

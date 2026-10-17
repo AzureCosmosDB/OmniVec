@@ -9,6 +9,7 @@ import math
 import asyncio
 import logging
 import hashlib
+import math
 import secrets
 import httpx
 from azure.core.exceptions import AzureError
@@ -57,12 +58,16 @@ from models import (  # lgtm[py/unused-import]
     Source, Destination, Pipeline, Job, JobStatus, JobStats,
     CreateSourceRequest, CreateDestinationRequest, CreatePipelineRequest,
     PipelineIdentityPreviewRequest, PipelineResourcePolicy,
-    SyncSourceRequest, PipelineRunStats, PipelineStatus, SourceType,
+    ModelRequestLimits,
+    SyncSourceRequest, SyntheticGenerateRequest, PipelineRunStats,
+    PipelineStatus, SourceType,
     ModelCategory, Assistant, CreateAssistantRequest, AssistantChatRequest,
     CosmosDBSourceConfig, GarnetSourceConfig, GarnetDestinationConfig, OneLakeIcebergSourceConfig,
     OneLakeIcebergDestinationConfig,
-    SharePointSourceConfig,
+    SharePointSourceConfig, SyntheticSourceConfig,
 )
+from synthetic_source import build_synthetic_message, publish_synthetic_messages
+from omnivec_queue import QUEUE_POLICY_FIELDS
 from store import init_store, get_store
 from readiness import StorageReadiness
 from garnet_endpoint import garnet_endpoint_identity
@@ -596,6 +601,16 @@ _API_RATE_SKIP_PREFIXES = ("/api/health", "/api/metrics")
 _api_rate_buckets: Dict[str, List[float]] = {}
 
 
+def _api_rate_limit_exempt(path: str) -> bool:
+    return (
+        any(path.startswith(prefix) for prefix in _API_RATE_SKIP_PREFIXES)
+        or (
+            path.startswith("/api/pipelines/")
+            and path.endswith("/metrics/inline")
+        )
+    )
+
+
 def _api_rate_check(key: str) -> bool:
     """Return True if the request is within budget, False if it should be 429'd."""
     if _API_RATE_LIMIT <= 0:
@@ -616,7 +631,7 @@ def _api_rate_check(key: str) -> bool:
 async def api_rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     if (path.startswith("/api/")
-            and not any(path.startswith(p) for p in _API_RATE_SKIP_PREFIXES)
+            and not _api_rate_limit_exempt(path)
             and not getattr(request.state, "internal", False)):
         auth = getattr(request.state, "auth", None) or {}
         token_id = auth.get("id")
@@ -1785,12 +1800,48 @@ def get_live_metrics():
     return {"source": "in_memory", **metrics_store.snapshot()}
 
 
+def _deployed_worker_concurrency() -> Optional[int]:
+    try:
+        from kubernetes.client.exceptions import ApiException
+        from kubernetes.config.config_exception import ConfigException
+    except ImportError:
+        logger.warning("Worker concurrency is unknown: Kubernetes client is unavailable")
+        return None
+    try:
+        apps_v1, _, _ = _get_k8s_clients()
+        deployment = apps_v1.read_namespaced_deployment(
+            "omnivec-dotnet-worker", OMNIVEC_NAMESPACE, _request_timeout=5,
+        )
+        containers = deployment.spec.template.spec.containers or []
+        if not containers:
+            logger.warning("Worker concurrency is unknown: deployment has no containers")
+            return None
+        container = containers[0]
+        for entry in container.env or []:
+            if entry.name == "Worker__MaxConcurrentCalls":
+                if entry.value is None:
+                    logger.warning("Worker concurrency is unknown: setting uses an unresolved value source")
+                    return None
+                limit = int(entry.value)
+                if limit <= 0:
+                    raise ValueError("Worker concurrency must be positive")
+                return limit
+        if container.env_from:
+            logger.warning("Worker concurrency is unknown: settings use an unresolved environment source")
+            return None
+        return 10  # WorkerOptions default when no deployment override is present.
+    except (ApiException, ConfigException, ValueError, OSError) as exc:
+        logger.warning("Worker concurrency discovery failed: %s", type(exc).__name__)
+        return None
+
+
 @app.get("/api/operations/resource-insights")
 def get_resource_insights():
     """Recommend operator-adjustable fairness settings from exported worker batches."""
     store = get_store()
     pipelines = [_pipeline_from_doc(doc) for doc in store.list("pipeline")]
     active = [p for p in pipelines if p.status == PipelineStatus.ACTIVE]
+    worker_concurrency = _deployed_worker_concurrency() if active else None
     priority_factor = {"low": 1, "normal": 2, "high": 4, "critical": 8}
     class_factor = {"shared": 1, "burst": 2, "dedicated": 4}
     total_effective_weight = sum(
@@ -1824,6 +1875,42 @@ def get_resource_insights():
         )
         throttle_rate = throttles / requests if requests else 0
         failure_rate = failed / max(processed + failed, 1)
+        recent_rates = sorted(
+            float(entry.get("n", 0)) * 1000 / float(entry.get("latency_ms", 0))
+            for entry in observed.get("recent", [])
+            if float(entry.get("n", 0)) > 0
+            and float(entry.get("latency_ms", 0)) > 0
+        )
+        capacity_ready = len(recent_rates) >= 10
+        lower_rate = (
+            recent_rates[max(0, (len(recent_rates) + 9) // 10 - 1)]
+            if capacity_ready else None
+        )
+        median_rate = (
+            recent_rates[len(recent_rates) // 2]
+            if capacity_ready else None
+        )
+        upper_rate = (
+            recent_rates[min(len(recent_rates) - 1, (len(recent_rates) * 9) // 10)]
+            if capacity_ready else None
+        )
+        effective_slots = (
+            min(policy.max_concurrency_per_worker, worker_concurrency)
+            if worker_concurrency is not None else None
+        )
+        conservative_per_worker = (
+            lower_rate * effective_slots
+            if lower_rate is not None and effective_slots is not None else None
+        )
+        typical_per_worker = (
+            median_rate * effective_slots
+            if median_rate is not None and effective_slots is not None else None
+        )
+        variability_ratio = (
+            upper_rate / lower_rate
+            if lower_rate and upper_rate is not None else None
+        )
+        safe_utilization = 0.70
         suggested = policy.model_dump()
         severity = "healthy"
         title = "Allocation is balanced"
@@ -1880,6 +1967,47 @@ def get_resource_insights():
                 "retries": max(0, int(observed.get("retries", 0))),
                 "last_document": observed.get("last_document"),
                 "last_activity_at": observed.get("updated_at"),
+            },
+            "capacity_estimate": {
+                "status": (
+                    "insufficient_data" if not capacity_ready
+                    else "ready" if effective_slots is not None else "unknown_worker_configuration"
+                ),
+                "configured_batch_size": policy.embed_batch_size,
+                "configured_slots_per_worker": policy.max_concurrency_per_worker,
+                "effective_slots_per_worker": effective_slots,
+                "worker_global_concurrency": worker_concurrency,
+                "lower_percentile_docs_per_slot_sec": (
+                    round(lower_rate, 2)
+                    if lower_rate is not None else None
+                ),
+                "typical_docs_per_slot_sec": (
+                    round(median_rate, 2)
+                    if median_rate is not None else None
+                ),
+                "recommended_sustained_docs_per_worker_sec": (
+                    round(conservative_per_worker * safe_utilization, 2)
+                    if conservative_per_worker is not None else None
+                ),
+                "typical_docs_per_worker_sec": (
+                    round(typical_per_worker, 2)
+                    if typical_per_worker is not None else None
+                ),
+                "variability_ratio": (
+                    round(variability_ratio, 2)
+                    if variability_ratio is not None else None
+                ),
+                "predictability": (
+                    "stable"
+                    if variability_ratio is not None and variability_ratio <= 1.5
+                    else "variable"
+                    if variability_ratio is not None
+                    else "unknown"
+                ),
+                "safety_utilization": safe_utilization,
+                "sample_documents": processed,
+                "sample_batches": len(recent_rates),
+                "scope": "Lower-percentile estimate from the latest completed batches under current model, payload, destination, and contention conditions.",
             },
             "recommendation": {
                 "severity": severity,
@@ -2105,6 +2233,13 @@ def get_source(source_id: str, request: Request):
     return _source_from_doc(doc, mask=not internal)
 
 
+def _validated_synthetic_source_config(config: dict) -> dict:
+    try:
+        return SyntheticSourceConfig(**config).model_dump()
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
 @app.post("/api/sources")
 async def create_source(req: CreateSourceRequest):
     """Create a new source."""
@@ -2154,6 +2289,8 @@ async def create_source(req: CreateSourceRequest):
             clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == SourceType.SYNTHETIC:
+        clean_config = _validated_synthetic_source_config(clean_config)
     if req.type == SourceType.SHAREPOINT:
         try:
             clean_config = SharePointSourceConfig(**clean_config).model_dump()
@@ -2281,6 +2418,8 @@ def update_source(source_id: str, req: CreateSourceRequest):
             clean_config = OneLakeIcebergSourceConfig(**clean_config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == SourceType.SYNTHETIC:
+        clean_config = _validated_synthetic_source_config(clean_config)
     if req.type == SourceType.SHAREPOINT:
         try:
             clean_config = SharePointSourceConfig(**clean_config).model_dump()
@@ -2425,6 +2564,235 @@ async def purge_source_vectors(source_id: str, request: Request, cascade: bool =
         "cascade": cascade,
         "details": deleted_per_destination,
     }
+
+
+_synthetic_run_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _execute_synthetic_run(
+    run_id: str,
+    source: dict,
+    pipeline: dict,
+    destination: dict,
+    config: dict,
+) -> None:
+    store = get_store()
+
+    async def update_progress(published: int) -> None:
+        doc = store.get(run_id, "synthetic_run")
+        if not doc:
+            return
+        doc["published"] = published
+        doc["updated_at"] = datetime.utcnow().isoformat()
+        store.upsert(doc)
+
+    async def refresh_resource_policy() -> dict:
+        current = await asyncio.to_thread(store.get, pipeline["id"], "pipeline")
+        if not current:
+            raise RuntimeError(f"Pipeline {pipeline['id']} disappeared during synthetic generation")
+        return _pipeline_from_doc(current).resource_policy.model_dump()
+
+    try:
+        await publish_synthetic_messages(
+            namespace=os.environ["SYNTHETIC_SERVICEBUS_NAMESPACE"],
+            topic_name=os.getenv("SYNTHETIC_SERVICEBUS_TOPIC", "embeddings"),
+            source=source,
+            pipeline=pipeline,
+            destination=destination,
+            run_id=run_id,
+            progress=update_progress,
+            refresh_resource_policy=refresh_resource_policy,
+            **config,
+        )
+        doc = store.get(run_id, "synthetic_run")
+        if doc:
+            doc["status"] = "completed"
+            doc["published"] = config["document_count"]
+            doc["completed_at"] = datetime.utcnow().isoformat()
+            doc["updated_at"] = doc["completed_at"]
+            store.upsert(doc)
+    except asyncio.CancelledError:
+        doc = store.get(run_id, "synthetic_run")
+        if doc:
+            doc["status"] = "cancelled"
+            doc["completed_at"] = datetime.utcnow().isoformat()
+            doc["updated_at"] = doc["completed_at"]
+            store.upsert(doc)
+        raise
+    except Exception as exc:
+        logger.exception("Synthetic source run %s failed", run_id)
+        doc = store.get(run_id, "synthetic_run")
+        if doc:
+            doc["status"] = "failed"
+            doc["error"] = f"{type(exc).__name__}: {exc}"[:2000]
+            doc["completed_at"] = datetime.utcnow().isoformat()
+            doc["updated_at"] = doc["completed_at"]
+            store.upsert(doc)
+
+
+@app.post("/api/sources/{source_id}/generate", status_code=202)
+async def generate_synthetic_source(
+    source_id: str, req: SyntheticGenerateRequest, request: Request,
+):
+    """Start a benchmark-only synthetic Service Bus publication run."""
+    auth = getattr(request.state, "auth", None) or {}
+    if not getattr(request.state, "internal", False) and auth.get("role") not in (
+        "admin", "operator",
+    ):
+        raise HTTPException(status_code=403, detail="Operator role required")
+    namespace = os.getenv("SYNTHETIC_SERVICEBUS_NAMESPACE", "").strip()
+    if not namespace:
+        raise HTTPException(
+            status_code=503,
+            detail="Synthetic source publishing is not configured",
+        )
+
+    store = get_store()
+    source_doc = store.get(source_id, "source")
+    if not source_doc:
+        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+    source = _source_from_doc(source_doc, mask=False)
+    if source.type != SourceType.SYNTHETIC:
+        raise HTTPException(
+            status_code=400,
+            detail="Generate is only supported for synthetic sources",
+        )
+    defaults = _validated_synthetic_source_config(source.config)
+
+    candidates = []
+    for pipeline_doc in store.list("pipeline"):
+        pipeline = _pipeline_from_doc(pipeline_doc)
+        if (
+            pipeline.status == PipelineStatus.ACTIVE
+            and pipeline.processing_mode == "queue"
+            and any(item.source_id == source_id for item in pipeline.sources)
+        ):
+            candidates.append(pipeline)
+    if req.pipeline_id:
+        candidates = [
+            pipeline for pipeline in candidates
+            if pipeline.id == req.pipeline_id
+        ]
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="No active queue-mode pipeline uses this synthetic source",
+        )
+    if len(candidates) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="pipeline_id is required when multiple active pipelines use this source",
+        )
+    pipeline = candidates[0]
+    destination_doc = store.get(pipeline.destination_id, "destination")
+    if not destination_doc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Destination '{pipeline.destination_id}' was not found",
+        )
+    destination = _destination_from_doc(destination_doc, mask=False)
+    if not destination.enabled:
+        raise HTTPException(status_code=409, detail="Destination is disabled")
+
+    config = {
+        "document_count": (
+            req.document_count
+            if req.document_count is not None
+            else defaults["document_count"]
+        ),
+        "message_size_bytes": (
+            req.message_size_bytes
+            if req.message_size_bytes is not None
+            else defaults["message_size_bytes"]
+        ),
+        "docs_per_second": (
+            req.docs_per_second
+            if req.docs_per_second is not None
+            else defaults["docs_per_second"]
+        ),
+        "content_pattern": (
+            req.content_pattern or defaults["content_pattern"]
+        ),
+        "mock_embedding": (
+            req.mock_embedding
+            if req.mock_embedding is not None
+            else defaults["mock_embedding"]
+        ),
+        "mock_embedding_dimensions": (
+            req.mock_embedding_dimensions
+            if req.mock_embedding_dimensions is not None
+            else defaults["mock_embedding_dimensions"]
+        ),
+    }
+    run_id = f"syn-{uuid.uuid4().hex[:12]}"
+    source_payload = source.model_dump(mode="json")
+    pipeline_payload = pipeline.model_dump(mode="json")
+    destination_payload = destination.model_dump(mode="json")
+    try:
+        build_synthetic_message(
+            source=source_payload,
+            pipeline=pipeline_payload,
+            destination=destination_payload,
+            run_id=run_id,
+            index=0,
+            message_size_bytes=config["message_size_bytes"],
+            content_pattern=config["content_pattern"],
+            mock_embedding=config["mock_embedding"],
+            mock_embedding_dimensions=config["mock_embedding_dimensions"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    now = datetime.utcnow().isoformat()
+    run = {
+        "id": run_id,
+        "doc_type": "synthetic_run",
+        "source_id": source_id,
+        "pipeline_id": pipeline.id,
+        "destination_id": destination.id,
+        "status": "publishing",
+        "published": 0,
+        **config,
+        "created_at": now,
+        "updated_at": now,
+    }
+    store.upsert(run)
+    task = asyncio.create_task(_execute_synthetic_run(
+        run_id, source_payload, pipeline_payload, destination_payload, config,
+    ))
+    _synthetic_run_tasks[run_id] = task
+    task.add_done_callback(lambda _: _synthetic_run_tasks.pop(run_id, None))
+    return run
+
+
+@app.get("/api/sources/{source_id}/generate/{run_id}")
+def get_synthetic_source_run(source_id: str, run_id: str):
+    store = get_store()
+    run = store.get(run_id, "synthetic_run")
+    if not run or run.get("source_id") != source_id:
+        raise HTTPException(status_code=404, detail="Synthetic run not found")
+    return {
+        key: value for key, value in run.items()
+        if not key.startswith("_") and key != "doc_type"
+    }
+
+
+@app.delete("/api/sources/{source_id}/generate/{run_id}")
+def cancel_synthetic_source_run(source_id: str, run_id: str, request: Request):
+    auth = getattr(request.state, "auth", None) or {}
+    if not getattr(request.state, "internal", False) and auth.get("role") not in (
+        "admin", "operator",
+    ):
+        raise HTTPException(status_code=403, detail="Operator role required")
+    store = get_store()
+    run = store.get(run_id, "synthetic_run")
+    if not run or run.get("source_id") != source_id:
+        raise HTTPException(status_code=404, detail="Synthetic run not found")
+    task = _synthetic_run_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
+        return {"success": True, "status": "cancelling"}
+    return {"success": False, "status": run.get("status", "unknown")}
 
 
 @app.post("/api/sources/{source_id}/sync")
@@ -2576,6 +2944,14 @@ async def test_source(source_id: str):
         ok, result = await _test_onelake_iceberg_connection(source.config)
     elif source.type == SourceType.SHAREPOINT:
         ok, result = await _test_sharepoint_connection(source.config)
+    elif source.type == SourceType.SYNTHETIC:
+        return {
+            "success": True,
+            "result": {
+                "status": "healthy",
+                "message": "Synthetic benchmark source is ready",
+            },
+        }
     else:
         return {"success": True, "result": {"status": "unknown", "message": "Connector not implemented"}}
 
@@ -3166,6 +3542,29 @@ async def create_destination(req: CreateDestinationRequest):
             config = GarnetDestinationConfig(**config).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    elif req.type == "null":
+        if config.get("benchmark_only") is not True:
+            raise HTTPException(
+                status_code=400,
+                detail="Null destinations require config.benchmark_only=true",
+            )
+        try:
+            max_docs_per_second = float(config.get("max_docs_per_second", 0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Null destination max_docs_per_second must be numeric",
+            ) from exc
+        if not math.isfinite(max_docs_per_second) or max_docs_per_second < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Null destination max_docs_per_second must be finite and non-negative",
+            )
+        config = {
+            "benchmark_only": True,
+            "max_docs_per_second": max_docs_per_second,
+            "rate_key": str(config.get("rate_key", "default"))[:128] or "default",
+        }
     warnings = []
     enabled = True
     if req.type == "cosmosdb-vector":
@@ -3940,7 +4339,7 @@ def list_pipelines(include_stats: bool = True):
     store = get_store()
     result = []
     for d in store.list("pipeline"):
-        p = _pipeline_from_doc(d)
+        p = _pipeline_with_current_model_limits(store, d)
         entry = {
             **p.model_dump(),
             "cfp_generation": _cfp_generation(p.reset_at),
@@ -3960,7 +4359,7 @@ def get_pipeline(pipeline_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
 
-    p = _pipeline_from_doc(doc)
+    p = _pipeline_with_current_model_limits(store, doc)
     stats = get_pipeline_stats(pipeline_id)
 
     return {
@@ -3968,6 +4367,25 @@ def get_pipeline(pipeline_id: str):
         "cfp_generation": _cfp_generation(p.reset_at),
         "stats": stats.model_dump()
     }
+
+
+async def _registered_docgrok_model(docgrok_ref: str) -> Dict[str, Any]:
+    try:
+        resp = await http_client.get(f"{DOCGROK_URL}/admin/models/registry")
+        resp.raise_for_status()
+        data = resp.json()
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list) or any(not isinstance(model, dict) for model in models):
+            raise ValueError("DocGrok returned an invalid model registry")
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot resolve registered model '{docgrok_ref}': {exc}",
+        ) from exc
+    model = next((item for item in models if item.get("id") == docgrok_ref), None)
+    if model is None:
+        raise HTTPException(status_code=400, detail=f"Model '{docgrok_ref}' not found in DocGrok")
+    return model
 
 
 async def _validate_docgrok_ref(docgrok_ref: str) -> str:
@@ -3984,19 +4402,13 @@ async def _validate_docgrok_ref(docgrok_ref: str) -> str:
             raise
         except Exception:  # lgtm[py/empty-except]
             pass
-        # Validate model exists via DocGrok /models endpoint
-        try:
-            resp = await http_client.get(f"{DOCGROK_URL}/models")
-            if resp.status_code == 200:
-                models = resp.json().get("models", [])
-                if not any(m.get("id") == docgrok_ref for m in models):
-                    raise HTTPException(status_code=400, detail=f"Model '{docgrok_ref}' not found in DocGrok")
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=503, detail=f"Cannot connect to DocGrok: {str(e)}")
+        await _registered_docgrok_model(docgrok_ref)
         return docgrok_ref
     elif docgrok_ref.startswith("trp-"):
         # Transform pipeline (future)
         return docgrok_ref
+
+
     elif docgrok_ref in ("mock-embedding", "mock-1536"):
         # Mock pipelines for testing
         return docgrok_ref
@@ -4011,6 +4423,26 @@ async def _validate_docgrok_ref(docgrok_ref: str) -> str:
         except httpx.RequestError as e:
             raise HTTPException(status_code=503, detail=f"Cannot connect to docgrok: {str(e)}")
         return docgrok_ref
+
+
+async def _resolve_model_request_limits(docgrok_ref: str) -> ModelRequestLimits:
+    """Resolve immutable request ceilings to snapshot on a pipeline."""
+    if not (docgrok_ref.startswith("mdl-ext-") or docgrok_ref.startswith("mdl-native-")):
+        return ModelRequestLimits()
+    try:
+        model = await _registered_docgrok_model(docgrok_ref)
+        return ModelRequestLimits(
+            max_batch_size=model.get("max_batch_size", 256),
+            context_window_tokens=model.get("context_window_tokens", 8191),
+            max_batch_tokens=model.get("max_batch_tokens", 6000),
+        )
+    except HTTPException:
+        raise
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot resolve request limits for model '{docgrok_ref}': {exc}",
+        )
 
 
 async def _resolve_docgrok_output_dim(docgrok_ref: str) -> Optional[int]:
@@ -4792,6 +5224,7 @@ async def create_pipeline(req: CreatePipelineRequest):
 
     # Validate docgrok_pipeline (must be a valid model ID or transform pipeline)
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
+    model_limits = await _resolve_model_request_limits(resolved_pipeline)
 
     # Enforce dim match between model/transform output and destination.
     dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
@@ -4846,6 +5279,7 @@ async def create_pipeline(req: CreatePipelineRequest):
         content_field=(req.content_field or "content"),
         metadata_fields=req.metadata_fields,
         resource_policy=req.resource_policy,
+        model_limits=model_limits,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
@@ -4953,6 +5387,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
             )
 
     resolved_pipeline = await _validate_docgrok_ref(req.docgrok_pipeline)
+    model_limits = await _resolve_model_request_limits(resolved_pipeline)
 
     # Validate vector_index_path against destination if provided
     dest_doc = await asyncio.to_thread(store.get, req.destination_id, "destination")
@@ -5012,6 +5447,7 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     pipeline.name = req.name
     pipeline.description = req.description
     pipeline.docgrok_pipeline = resolved_pipeline
+    pipeline.model_limits = model_limits
     pipeline.metadata_mapping = req.metadata_mapping
     pipeline.processing_mode = req.processing_mode
     pipeline.content_strategy = req.content_strategy if req.content_strategy in ("truncate", "chunk") else pipeline.content_strategy
@@ -5034,7 +5470,14 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
     if req.content_field is not None:
         pipeline.content_field = req.content_field or "content"
     pipeline.metadata_fields = req.metadata_fields
-    pipeline.resource_policy = req.resource_policy
+    policy_data = req.resource_policy.model_dump()
+    for field in QUEUE_POLICY_FIELDS:
+        if field not in req.resource_policy.model_fields_set:
+            policy_data[field] = getattr(pipeline.resource_policy, field)
+    try:
+        pipeline.resource_policy = PipelineResourcePolicy.model_validate(policy_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     pipeline.updated_at = datetime.utcnow()
 
     await asyncio.to_thread(_replace_control_doc, store, doc, pipeline, "pipeline")
@@ -5045,12 +5488,20 @@ async def update_pipeline(pipeline_id: str, req: CreatePipelineRequest):
 def update_pipeline_resource_policy(
     pipeline_id: str, policy: PipelineResourcePolicy
 ):
-    """Update shared-worker fairness controls without resetting the pipeline."""
+    """Update shared-worker fairness and queue packing without resetting the pipeline."""
     store = get_store()
     doc = store.get(pipeline_id, "pipeline")
     if not doc:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
     pipeline = _pipeline_from_doc(doc)
+    policy_data = policy.model_dump()
+    for field in QUEUE_POLICY_FIELDS:
+        if field not in policy.model_fields_set:
+            policy_data[field] = getattr(pipeline.resource_policy, field)
+    try:
+        policy = PipelineResourcePolicy.model_validate(policy_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     pipeline.resource_policy = policy
     pipeline.updated_at = datetime.utcnow()
     _replace_control_doc(store, doc, pipeline, "pipeline")
@@ -6547,6 +6998,74 @@ def _replace_model_metadata(store, doc: dict):
         raise HTTPException(status_code=409, detail="Model changed during the operation; reload and retry") from exc
 
 
+def _validated_model_request_limits(payload: dict, current: Optional[dict] = None) -> ModelRequestLimits:
+    current = current or {}
+    try:
+        return ModelRequestLimits(
+            max_batch_size=int(payload.get("max_batch_size", current.get("max_batch_size", 256))),
+            context_window_tokens=int(payload.get(
+                "context_window_tokens", current.get("context_window_tokens", 8191)
+            )),
+            max_batch_tokens=int(payload.get("max_batch_tokens", current.get("max_batch_tokens", 6000))),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid model request limits: {exc}") from exc
+
+
+def _refresh_pipeline_limit_snapshots(store, model_id: str, limits: ModelRequestLimits):
+    pipeline_ids = [
+        doc.get("id") for doc in store.list("pipeline")
+        if doc.get("docgrok_pipeline") == model_id and doc.get("id")
+    ]
+    pending = []
+    for pipeline_id in pipeline_ids:
+        for attempt in range(2):
+            current = store.get(pipeline_id, "pipeline")
+            if not current or current.get("docgrok_pipeline") != model_id:
+                break
+            pipeline = _pipeline_from_doc(current)
+            model = store.get(model_id, "docgrok_model")
+            pipeline.model_limits = _validated_model_request_limits(model) if model else limits
+            pipeline.updated_at = datetime.utcnow()
+            try:
+                _replace_control_doc(store, current, pipeline, "pipeline")
+                break
+            except HTTPException as exc:
+                if exc.status_code != 409:
+                    raise
+                if attempt == 1:
+                    pending.append(pipeline_id)
+                    logger.warning("Model-limit snapshot for pipeline %s requires read-time reconciliation", pipeline_id)
+    return pending
+
+
+def _pipeline_with_current_model_limits(store, doc: dict) -> Pipeline:
+    """Return authoritative model limits even when snapshot persistence conflicts."""
+    pipeline = _pipeline_from_doc(doc)
+    reference = pipeline.docgrok_pipeline
+    if reference.startswith("mdl-ext-"):
+        model = store.get(reference, "docgrok_model")
+        if not model:
+            raise HTTPException(status_code=503, detail=f"Model metadata for '{reference}' is unavailable")
+        limits = _validated_model_request_limits(model)
+    elif reference in ("mdl-native-bge-small", "mdl-native-bge-base", "mdl-native-bge-large"):
+        limits = ModelRequestLimits(max_batch_size=256, context_window_tokens=512, max_batch_tokens=6000)
+    elif reference == "mdl-native-clip":
+        limits = ModelRequestLimits(max_batch_size=256, context_window_tokens=77, max_batch_tokens=6000)
+    else:
+        return pipeline
+    if pipeline.model_limits != limits:
+        pipeline.model_limits = limits
+        pipeline.updated_at = datetime.utcnow()
+        try:
+            _replace_control_doc(store, doc, pipeline, "pipeline")
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            logger.warning("Serving current model limits for pipeline %s despite snapshot conflict", pipeline.id)
+    return pipeline
+
+
 @app.post("/api/models")
 async def create_model(payload: dict):
     """Create an external model â€” proxied to DocGrok, persisted in CosmosDB."""
@@ -6568,6 +7087,7 @@ async def create_model(payload: dict):
         model_name = payload.get("name", payload.get("model", "")).strip()
         model_category = payload.get("model_category", "embedding")  # "embedding" or "chat"
         auth_type = payload.get("auth_type", "key")  # "key" or "managed-identity"
+        request_limits = _validated_model_request_limits(payload)
         reg_payload = {
             "name": model_name,
             "type": payload.get("provider_type", payload.get("type", "azure-openai")),
@@ -6577,6 +7097,7 @@ async def create_model(payload: dict):
             "deployment": payload.get("deployment", payload.get("model", payload.get("name", ""))).strip(),
             "embedding_dim": int(payload.get("embedding_dim", payload.get("dimensions", 1536))),
             "api_version": payload.get("api_version", "2024-06-01"),
+            **request_limits.model_dump(),
         }
         if model_type == "mock-embedding":
             reg_payload["latency_ms"] = payload["latency_ms"]
@@ -6597,6 +7118,8 @@ async def create_model(payload: dict):
             existing_model = doc
             reg_payload["id"] = doc["id"]
             break
+        request_limits = _validated_model_request_limits(payload, existing_model)
+        reg_payload.update(request_limits.model_dump())
 
         # Store API key in Key Vault (if configured), strip from CosmosDB doc
         from keyvault_client import set_model_api_key
@@ -6649,6 +7172,9 @@ async def create_model(payload: dict):
                 if existing.get("model_category") != model_category:
                     _replace_model_metadata(store, {**existing, "model_category": model_category})
             result["model_category"] = model_category
+            result["pending_pipeline_snapshots"] = _refresh_pipeline_limit_snapshots(
+                store, model_id, request_limits,
+            )
 
         return result
     except HTTPException:
@@ -6691,7 +7217,11 @@ async def update_model(model_id: str, payload: dict):
                 raise HTTPException(409, "Mock model dimensions and latency are locked while referenced by a pipeline")
 
     # Merge updatable fields
-    updatable = ("api_key", "endpoint", "deployment", "api_version", "embedding_dim", "auth_type", "client_id", "latency_ms")
+    updatable = (
+        "api_key", "endpoint", "deployment", "api_version", "embedding_dim",
+        "auth_type", "client_id", "max_batch_size", "context_window_tokens",
+        "max_batch_tokens", "latency_ms",
+    )
     changed = []
     new_api_key = None
     for field in updatable:
@@ -6720,9 +7250,12 @@ async def update_model(model_id: str, payload: dict):
             doc.pop("api_key_source", None)
 
     doc["updated_at"] = datetime.utcnow().isoformat()
+    request_limits = _validated_model_request_limits(payload, doc)
+    doc.update(request_limits.model_dump())
 
     # For embedding models, push everything (including the new key) to DocGrok and
     # let DocGrok re-encrypt + persist. Don't double-write from api.py.
+    pending_snapshots = []
     if not is_chat:
         try:
             reg_payload = {
@@ -6735,6 +7268,7 @@ async def update_model(model_id: str, payload: dict):
                 "deployment": doc.get("deployment", ""),
                 "embedding_dim": int(doc.get("embedding_dim", 1536)),
                 "api_version": doc.get("api_version", "2024-06-01"),
+                **request_limits.model_dump(),
             }
             if "client_id" in doc:
                 reg_payload["client_id"] = doc["client_id"]
@@ -6743,6 +7277,7 @@ async def update_model(model_id: str, payload: dict):
             resp = await http_client.post(f"{DOCGROK_URL}/admin/models/registry", json=reg_payload)
             if resp.status_code >= 400:
                 raise HTTPException(status_code=resp.status_code, detail="DocGrok model update failed")
+            pending_snapshots = _refresh_pipeline_limit_snapshots(store, model_id, request_limits)
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=503, detail="DocGrok model update is unavailable") from exc
     else:
@@ -6752,7 +7287,10 @@ async def update_model(model_id: str, payload: dict):
         except AzureError as exc:
             raise HTTPException(status_code=503, detail="Model metadata update failed") from exc
 
-    return {"status": "updated", "id": model_id, "fields_updated": changed}
+    return {
+        "status": "updated", "id": model_id, "fields_updated": changed,
+        "pending_pipeline_snapshots": pending_snapshots,
+    }
 
 
 @app.delete("/api/models/{model_id}")
@@ -8672,8 +9210,8 @@ def _compute_pipeline_stats(pipeline_id: str) -> PipelineRunStats:
 
     # Connector-driven queue pipelines (for example OneLake and SharePoint)
     # do not create metadata-store job documents. Their workers report
-    # deduplicated batch metrics after destination writes complete, so use
-    # those counters whenever source-specific inventory is unavailable.
+    # batch telemetry after destination writes complete, so use Application
+    # Insights counters whenever source-specific inventory is unavailable.
     try:
         reported, telemetry_source = _reported_pipeline_metrics(pipeline_id, pipeline.reset_at)
         reported_processed = max(0, int(reported.get("processed", 0)))

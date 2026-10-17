@@ -1,14 +1,14 @@
 /* OmniVec console · model and recipe detail pages */
 (() => {
 const X = window.OVX;
-const { icon, esc, fmt, ms, ago, plural, api, invalidate, D, M, T, logo, dot, empty, spinner, go, toast, confirmAction, openModal, $, $$ } = X;
+const { icon, esc, nameLabel, fmt, ms, ago, plural, api, invalidate, D, M, T, logo, dot, empty, spinner, go, toast, confirmAction, openModal, $, $$ } = X;
 
 const nice = k => String(k).replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
 const val = v => v === true ? 'Yes' : v === false ? 'No' : v == null || v === '' ? '<span class="muted">Default</span>' : esc(typeof v === 'object' ? JSON.stringify(v) : v);
 const kv = rows => `<dl class="kv">${rows.filter(r => r && r[1] != null && r[1] !== '').map(([k, v, mono]) => `<dt>${esc(k)}</dt><dd class="${mono ? 'mono small' : ''}">${v}</dd>`).join('')}</dl>`;
 const healthBadge = h => h ? `<span class="badge ${h.status==='healthy'?'ok':'warn'}">${dot(h.status==='healthy'?'ok':'warn')}${h.status==='healthy'?'Healthy':esc(h.status)}</span>` : '<span class="badge out">Not checked</span>';
 const pipeTable = (list, note) => list.length
-  ? `<table class="tbl"><thead><tr><th>Pipeline</th><th>Health</th><th>Vector store</th><th class="r">Vectors</th><th>Last write</th></tr></thead><tbody>${list.map(p => `<tr class="clickrow" data-href="#/pipelines/${p.id}"><td><div class="nm">${esc(p.name)}</div><div class="id">${p.id}</div></td><td>${X.statusBadge(p)}</td><td><div class="row" style="gap:8px">${logo(p.dst.type,'sm')}<span class="trunc">${esc(p.dst.name)}</span></div></td><td class="r num">${p.statsLoading ? '<span class="skel" style="display:inline-block;width:44px;height:12px;vertical-align:middle"></span>' : fmt(p.vectors)}</td><td class="muted small">${ago(p.lastWrite)}</td></tr>`).join('')}</tbody></table>`
+  ? `<table class="tbl"><thead><tr><th>Pipeline</th><th>Health</th><th>Vector store</th><th class="r">Vectors</th><th>Last write</th></tr></thead><tbody>${list.map(p => `<tr class="clickrow" data-href="#/pipelines/${p.id}"><td><div class="nm">${nameLabel(p.name)}</div><div class="id">${p.id}</div></td><td>${X.statusBadge(p)}</td><td><div class="row" style="gap:8px">${logo(p.dst.type,'sm')}<span class="trunc">${nameLabel(p.dst.name)}</span></div></td><td class="r num">${p.statsLoading ? '<span class="skel" style="display:inline-block;width:44px;height:12px;vertical-align:middle"></span>' : fmt(p.vectors)}</td><td class="muted small">${ago(p.lastWrite)}</td></tr>`).join('')}</tbody></table>`
   : `<div class="card-b muted">${note}</div>`;
 const rowLinks = v => $$('tr[data-href]', v).forEach(r => r.onclick = e => { if (!e.target.closest('button,a')) go(r.dataset.href); });
 const pid = () => ((D.identity||{}).principal_id) || ((D.caps||{}).identity||{}).principal_id || null;
@@ -20,11 +20,12 @@ X.modelDetail = id => {
   const h = M.hm[m.id], used = X.usedBy(m.id), chat = m.model_category === 'chat', native = m.kind === 'native' || !m.type;
   const title = m.deployment || m.name;
   const auth = m.auth_type==='managed-identity' || (m.endpoint && !m.api_key) ? 'Managed identity' : m.api_key ? 'API key (Key Vault)' : 'In-cluster, no auth';
+  const limits = chat ? [] : [['Maximum batch size', fmt(m.max_batch_size||256)], ['Context window', `${fmt(m.context_window_tokens||8191)} tokens`], ['Batch token budget', `${fmt(m.max_batch_tokens||6000)} tokens`]];
   const conf = native
-    ? [['Runs as', 'OmniVec native model (in-cluster)'], ['Model type', esc(m.model_type||'text')], ['Image', esc(m.image||'—'), 1], ['Replicas', m.replicas != null ? `${m.ready_replicas ?? '—'} of ${m.replicas} ready` : null], ['Memory', esc(m.memory||'')], ['GPU', m.gpu && m.gpu !== '0' ? esc(m.gpu) : 'None (CPU)'], ['Dimensions', m.embedding_dim ? esc(m.embedding_dim) : '<span class="muted">Not reported by the model</span>']]
-    : [['Provider', esc(T(m.type).label)], ['Deployment', esc(m.deployment||'—'), 1], ['Endpoint', esc(m.endpoint||'—'), 1], ['API version', esc(m.api_version||''), 1], chat ? null : ['Dimensions', m.embedding_dim ? esc(m.embedding_dim) : '<span class="muted">Not set</span>'], ['Authentication', auth]];
+    ? [['Runs as', 'OmniVec native model (in-cluster)'], ['Model type', esc(m.model_type||'text')], ['Image', esc(m.image||'—'), 1], ['Replicas', m.replicas != null ? `${m.ready_replicas ?? '—'} of ${m.replicas} ready` : null], ['Memory', esc(m.memory||'')], ['GPU', m.gpu && m.gpu !== '0' ? esc(m.gpu) : 'None (CPU)'], ['Dimensions', m.embedding_dim ? esc(m.embedding_dim) : '<span class="muted">Not reported by the model</span>'], ...limits]
+    : [['Provider', esc(T(m.type).label)], ['Deployment', esc(m.deployment||'—'), 1], ['Endpoint', esc(m.endpoint||'—'), 1], ['API version', esc(m.api_version||''), 1], chat ? null : ['Dimensions', m.embedding_dim ? esc(m.embedding_dim) : '<span class="muted">Not set</span>'], ...limits, ['Authentication', auth]];
   const html = `<div class="page">
-   <div class="ph"><div style="min-width:0"><div class="row">${logo(m.type||'native','lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${esc(title)}</h1>${healthBadge(h)}</div>
+   <div class="ph"><div style="min-width:0"><div class="row">${logo(m.type||'native','lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${nameLabel(title)}</h1>${healthBadge(h)}</div>
      <p class="mono small">${m.id} · ${chat ? 'Chat model (agent)' : 'Embedding model'}${m.name && m.name !== title ? ' · registered as '+esc(m.name) : ''}</p></div></div></div>
     <div class="acts"><button class="btn pri" id="mtest">${icon('play','sm')}Test model</button>${native ? '' : `<button class="btn" id="macc">${icon('shield','sm')}Access guidance</button>`}<button class="btn icon" id="mdel" title="Delete model">${icon('trash','sm')}</button></div></div>
    <div id="mtestout"></div>
@@ -62,7 +63,7 @@ X.recipeDetail = name => {
     return `<div class="rstage"><div class="rstage-n">${i+1}</div><div class="card grow"><div class="card-h"><h3>${icon(st[0],'sm')} ${esc(st[1])} <span class="mono muted small" style="font-weight:400">${esc(s.name||'')}</span></h3><span class="muted small" style="margin-left:auto">${esc(st[2])}</span></div>
       ${cfg.length ? `<div class="card-b">${kv(cfg.map(([k, v]) => [nice(k), s.type==='embed' && k==='model_id' && v == null ? '<span class="muted">Pipeline\'s embedding model</span>' : val(v)]))}</div>` : ''}</div></div>`; }).join('');
   const html = `<div class="page">
-   <div class="ph"><div style="min-width:0"><div class="row">${logo('recipe','lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${esc(t.name)}</h1><span class="badge out">v${esc(t.version||'1')}</span>${t.source ? `<span class="badge">${esc(t.source==='builtin'?'Built-in':t.source)}</span>` : ''}</div>
+   <div class="ph"><div style="min-width:0"><div class="row">${logo('recipe','lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${nameLabel(t.name)}</h1><span class="badge out">v${esc(t.version||'1')}</span>${t.source ? `<span class="badge">${esc(t.source==='builtin'?'Built-in':t.source)}</span>` : ''}</div>
      <p>${esc(t.description||'')}</p></div></div></div>
     <div class="acts"><a class="btn pri" href="#/new">${icon('plus','sm')}Use in a new pipeline</a></div></div>
    <div class="grid g-main" style="align-items:start"><div class="stack">

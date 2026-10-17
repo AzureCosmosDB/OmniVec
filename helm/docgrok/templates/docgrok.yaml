@@ -39,6 +39,14 @@ spec:
           value: {{ .Values.docgrok.env.CLIP_URL | quote }}
         - name: BGE_URL
           value: {{ .Values.docgrok.env.BGE_URL | quote }}
+        - name: BGE_SMALL_URL
+          value: {{ .Values.docgrok.env.BGE_SMALL_URL | quote }}
+        - name: NATIVE_BACKEND_MAX_IDLE_PER_HOST
+          value: {{ .Values.docgrok.env.NATIVE_BACKEND_MAX_IDLE_PER_HOST | quote }}
+        - name: NATIVE_BACKEND_IDLE_TIMEOUT_SECONDS
+          value: {{ .Values.docgrok.env.NATIVE_BACKEND_IDLE_TIMEOUT_SECONDS | quote }}
+        - name: NATIVE_BACKEND_MAX_ATTEMPTS
+          value: {{ .Values.docgrok.env.NATIVE_BACKEND_MAX_ATTEMPTS | quote }}
         - name: DOCGROK_UNPOOLED_MODEL_HOSTS
           value: {{ .Values.docgrok.env.DOCGROK_UNPOOLED_MODEL_HOSTS | quote }}
         - name: NAMESPACE

@@ -51,6 +51,7 @@ spec:
               value: {{ .Values.azure.serviceBus.namespace | quote }}
             - name: ChangeFeed__ServiceBusTopicName
               value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            {{- include "omnivec.pipelineLanes.ingestionEnv" . | nindent 12 }}
             {{- end }}
           resources:
             {{- toYaml .Values.changefeed.resources | nindent 12 }}

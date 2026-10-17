@@ -1,7 +1,7 @@
 /* OmniVec console: Search bench, Issues, Metrics, Capacity, Platform, diagnostics renderer */
 (() => {
 const X = window.OVX;
-const { icon, esc, fmt, ms, ago, when, plural, api, need, invalidate, D, M, T, logo, dot, statusBadge, chipFlow, chart, empty, codebox, loadErr, spinner, route, go, toast, confirmAction, openModal, closeOverlay, $, $$ } = X;
+const { icon, esc, nameLabel, fmt, ms, ago, when, plural, api, need, invalidate, D, M, T, logo, dot, statusBadge, chipFlow, chart, empty, codebox, loadErr, spinner, route, go, toast, confirmAction, openModal, closeOverlay, $, $$ } = X;
 const sevBadge = s => `<span class="badge ${s==='err'?'err':s==='warn'?'warn':'acc'}">${dot(s)}${s==='err'?'Failing':s==='warn'?'Attention':'Info'}</span>`;
 const hl = (t, q) => { let h = esc(t); (q||'').split(/\s+/).filter(w => w.length > 3).slice(0,6).forEach(w => { h = h.replace(new RegExp('('+w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'), '<mark>$1</mark>'); }); return h; };
 
@@ -24,12 +24,12 @@ X.searchBench = (el, opts = {}) => {
     if ($('.msel-pop', host)) { $('.msel-pop', host).remove(); return; }
     const pop = document.createElement('div'); pop.className = 'msel-pop'; host.append(pop);
     const dims = d => { const vi = ((d.config||{}).vector_indexes||[])[0]; return (vi && vi.dimensions) || (d.config||{}).vector_dimensions || null; };
-    const sync = () => { const b = $('#mselb', el); if (b) $('.trunc', b).innerHTML = S.stores.length ? esc((M.DST[S.stores[0]]||{}).name||S.stores[0]) + (S.stores.length > 1 ? ` <span class="badge acc">+${S.stores.length-1}</span>` : '') : '<span class="muted">Choose vector stores</span>'; };
+    const sync = () => { const b = $('#mselb', el); if (b) $('.trunc', b).innerHTML = S.stores.length ? nameLabel((M.DST[S.stores[0]]||{}).name||S.stores[0]) + (S.stores.length > 1 ? ` <span class="badge acc">+${S.stores.length-1}</span>` : '') : '<span class="muted">Choose vector stores</span>'; };
     const paint = () => { const q = ($('input', pop) || {}).value || '';
       const list = M.dests.filter(d => !q || (d.name+' '+d.type).toLowerCase().includes(q.toLowerCase()));
       const selDims = [...new Set(S.stores.map(id => M.DST[id]).filter(Boolean).map(dims).filter(Boolean))];
       $('.msel-list', pop).innerHTML = list.slice(0, 200).map(d => { const on = S.stores.includes(d.id), n = X.usedBy(d.id).length, dm = dims(d);
-        return `<label class="msel-it ${on?'on':''}"><input type="checkbox" data-sid="${d.id}" ${on?'checked':''}>${logo(d.type,'sm')}<div class="grow" style="min-width:0"><div class="trunc" style="font-weight:550">${esc(d.name)}</div><div class="muted small">${esc(X.T(d.type).short)}${dm ? ' · '+dm+'d' : ''} · ${plural(n,'pipeline')}</div></div></label>`; }).join('')
+        return `<label class="msel-it ${on?'on':''}"><input type="checkbox" data-sid="${d.id}" ${on?'checked':''}>${logo(d.type,'sm')}<div class="grow" style="min-width:0"><div class="trunc" style="font-weight:550">${nameLabel(d.name)}</div><div class="muted small">${esc(X.T(d.type).short)}${dm ? ' · '+dm+'d' : ''} · ${plural(n,'pipeline')}</div></div></label>`; }).join('')
         || '<div class="muted small" style="padding:12px">No stores match.</div>';
       $('.msel-foot span', pop).innerHTML = `${S.stores.length} selected${selDims.length > 1 ? ` · <span style="color:var(--warn)">mixed dimensions (${selDims.join(', ')})</span>` : ''}`;
       $$('[data-sid]', pop).forEach(cb => cb.onchange = () => { const i = S.stores.indexOf(cb.dataset.sid); cb.checked ? (i<0 && S.stores.push(cb.dataset.sid)) : (i>=0 && S.stores.splice(i,1)); paint(); sync(); }); };
@@ -42,7 +42,7 @@ X.searchBench = (el, opts = {}) => {
     el.innerHTML = `<div class="stack">
      <div class="card"><div class="card-b stack s12"><div class="row" style="gap:8px"><div class="search-inp grow">${icon('search','sm')}<input class="inp" id="sq" placeholder="Ask a question the way a user of your AI app would…" value="${esc(S.q)}"></div>
        <button class="btn pri" id="sgo" ${S.busy?'disabled':''}>${S.busy ? spinner('Searching…') : 'Search'}</button></div>
-      <div class="row wrap" style="gap:14px">${opts.compact ? '' : `<div class="msel" id="msel"><button class="sel msel-btn" id="mselb" type="button">${icon('db','sm')}<span class="trunc">${S.stores.length ? esc((M.DST[S.stores[0]]||{}).name||S.stores[0]) + (S.stores.length > 1 ? ` <span class="badge acc">+${S.stores.length-1}</span>` : '') : '<span class="muted">Choose vector stores</span>'}</span></button></div>`}
+      <div class="row wrap" style="gap:14px">${opts.compact ? '' : `<div class="msel" id="msel"><button class="sel msel-btn" id="mselb" type="button">${icon('db','sm')}<span class="trunc">${S.stores.length ? nameLabel((M.DST[S.stores[0]]||{}).name||S.stores[0]) + (S.stores.length > 1 ? ` <span class="badge acc">+${S.stores.length-1}</span>` : '') : '<span class="muted">Choose vector stores</span>'}</span></button></div>`}
        <div class="seg" id="smode">${[['vector','Vector'],['hybrid','Hybrid'],['fts','Keyword']].map(([k,l]) => `<button data-m="${k}" class="${S.mode===k?'on':''}">${l}</button>`).join('')}</div>
        <label class="row small muted" style="gap:6px">Top <select class="sel" id="sk" style="width:64px;height:28px">${[3,5,10,20].map(n => `<option ${S.k===n?'selected':''}>${n}</option>`).join('')}</select></label></div></div></div>
      <div id="sout">${out()}</div></div>`;
@@ -162,7 +162,7 @@ route('metrics', { needs:[...X.CORE], render() {
       return `<div class="card" style="margin-top:16px"><div class="card-h"><h3>${icon('flow','sm')} ${esc(p.name||pid)}</h3>${p.id ? X.statusBadge(p) : ''}<span class="muted small" style="margin-left:8px">Live counters since this API replica started</span><a class="btn sm" style="margin-left:auto" href="#/pipelines/${pid}/activity">Open pipeline ${icon('chev','sm')}</a></div>
        <div class="stats" style="grid-template-columns:repeat(6,minmax(0,1fr))">${[['Embedded', fmt(L.embedded)], ['Failed', fmt(L.failed), L.failed ? 'var(--err)' : ''], ['Retries', fmt(L.retries)], ['Throttles', fmt(L.throttles), L.throttles ? 'var(--warn)' : ''], ['Queue wait', ms(p.qwait)], ['Last success', ago(L.last_success_at)]].map(([l, val, col]) => `<div class="stat"><div class="lbl">${l}</div><div class="val" style="font-size:20px;${col ? 'color:'+col : ''}">${val}</div></div>`).join('')}</div></div>`; })()
    : (() => { const rank = (key, f, col, note) => { const l = M.pipelines.filter(p => (p[key]||0) > 0).sort((a,b) => b[key]-a[key]).slice(0, 8); const mx = l.length ? l[0][key] : 1;
-        return l.length ? `<div class="hbars">${l.map(p => `<button class="hbar" data-pp="${p.id}" title="Show metrics for ${esc(p.name)}"><span class="hb-n trunc">${esc(p.name)}</span><span class="hb-t"><span style="width:${Math.max(2, 100*p[key]/mx)}%;background:${col}"></span></span><span class="hb-v num">${f(p[key])}</span></button>`).join('')}</div>` : `<div class="muted small">${note}</div>`; };
+        return l.length ? `<div class="hbars">${l.map(p => `<button class="hbar" data-pp="${p.id}" title="Show metrics for ${esc(p.name)}"><span class="hb-n trunc">${nameLabel(p.name)}</span><span class="hb-t"><span style="width:${Math.max(2, 100*p[key]/mx)}%;background:${col}"></span></span><span class="hb-v num">${f(p[key])}</span></button>`).join('')}</div>` : `<div class="muted small">${note}</div>`; };
       return `<div class="grid g2" style="margin-top:16px">
        <div class="card"><div class="card-h"><h3>Most vectors written</h3><span class="muted small" style="margin-left:auto">Click a pipeline to drill in</span></div><div class="card-b">${rank('vectors', fmt, 'var(--info)', M.pipelines.some(p => p.statsLoading) ? 'Loading pipeline stats…' : 'No vectors written yet.')}</div></div>
        <div class="card"><div class="card-h"><h3>Longest queue wait</h3><span class="muted small" style="margin-left:auto">Time work waits for a worker</span></div><div class="card-b">${rank('qwait', ms, 'var(--warn)', 'No queue wait recorded.')}</div></div></div>`; })()}

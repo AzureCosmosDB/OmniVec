@@ -9,9 +9,30 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).parents[2] / "connectors" / "ingestion" / "onelake_iceberg"))
 from helpers import (  # noqa: E402
     checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
-    ordered_source_version, pipeline_fingerprint, read_projected_rows,
+    embedding_request_policy, ordered_source_version, pipeline_fingerprint, read_projected_rows,
     row_has_current_omnivec_embedding,
 )
+
+
+def test_embedding_request_policy_preserves_pipeline_and_model_ceilings():
+    result = embedding_request_policy({
+        "resource_policy": {
+            "weight": 25, "max_concurrency_per_worker": 3, "priority": "high",
+            "workload_class": "burst", "embed_batch_size": 100,
+        },
+        "model_limits": {
+            "max_batch_size": 16, "context_window_tokens": 512, "max_batch_tokens": 1024,
+        },
+    })
+    assert result == {
+        "resource_weight": 25, "max_concurrency_per_worker": 3,
+        "resource_priority": "high", "workload_class": "burst", "embed_batch_size": 100,
+        "model_max_batch_size": 16, "model_context_window_tokens": 512,
+        "model_max_batch_tokens": 1024,
+    }
+    legacy = embedding_request_policy({})
+    assert legacy["embed_batch_size"] == 50
+    assert legacy["model_max_batch_tokens"] == 6000
 
 
 def test_content_hash_uses_only_configured_user_fields():

@@ -1,7 +1,7 @@
 /* OmniVec console: Agent panel, Models & recipes, Publish to AI apps, Settings */
 (() => {
 const X = window.OVX;
-const { icon, esc, fmt, ms, ago, when, plural, api, need, invalidate, D, M, T, logo, dot, empty, codebox, loadErr, spinner, route, go, toast, confirmAction, openModal, openDrawer, closeOverlay, $, $$ } = X;
+const { icon, esc, nameLabel, fmt, ms, ago, when, plural, api, need, invalidate, D, M, T, logo, dot, empty, codebox, loadErr, spinner, route, go, toast, confirmAction, openModal, openDrawer, closeOverlay, $, $$ } = X;
 
 /* ---------- agent ---------- */
 const A = { session:null, msgs:[], busy:false, model:localStorage.getItem('ov-agent-model') || '' };
@@ -91,7 +91,7 @@ route('models', { needs:[...X.CORE, 'caps', 'transforms', 'publish'], render(par
   const auth = m => m.auth_type==='managed-identity' || (m.endpoint && !m.api_key) ? 'Managed identity' : m.api_key ? 'API key' : m.endpoint ? '—' : 'In-cluster';
   const mtbl = (list, isChat) => `<table class="tbl"><thead><tr><th>Model</th><th>Provider</th>${isChat ? '' : '<th class="r">Dims</th>'}<th>Endpoint</th><th>Auth</th><th>Health</th><th class="r">Used by</th><th></th></tr></thead><tbody>
     ${list.map(m => { const h = M.hm[m.id], used = X.usedBy(m.id).length;
-      return `<tr class="clickrow" data-href="#/models/${m.id}"><td><div class="row" style="gap:10px">${logo(m.type||'native')}<div style="min-width:0"><div class="nm">${esc(m.deployment||m.name)}</div><div class="muted small mono">${esc(m.id)}</div></div></div></td>
+      return `<tr class="clickrow" data-href="#/models/${m.id}"><td><div class="row" style="gap:10px">${logo(m.type||'native')}<div style="min-width:0"><div class="nm">${nameLabel(m.deployment||m.name)}</div><div class="muted small mono">${esc(m.id)}</div></div></div></td>
        <td class="small">${m.type ? esc(T(m.type).short) : 'OmniVec native'}</td>
        ${isChat ? '' : `<td class="r num">${m.embedding_dim ? esc(m.embedding_dim) : '<span class="muted small">Not reported</span>'}</td>`}
        <td class="mono small muted" style="max-width:260px">${esc((m.endpoint||'in-cluster').replace(/^https?:\/\//,''))}</td><td class="small">${auth(m)}</td>
@@ -106,7 +106,7 @@ route('models', { needs:[...X.CORE, 'caps', 'transforms', 'publish'], render(par
    ${tab==='models' ? `
    <div class="eyebrow">Embedding models <span class="ct">${emb.length}</span></div><div class="card" style="margin:8px 0 22px">${emb.length ? mtbl(emb) : empty('cube','No embedding models','Register an Azure OpenAI embedding deployment to build pipelines.', '<a class="btn sm pri" href="#/models/new">Register embedding model</a>')}</div>
    <div class="eyebrow">Chat models (agent) <span class="ct">${chat.length}</span></div><div class="card" style="margin:8px 0 22px">${chat.length ? mtbl(chat, true) : empty('bot','No chat model yet','The agent can\'t answer until an Azure OpenAI chat deployment is registered.', '<a class="btn sm pri" href="#/models/new?cat=chat">Register chat model</a>')}</div>
-   ` : `<p class="muted small" style="margin:0 0 12px">Recipes are processing templates (extract, chunk, embed) chosen per file type when you build a pipeline.</p><div class="card">${tr.length ? `<table class="tbl"><thead><tr><th>Recipe</th><th>Applies to</th><th>Stages</th><th>Description</th></tr></thead><tbody>${tr.map(t => `<tr class="clickrow" data-href="#/models/recipes/${encodeURIComponent(t.name)}"><td style="white-space:nowrap"><div class="nm">${esc(t.name)}</div><span class="muted small">v${esc(t.version||'1')}</span></td><td class="small tags" style="max-width:280px">${exts(t)}</td><td class="small">${stages(t)}</td><td class="small muted">${esc(t.description||'')}</td></tr>`).join('')}</tbody></table>` : empty('layers','No recipes','DocGrok recipes appear here when the service is running.')}</div>`}</div>`,
+   ` : `<p class="muted small" style="margin:0 0 12px">Recipes are processing templates (extract, chunk, embed) chosen per file type when you build a pipeline.</p><div class="card">${tr.length ? `<table class="tbl"><thead><tr><th>Recipe</th><th>Applies to</th><th>Stages</th><th>Description</th></tr></thead><tbody>${tr.map(t => `<tr class="clickrow" data-href="#/models/recipes/${encodeURIComponent(t.name)}"><td style="white-space:nowrap"><div class="nm">${nameLabel(t.name)}</div><span class="muted small">v${esc(t.version||'1')}</span></td><td class="small tags" style="max-width:280px">${exts(t)}</td><td class="small">${stages(t)}</td><td class="small muted">${esc(t.description||'')}</td></tr>`).join('')}</tbody></table>` : empty('layers','No recipes','DocGrok recipes appear here when the service is running.')}</div>`}</div>`,
    mount(v) { $$('tr[data-href]', v).forEach(r => r.onclick = e => { if (!e.target.closest('button,a')) go(r.dataset.href); });
      $$('[data-mm]', v).forEach(b => b.onclick = () => { const m = M.MDL[b.dataset.mm];
      X.menu(b, [{ label:'Open details', icon:'chev', run:() => go('#/models/'+m.id) }, { label:'Test model', icon:'play', run: async () => { const e = $('#mt-'+m.id, v); e.style.color = 'var(--err)'; e.innerHTML = spinner('Testing…');
@@ -126,6 +126,7 @@ function newModel() {
      <div class="grid g2"><div class="fld"><label>Display name</label><input class="inp" id="mn" placeholder="${cat==='chat'?'gpt-4o':'text-embedding-3-small'}"></div><div class="fld"><label>Deployment name</label><input class="inp mono" id="md" placeholder="${cat==='chat'?'gpt-4o':'text-embedding-3-small'}"></div></div>
      <div class="fld"><label>Endpoint</label><input class="inp mono" id="me" placeholder="https://<resource>.openai.azure.com/"></div>
      <div class="grid g2">${cat==='embedding' ? `<div class="fld"><label>Dimensions</label><input class="inp" type="number" id="mdim" value="1536"><span class="hint">Must match the vector store's index.</span></div>` : ''}<div class="fld"><label>API version</label><input class="inp mono" id="mv" value="2024-06-01"></div></div>
+     ${cat==='embedding' ? `<div class="grid g3"><div class="fld"><label>Maximum batch size</label><input class="inp" type="number" min="1" id="mmaxb" value="256"><span class="hint">Maximum inputs in one model request.</span></div><div class="fld"><label>Context window</label><input class="inp" type="number" min="1" id="mctx" value="8191"><span class="hint">Maximum tokens per input.</span></div><div class="fld"><label>Batch token budget</label><input class="inp" type="number" min="1" id="mmaxt" value="6000"><span class="hint">Maximum estimated tokens across one request.</span></div></div>` : ''}
      <div class="fld"><label>Authentication</label><div class="seg" id="mauth"><button data-a="managed-identity" class="on">Managed identity</button><button data-a="key">API key</button></div></div>
      <div id="mkey" style="display:none" class="fld"><label>API key</label><input class="inp mono" type="password" id="mk"><span class="hint">Stored in Key Vault when configured.</span></div>
      <div class="inline-err" id="merr"></div>
@@ -144,12 +145,12 @@ function newModel() {
       $$('[data-a]', v).forEach(b => b.onclick = () => { auth = b.dataset.a; $$('[data-a]', v).forEach(x => x.classList.toggle('on', x===b)); $('#mkey', v).style.display = auth==='key' ? '' : 'none'; });
       $('#md', v).oninput = e => { if (!$('#mn', v).dataset.t) $('#mn', v).value = e.target.value; }; $('#mn', v).oninput = e => e.target.dataset.t = 1;
       $('#msave', v).onclick = async e => { const b = e.currentTarget, g = id => ($('#'+id, v)||{}).value;
-        const body = { name:(g('mn')||g('md')||'').trim(), deployment:(g('md')||'').trim(), endpoint:(g('me')||'').trim(), provider_type:'azure-openai', model_category:cat, auth_type:auth, api_version:g('mv'), ...(cat==='embedding' ? { embedding_dim:+g('mdim') } : {}), ...(auth==='key' ? { api_key:g('mk') } : {}) };
+        const body = { name:(g('mn')||g('md')||'').trim(), deployment:(g('md')||'').trim(), endpoint:(g('me')||'').trim(), provider_type:'azure-openai', model_category:cat, auth_type:auth, api_version:g('mv'), ...(cat==='embedding' ? { embedding_dim:+g('mdim'), max_batch_size:+g('mmaxb'), context_window_tokens:+g('mctx'), max_batch_tokens:+g('mmaxt') } : {}), ...(auth==='key' ? { api_key:g('mk') } : {}) };
         if (provider?.value==='mock-embedding') {
           body.provider_type='mock-embedding'; body.auth_type='none'; body.endpoint=''; body.api_key='';
           body.latency_ms=Number(g('mlatency'));
           if (!body.name || !Number.isInteger(body.embedding_dim) || body.embedding_dim<1 || body.embedding_dim>65536) { $('#merr',v).textContent='Enter a name and dimensions between 1 and 65536.'; return; }
-        } else if (!body.deployment || !/^https:\/\//.test(body.endpoint)) { $('#merr', v).textContent = 'Enter the deployment name and an https endpoint.'; return; }
+        } else if (!body.deployment || !/^https:\/\//.test(body.endpoint) || (cat==='embedding' && (!body.max_batch_size || !body.context_window_tokens || !body.max_batch_tokens))) { $('#merr', v).textContent = 'Enter the deployment, https endpoint, and positive model request limits.'; return; }
         b.disabled = true; b.innerHTML = spinner('Registering…');
         try { await api('/api/models', { method:'POST', body }); toast('Model registered'); invalidate('models','health'); go(qp.get('then')==='new' ? '#/new' : '#/models'); }
         catch (er) { $('#merr', v).textContent = er.message; b.disabled = false; b.innerHTML = icon('check','sm')+'Register'; } }; } };

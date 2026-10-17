@@ -1,0 +1,10 @@
+.resource-name{display:inline-flex;max-width:100%;min-width:0;vertical-align:bottom;white-space:pre}
+.resource-name-prefix{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.resource-name-suffix{flex:none}
+.msel-btn>.trunc{display:flex;align-items:center;gap:6px}
+.msel-btn>.trunc>.badge{flex:none}
+.tbl .resource-name,#sources-table .resource-name,#destinations-table .resource-name,#pipelines-table td:first-child .resource-name,#active-pipelines-table .resource-name{max-width:260px}
+.fnode{min-width:0}
+.pipeline-node{min-width:0;max-width:220px;flex:none}
+.modal-title{min-width:0}
+.crumbs>a,.crumbs>.cur{min-width:0}

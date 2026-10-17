@@ -24,6 +24,21 @@ OMNIVEC_MANAGED_FIELDS = frozenset(
 )
 
 
+def embedding_request_policy(pipeline: dict[str, Any]) -> dict[str, Any]:
+    policy = pipeline.get("resource_policy") or {}
+    limits = pipeline.get("model_limits") or {}
+    return {
+        "resource_weight": policy.get("weight", 10),
+        "max_concurrency_per_worker": policy.get("max_concurrency_per_worker", 2),
+        "resource_priority": policy.get("priority", "normal"),
+        "workload_class": policy.get("workload_class", "shared"),
+        "embed_batch_size": policy.get("embed_batch_size", 50),
+        "model_max_batch_size": limits.get("max_batch_size", 256),
+        "model_context_window_tokens": limits.get("context_window_tokens", 8191),
+        "model_max_batch_tokens": limits.get("max_batch_tokens", 6000),
+    }
+
+
 def content_from_row(row: dict[str, Any], fields: Iterable[str]) -> str:
     """Build stable embedding input from configured user content fields only."""
     return "\n\n".join(

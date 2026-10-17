@@ -1,12 +1,36 @@
 # OneLake Apache Iceberg
 
+[README](../README.md) | [User guide](user-guide.md) | [Pipeline tuning](pipeline-tuning.md)
+
 OmniVec reads existing OneLake Iceberg rows with a dedicated PyIceberg watcher
-and writes vectors and OmniVec metadata back to those same rows through a
-Fabric Spark Job Definition. It never writes Iceberg metadata directly.
+and can either send embeddings to a separate supported destination or write
+them back to the same rows through a Fabric Spark Job Definition. It never
+writes Iceberg metadata directly.
+
+## Choose your path
+
+| Goal | Required components |
+|------|---------------------|
+| Read OneLake into Cosmos DB Vector or Garnet | Iceberg watcher, queue workers, embedding model, destination access |
+| Write embeddings into the original lakehouse rows | Above, plus write-back columns, staging access, and a Spark MERGE Job Definition |
+| Search a OneLake write-back destination | A Garnet serving mirror; the lakehouse itself is not an OmniVec search index |
+| Lower-latency change delivery | A separately configured long-running Spark Delta CDF job; the watcher remains the recovery path |
+
+Grant catalog/data read, checkpoint write, and Service Bus permissions before
+enabling the watcher. Write-back additionally requires staging/table write and
+Fabric job execution permissions. Cross-tenant access requires the federated
+identity setup below, not a client secret in source configuration.
+
+Use `processing_mode: "queue"`. Same-row OneLake write-back also requires
+`content_strategy: "truncate"` and the **same lakehouse and source table**;
+it updates existing rows rather than inserting new ones.
 
 ## Configuration
 
-Create a source with `type: "onelake-iceberg"`:
+The following JSON is the source **config object**, not the entire API request.
+Use it under `config` with `name` and `type: "onelake-iceberg"` in
+`POST /api/sources`, or save it as `onelake-source.json` and pass it to
+`omnivec source create --name "Lakehouse documents" --type onelake-iceberg -f onelake-source.json`.
 
 ```json
 {
@@ -23,7 +47,7 @@ Create a source with `type: "onelake-iceberg"`:
   "checkpoint_file_system": "<workspaceId>",
   "checkpoint_path": ".omnivec/checkpoints",
   "change_data_feed": {
-    "enabled": true,
+    "enabled": false,
     "checkpoint_path": "Files/omnivec/cdf-checkpoints/documents",
     "trigger_interval_seconds": 10,
     "recovery_poll_interval_seconds": 900,
@@ -47,8 +71,10 @@ OneLake access, set the federated application on the individual pipeline source:
 
 Cross-tenant pipelines use isolated credentials and checkpoint files. The
 deployment identity continues to send Service Bus messages in the OmniVec
-tenant. OneLake sources can target either a `cosmosdb-vector` destination or
-the same-lakehouse `onelake-iceberg` write-back destination described below.
+tenant. Supported destination paths include `cosmosdb-vector`, standalone
+`garnet`, the same-lakehouse `onelake-iceberg` write-back destination below,
+and benchmark-only `null`. A source registration alone does not start ingestion:
+create a compatible pipeline and explicitly Run or Resume it.
 
 The watcher hashes only `content_fields`; managed fields such as `embedding`,
 `content_hash`, `pipeline_id`, `pipeline_generation`, and
@@ -64,9 +90,13 @@ source table. Use the identifier visible to the attached Spark lakehouse
 also accepted when that Spark catalog exposes them.
 When `change_data_feed.enabled` is true, the watcher performs the initial
 prefill immediately and then scans at `recovery_poll_interval_seconds` as a
-repair path. The Delta CDF job below handles low-latency changes.
+repair path. Keep it false for watcher-only operation. Enable it only when the
+separate Delta CDF job below is configured and running; this flag does not
+provision or start a Fabric stream.
 
-Create a destination with `type: "onelake-iceberg"`:
+For write-back, use this destination **config object** with
+`type: "onelake-iceberg"` in `POST /api/destinations`, or a CLI `--file`.
+Remove `mirror` entirely if no serving mirror is required.
 
 ```json
 {
@@ -147,9 +177,17 @@ The legacy `redis` mirror type remains available for existing string-mirror
 configurations, but it is not vector-searchable. New serving mirrors should
 use Garnet.
 
+### Verify each stage
+
+After creating the pipeline, explicitly Run or Resume it. Verify source scans
+and worker progress, then inspect staging and Spark job status, then confirm
+the target rows contain the expected vectors. Finally query the Garnet mirror
+if configured. A successful queue acknowledgment or staging write does **not**
+prove that MERGE finished or that the serving mirror contains every expected row.
+
 ## Fabric Spark Job Definition
 
-Upload `connectors/fabric_spark/onelake_iceberg_merge.py` as the Spark Job
+Upload [onelake_iceberg_merge.py](../connectors/fabric_spark/onelake_iceberg_merge.py) as the Spark Job
 Definition entry point. The worker invokes the Spark Job Definition API with
 `executionData.commandLineArguments` and binds `defaultLakehouseId` to the
 source lakehouse:
@@ -223,8 +261,10 @@ ALTER TABLE dbo.documents SET TBLPROPERTIES (
 
 Upload these files to a long-running Fabric Spark Job Definition:
 
-- `connectors/fabric_spark/onelake_delta_cdf_stream.py`
-- `connectors/fabric_spark/onelake_delta_cdf_helpers.py`
+- [onelake_delta_cdf_stream.py](../connectors/fabric_spark/onelake_delta_cdf_stream.py)
+- [onelake_delta_cdf_helpers.py](../connectors/fabric_spark/onelake_delta_cdf_helpers.py)
+- [omnivec_queue/__init__.py](../omnivec_queue/__init__.py), uploaded as the Python dependency
+  `omnivec_queue.py` (the pure envelope codec does not require the Azure SDK).
 
 The job reads `insert`, `update_postimage`, and `delete` records. Updates made
 only by OmniVec are discarded when the stored content hash, model, pipeline
@@ -251,16 +291,21 @@ Start the job after the first watcher prefill completes:
 --max-files-per-trigger 1000
 ```
 
-Omit `--starting-version` for the normal prefill-to-live handoff; Structured
-Streaming starts with changes arriving after the stream starts. Set it only
-when intentionally replaying retained CDF history. Spark's checkpoint provides
-microbatch recovery. Messages have deterministic IDs, and downstream writes
-use source and pipeline versions, so retried microbatches are safe. Enabling
-duplicate detection on the Service Bus topic also avoids redundant embedding
-calls.
+For a new stream/checkpoint, omitting `--starting-version` lets Delta CDF emit
+the current snapshot as inserts, then future changes. It does **not** mean
+"future changes only" and may overlap the watcher's prefill. Set a starting
+version only after choosing a deliberate boundary within retained CDF history;
+do not create a gap between prefill and streaming.
 
-The decoded `pipeline-config-base64` value is an array with one entry per
-active pipeline:
+Spark's checkpoint provides microbatch recovery. Deterministic message IDs and
+source/pipeline versions support replay handling, but delivery remains at least
+once. Service Bus duplicate detection, if configured, can reduce duplicate
+publication within its detection window; it is not an exactly-once guarantee.
+
+The decoded `pipeline-config-base64` value is an array with one entry per active
+pipeline. This is a **plan shape**, not a ready-to-run configuration: replace all
+sample IDs/model/generation values and populate `destination_config` with the
+complete resolved destination configuration shown earlier.
 
 ```json
 [
@@ -270,6 +315,7 @@ active pipeline:
     "docgrok_pipeline": "text-embedding-model",
     "pipeline_generation": "1",
     "pipeline_revision": 1,
+    "resource_policy": {"queue_documents_per_message": 100},
     "source_id": "src-onelake",
     "id_field": "id",
     "content_fields": ["title", "body"],
@@ -289,3 +335,21 @@ active pipeline:
 This job remains running and consumes Fabric capacity while active. If
 continuous Spark capacity isn't desired, retain the polling watcher or route
 upstream database CDC through Fabric Eventstream before landing the table.
+
+Stage-1 [broker pipeline lanes](pipeline-tuning.md#opt-in-broker-pipeline-lanes-stage-1)
+are not compatible with CDF-enabled OneLake sources. Do not enable both.
+
+`resource_policy.queue_documents_per_message` is optional (default 1, maximum
+1000). Copy it from the API pipeline policy into each manually supplied plan;
+running Spark jobs do not hot-reload API policy changes. For live changes
+without restarting the stream, supply `--pipeline-config-path` instead of
+`--pipeline-config-base64`: the job reads that JSON file at each microbatch
+boundary. Replace the file atomically to avoid partial JSON reads.
+Plans also accept `queue_max_envelope_bytes` (default 229376, max 983040),
+`queue_send_batch_max_bytes` (default 245760, max 1048576), and
+`queue_publish_batch_size` (default 200, max 1000). Reserve at least 16384
+bytes between envelope and send-batch caps and confirm the broker supports
+the chosen sizes. Messages flush at microbatch and configured byte/count
+boundaries, retaining each document's identity and source version.
+Deploy envelope-aware workers first. Changing transport packing does not
+change model-request token limits or Structured Streaming checkpoint semantics.

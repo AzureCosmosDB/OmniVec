@@ -33,10 +33,10 @@ public sealed class GarnetDestinationWriter : IDestinationWriter
             throw new ArgumentException($"Unsupported Garnet quantization '{quantization}'");
         var graphM = GetPositiveInt(config, "m", 16);
         var buildEf = GetPositiveInt(config, "ef", 200);
+        var writeConcurrency = GetBoundedConcurrency(config, "write_concurrency", 16);
 
-        foreach (var result in results)
+        await RunBoundedAsync(results, writeConcurrency, async (result, token) =>
         {
-            ct.ThrowIfCancellationRequested();
             var elementId = OneLakeIcebergDestinationWriter.BuildGarnetElementId(
                 result.PipelineId, result.SourceId, result.SourceRef);
             var attributes = JsonSerializer.Serialize(new
@@ -78,8 +78,8 @@ public sealed class GarnetDestinationWriter : IDestinationWriter
                     graphM,
                     "XDISTANCE_METRIC",
                     metric),
-                ct);
-        }
+                token);
+        }, ct);
     }
 
     public async Task DeleteByRefAsync(
@@ -91,9 +91,9 @@ public sealed class GarnetDestinationWriter : IDestinationWriter
 
         var vectorSet = Get(config, "vector_set", "omnivec-vectors");
         var database = await GetDatabaseAsync(config, ct);
-        foreach (var request in requests)
+        var writeConcurrency = GetBoundedConcurrency(config, "write_concurrency", 16);
+        await RunBoundedAsync(requests, writeConcurrency, async (request, token) =>
         {
-            ct.ThrowIfCancellationRequested();
             var elementId = OneLakeIcebergDestinationWriter.BuildGarnetElementId(
                 request.PipelineId, request.SourceId, request.SourceRef);
             await OneLakeIcebergDestinationWriter.ApplyGarnetVersionedOperationAsync(
@@ -103,8 +103,8 @@ public sealed class GarnetDestinationWriter : IDestinationWriter
                 OneLakeIcebergDestinationWriter.BuildOperationVersion(
                     request.SourceVersion, request.PipelineRevision, "delete"),
                 transaction => transaction.ExecuteAsync("VREM", vectorSet, elementId),
-                ct);
-        }
+                token);
+        }, ct);
     }
 
     public static async Task<IDatabase> GetDatabaseAsync(
@@ -151,4 +151,24 @@ public sealed class GarnetDestinationWriter : IDestinationWriter
             && parsed > 0
                 ? parsed
                 : fallback;
+
+    private static int GetBoundedConcurrency(
+        Dictionary<string, object> config,
+        string key,
+        int fallback)
+        => Math.Clamp(GetPositiveInt(config, key, fallback), 1, 128);
+
+    internal static Task RunBoundedAsync<T>(
+        IEnumerable<T> items,
+        int maxConcurrency,
+        Func<T, CancellationToken, Task> operation,
+        CancellationToken ct)
+        => Parallel.ForEachAsync(
+            items,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Clamp(maxConcurrency, 1, 128),
+                CancellationToken = ct,
+            },
+            async (item, token) => await operation(item, token));
 }

@@ -64,6 +64,12 @@ spec:
               value: {{ .Values.azure.workloadIdentity.principalId | quote }}
             - name: ENABLE_BLOB_SOURCE
               value: {{ .Values.blobIngestor.enabled | default false | quote }}
+            {{- if .Values.azure.serviceBus.namespace }}
+            - name: SYNTHETIC_SERVICEBUS_NAMESPACE
+              value: {{ .Values.azure.serviceBus.namespace | quote }}
+            - name: SYNTHETIC_SERVICEBUS_TOPIC
+              value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            {{- end }}
             {{- if .Values.azure.subscriptionId }}
             - name: AZURE_SUBSCRIPTION_ID
               value: {{ .Values.azure.subscriptionId | quote }}

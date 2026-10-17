@@ -23,6 +23,9 @@ def test_required_pr_image_builds_are_reported_without_publishing():
         "build (omnivec-api, ., Dockerfile)",
         "build (omnivec-web, web, web/Dockerfile)",
         "build (omnivec-changefeed, ., connectors/ingestion/dotnet/Dockerfile)",
+        "build (omnivec-dotnet-worker, connectors/worker/dotnet, connectors/worker/dotnet/Dockerfile)",
+        "build (omnivec-onelake-iceberg-watcher, ., connectors/ingestion/onelake_iceberg/Dockerfile)",
+        "build (docgrok-router, docgrok/router, docgrok/router/Dockerfile)",
         "build (docgrok-mock-embedding, docgrok/services/embedding/mock, docgrok/services/embedding/mock/Dockerfile)",
         "build (omnivec-mock-source, connectors/mock, connectors/mock/Source/Dockerfile)",
         "build (omnivec-mock-destination, connectors/mock, connectors/mock/Destination/Dockerfile)",
@@ -41,6 +44,7 @@ def test_root_ingestion_build_context_keeps_both_dotnet_projects():
     ignore = (root / ".dockerignore").read_text().splitlines()
     assert "connectors/" not in ignore
     for path in ("connectors/ingestion/", "connectors/ingestion/dotnet/",
+                 "connectors/ingestion/onelake_iceberg/",
                  "connectors/worker/", "connectors/worker/dotnet/"):
         assert f"!{path}" in ignore
     for project in ("ingestion", "worker"):

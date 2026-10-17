@@ -415,7 +415,8 @@ public class SourceWatcherManager : IAsyncDisposable
                 source, _options, _apiClient, _hasher,
                 _loggerFactory.CreateLogger<BlobSourceWatcher>(),
                 generation: generation,
-                sbPublisher: _sbPublisher.IsEnabled ? _sbPublisher : null),
+                sbPublisher: _sbPublisher.IsEnabled ? _sbPublisher : null,
+                stateStore: _stateContainerManager),
 
             "databricks" => new DatabricksCdcWatcher(
                 source, _options, _apiClient, _hasher,

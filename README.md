@@ -1,818 +1,329 @@
 # OmniVec
 
-> **⚠️ Public Preview Notice**
-> This repository is currently available as a **public preview** and is **not yet fully ready for production use**.
-> Expect breaking changes, incomplete features, and limited support during this phase.
+**Connect data sources, generate embeddings, and search your vectors on Azure.**
 
-**Any data source → embeddings → vector search, deployed on Azure in one command.**
+OmniVec runs on Azure Kubernetes Service (AKS) and provides a web console, CLI,
+and REST API. Source watchers detect data changes; DocGrok extracts content and
+routes embedding requests; workers write the resulting vectors to your chosen
+destination.
 
-OmniVec automates the full vector ingestion pipeline: connect a data source, extract content, generate embeddings, and store vectors in a searchable destination. It runs on Azure Kubernetes Service and comes with a web UI, CLI, and REST API.
+> **Public preview:** Expect breaking changes, incomplete features, and limited
+> support. This release is not yet ready for production use.
 
+```text
+Source -> source watcher -> processing -> embedding model -> destination
+                                  DocGrok                    |
+                                                             v
+                                                       Vector search
 ```
-Sources                  Processing              Destinations
-────────                 ──────────              ────────────
-Azure Blob Storage ─┐                         ┌→ CosmosDB Vector
-CosmosDB           ─┼─→ DocGrok Pipelines ───┤→ pgvector
-PostgreSQL         ─┤   (embed, OCR, chunk)   └→ MSSQL
-MSSQL              ─┘
-```
 
-This guide walks you through deploying OmniVec and running your first end-to-end pipeline.
+Not every source/destination pair supports every processing or search mode.
+Start with the Cosmos DB walkthrough below, then use the connector guides for
+other combinations.
 
 See the [v2.0.0 release notes](docs/releases/v2.0.0.md) for cumulative fixes,
 breaking changes, upgrade instructions, and measured benchmark results.
 
-### Operations console
+## Start here
 
-The desktop console uses a Web3-inspired visual design with persistent dark/light
-themes, keyboard-accessible navigation, and a source-to-pipeline-to-vector-store
-overview. The **Metrics** view separates runtime throughput, latency percentiles
-and job counters from the selected historical time range. Unavailable measurements
-remain unknown rather than turning into zero.
+| I want to... | Read |
+|--------------|------|
+| Deploy OmniVec and run a first pipeline | [Quick start](#quick-start) below |
+| Use the console and understand pipeline actions | [User guide](docs/user-guide.md) |
+| Automate with the CLI | [CLI guide](docs/cli-guide.md) |
+| Configure or upgrade a deployment | [Deployment guide](docs/deployment.md) |
+| Understand components, identity, and data flow | [Architecture](docs/architecture.md) |
+| Use search from an application | [Search API](docs/search-api.md) |
+| Connect a SharePoint library | [SharePoint guide](docs/sharepoint-source.md) |
+| Connect Fabric OneLake or configure write-back | [OneLake guide](docs/onelake-iceberg.md) |
+| Tune batching, chunking, or broker lanes | [Pipeline tuning](docs/pipeline-tuning.md) |
+| Diagnose a pipeline or use approval-gated recovery | [Diagnostics and Recovery Agent](docs/agent.md) |
+| Deploy a Cosmos MCP server or connect a Foundry agent | [Cloud deployment guide](docs/cloud-deployments.md) |
 
-**Diagnostics** provides read-only system or pipeline evidence without requiring
-a chat model: workload readiness, queue/dead-letter counters, dependency health,
-coverage gaps and prioritized next steps. **Recovery Agent** uses registered chat
-models for investigation and approval-gated repairs; readiness is not processing
-proof. See [the agent operational contract](docs/agent.md).
+## Quick start
 
-Startup now shows loading/session-check progress instead of a blank screen, with
-bounded waits and a retry action. Temporary service failures preserve the saved
-session token. Sources, Destinations and Pipelines include whole-inventory
-summary cards and fixed-height, ten-row paginated tables without an internal
-vertical scrollbar.
+### 1. Prepare
 
-**MCP servers** prepares destination-specific Azure Functions deployments using
-the shared Cosmos MCP implementation. **Foundry agents** connects a successfully
-deployed server to an existing Foundry project. Both use explicit administrator
-approval, persistent deployment jobs and bounded recovery. Provisioning is
-**disabled by default**; see [cloud deployment setup and limits](docs/cloud-deployments.md).
+Install [Azure CLI](https://aka.ms/install-azure-cli),
+[Azure Developer CLI](https://aka.ms/install-azd),
+[PowerShell 7+](https://aka.ms/install-powershell), and
+[Git](https://git-scm.com). Hooks install `kubectl` and Helm if needed.
 
-Desktop browser regressions are in `tests\e2e\test_operations_console.py`. They
-are opt-in: provide `OMNIVEC_E2E_BASE_URL` for a localhost Kubernetes tunnel and
-`OMNIVEC_E2E_TOKEN` through the process environment, then run
-`python -m pytest tests\e2e\test_operations_console.py -q`. Set
-`OMNIVEC_E2E_CHAT=1` only with an approved chat deployment to include real
-read-only inference. Browser tests prohibit mutation/approval requests and do
-not replace ingestion or approved-repair E2E tests.
+You need an Azure subscription with resource-provisioning and role-assignment
+permissions, available regional quota, and access to an embedding deployment.
+The default configuration uses two `Standard_D4s_v5` system nodes, no GPU pool,
+and Cosmos DB serverless metadata. **Azure resources and inference incur costs.**
+See [deployment prerequisites](docs/deployment.md#prerequisites) before proceeding.
 
----
+### 2. Deploy
 
-## Part 1 — Deploy OmniVec
+Run in PowerShell 7 on Windows, or your shell on Linux/macOS:
 
-### Prerequisites
-
-Install these before you begin:
-
-| Tool | Install | Verify |
-|------|---------|--------|
-| **Azure CLI** (`az`) | [install](https://aka.ms/install-azure-cli) | `az version` |
-| **Azure Developer CLI** (`azd`) | [install](https://aka.ms/install-azd) | `azd version` |
-| **PowerShell 7+** (`pwsh`) | [install](https://aka.ms/install-powershell) | `pwsh --version` |
-| **Git** | [install](https://git-scm.com) | `git --version` |
-
-You also need:
-
-- An **Azure subscription** with permission to create resource groups, AKS clusters, and CosmosDB accounts.
-
-> `kubectl` and `helm` are installed automatically by the deployment hooks if not already present.
-
-> **Costs:** The default configuration uses 2× Standard_D4s_v5 nodes, no GPU, and CosmosDB serverless. Check regional pricing and quota before deployment. B-series VMs are [not supported for AKS system pools](https://learn.microsoft.com/azure/aks/use-system-pools#system-and-user-node-pools). `azd down --purge --force` permanently deletes the environment's resources and data; use it only when you intend to remove that environment.
-
-### Deploy
-
-> **Windows users:** Run these commands in PowerShell 7 (`pwsh`), not Command Prompt.
-
-```bash
-# Clone the repo
+```powershell
 git clone https://github.com/AzureCosmosDB/OmniVec
 cd OmniVec
-
-# Log in to Azure
 az login
 azd auth login
-
-# Create a named environment
 azd env new my-omnivec
-
-# Deploy everything — infrastructure + application (~15–25 minutes)
 azd up
 ```
 
-When prompted, choose **1) Quick start** to use recommended defaults (no GPU, CosmosDB serverless, blob source enabled). Or pre-set config to skip all prompts:
+Choose **Quick start** when prompted. Deployment provisions the infrastructure,
+imports or builds images, deploys the Helm charts, and checks readiness.
+Keep the environment name for later upgrades and diagnostics.
 
-```bash
-azd env set AZURE_LOCATION              eastus2
-azd env set OMNIVEC_SYSTEM_NODE_VM_SIZE Standard_D4s_v5
-azd env set OMNIVEC_SYSTEM_NODE_COUNT   2
-azd env set OMNIVEC_GPU_NODE_VM_SIZE    ""
-azd env set OMNIVEC_GPU_NODE_COUNT      0
-azd env set OMNIVEC_METADATA_STORE      cosmosdb-serverless
-azd up
-```
+Open the reported OmniVec URL with `/ui`. Retrieve the admin token for sign-in:
 
-What happens behind the scenes:
-
-1. **preprovision hook** — validates tools, checks for an existing deployment, collects any missing config interactively.
-2. **Bicep deployment** — provisions AKS, CosmosDB, ACR, Key Vault, Storage, Service Bus, and Event Grid.
-3. **postprovision hook** — imports pre-built container images (or builds from source), deploys all services via Helm.
-
-`azure.yaml` selects PowerShell hooks on Windows and POSIX shell hooks elsewhere.
-`deploy.sh` is a compatibility wrapper for `azd up`, not a separate Terraform
-installer. Existing Terraform-managed installations require a reviewed migration;
-do not run both stacks against the same resources. The examples below use the
-maintained Bicep/azd path. POSIX image imports use a portable watchdog; no GNU
-`timeout` or macOS coreutils installation is required.
-
-`azd up` is resumable and safe to rerun after an interrupted attempt. The hooks
-preserve successfully built images, recover stale local locks, reconcile pending
-Helm operations, retry transient Azure/AKS transport failures, and verify actual
-deployment convergence after an initial rollout timeout. A rerun never adopts
-unrelated Kubernetes resources or overwrites the default kubeconfig. Genuine
-configuration, authorization, image, or workload failures still stop explicitly
-with diagnostics instead of being reported as a successful deployment.
-
-Source-build deployments use minimal per-image contexts and immutable
-`src-<fingerprint>` tags. Existing matching fingerprints are reused, independent
-images are built with bounded concurrency, and Helm rolls only workloads whose
-image tag changed. For an already-provisioned environment, use
-`./deploy.sh --code-only --environment <name>` to skip Bicep reconciliation and
-run only the resumable image/Helm/health deployment path. On Windows use
-`.\deploy.ps1 -CodeOnly --environment <name>`. Set
-`OMNIVEC_BUILD_CONCURRENCY` from 1 to 5 to tune ACR build parallelism (default 3).
-
-### Save these values
-
-When deployment finishes, the console prints two important values. **Copy them now:**
-
-| Value | What it is |
-|-------|-----------|
-| **OmniVec URL** | `http://<id>.<region>.cloudapp.azure.com/ui` — your web UI |
-| **Admin Token** | Bearer token for API and CLI authentication |
-
-If you missed them:
-
-```bash
-# Retrieve the admin token
+```powershell
 azd env get-value OMNIVEC_ADMIN_TOKEN
-
-# Check which environment is active
-azd env list
 ```
 
-### Microsoft Entra login
+Treat it as a secret. Use HTTPS before sending credentials over an untrusted
+network. For Microsoft Entra login, TLS requirements, interrupted deployments,
+and image updates, see the [deployment guide](docs/deployment.md).
 
-The API accepts Entra access tokens and the web console can show **Sign in with
-Microsoft**. The public browser origin must use HTTPS.
+### 3. Register an embedding model
 
-```bash
-azd env set OMNIVEC_ENTRA_ENABLED true
-azd env set OMNIVEC_PUBLIC_URL https://omnivec.example.com
-azd up
-```
+For this walkthrough, use an Azure OpenAI deployment of
+`text-embedding-3-small` with **1536 output dimensions**. No GPU nodes are needed.
+You can use another model, but its output dimensions must match the destination.
 
-The post-provision hook creates or updates a single-tenant app registration,
-defines `OmniVec.Admin`, `OmniVec.Operator`, and `OmniVec.Viewer` app roles,
-assigns the deploying user the admin role, and stores the generated client ID
-in the azd environment. The deploying identity needs permission to manage
-application registrations and enterprise-app role assignments. Assign other
-users or groups from the printed Enterprise application URL. The generated
-admin token remains available as break-glass access during migration.
+In **Models**, add an Azure OpenAI external model and supply:
 
----
+| Setting | Value |
+|---------|-------|
+| Endpoint | Your resource endpoint, such as `https://<resource>.openai.azure.com` |
+| Deployment | The exact Azure deployment name, which may differ from the model name |
+| Authentication | Managed identity with the required Azure OpenAI access, or an API key |
+| Dimensions | `1536` for this example |
 
-### Open the UI
+Save, then **Test**. For managed identity, grant the OmniVec workload identity
+**Cognitive Services OpenAI User** on the embedding resource. Registering a model
+does not grant that permission or create an Azure OpenAI deployment.
 
-Open the **OmniVec URL** in your browser. You should see the OmniVec dashboard.
+Keep the returned model ID/name. Select that model when creating the pipeline;
+do not assume a transform named `text-azure` uses the model you just registered.
 
-If the page doesn't load, wait 1–2 minutes for the load balancer to assign an external IP:
+### 4. Connect a source
 
-```bash
-kubectl --kubeconfig "$HOME/.kube/omnivec-my-omnivec" get svc omnivec-web -n omnivec
-```
-
-Replace `my-omnivec` with your environment name. Deployment hooks keep this
-kubeconfig separate and do not switch your default Kubernetes context.
-
-**Deployment is complete.** OmniVec is running. The next part walks through creating your first pipeline.
-
----
-
-## Part 2 — Your first pipeline
-
-This section requires an **Azure OpenAI resource** with an embedding model deployed. If you don't have one yet:
-
-1. [Create an Azure OpenAI resource](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource)
-2. [Deploy an embedding model](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource?pivots=web-portal#deploy-a-model) — choose `text-embedding-3-small` for a first run
-3. Note these three values:
-   - **Endpoint URL** — Azure Portal → your OpenAI resource → Overview
-   - **API Key** — Azure Portal → Keys and Endpoint
-   - **Deployment Name** — Azure Portal → Deployments → the exact name you gave the deployment (this is **not** the model name)
-
-This walkthrough uses the UI. For CLI equivalents, see [docs/cli-guide.md](docs/cli-guide.md).
-
-### Register an embedding model
-
-1. Go to **Models** in the sidebar.
-2. Click **Add Model**.
-3. Choose **Azure OpenAI (External)**.
-4. Fill in the three values from your Azure OpenAI resource:
-
-   | Field | Value | Where to find it |
-   |-------|-------|-------------------|
-   | Endpoint | `https://<resource>.openai.azure.com` | Azure Portal → your OpenAI resource → Overview |
-   | API Key | `xxxxxxxx` | Azure Portal → Keys and Endpoint |
-   | Deployment Name | e.g. `text-embedding-3-small` | Azure Portal → Deployments (the exact name, not the model name) |
-
-5. Click **Save**, then **Test** to confirm OmniVec can reach the model.
-
-> **Common mistake:** The deployment name must match exactly what's shown in the Azure Portal under "Deployments." If you named your deployment `my-embeddings`, use `my-embeddings` — not `text-embedding-3-small`.
-
-### Create a source
-
-A source is a connection to data you want to embed. For this first run, use **CosmosDB** — create a new CosmosDB account for your data (separate from the OmniVec metadata account).
-
-1. Create a new CosmosDB account in the Azure Portal:
-   - Azure Portal → **Create a resource** → **Azure Cosmos DB** → **NoSQL**
-   - **Account name**: e.g., `my-omnivec-data`
-   - **Capacity mode**: Serverless
-   - Enable **Vector Search** under Features
-   - Click **Create** (takes ~3–5 minutes)
-2. Create a database and source container:
-   - Go to your new Cosmos DB account → **Data Explorer** → **New Container**
-   - **Database id**: `demo` (create new)
-   - **Container id**: `documents`
-   - **Partition key**: `/id`
-   - Click **OK**
-3. Insert a few sample documents via Data Explorer → `documents` container → **New Item**:
-   ```json
-   { "id": "doc-001", "content": "OmniVec is a universal vector ingestion platform that processes documents from Azure CosmosDB into vector embeddings for semantic search.", "title": "About OmniVec" }
-   ```
-   ```json
-   { "id": "doc-002", "content": "Azure Kubernetes Service simplifies deploying managed Kubernetes clusters in Azure by offloading operational overhead.", "title": "About AKS" }
-   ```
-4. Grant the OmniVec managed identity access to this account:
-
-   **Bash / Linux:**
-   ```bash
-   az cosmosdb sql role assignment create \
-     --account-name "my-omnivec-data" \
-     --resource-group "<your-rg>" \
-     --role-definition-id "00000000-0000-0000-0000-000000000002" \
-     --principal-id "<omnivec-identity-principal-id>" \
-     --scope "/dbs"
-   ```
-   **PowerShell / Windows:**
-   ```powershell
-   az cosmosdb sql role assignment create `
-     --account-name "my-omnivec-data" `
-     --resource-group "<your-rg>" `
-     --role-definition-id "00000000-0000-0000-0000-000000000002" `
-     --principal-id "<omnivec-identity-principal-id>" `
-     --scope "/dbs"
-   ```
-   Also grant **Cosmos DB Account Reader Role** via Access Control (IAM).
-
-5. In OmniVec, go to **Sources** → **New Source**.
-6. Choose **CosmosDB**.
-7. Fill in:
-   - **Name**: `My First Source`
-   - **Endpoint**: your new Cosmos DB account URI
-   - **Database**: `demo`
-   - **Container**: `documents`
-8. Click **Save**, then **Test Connection** to verify access.
-
-### Create a destination
-
-A destination is where vectors are stored. Use the **same CosmosDB account** with a separate container that has a vector embedding policy.
-
-1. In your Cosmos DB account → **Data Explorer** → **New Container**:
-   - **Database id**: `demo` (use existing)
-   - **Container id**: `vectors`
-   - **Partition key**: `/id`
-   - Under **Container Vector Policy**, add a vector embedding:
-     - **Path**: `/embedding`
-     - **Data type**: `float32`
-     - **Dimensions**: `1536` (matches `text-embedding-3-small`)
-     - **Distance function**: `cosine`
-   - Click **OK** to create
-2. In OmniVec, go to **Destinations** → **New Destination**.
-3. Choose **CosmosDB Vector**.
-4. Fill in:
-   - **Name**: `My First Destination`
-   - **Endpoint**: same Cosmos DB account URI
-   - **Database**: `demo`
-   - **Container**: `vectors`
-5. Click **Save**, then **Test Connection**.
-6. Click **Fetch Embedding Policies** — you should see `/embedding` with dimensions `1536` and distance function `cosine`.
-
-> **If Fetch Embedding Policies returns nothing:** your container doesn't have a vector embedding policy configured. Go back to Data Explorer and verify the container's vector policy includes a `/embedding` path. See the [Cosmos DB vector search docs](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search) for details.
-
-### Create a pipeline
-
-A pipeline ties source → model → destination together.
-
-1. Go to **Pipelines** → **New Pipeline**.
-2. Fill in:
-   - **Name**: `My First Pipeline`
-   - **Source**: select your CosmosDB source
-   - **Destination**: select your CosmosDB vector destination
-   - **Model**: select the Azure OpenAI model you registered
-   - **Embedding Policy Path**: select the path from your destination (e.g., `/embedding`)
-   - **Content Strategy**: `Truncate` (embeds full document text as a single vector — simplest for first run)
-   - **Process Existing**: ✅ enable this (so documents already in the source get processed)
-3. Click **Create**.
-
-The pipeline starts processing immediately. You can watch progress on the pipeline detail page.
-
-#### Cosmos text chunking (queue mode)
-
-For Cosmos field-content sources writing to a **separate Cosmos vector container**,
-set `content_strategy: "chunk"` and, for example:
+Use a Cosmos DB for NoSQL data account separate from OmniVec's metadata account.
+In Data Explorer, create database `demo` and container `documents`, partitioned
+by `/id`. Add these two items:
 
 ```json
 {
-  "chunk_config": {
-    "chunk_size": 1000,
-    "chunk_overlap": 200,
-    "chunk_unit": "chars",
-    "store_text": true,
-    "text_field": "text",
-    "doc_id_pattern": "{source}-chunk-{chunk}"
-  }
+  "id": "doc-001",
+  "title": "About OmniVec",
+  "content": "OmniVec connects data sources to embedding models and vector stores for semantic search."
 }
 ```
 
-The .NET worker embeds each overlapping chunk without first truncating the source.
-`chars` counts Unicode codepoints and prefers paragraph/sentence boundaries, like
-the Python chunker. `tokens` uses **whitespace words**, not model/BPE tokens.
-Oversized chunks fail explicitly: reduce the configured size to fit the model and
-worker limits. `truncate` remains the default; `chunk` with inline mode, URL content,
-attachments, mixed source types or non-Cosmos destinations is rejected.
+```json
+{
+  "id": "doc-002",
+  "title": "About AKS",
+  "content": "Azure Kubernetes Service runs containerized applications on managed Kubernetes clusters."
+}
+```
 
-Each vector includes `chunk_index`, `chunk_count`, `source_id`, `source_ref`,
-`pipeline_id` and `chunk_source_partition`, even when optional metadata is disabled.
-Only `store_text: true` stores chunk text at `text_field`; raw source fields are
-not copied onto every chunk. Chunk settings take precedence over the pipeline's
-single-document `store_content`/`content_field` options.
+In **Connections > Sources**, add a Cosmos DB source with the account endpoint,
+database `demo`, and container `documents`. In the classic console, use
+**Sources > New Source**.
 
-All six pattern variables are supported: `source`, `source_ref`, `source_hash`,
-`chunk` (zero-padded), `pipeline`, `pipeline_hash`. A mandatory SHA-256 namespace
-prefix isolates pipeline, source registration, source partition and document.
-Patterns must contain `{chunk}` and render valid Cosmos IDs. `/id` and single
-top-level non-metadata partition keys are supported.
-For example, `custom-{pipeline_hash}-{source_hash}-{chunk}` produces IDs ending
-in that rendered name, after the mandatory isolation prefix. A constant template
-or `{source}-{pipeline}` is rejected because it would name every chunk alike.
-The generated ID never replaces the original `source_ref`.
+Use **Check access** and **Test Connection**. The permissions report can provide
+scoped grant commands for an authorized Azure administrator. Cosmos data-plane
+access and any account-discovery permissions are distinct; being an OmniVec
+administrator does not grant either. Repeat the check after permissions propagate.
+A read-only connection check does not prove destination writes or checkpoint access.
 
-After all replacement chunks are written, obsolete chunks for that exact source
-and pipeline are removed. Empty text removes the previous set. Failed embedding,
-write or cleanup is retried or explicitly dead-lettered, not acknowledged as success.
-Replacement across `/id` partitions is **not atomic or revision-fenced**: overlapping,
-out-of-order updates can race; this is distinct from SharePoint's revision-fenced
-replacement, which is unchanged. Strategy and text-storage field/opt-in cannot be
-changed in-place; create a new pipeline for those changes.
+### 5. Connect a vector destination
 
-In the UI, select **Chunk** under creation options to configure size, overlap
-(including zero), unit, text storage/field and the chunk ID template. The
-pipeline's Chunking detail tab preserves those settings; Cosmos size, overlap,
-unit and template are editable for future processing, while strategy and text
-storage remain locked. Search results show the distinct vector ID below the
-source reference when they differ.
+In the same data account, enable the Cosmos DB vector-search capability and create
+a **separate** container, `demo/vectors`. Configure:
 
-The CLI exposes `--chunk-size`, `--chunk-overlap`, `--chunk-unit`,
-`--store-text`, `--text-field` and `--chunk-doc-id-pattern` on pipeline create
-and update. `--doc-id-pattern` also targets the chunk template when the pipeline
-uses chunk strategy; the explicit `--chunk-doc-id-pattern` takes precedence.
-Updates preserve omitted chunk settings and send explicit zero/false values.
+| Setting | Value |
+|---------|-------|
+| Partition key | `/id` |
+| Vector path | `/embedding` |
+| Data type | `float32` |
+| Dimensions | `1536` |
+| Distance function | `cosine` |
+| Vector index | `quantizedFlat` or `diskANN` on `/embedding` |
 
-Offline regression coverage runs with `dotnet run --project tests/sharepoint -c Release`
-and `python -m pytest tests/unit/test_cosmos_chunking.py tests/unit/test_pipeline_ui_flows.py -q`
-(UI JavaScript tests require Node, use DOM stubs, and are not browser coverage).
-CLI payload tests run with `go test ./...` from `cli`. The opt-in
-`scripts/e2e-cosmos-chunking.py` live probe runs inside an API pod, keeps admin
-credentials on loopback, and creates only explicitly named synthetic fixtures.
-Its `--chunk-size`, `--chunk-overlap`, `--chunk-unit` and `--doc-id-pattern`
-arguments populate the existing `chunk_config`; the probe compares every chunk
-with the existing Python chunker and verifies the rendered template in every ID.
+Both a vector embedding policy and an appropriate vector index are needed.
+For a tiny sample, Cosmos may use a full scan until the index has enough vectors;
+this walkthrough is not a performance benchmark. See the
+[Cosmos DB vector-search documentation](https://learn.microsoft.com/azure/cosmos-db/nosql/vector-search).
 
-### Verify it worked
+In **Connections > Vector stores**, add a Cosmos DB Vector destination pointing
+to `demo/vectors`. Test the connection and confirm that `/embedding` and its
+dimensions are discovered. In the classic console, use **Destinations**.
 
-Within a few minutes, check these signals:
+> `/id` is suitable for this Cosmos-to-Cosmos example. **SharePoint requires a
+> different partitioning contract**, such as `/document_id`; follow its guide.
 
-- [ ] **Pipeline health** shows green on the Pipelines page
-- [ ] **Embedded count** increases to match your source document count
-- [ ] **Completion** reaches 100%
+### 6. Create and activate the pipeline
 
-Then test vector search:
+In **Pipelines**, create a pipeline with these settings:
 
-1. Go to **Vector Search** in the sidebar.
-2. Select your destination index.
-3. Type: `vector ingestion platform`
-4. Click **Search** — you should see your documents returned with similarity scores.
+| Setting | Value |
+|---------|-------|
+| Source | The `demo/documents` source |
+| Content fields / mode | `content` / `field` |
+| Model | The embedding model registered in step 3 |
+| Destination | The `demo/vectors` destination |
+| Vector index path | `/embedding` |
+| Processing mode | `queue` |
+| Content strategy | `truncate` |
+| Process existing | Enabled |
 
-> **Expected result:** Your sample document about OmniVec should appear as the top result for "vector ingestion platform."
+`truncate` produces one embedding per document, subject to model input limits;
+it does not promise to embed an arbitrarily long document in full. To retrieve
+text previews from a separate Cosmos destination, explicitly enable content
+storage (`store_content: true`, `content_field: "content"`). Otherwise, source
+text is not copied there by default.
 
-**Congratulations — you've deployed OmniVec and run a full vector ingestion pipeline.** 🎉
+**New pipelines start paused.** After creation, select **Run** or **Resume**.
+`process_existing` controls backfill; it does not activate the pipeline.
 
----
+### Verify the result
+
+Confirm all three stages rather than relying only on a green health badge:
+
+1. **Ingestion:** the pipeline is active and its embedded count increases.
+   Check watcher/worker diagnostics and errors if it does not.
+2. **Storage:** the destination contains vectors for both sample documents with
+   the expected dimensions and pipeline/source metadata.
+3. **Retrieval:** open **Vector Search**, select the destination, and search for
+   `vector ingestion platform`. Inspect the returned document references and,
+   if content storage was enabled, their text.
+
+Ranking and latency vary by model and index. Completion percentages require a
+known source total; chunk counts and source-document counts are not interchangeable.
+Queue pipelines do not necessarily create one Jobs-page record per document.
+
+## Supported connectors
+
+These tables describe implemented connectors, not a promise that every watcher
+is enabled or every pair is compatible. Queue pipelines require Service Bus and
+.NET workers. See the [configuration and compatibility guide](docs/user-guide.md).
+
+| Source | API type | Ingestion / prerequisites |
+|--------|----------|--------------------------|
+| Azure Blob Storage | `azure-blob` | Initial enumeration and polling; optional Event Grid events; deletion requires event delivery |
+| Cosmos DB for NoSQL | `cosmosdb` | Initial backfill and change feed |
+| PostgreSQL | `postgresql` | Recognized timestamp-column polling, otherwise repeated table scans |
+| SQL Server / Azure SQL | `mssql` | Initial scan and SQL CDC; CDC and suitable permissions required |
+| Databricks Delta | `databricks` | Snapshot and Delta CDF through a SQL Warehouse; dedicated watcher |
+| SharePoint Online | `sharepoint` | Microsoft Graph delta polling; Graph grants and dedicated watcher |
+| Fabric OneLake | `onelake-iceberg` | Iceberg scans; optional separately deployed Fabric Spark Delta CDF job |
+| Garnet HASH | `garnet` | Versioned JSON documents; inline polling to a vector set on the same endpoint |
+| Isolated mock service | `mock` | Opt-in inline benchmark source with separate model and sink services |
+| Synthetic traffic | `synthetic` | Explicit API-triggered publication for controlled benchmarks only |
+
+`s3` and standalone `http` are declared API types but **not implemented**;
+source creation rejects them. A URL-valued content field is not a standalone
+HTTP source.
+
+| Destination | API type | Storage / OmniVec search |
+|-------------|----------|--------------------------|
+| Cosmos DB Vector | `cosmosdb-vector` | Vector search; full-text/hybrid with the corresponding Cosmos policies |
+| PostgreSQL + pgvector | `pgvector` | Vector column/index with matching dimensions; vector search |
+| SQL Server / Azure SQL | `mssql` | Serialized embedding arrays and metadata; no OmniVec Search support |
+| Garnet Vector Sets | `garnet` | Preview vector storage/search; requires `--enable-vector-set-preview`, not generic Redis |
+| OneLake write-back | `onelake-iceberg` | Asynchronous Spark MERGE into existing source rows; search through an optional Garnet mirror |
+| Isolated mock sink | `mock` | Opt-in HTTP benchmark sink; no persistence or search |
+| Null sink | `null` | Benchmark-only discard sink; no persistence or search |
+
+SharePoint supports Cosmos DB Vector destinations only. OneLake write-back
+requires queue mode, `truncate`, and the same lakehouse/source table. Synthetic
+sources and null sinks require `benchmark_only: true`; benchmark completion is
+not evidence of production storage or search quality.
+
+The desktop wizard exposes a subset of these types. Use the CLI/REST API for
+implemented connectors missing from the picker. Registration does not deploy a
+watcher or grant access.
+
+## Operations and troubleshooting
+
+The console's **Metrics** view separates live measurements from historical
+ranges; unavailable values remain unknown rather than becoming zero.
+**Diagnostics** gathers read-only system/pipeline evidence without a chat model.
+**Recovery Agent** uses a registered chat model and explicit approvals for
+supported repairs. See the [agent contract](docs/agent.md).
+
+| Symptom | First checks |
+|---------|--------------|
+| UI unreachable | Correct environment URL, web service external IP, pod readiness, network/TLS setup |
+| Authentication rejected | Correct server and credential scope; token expiry or Entra role assignment |
+| Source/destination test fails | **Check access** report, network reachability, resource IDs, connector-specific grants |
+| Azure OpenAI `DeploymentNotFound` | Exact Azure deployment name and endpoint, not just the model family |
+| Active pipeline makes no progress | Watcher enabled, source content available, model/destination healthy, queue backlog and DLQ |
+| Embedded count is zero/unknown | Confirm real destination writes, metadata, metrics freshness, and source totals before resetting |
+| Vectors exist but search is empty | Searchable destination, matching model/dimensions/vector path, index readiness, response warnings |
+| `ImagePullBackOff` | Image existence and pull permissions; follow the [upgrade/recovery guide](docs/deployment.md#update-or-recover-a-deployment) |
+
+For deployment diagnostics, run from the repository root:
+
+```powershell
+pwsh scripts\diagnose.ps1 -EnvName my-omnivec
+pwsh scripts\diagnose.ps1 -EnvName my-omnivec -Pipeline pip-example
+```
+
+On Linux/macOS, use `./scripts/diagnose.sh --env my-omnivec`, adding
+`--pipeline pip-example` for one pipeline. Review proposed fixes before executing
+them. Readiness and a successful connection test are not proof of completed ingestion.
+
+**Pause is not a cancellation fence.** Already queued or in-flight work can
+finish. Reset can replay documents, remove job records, and clean up chunk
+outputs; it restores the previous active/paused state on success. Plan destructive
+recovery with producers, workers, and queued messages quiesced.
+
+## Automated demos
+
+The [CLI walkthrough](docs/cli-guide.md#walkthrough-end-to-end-example) mirrors
+the manual flow. The [SharePoint-to-Foundry example](examples/sharepoint-foundry/README.md)
+adds scoped ingestion, MCP, and a retrieval-verified question.
+
+Repository scripts also provide opt-in demos:
+
+| Script | Purpose |
+|--------|---------|
+| [e2e-demo.ps1](scripts/e2e-demo.ps1) / [e2e-demo.sh](scripts/e2e-demo.sh) | Provision/use a deployment, create sample resources, ingest, and search |
+| [e2e-blob-demo.ps1](scripts/e2e-blob-demo.ps1) | Blob-to-Cosmos demo; accepts an existing registered `-ModelId` |
+
+These scripts can create resources, consume inference, and delete fixtures.
+Inspect their parameters and obtain approval for the target environment first.
+`-Existing` / `--existing` uses existing infrastructure; `-FromStep` /
+`--from-step` resumes a demo step, not an arbitrary deployment transaction.
+An ingestion-only run such as `-NoSearch` still needs separate retrieval verification.
 
 ## Cleanup
 
-To stop all charges, delete all Azure resources:
-
-```bash
-azd down --purge --force
-```
-
-This removes the resource group, all Azure services, and local environment config.
-
----
-
-## Next steps
-
-| Want to... | Go to |
-|-----------|-------|
-| Manage pipelines via CLI | [CLI Guide](docs/cli-guide.md) |
-| Install the CLI (one line) | [CLI Install](docs/cli-guide.md#installation) |
-| Understand the architecture | [Architecture](docs/architecture.md) |
-| Use the web UI in depth | [User Guide](docs/user-guide.md) |
-| Run the automated E2E test suite | [E2E Demo](#automated-e2e-demo) below |
-| Diagnose deployment or pipeline issues | [Diagnostics](#diagnostics) below |
-| Add GPU-hosted models | [Models](#models) section below |
-
----
-
-## Reference
-
-### Environment variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `AZURE_LOCATION` | Yes | — | Azure region (e.g., `eastus2`, `westus3`) |
-| `OMNIVEC_SYSTEM_NODE_VM_SIZE` | Yes | prompted | Non-burstable AKS system-pool SKU with at least 4 vCPUs (default `Standard_D4s_v5`) |
-| `OMNIVEC_SYSTEM_NODE_COUNT` | Yes | `2` | Number of system nodes |
-| `OMNIVEC_GPU_NODE_VM_SIZE` | No | `""` | GPU VM SKU (empty = no GPU pool) |
-| `OMNIVEC_GPU_NODE_COUNT` | No | `0` | GPU nodes (0 = external models only) |
-| `OMNIVEC_METADATA_STORE` | Yes | prompted | `cosmosdb-serverless` or `cosmosdb-provisioned` |
-| `OMNIVEC_SHARED_REGISTRY_TOKEN` | No | prompted | Token for pre-built images (skip = build from source) |
-| `OMNIVEC_BUILD_MODE` | No | auto-detect | `acr` (cloud build) or `docker` (local build) |
-| `OMNIVEC_BUILD` | No | `false` | `true` = force building from source |
-| `OMNIVEC_SKIP_IMPORT` | No | `false` | Preserve all required local ACR images; missing images fail instead of being imported |
-| `OMNIVEC_FORCE_IMPORT` | No | `false` | Set in the shell environment to overwrite local tags from the selected channel |
-| `OMNIVEC_SHAREPOINT_ENABLED` | No | `false` | Deploy the SharePoint watcher alongside the required .NET worker and Service Bus |
-| `OMNIVEC_ONELAKE_ICEBERG_ENABLED` | No | `false` | Deploy the OneLake Iceberg watcher; requires Fabric, OneLake, and Service Bus permissions |
-| `OMNIVEC_AGENT_DEFAULT_MODEL_ID` | No | empty | Registered chat-model ID for troubleshooting; does not register a model or grant inference access |
-| `OMNIVEC_AGENT_IMAGE_TAG` | No | `latest` | Pin an already-published `omnivec-agent` tag in this environment's ACR; missing pins fail deployment |
-| `OMNIVEC_AGENT_ALLOW_K8S_REMEDIATION` | No | `false` | Opt in to namespace-scoped agent restart/scale permissions; each action still needs operator approval |
-| `OMNIVEC_ADMIN_TOKEN` | No | auto-generated | Admin bearer token for API auth |
-| `OMNIVEC_ENTRA_ENABLED` | No | `false` | Create or reconcile a single-tenant Entra application and enable Microsoft login |
-| `OMNIVEC_PUBLIC_URL` | When Entra is enabled | — | Public HTTPS origin registered as the SPA redirect URI |
-| `OMNIVEC_ENTRA_CLIENT_ID` | No | auto-created | Reuse an existing OmniVec app registration instead of creating one |
-
-### What gets deployed
-
-| Resource | Azure Service | Purpose |
-|----------|---------------|---------|
-| AKS Cluster | Azure Kubernetes Service | All OmniVec + DocGrok pods |
-| System Node Pool | configurable VM SKU | API, controller, worker, changefeed, web |
-| GPU Node Pool (optional) | NC-series VMs | Self-hosted embedding models |
-| Container Registry | Azure Container Registry | Docker images |
-| CosmosDB Account | Azure Cosmos DB (NoSQL) | Metadata store |
-| Key Vault | Azure Key Vault | Model API keys |
-| Storage Account (optional) | Azure Blob Storage | Blob ingestion source |
-| Service Bus (optional) | Azure Service Bus | Job queue for blob events |
-| Event Grid (optional) | Azure Event Grid | Real-time blob notifications |
-| Managed Identity | User-Assigned MI | Workload identity (no secrets in pods) |
-
-### Concepts
-
-**Sources** store connection info only — endpoint, credentials, container/table. Content extraction settings (which fields to embed, file type filters) belong to the **pipeline**, not the source. This lets multiple pipelines process the same source differently.
-
-| Source Type | Config |
-|-------------|--------|
-| `cosmosdb` | endpoint, database, container |
-| `azure-blob` | account_url, container, prefix |
-| `postgresql` | host, port, database, table |
-| `mssql` | host, port, database, table |
-| `sharepoint` | site_id, drive_id, folder_path, file_types |
-
-**Destinations** are where vectors are stored. When you test a destination, OmniVec probes its vector indexing policy and returns available vector paths. You pick one when creating a pipeline.
-
-| Destination Type | Config |
-|------------------|--------|
-| `cosmosdb-vector` | endpoint, database, container |
-| `pgvector` | host, port, database, table |
-| `mssql` | host, port, database, table |
-
-**Pipelines** define the full flow: source(s) → content extraction → embedding model → destination. Key settings include `content_strategy` (`truncate` or `chunk`), `processing_mode` (`queue` or `inline`), and `process_existing` (backfill on creation).
-
-### Models
-
-| Type | Examples | ID Format |
-|------|----------|-----------|
-| **External** | Azure OpenAI `text-embedding-3-small` / `text-embedding-3-large` | `mdl-ext-{hash}` |
-| **Native (GPU)** | DSE-Qwen2, CLIP, BGE, BGE-Small | `mdl-{hash}` |
-
-External models (Azure OpenAI) are the easiest starting point — no GPU nodes needed. Native models require a GPU node pool.
-
-### Updating a deployment
-
-Running `azd up` reconciles an existing environment; review configuration changes
-before running it. Do not run concurrent deployments against the same environment.
-
-1. Preprovision detects the existing resource group and skips setup prompts.
-2. Bicep runs — unchanged resources are not modified.
-3. By default, existing local ACR `:latest` images are preserved, **not** compared with the shared registry. Set `OMNIVEC_FORCE_IMPORT=true` in your shell to refresh them, or explicitly request a source build.
-4. Updated images trigger `kubectl rollout restart`. Every deployment, including ingestion workers, must complete its rollout before the hook reports success. Kubernetes readiness is not an end-to-end pipeline test.
-5. Interrupted image updates leave a local recovery marker so the next hook run still restarts workloads. Partial import failures stop deployment instead of silently using a mixture of old and new images. ACR existence checks retry transient failures instead of treating them as missing images.
-6. Helm dependencies are packaged in a disposable isolated cache, so stale global repositories and generated subchart archives cannot break or dirty the source checkout.
-7. Success requires every deployment to roll out, the load balancer to receive an external IP, and the public `/health` endpoint to report healthy.
-
-After the per-environment hook lock is acquired, retries automatically recover a
-Helm release left in `pending-install`, `pending-upgrade`, or `pending-rollback`
-by an interrupted prior run. Set `OMNIVEC_RECOVER_PENDING_HELM=false` to require
-manual recovery instead. Windows hook locks are released by the OS. POSIX hooks
-remove a stale same-host lock only when its recorded PID is no longer running;
-they refuse to take over a lock recorded on another host. These remain local
-hook locks, not a distributed lock covering the entire Bicep deployment.
-
-Deployment configuration needed for retries from another checkout is copied to
-resource-group tags, including image channel/build settings and optional
-SharePoint/OneLake watcher flags. Authentication tokens remain in the local azd
-environment and are deliberately omitted from deployment output.
-
-Image imports have a 15-minute deadline (POSIX imports may retry once); ACR source
-builds have a one-hour server-side limit. A timeout stops the hook but does not
-prove Azure has cancelled a remote operation—inspect its status before retrying.
-Helm readiness deadlines stop automatic retries; diagnose the workloads instead
-of repeatedly applying the same stalled release.
-The application is not proven production-ready by a successful deployment alone.
-
-Force a source build:
-```bash
-azd env set OMNIVEC_BUILD true
-azd up
-```
-
----
-
-## Automated E2E demo
-
-The scripted demo creates sources, destinations, pipelines, sample data, and validates vector search end-to-end. Use it after you're comfortable with the manual flow above.
-
-**PowerShell (Windows/macOS/Linux):**
-
-```powershell
-# Against your existing deployment
-pwsh scripts/e2e-demo.ps1 -Existing -EnvName my-omnivec `
-  -AdminToken <token> `
-  -AoaiEndpoint https://<resource>.openai.azure.com `
-  -AoaiKey <key>
-
-# Full automated run (creates new infra)
-pwsh scripts/e2e-demo.ps1
-
-# Resume from a specific step
-pwsh scripts/e2e-demo.ps1 -FromStep 5
-
-# Cleanup
-pwsh scripts/e2e-demo.ps1 -Cleanup -EnvName my-omnivec
-```
-
-**Bash (Linux/macOS):**
-
-```bash
-# Against your existing deployment
-./scripts/e2e-demo.sh --existing --env my-omnivec \
-  --token <token> \
-  --endpoint https://<resource>.openai.azure.com \
-  --key <key>
-
-# Full automated run (creates new infra)
-./scripts/e2e-demo.sh --endpoint <url> --key <key>
-
-# Resume from a specific step
-./scripts/e2e-demo.sh --from-step 5
-
-# Cleanup
-./scripts/e2e-demo.sh --cleanup --env my-omnivec
-```
-
-| Flag (PS1 / Bash) | Description |
-|------|-------------|
-| `-Existing` / `--existing` | Use an existing deployment |
-| `-EnvName` / `--env` | azd environment name |
-| `-AdminToken` / `--token` | Admin token (`azd env get-value OMNIVEC_ADMIN_TOKEN`) |
-| `-AoaiEndpoint` / `--endpoint` | Azure OpenAI endpoint URL |
-| `-AoaiKey` / `--key` | Azure OpenAI API key |
-| `-FromStep` / `--from-step` | Resume from step N (1–11) |
-| `-Cleanup` / `--cleanup` | Delete test resources |
-
-For an already-registered embedding model, the PowerShell Blob-to-Cosmos demo
-accepts `-ModelId` instead of requesting an Azure OpenAI key:
-
-```powershell
-pwsh scripts\e2e-blob-demo.ps1 -Env my-omnivec -ModelId <registered-model-id> `
-  -ServerUrl http://127.0.0.1:18082 -KubeConfig <dedicated-kubeconfig> `
-  -FileType txt -NoSearch
-```
-
-This example expects a localhost-only port-forward to `service/omnivec-web`
-on port 18082. `-NoSearch` deliberately limits this script run to ingestion;
-verify retrieval separately through the web app's Vector Search playground.
-For keyless model access, grant the OmniVec workload identity **Cognitive
-Services OpenAI User** on the embedding account, then register the model with
-managed-identity authentication under **Models**. The model and destination must
-use the same embedding dimensions. SharePoint and OneLake source permissions
-are separate prerequisites; a healthy model does not establish source access.
-
----
-
-## Diagnostics
-
-Run the diagnostics script to check deployment health and find common issues:
-
-**PowerShell:**
-```powershell
-pwsh scripts/diagnose.ps1 -EnvName my-omnivec
-```
-
-**Bash:**
-```bash
-./scripts/diagnose.sh --env my-omnivec
-```
-
-It checks 11 areas: infrastructure, pods, Helm release, networking, auth/RBAC, images, node capacity, models, pipelines, Service Bus, and recent error logs. Every failure includes a copy-paste fix command.
-
-**Deep-diagnose a single pipeline** (finds why it's stuck or not running):
-
-```powershell
-pwsh scripts/diagnose.ps1 -EnvName my-omnivec -Pipeline pip-abc123
-```
-```bash
-./scripts/diagnose.sh --env my-omnivec --pipeline pip-abc123
-```
-
-Pipeline diagnostics detects: paused, error state, 0 source docs, changefeed not triggering, workers down, all jobs failing, stalled mid-progress, dimension mismatch, and more.
-
----
-
-## Troubleshooting
-
-### Guided source and destination access checks
-
-In the source/destination setup wizard, open the permissions step and select
-**Check access**. For an existing resource, open its details and select
-**Check access / fix permissions**. Failed wizard connection tests also link back
-to the access diagnosis.
-
-The result explains what failed, the required scope, who can grant access, and
-what remains unverified. Supported Azure connectors provide **Copy PowerShell**,
-**Copy Bash**, and **Copy administrator instructions** actions using actual IDs.
-If discovery cannot resolve the account or workload identity, enter the missing
-resource/principal ID; the UI never substitutes an executable placeholder.
-Permission changes remain customer-executed. Use **Check again** after granting
-access; a network timeout is not evidence that more permissions are needed.
-
-The same report is available through the [CLI permissions commands](docs/cli-guide.md#understand-and-fix-access-failures).
-Exact grant templates cover managed-identity Cosmos DB and Azure Blob connectors;
-SharePoint, Fabric and other connectors retain service-specific guidance without
-unverified grant scripts. Destination write/delete and internal checkpoint access
-are explicitly not established by these read-only checks.
-
-### Missed the URL or admin token after deploy
-
-```bash
-azd env get-value OMNIVEC_ADMIN_TOKEN
-azd env list
-kubectl get svc omnivec-web -n omnivec    # shows the external IP
-```
-
-### DeploymentNotFound from Azure OpenAI
-
-The `deployment` field must match the exact deployment name in the Azure Portal (under Deployments), not the model name.
-
-### readMetadata RBAC error
-
-**Symptom:** `principal does not have required RBAC permissions to perform action readMetadata`
-
-**Fix:** Grant both roles to the managed identity on every CosmosDB account OmniVec accesses:
-1. `Cosmos DB Built-in Data Contributor` (SQL RBAC)
-2. `Cosmos DB Account Reader Role` (ARM RBAC)
-
-### 401 Unauthorized from changefeed/controller
-
-Internal services call the API without a Bearer token. The API bypasses auth for `Host: omnivec-api` (K8s internal DNS). Ensure you're running the latest API image.
-
-### Pipeline shows 0% embedded
-
-The vector documents are missing `pipeline_id`/`embedded_at` fields. Use the latest API image.
-
-### Pods stuck in ImagePullBackOff
-
-```bash
-az acr repository list --name <acr-name>          # verify images exist
-azd hooks run postprovision                         # re-import images
-# or force source build:
-azd env set OMNIVEC_BUILD true && azd hooks run postprovision
-```
-
-### External IP not assigned after 5 minutes
-
-Check AKS load balancer health and NSG rules:
-```bash
-kubectl get svc omnivec-web -n omnivec
-kubectl describe svc omnivec-web -n omnivec
-```
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       OmniVec Platform (AKS)                            │
-│                                                                         │
-│  ┌──────────┐   ┌───────────┐   ┌───────────┐   ┌──────────────────┐   │
-│  │  Web UI   │──▶│  OmniVec  │──▶│  DocGrok  │──▶│ Embedding Models │   │
-│  │ (nginx)   │   │   API     │   │  Router   │   │ (GPU / External) │   │
-│  └──────────┘   └─────┬─────┘   └───────────┘   └──────────────────┘   │
-│                       │                                                 │
-│            ┌──────────┼──────────────────────────────┐                  │
-│            ▼          ▼                              ▼                  │
-│  ┌──────────────┐  ┌──────────┐  ┌──────────────────────────────┐      │
-│  │  Controller   │  │ Workers  │  │  Change Feed Processor (.NET)│      │
-│  │ (bookkeeper)  │  │(job proc)│  │  (CosmosDB CDC, 15 replicas)│      │
-│  └──────────────┘  └──────────┘  └──────────────────────────────┘      │
-│                                                                         │
-│  Azure CosmosDB (metadata)  ·  Azure Blob Storage  ·  Service Bus      │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-| Component | Technology | Replicas | Role |
-|-----------|-----------|----------|------|
-| `omnivec-web` | nginx + static HTML/JS | 2 | Web UI + reverse proxy |
-| `omnivec-api` | Python FastAPI | 2 | REST API (control plane) |
-| `omnivec-controller` | Python | 1 | Source monitoring, job creation, metrics |
-| `omnivec-worker` | Python | 1–10 (HPA) | Job processing (download → embed → store) |
-| `omnivec-changefeed` | .NET | 15 | CosmosDB Change Feed processor (real-time CDC) |
-| `omnivec-onelake-iceberg-watcher` | Python/PyIceberg | disabled | OneLake Iceberg REST source watcher |
-| `docgrok` | Rust (Axum) | 1 | Embedding router (model discovery + routing) |
-| `docgrok-controller` | Rust | 1 | Model health monitoring, scale state |
-| `docgrok-pipeline-worker` | Python + PaddleOCR | 1 | Multi-step transforms (PDF → OCR → embed) |
-
-See [docs/architecture.md](docs/architecture.md) for details.
-
----
-
-## Components
-
-| Directory | Description |
-|-----------|-------------|
-| `api/` | Control plane API (Python FastAPI) |
-| `web/` | Web UI (static HTML/JS + nginx) |
-| `connectors/ingestion/dotnet/` | .NET Change Feed Processor connector |
-| `connectors/worker/dotnet/` | .NET embedding worker |
-| `connectors/ingestion/onelake_iceberg/` | OneLake Iceberg REST catalog watcher |
-| `connectors/fabric_spark/` | Fabric Spark Job Definition scripts |
-| `docgrok/` | Document intelligence engine (in-repo) |
-| `agent/` | OmniVec Agent — in-cluster read-only AI-ops agent (see [docs/agent.md](docs/agent.md)) |
-| `cli/` | Go CLI for managing pipelines, sources, and jobs |
-| `infra/` | Azure Bicep infrastructure-as-code |
-| `helm/` | Kubernetes Helm charts |
-| `hooks/` | azd lifecycle hooks (preprovision/postprovision) |
-| `scripts/` | Automation scripts (E2E demo, diagnostics) |
-
-## Release channels
-
-This repo uses two long-lived branches to separate rapid iteration from stable testing:
-
-| Branch | Purpose | Image tag | Who uses it |
-|--------|---------|-----------|-------------|
-| `main` | Stable releases | `:stable` + `:vX.Y.Z` | Testers, demos, customer-facing deployments |
-| `dev`  | Active development | `:dev` | Active development, internal dogfooding |
-
-**Default for `azd up` is `:stable`.** To opt into the dev channel:
-
-```sh
-azd env set OMNIVEC_IMAGE_TAG dev
-azd up
-```
-
-**Promoting dev → main:**
-1. Open a PR from `dev` → `main`, squash-merge when green.
-2. Tag the merge commit: `git tag vX.Y.Z && git push --tags`.
-3. The `build-and-push-images` workflow publishes `:stable` and `:vX.Y.Z` tags for all five images.
-
-**CI auto-builds** (`.github/workflows/build-images.yml`):
-- Push to `dev` → rebuild all images with `:dev` + `:sha-<short>` tags.
-- Push to `main` → rebuild with `:stable` + `:sha-<short>`.
-- Push tag `vX.Y.Z` → rebuild with `:stable` + `:vX.Y.Z`.
-
-Required repo secrets: `ACR_USERNAME`, `ACR_PASSWORD` (from an ACR scope-map token with `content/write` on the 5 repos).
+Deleting a pipeline removes its configuration, **not all vectors or external
+resources**. Paused pipelines may still have queued work.
+
+To remove an entire deployment, review the selected azd environment and back up
+required data before using `azd down`. This is destructive. External source/model
+accounts and separately created Fabric, MCP, or Foundry resources may remain.
+See [environment removal](docs/deployment.md#remove-an-environment).
+
+## Repository layout
+
+| Directory | Responsibility |
+|-----------|----------------|
+| `api/` | Python FastAPI control plane and bookkeeping |
+| `web/` | Static console and nginx proxy |
+| `search/` | Standalone search service |
+| `connectors/ingestion/` | .NET source ingestion and Python OneLake watcher |
+| `connectors/worker/dotnet/` | Queue-based embedding and destination writes |
+| `connectors/fabric_spark/` | Separately configured Fabric CDF and MERGE jobs |
+| `docgrok/` | Embedding routing, model integration, and document transforms |
+| `agent/` | Diagnostics and approval-gated recovery |
+| `cli/` | Go command-line client |
+| `infra/`, `helm/`, `hooks/` | Azure infrastructure and application deployment |
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE), [contributing guidance](CONTRIBUTING.md), and
+[security reporting](SECURITY.md).

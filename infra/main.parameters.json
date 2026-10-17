@@ -22,6 +22,15 @@
     },
     "gpuNodeCount": {
       "value": "${OMNIVEC_GPU_NODE_COUNT}"
+    },
+    "enablePipelineLanes": {
+      "value": false
+    },
+    "serviceBusSku": {
+      "value": "${OMNIVEC_SERVICE_BUS_SKU}"
+    },
+    "serviceBusCapacity": {
+      "value": "${OMNIVEC_SERVICE_BUS_CAPACITY}"
     }
   }
 }

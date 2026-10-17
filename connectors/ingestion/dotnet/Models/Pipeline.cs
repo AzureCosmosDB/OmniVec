@@ -70,6 +70,9 @@ public class Pipeline
 
     [JsonPropertyName("resource_policy")]
     public PipelineResourcePolicy ResourcePolicy { get; set; } = new();
+
+    [JsonPropertyName("model_limits")]
+    public ModelRequestLimits ModelLimits { get; set; } = new();
 }
 
 public class PipelineResourcePolicy
@@ -80,11 +83,38 @@ public class PipelineResourcePolicy
     [JsonPropertyName("max_concurrency_per_worker")]
     public int MaxConcurrencyPerWorker { get; set; } = 2;
 
+    [JsonPropertyName("embed_batch_size")]
+    public int EmbedBatchSize { get; set; } = 50;
+
+    [JsonPropertyName("queue_documents_per_message")]
+    public int QueueDocumentsPerMessage { get; set; } = 1;
+
+    [JsonPropertyName("queue_max_envelope_bytes")]
+    public int QueueMaxEnvelopeBytes { get; set; } = 224 * 1024;
+
+    [JsonPropertyName("queue_send_batch_max_bytes")]
+    public int QueueSendBatchMaxBytes { get; set; } = 240 * 1024;
+
+    [JsonPropertyName("queue_publish_batch_size")]
+    public int QueuePublishBatchSize { get; set; } = 200;
+
     [JsonPropertyName("priority")]
     public string Priority { get; set; } = "normal";
 
     [JsonPropertyName("workload_class")]
     public string WorkloadClass { get; set; } = "shared";
+}
+
+public class ModelRequestLimits
+{
+    [JsonPropertyName("max_batch_size")]
+    public int MaxBatchSize { get; set; } = 256;
+
+    [JsonPropertyName("context_window_tokens")]
+    public int ContextWindowTokens { get; set; } = 8191;
+
+    [JsonPropertyName("max_batch_tokens")]
+    public int MaxBatchTokens { get; set; } = 6000;
 }
 
 public class PipelineSource

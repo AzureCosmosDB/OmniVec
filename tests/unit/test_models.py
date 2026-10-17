@@ -24,12 +24,12 @@ class TestEnums:
     def test_source_type_values(self, api_models):
         assert {e.value for e in api_models.SourceType} == {
             "azure-blob", "cosmosdb", "postgresql", "mssql", "s3", "http", "databricks",
-            "onelake-iceberg", "sharepoint", "garnet", "mock"
+            "onelake-iceberg", "sharepoint", "synthetic", "garnet", "mock"
         }
 
     def test_destination_type_values(self, api_models):
         assert {e.value for e in api_models.DestinationType} == {
-            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg", "garnet", "mock"
+            "cosmosdb-vector", "pgvector", "mssql", "onelake-iceberg", "garnet", "mock", "null"
         }
 
     def test_job_status_values(self, api_models):
@@ -176,6 +176,7 @@ class TestDestination:
         )
         assert config.distance_metric == "COSINE"
         assert config.quantization == "NOQUANT"
+        assert config.write_concurrency == 16
         assert config.search_ef == 100
 
     @pytest.mark.parametrize("field,value", [
@@ -183,6 +184,7 @@ class TestDestination:
         ("vector_set", "bad set"),
         ("password_secret_ref", "plain-password"),
         ("m", 3),
+        ("write_concurrency", 129),
     ])
     def test_garnet_rejects_invalid_config(self, api_models, field, value):
         config = {

@@ -132,6 +132,7 @@ models:
         name: bge-small-svc
         port: 8000
         targetPort: 8000
+        headless: true
       env:
         BGE_MODEL_NAME: "BAAI/bge-small-en-v1.5"
         BGE_EMBEDDING_DIM: "384"
@@ -226,6 +227,10 @@ docgrok:
     DSE_QWEN2_URL: "http://dse-qwen2-svc:8000"
     CLIP_URL: "http://clip-svc:8000"
     BGE_URL: "http://bge-svc:8000"
+    BGE_SMALL_URL: "http://bge-small-svc:8000"
+    NATIVE_BACKEND_MAX_IDLE_PER_HOST: "0"
+    NATIVE_BACKEND_IDLE_TIMEOUT_SECONDS: "1"
+    NATIVE_BACKEND_MAX_ATTEMPTS: "3"
     DOCGROK_UNPOOLED_MODEL_HOSTS: ""
   resources:
     requests:
@@ -283,6 +288,8 @@ pipelineWorker:
   env:
     DOCGROK_ROUTER_URL: "http://docgrok:80"
     DEFAULT_MODEL_ID: ""
+    DOCGROK_MAX_BUFFERED_BLOB_BYTES: "52428800"
+    DOCGROK_MAX_STREAMED_BLOB_BYTES: "1073741824"
     DOCGROK_EMBED_MODE: "router"
     DOCGROK_DIRECT_EMBEDDING_ROUTES: "{}"
     DOCGROK_DIRECT_EMBED_CONCURRENCY: "8"

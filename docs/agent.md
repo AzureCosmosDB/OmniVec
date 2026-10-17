@@ -1,10 +1,28 @@
 # OmniVec agent: system and pipeline troubleshooting
 
+[README](../README.md) | [User guide](user-guide.md) | [Deployment settings](deployment.md#environment-reference)
+
 The existing **in-cluster OmniVec agent** diagnoses operational faults, proposes
 concrete scoped fixes, executes approved tools and verifies recovery. It is not
-a separate agent product. The web Agent tab and `omnivec agent chat` use the
+a separate agent product. The web **Recovery Agent** view (Agent in the classic
+console) and `omnivec agent chat` use the
 existing `/api/agent/*` proxy, internal token, caller roles and user sessions.
 The service has no public ingress.
+
+## Start with diagnostics
+
+Open **Diagnostics**, choose system-wide evidence or a pipeline ID, and inspect
+the observations, missing coverage, and recommended next steps. This path does
+not need a chat model and does not perform repairs.
+
+Use **Investigate with agent** when a configured chat model would help with the
+investigation. The action drafts a scoped question; it does not send it or
+approve a change. Configure a registered **chat-capable** model and its access
+before using chat; an embedding deployment is not a substitute.
+
+Approve only a specific supported action after reviewing its scope and impact.
+Check the runtime's recovery result afterward. Readiness or successful execution
+is not proof that ingestion recovered.
 
 ## Operational contract
 

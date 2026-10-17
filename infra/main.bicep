@@ -28,6 +28,15 @@ param gpuNodeVmSize string = 'Standard_NC6s_v3'
 @description('Initial GPU node count (0 to skip GPU pool). String for the same reason as systemNodeCount.')
 param gpuNodeCount string = '0'
 
+@description('Azure Service Bus namespace SKU.')
+param serviceBusSku string = 'Standard'
+
+@description('Premium Service Bus messaging units. Ignored for Standard.')
+param serviceBusCapacity string = '1'
+
+@description('Provision only the separate embeddings-lanes-v1 topic; Helm lane activation remains independently opt-in.')
+param enablePipelineLanes bool = false
+
 @description('DEPRECATED: Storage Account, Service Bus, and Event Grid are now always provisioned. This parameter is kept for backward compatibility with existing azd envs and is ignored.')
 param enableBlobSource string = 'true'
 
@@ -41,9 +50,13 @@ param enableBlobSource string = 'true'
 
 var _sysCountClean  = trim(replace(replace(systemNodeCount, '\u{FEFF}', ''), '\r', ''))
 var _gpuCountClean  = trim(replace(replace(gpuNodeCount,    '\u{FEFF}', ''), '\r', ''))
+var _serviceBusSkuClean = toLower(trim(replace(replace(serviceBusSku, '\u{FEFF}', ''), '\r', '')))
+var _serviceBusCapacityClean = trim(replace(replace(serviceBusCapacity, '\u{FEFF}', ''), '\r', ''))
 
 var systemNodeCountInt   = empty(_sysCountClean) ? 2 : int(_sysCountClean)
 var gpuNodeCountInt      = empty(_gpuCountClean) ? 0 : int(_gpuCountClean)
+var serviceBusSkuName = _serviceBusSkuClean == 'premium' ? 'Premium' : 'Standard'
+var serviceBusCapacityInt = empty(_serviceBusCapacityClean) ? 1 : int(_serviceBusCapacityClean)
 
 // =============================================================================
 // NAMING (must be computed before resource group to avoid circular dependency)
@@ -135,6 +148,9 @@ module servicebus 'modules/servicebus.bicep' = {
     location: location
     tags: tags
     identityPrincipalId: identity.outputs.principalId
+    skuName: serviceBusSkuName
+    premiumMessagingUnits: serviceBusCapacityInt
+    enablePipelineLanes: enablePipelineLanes
   }
 }
 

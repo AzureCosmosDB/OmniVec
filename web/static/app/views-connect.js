@@ -1,7 +1,7 @@
 /* OmniVec console: Connections (sources + vector stores): list, detail, guided add/edit */
 (() => {
 const X = window.OVX;
-const { icon, esc, fmt, ago, plural, api, need, invalidate, D, M, T, logo, dot, empty, loadErr, codebox, spinner, route, go, render, toast, confirmAction, menu, openDrawer, $, $$ } = X;
+const { icon, esc, nameLabel, fmt, ago, plural, api, need, invalidate, D, M, T, logo, dot, empty, loadErr, codebox, spinner, route, go, render, toast, confirmAction, menu, openDrawer, $, $$ } = X;
 
 /* ---------- connector form definitions ---------- */
 const F = (k, label, o = {}) => ({ k, label, ...o });
@@ -45,6 +45,14 @@ const FORMS = {
     'onelake-iceberg': { blurb:'Apache Iceberg tables in a Microsoft Fabric lakehouse.', fields:[
       F('warehouse','Workspace / lakehouse',{ req:1, ph:'<workspace-id>/<lakehouse-id>' }), F('namespace','Namespace',{ def:'dbo' }), F('table','Table',{ req:1 }),
       F('content_fields','Content fields',{ type:'tags', def:['content'] }), F('id_field','ID field',{ def:'id' }), F('poll_interval_seconds','Poll every (seconds)',{ type:'number', def:60, adv:1 }) ] },
+    'synthetic': { blurb:'Generate controlled Service Bus traffic to locate queue, embedding, destination and telemetry bottlenecks.', fields:[
+      F('document_count','Documents per run',{ type:'select', opts:['1000','5000','10000','100000'], def:'10000' }),
+      F('message_size_bytes','Serialized document size (bytes)',{ type:'number', def:1024, hint:'Exact single-document body size. Pipeline Capacity controls how many documents are packed into each queue message.' }),
+      F('docs_per_second','Offered documents per second',{ type:'select', opts:['100','250','500','0'], def:'100', hint:'0 publishes as fast as Service Bus accepts messages.' }),
+      F('content_pattern','Content pattern',{ type:'select', opts:['deterministic','repeated'], def:'deterministic', adv:1 }),
+      F('mock_embedding','Embedding path',{ type:'select', opts:['false','true'], def:'false', adv:1, hint:'true bypasses the model only when workers explicitly enable benchmark mock embedding.' }),
+      F('mock_embedding_dimensions','Mock vector dimensions',{ type:'number', def:384, adv:1 }) ],
+      build: v => ({ benchmark_only:true, document_count:+v.document_count||10000, message_size_bytes:+v.message_size_bytes||1024, docs_per_second:Number(v.docs_per_second), content_pattern:v.content_pattern||'deterministic', mock_embedding:String(v.mock_embedding)==='true', mock_embedding_dimensions:+v.mock_embedding_dimensions||384 }) },
   },
   destination: {
     'mock': { blurb:'Receives and validates full vector payloads, then discards them. No vector storage.', fields:[
@@ -108,7 +116,7 @@ route('connections', { needs:[...X.CORE, 'caps'], render(parts) {
     return x.type==='cosmosdb' ? 'Change feed' : x.type==='azure-blob' ? (t && t.status==='not_configured' ? `<span class="badge warn">${icon('bolt','sm')}No trigger</span>` : 'Event Grid') : x.type==='sharepoint' ? 'Delta polling' : kind==='destination' ? '—' : 'Scheduled sync'; };
   const tbl = rows.length ? `<table class="tbl"><thead><tr><th>Name</th><th>Location</th><th>Health</th>${kind==='source' ? '<th>Change detection</th>' : '<th>Index</th>'}<th class="r">Used by</th><th>Checked</th><th></th></tr></thead><tbody>
     ${rows.map(x => { const h = healthOf(kind, x.id), used = X.usedBy(x.id), pr = probOf(x); const vi = ((x.config||{}).vector_indexes||[])[0];
-      return `<tr class="clickrow" data-href="#/connections/${path}/${x.id}"><td><div class="row" style="gap:10px">${logo(x.type)}<div style="min-width:0"><div class="nm">${esc(x.name)}</div><div class="muted small">${esc(T(x.type).short)}</div></div></div></td>
+      return `<tr class="clickrow" data-href="#/connections/${path}/${x.id}"><td><div class="row" style="gap:10px">${logo(x.type)}<div style="min-width:0"><div class="nm">${nameLabel(x.name)}</div><div class="muted small">${esc(T(x.type).short)}</div></div></div></td>
        <td class="mono small muted">${esc(keyInfo(x))}</td>
        <td>${pr ? `<span class="badge ${pr[0]}">${X.dot(pr[0])}${esc(pr[1])}</span>` : h ? `<span class="badge ok">${X.dot('ok')}Healthy</span>` : '<span class="badge out">Not checked</span>'}</td>
        <td class="small">${kind==='source' ? change(x) : vi ? `${esc(vi.indexType||'')} · ${esc(vi.dimensions||'—')}d` : '<span class="muted">—</span>'}</td>
@@ -116,7 +124,7 @@ route('connections', { needs:[...X.CORE, 'caps'], render(parts) {
        <td class="r"><button class="btn ghost sm icon" data-rm="${x.id}">${icon('more','sm')}</button></td></tr>`; }).join('')}</tbody></table>`
     : empty('search', 'No matches', 'Try another filter.');
   const firstRun = !list.length;
-  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','garnet','onelake-iceberg','mssql'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
+  const tiles = (kind==='source' ? ['cosmosdb','azure-blob','sharepoint','postgresql','garnet','onelake-iceberg','mssql','synthetic'] : ['cosmosdb-vector','pgvector','garnet','onelake-iceberg'])
     .map(t => `<a class="opt" href="#/connections/new/${path}?type=${t}">${logo(t)}<div><div class="t">${esc(T(t).label)}</div><div class="d">Guided setup with a permissions check</div></div></a>`).join('');
   const html = `<div class="page">
    <div class="ph"><div><h1>Connections</h1><p>Sources are where content comes from. Vector stores are where embeddings are written and searched. Each can be reused by many pipelines.</p></div>
@@ -147,7 +155,7 @@ function detail(kind, id, section) {
   const cfgRows = Object.entries(c).filter(([k,v]) => v!=null && v!=='' && typeof v !== 'object').map(([k,v]) => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd class="mono small">${esc(/password|secret/i.test(k) || /key$/i.test(k) ? '••••••' : v)}</dd>`).join('');
   const vi = (c.vector_indexes||[])[0]; const pol = h && (h.checks||[]).find(k => k.check==='vector_policy');
   const html = `<div class="page">
-   <div class="ph"><div style="min-width:0"><div class="row">${logo(x.type,'lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${esc(x.name)}</h1>${h ? `<span class="badge ${h.status==='healthy'?'ok':'warn'}">${hdot(h)}${h.status==='healthy'?'Healthy':esc(h.status)}</span>` : '<span class="badge out">Not checked</span>'}</div>
+   <div class="ph"><div style="min-width:0"><div class="row">${logo(x.type,'lg')}<div style="min-width:0"><div class="row"><h1 class="trunc">${nameLabel(x.name)}</h1>${h ? `<span class="badge ${h.status==='healthy'?'ok':'warn'}">${hdot(h)}${h.status==='healthy'?'Healthy':esc(h.status)}</span>` : '<span class="badge out">Not checked</span>'}</div>
      <p class="mono small">${x.id} · ${esc(T(x.type).label)} · created ${ago(x.created_at)}</p></div></div></div>
     <div class="acts"><button class="btn" id="ctest">${icon('bolt')}Test connection</button><a class="btn" href="${base}/edit">${icon('edit')}Edit</a><button class="btn icon" id="cmore">${icon('more')}</button></div></div>
    <div id="ctestout"></div>
@@ -157,11 +165,13 @@ function detail(kind, id, section) {
       ${t && t.status==='not_configured' ? `<div class="callout warn">${icon('info','ic')}<div class="grow"><b>New uploads are not picked up automatically</b>Existing blobs were processed when the pipeline started. To ingest new and changed files as they arrive, subscribe the storage account to BlobCreated and BlobDeleted events. Until then, use <b>Sync now</b>.</div></div>
         <div class="row"><button class="btn pri" id="egcreate">${icon('bolt','sm')}Create Event Grid subscription</button><button class="btn" id="csync">${icon('refresh','sm')}Sync now</button></div>` : `<div class="muted">Event Grid delivers new and changed files to OmniVec as they arrive.</div><div class="row"><button class="btn" id="csync">${icon('refresh','sm')}Sync now</button></div>`}
       <div id="egout"></div></div></div>` : ''}
-    ${kind==='source' && x.type!=='azure-blob' ? `<div class="card"><div class="card-h"><h3>${icon('refresh','sm')} Change detection</h3><span class="muted small" style="margin-left:auto">${esc(x.type==='cosmosdb' ? (t ? 'Change feed · '+t.status.replace(/_/g,' ') : 'Change feed') : 'Polling every '+(c.poll_interval_seconds||60)+'s')}</span></div>
+    ${kind==='source' && x.type==='synthetic' ? `<div class="card"><div class="card-h"><h3>${icon('bolt','sm')} Benchmark generator</h3><span class="muted small" style="margin-left:auto">${fmt(c.document_count||10000)} docs · ${fmt(c.message_size_bytes||1024)} bytes</span></div>
+      <div class="card-b row sp"><span class="muted">Publishes at ${Number(c.docs_per_second||0) ? fmt(c.docs_per_second)+' docs/sec' : 'unlimited rate'} through the normal embedding topic.</span><button class="btn pri" id="cgenerate">${icon('bolt','sm')}Generate messages</button></div></div>` : ''}
+    ${kind==='source' && x.type!=='azure-blob' && x.type!=='synthetic' ? `<div class="card"><div class="card-h"><h3>${icon('refresh','sm')} Change detection</h3><span class="muted small" style="margin-left:auto">${esc(x.type==='cosmosdb' ? (t ? 'Change feed · '+t.status.replace(/_/g,' ') : 'Change feed') : 'Polling every '+(c.poll_interval_seconds||60)+'s')}</span></div>
       <div class="card-b row sp"><span class="muted">${x.type==='cosmosdb' ? 'Inserts and updates flow automatically through the Cosmos DB change feed.' : 'OmniVec checks for new and changed items on a schedule.'}</span><button class="btn" id="csync">${icon('refresh','sm')}Sync now</button></div></div>` : ''}
     <div class="card"><div class="card-h"><h3>Used by</h3><span class="badge">${used.length}</span>${kind==='source' ? `<a class="btn sm" style="margin-left:auto" href="#/new?source=${x.id}">${icon('plus','sm')}New pipeline from this source</a>` : `<a class="btn sm" style="margin-left:auto" href="#/search?store=${x.id}">${icon('search','sm')}Search this store</a>`}</div>
-     ${used.length ? `<table class="tbl"><tbody>${used.map(p => `<tr class="clickrow" onclick="location.hash='#/pipelines/${p.id}'"><td><div class="nm">${esc(p.name)}</div><div class="id">${p.id}</div></td><td>${X.statusBadge(p)}</td><td class="r num">${p.statsLoading ? '<span class="skel" style="display:inline-block;width:44px;height:12px;vertical-align:middle"></span>' : fmt(p.vectors)} vectors</td><td class="muted">${ago(p.lastWrite)}</td></tr>`).join('')}</tbody></table>` : `<div class="card-b muted">No pipelines use this ${noun} yet.</div>`}</div>
-    <div class="card"><div class="card-h"><h3>Sample ${kind==='source'?'documents':'vectors'}</h3><button class="btn sm" id="csample" style="margin-left:auto">${icon('file','sm')}Load sample</button></div><div class="card-b" id="csampleout"><div class="muted small">Preview a few items to confirm the right data is connected.</div></div></div>
+     ${used.length ? `<table class="tbl"><tbody>${used.map(p => `<tr class="clickrow" onclick="location.hash='#/pipelines/${p.id}'"><td><div class="nm">${nameLabel(p.name)}</div><div class="id">${p.id}</div></td><td>${X.statusBadge(p)}</td><td class="r num">${p.statsLoading ? '<span class="skel" style="display:inline-block;width:44px;height:12px;vertical-align:middle"></span>' : fmt(p.vectors)} vectors</td><td class="muted">${ago(p.lastWrite)}</td></tr>`).join('')}</tbody></table>` : `<div class="card-b muted">No pipelines use this ${noun} yet.</div>`}</div>
+    ${x.type==='synthetic' ? '' : `<div class="card"><div class="card-h"><h3>Sample ${kind==='source'?'documents':'vectors'}</h3><button class="btn sm" id="csample" style="margin-left:auto">${icon('file','sm')}Load sample</button></div><div class="card-b" id="csampleout"><div class="muted small">Preview a few items to confirm the right data is connected.</div></div></div>`}
    </div><div class="stack">
     <div class="card"><div class="card-h"><h3>Health checks</h3><span class="muted small" style="margin-left:auto">${h ? ago(h.checked_at) : ''}</span></div><div class="card-b stack s8">${h ? (h.checks||[]).map(k => `<div class="chk-row">${X.chkIcon(k.status)}<div><b style="font-weight:600">${esc(X.humanCheck(k.check))}</b> <span class="muted">${esc(k.detail||'')}</span></div></div>`).join('') : '<div class="muted">Not checked yet.</div>'}</div></div>
     ${kind==='destination' ? `<div class="card"><div class="card-h"><h3>Vector index</h3></div><div class="card-b"><dl class="kv">${vi ? `<dt>Path</dt><dd class="mono">${esc(vi.path)}</dd><dt>Index</dt><dd>${esc(vi.indexType)}</dd><dt>Dimensions</dt><dd>${esc(vi.dimensions)}</dd><dt>Distance</dt><dd>${esc(vi.distanceFunction||'—')}</dd>` : pol ? `<dt>Field</dt><dd class="mono">${esc(pol.vector_field||'—')}</dd><dt>Dimensions</dt><dd>${esc(pol.dimensions||'—')}</dd>` : x.type==='pgvector' ? `<dt>Column</dt><dd class="mono">${esc(c.vector_column||'embedding')}</dd><dt>Dimensions</dt><dd>${esc(c.vector_dimensions||'—')}</dd><dt>Index</dt><dd>${esc(c.index_type||'—')}</dd>` : '<dt>Index</dt><dd>Not reported</dd>'}</dl></div></div>` : ''}
@@ -190,13 +200,17 @@ function detail(kind, id, section) {
     const sync = $('#csync', v); if (sync) sync.onclick = async () => { sync.disabled = true; sync.innerHTML = spinner('Starting…');
       try { const r = await api(`/api/sources/${x.id}/sync`, { method:'POST', body:{ full_sync:false } }); toast(r.message || 'Sync started'); } catch (err) { toast(err.message, 'err'); }
       sync.disabled = false; sync.innerHTML = icon('refresh','sm')+'Sync now'; };
+    const generate = $('#cgenerate', v); if (generate) generate.onclick = async () => { generate.disabled = true; generate.innerHTML = spinner('Starting…');
+      try { const r = await api(`/api/sources/${x.id}/generate`, { method:'POST', body:{} }); toast(`Synthetic run ${r.id} started · ${fmt(r.document_count)} documents`); }
+      catch (err) { toast(err.message, 'err'); }
+      generate.disabled = false; generate.innerHTML = icon('bolt','sm')+'Generate messages'; };
     const eg = $('#egcreate', v); if (eg) eg.onclick = async () => { eg.disabled = true; eg.innerHTML = spinner('Creating subscription…'); const out = $('#egout', v);
       try { const r = await api('/api/triggers/eventgrid/create', { method:'POST', body:{ source_id:x.id } });
         if (r.success) { out.innerHTML = `<div class="callout ok">${icon('check','ic')}<div><b>Event Grid subscription created</b>Storage account ${esc(r.storage_account||'')} · container ${esc(r.container||'')}. New uploads now start ingestion automatically.</div></div>`; invalidate('triggers'); }
         else out.innerHTML = egManual(r, x); }
       catch (err) { out.innerHTML = egManual({ error: err.message }, x); }
       eg.disabled = false; eg.innerHTML = icon('bolt','sm')+'Create Event Grid subscription'; };
-    const smp = $('#csample', v); smp.onclick = async () => { const out = $('#csampleout', v); out.innerHTML = spinner('Loading…');
+    const smp = $('#csample', v); if (smp) smp.onclick = async () => { const out = $('#csampleout', v); out.innerHTML = spinner('Loading…');
       try { const r = await api(`/api/${kind==='source'?'sources':'destinations'}/${x.id}/sample?limit=5`); const items = r.documents || r.samples || r.items || r.blobs || r.files || (Array.isArray(r) ? r : []);
         out.innerHTML = items.length ? items.map(d => `<div class="code" style="margin-bottom:8px;max-height:160px;white-space:pre-wrap">${esc(JSON.stringify(stripVec(d), null, 2).slice(0, 1200))}</div>`).join('') : `<div class="muted">No items returned.${r.message ? ' '+esc(r.message) : ''}</div>`; }
       catch (err) { out.innerHTML = `<div class="callout warn">${icon('alert','ic')}<div>${esc(err.message)}</div></div>`; } };

@@ -1,9 +1,26 @@
 # SharePoint Online source
 
+[README](../README.md) | [User guide](user-guide.md) | [SharePoint-to-Foundry example](../examples/sharepoint-foundry/README.md)
+
 OmniVec can ingest files from a SharePoint Online document library by polling
 Microsoft Graph delta changes. The watcher publishes stable site, drive, and
 item identifiers to Service Bus; the worker downloads each file with workload
 identity and sends the bytes to DocGrok for extraction, chunking, and embedding.
+
+## Before you start
+
+1. Obtain Graph application consent and access to the intended site/library.
+2. Prepare a Cosmos vector destination with matching embedding dimensions and
+   a dedicated document partition key such as `/document_id`, **not `/id`**.
+3. Deploy compatible SharePoint watcher, .NET worker, router, and extraction
+   components with Service Bus access.
+4. Register a folder-scoped source and a queue pipeline, then explicitly
+   **Run or Resume** it.
+5. Verify file ingestion, destination vectors, and search. Registration or
+   connection-test success alone is not end-to-end proof.
+
+The worker buffers files in memory, with a maximum raw file size of 50 MiB.
+Start with a small sample and low file concurrency before increasing load.
 
 ## Permissions
 
@@ -22,6 +39,10 @@ Same-tenant pipelines retain the legacy shared source cursor so upgrades preserv
 existing outboxes, revision high-water marks, and delete reconciliation state.
 
 ## Source configuration
+
+Submit this body to `POST /api/sources`, replacing the site/drive IDs. In the
+CLI, pass only the nested `config` object to `--file`, with `--name` and `--type`
+as separate flags.
 
 ```json
 {
@@ -96,9 +117,9 @@ azd env set OMNIVEC_BUILD true
 azd up
 ```
 
-For this feature branch, build from source as shown or supply matching images
-for all changed services. Enabling the watcher alone does not update older
-shared registry images to include the SharePoint protocol.
+Use compatible images for all components implementing the SharePoint protocol.
+If the selected published images do not include that support, build from source
+as shown. Enabling the watcher alone does not update older shared images.
 
 `azure.serviceBus.namespace` must be configured or Helm rendering fails. Keep
 `dotnetWorker.enabled: true` so published SharePoint references are downloaded
@@ -113,10 +134,11 @@ limit while downloading, even without a Content-Length header.
 
 This is a bounded, **in-memory**, not streaming, implementation. Download buffers,
 base64 strings, serialized JSON, extracted text, and vectors can coexist. A
-50 MiB file can require several hundred MiB per concurrent operation. Reduce
-`Worker__BlobConcurrency` and `Worker__MaxConcurrentCalls`, lower the source size
-limit, and size worker/router/pipeline-worker memory accordingly. Compressed
-documents can expand far beyond their input size.
+50 MiB file can require several hundred MiB per concurrent operation.
+`Worker__SharePointConcurrency` defaults to 1 and adds a cap within the broader
+file-processing limit. Review `Worker__BlobConcurrency` and text concurrency,
+lower the source size limit as needed, and size worker/router/pipeline-worker
+memory accordingly. Compressed documents can expand far beyond their input size.
 
 ## Destination and synchronization contract
 

@@ -23,6 +23,15 @@ jobs:
           - image: omnivec-changefeed
             context: .
             dockerfile: connectors/ingestion/dotnet/Dockerfile
+          - image: omnivec-dotnet-worker
+            context: connectors/worker/dotnet
+            dockerfile: connectors/worker/dotnet/Dockerfile
+          - image: omnivec-onelake-iceberg-watcher
+            context: .
+            dockerfile: connectors/ingestion/onelake_iceberg/Dockerfile
+          - image: docgrok-router
+            context: docgrok/router
+            dockerfile: docgrok/router/Dockerfile
           - image: docgrok-mock-embedding
             context: docgrok/services/embedding/mock
             dockerfile: docgrok/services/embedding/mock/Dockerfile

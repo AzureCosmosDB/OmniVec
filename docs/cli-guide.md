@@ -1,12 +1,27 @@
 # OmniVec CLI Reference
 
+[README](../README.md) | [User guide](user-guide.md) | [Search API](search-api.md)
+
 The OmniVec CLI (`omnivec`) is a standalone binary for managing the OmniVec platform from the command line.
+
+Commands below assume `omnivec` is on `PATH` and you have configured the server
+and authentication. Replace angle-bracket placeholders with real values.
+Multi-line examples marked `bash` use Bash continuations; in PowerShell, use
+backticks or put the command on one line. Prefer JSON files for connector
+configuration to avoid shell-quoting differences.
+
+Use `omnivec <command> --help` for the flags available in your installed version.
+Match the CLI to your server version when using recently added connector features.
 
 ---
 
 ## Installation
 
-### Quick install (recommended)
+### Install a published release
+
+Review the [Bash installer](../scripts/install.sh) or
+[PowerShell installer](../scripts/install.ps1) before executing it. These download
+the latest release by default; `OMNIVEC_VERSION` can pin a published tag.
 
 **macOS & Linux** (auto-detects OS + arch, strips macOS quarantine, installs to `~/.local/bin`):
 ```bash
@@ -17,7 +32,6 @@ curl -fsSL https://github.com/AzureCosmosDB/OmniVec/raw/main/scripts/install.sh 
 ```bash
 brew install --formula https://raw.githubusercontent.com/AzureCosmosDB/OmniVec/main/scripts/omnivec.rb
 ```
-(A dedicated `AzureCosmosDB/homebrew-omnivec` tap is planned; once published, the command will simplify to `brew install AzureCosmosDB/omnivec/omnivec`.)
 
 **Windows** (installs to `%USERPROFILE%\.omnivec\bin` and updates user PATH):
 ```powershell
@@ -37,11 +51,9 @@ Grab the binary for your platform from the [latest release](https://github.com/A
 | Windows (amd64) | `omnivec-vX.Y.Z-windows-amd64.exe` |
 | Windows (arm64) | `omnivec-vX.Y.Z-windows-arm64.exe` |
 
-```bash
-# Linux / macOS
-chmod +x omnivec-*
-sudo mv omnivec-* /usr/local/bin/omnivec
-```
+Download only the asset for your OS/architecture, rename it to `omnivec`
+(`omnivec.exe` on Windows), and add its directory to `PATH`. On Linux/macOS,
+make that specific file executable with `chmod +x omnivec`.
 
 > **macOS Gatekeeper note:** if you see *"cannot be opened because the developer cannot be verified"*, strip the quarantine flag before running:
 > ```bash
@@ -51,9 +63,19 @@ sudo mv omnivec-* /usr/local/bin/omnivec
 
 ### Build from source
 
-Requires Go 1.24+.
+Requires Go 1.25 or later, as declared in [go.mod](../cli/go.mod).
+From the repository root:
+
+```powershell
+go -C cli build -o ..\bin\omnivec.exe .
+.\bin\omnivec.exe --help
+```
+
+On Linux/macOS:
+
 ```bash
-cd cli && go build -o ../bin/omnivec . && cd ..
+go -C cli build -o ../bin/omnivec .
+./bin/omnivec --help
 ```
 
 ---
@@ -62,10 +84,10 @@ cd cli && go build -o ../bin/omnivec . && cd ..
 
 ```bash
 # Set the server URL
-omnivec config set server http://<omnivec-url>
+omnivec config set server https://<omnivec-host>
 
-# Set auth token
-omnivec config set token <admin-token>
+# Optionally validate and save a token already supplied in the environment
+omnivec auth login --token "$OMNIVEC_TOKEN"
 
 # View current config
 omnivec config view
@@ -77,6 +99,17 @@ omnivec config view
 3. `~/.omnivec/config.yaml`
 4. Default: `http://localhost:8080`
 
+Token precedence is `--token`, then `OMNIVEC_TOKEN`, then the saved configuration.
+Use a control-plane credential, not a standalone search token. Saved credentials
+are local to the CLI; protect the config file and avoid putting literal secrets
+in shell history or source control. An HTTP localhost tunnel is useful for local
+administration; use HTTPS across untrusted networks.
+
+Supply `OMNIVEC_TOKEN` through your shell's secure credential workflow before
+running the example. In PowerShell, the login command is
+`omnivec auth login --token $env:OMNIVEC_TOKEN`. Login requires an explicit token;
+it does not prompt. Other commands can use `OMNIVEC_TOKEN` without saving it.
+
 ---
 
 ## Global Flags
@@ -84,7 +117,9 @@ omnivec config view
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--server` | `-s` | OmniVec server URL | from config |
+| `--token` | | Authentication token; prefer the environment for routine commands | from environment/config |
 | `--output` | `-o` | Output format: `table`, `json`, `yaml` | `table` |
+| `--per-page` | | Table rows per page; `0` disables pagination | `15` |
 | `--help` | `-h` | Show help for any command | |
 
 The CLI auto-detects ID prefixes: `omnivec source show abc123` is the same as `omnivec source show src-abc123`.
@@ -128,7 +163,9 @@ return a nonzero exit code, including unsupported or incomplete checks.
 After granting access, rerun the same command. Propagation can take several minutes;
 checks have bounded waits and do not retry permission grants.
 
-A source is a connection to a data store. Sources store **connection info only** — content extraction config is on the pipeline.
+A source stores connection and connector-level scan settings. Pipeline source
+entries choose content fields/modes; SharePoint file filters and OneLake scan
+fields also belong to their source configurations.
 
 ```bash
 # List all sources
@@ -155,7 +192,7 @@ omnivec source create --name "My Source" --type azure-blob -f source-config.json
 # Test a source connection
 omnivec source test <id>
 
-# Trigger a source sync (re-scan and create jobs)
+# Request asynchronous source synchronization
 omnivec source sync <id>
 omnivec source sync <id> --full   # reprocess all documents
 omnivec source sync <id> --full --wait --minimum-documents 10 --timeout 5m
@@ -174,35 +211,44 @@ stops waiting; it does not cancel the pipeline or its long-running watcher.
 This is a readiness threshold, not proof that a large or empty source has
 completed a full enumeration.
 
-**Config fields by source type:**
+Implemented types are `azure-blob`, `cosmosdb`, `postgresql`, `mssql`,
+`databricks`, `sharepoint`, `onelake-iceberg`, `garnet`, and benchmark-only
+`synthetic` and `mock` (the latter requires the isolated mock components).
+`s3` and standalone `http` creation are rejected. Use the
+[source configuration table](user-guide.md#supported-sources) for required fields,
+permissions, and watcher prerequisites.
 
-| Type | Required Fields | Optional Fields |
-|------|----------------|----------------|
-| `azure-blob` | `account_url`, `container` | `prefix`, `file_type` (default `pdf`) |
-| `cosmosdb` | `endpoint`, `database`, `container` | `query`, `attachments_field`, `attachment_url_field`, `attachment_name_field`, `attachment_content_type_field`, `attachment_name_regex`, `attachment_file_types`, `attachment_content_types`, `attachment_blob_container`, `account_url`, `connection_string` |
-| `postgresql` | `host`, `database`, `table` | `port`, `user`, `password`, `ssl_mode` |
-| `mssql` | `host`, `database`, `table` | `port`, `user`, `password` |
-
-> **Note:** Content extraction config (`content_fields`, `content_mode`, `file_types`) is configured per-pipeline on the pipeline source entry, not on the source itself.
+`--config` accepts **one JSON object**, not repeated `key=value` arguments.
+`--file` / `-f` reads that same configuration object from a file, without a
+wrapping `name`/`type`/`config` resource object. Names and types are separate flags.
+Connection settings cannot be changed while a pipeline references the resource.
 
 ### CosmosDB attachment-source mode
 
 By default a CosmosDB source extracts inline text from the per-pipeline
 `content_fields`. Setting `attachments_field` switches the source into
 **attachment mode**: for each document, the watcher iterates the named array,
-applies user filters, and emits one job per matching attachment with the blob
+applies user filters, and emits queue work per matching attachment with the blob
 URL — DocGrok's pipeline-worker downloads each blob from Azure Storage and
 embeds it (PDF, DOCX, etc.).
 
-```bash
-omnivec source create --name "Cases with PDFs" --type cosmosdb \
-  --config endpoint=https://acct.documents.azure.com:443/ \
-  --config database=app --config container=cases \
-  --config attachments_field=attachments \
-  --config attachment_file_types=pdf,docx \
-  --config attachment_name_regex='^report-.*' \
-  --config account_url=https://acct.blob.core.windows.net \
-  --config attachment_blob_container=docs
+Save this as `attachment-source.json`:
+
+```json
+{
+  "endpoint": "https://acct.documents.azure.com",
+  "database": "app",
+  "container": "cases",
+  "attachments_field": "attachments",
+  "attachment_file_types": ["pdf", "docx"],
+  "attachment_name_regex": "^report-.*",
+  "account_url": "https://acct.blob.core.windows.net",
+  "attachment_blob_container": "docs"
+}
+```
+
+```powershell
+omnivec source create --name "Cases with PDFs" --type cosmosdb -f attachment-source.json
 ```
 
 Note that `container` names the **cosmos** container (`cases` above). For
@@ -227,8 +273,8 @@ configured filter to be selected):
 
 Attachment URLs must be on `*.blob.core.windows.net`; if `account_url` is set,
 URLs must match that exact host (SSRF guard). Attachment-mode pipelines must
-use `processing_mode=queue` — inline mode is skipped because the worker
-downloads the blob asynchronously.
+use `processing_mode=queue`; do not rely on inline processing to download and
+extract attachments.
 
 ---
 
@@ -257,7 +303,14 @@ omnivec dest update <id> --name "Renamed"
 omnivec dest delete <id> -y
 ```
 
-When you test a destination, it returns the container's **vector embedding policy** — the available embedding paths with dimensions, distance function, and index type. Use one of these paths as `--vector-index-path` when creating a pipeline.
+For Cosmos DB, testing discovers the container's vector policies and indexes.
+Use the applicable path as `--vector-index-path` and match model dimensions.
+Other connector tests return their own connectivity/index evidence.
+
+Destination types are `cosmosdb-vector`, `pgvector`, `mssql`, `garnet`,
+`onelake-iceberg`, and benchmark-only `null`. Successful registration does not
+imply search support or permission to write/delete. See the
+[destination guide](user-guide.md#2-destinations).
 
 ---
 
@@ -277,7 +330,7 @@ omnivec pipeline create \
   --name "My Pipeline" \
   --source <src-id> \
   --destination <dst-id> \
-  --model text-azure \
+  --model <registered-model-id-or-transform> \
   --content-fields content \
   --content-strategy truncate \
   --vector-index-path /embedding \
@@ -286,8 +339,8 @@ omnivec pipeline create \
 # Update a pipeline
 omnivec pipeline update <id> --name "Renamed" --description "Updated"
 
-# Note: content strategy, chunking config, and processing mode are
-# locked after creation and cannot be changed via update.
+# Creation leaves the pipeline paused; activate it explicitly.
+omnivec pipeline run <id>
 
 # Pause / Resume / Run / Reset / Delete
 omnivec pipeline pause <id>
@@ -304,24 +357,50 @@ omnivec pipeline delete <id> -y
 | `--name` | Yes | — | Pipeline name |
 | `--source` | Yes | — | Source ID |
 | `--destination` | Yes | — | Destination ID |
-| `--model` | Yes | — | DocGrok pipeline name (e.g., `text-azure`, `pdf-vision`) |
+| `--model` | Yes | — | Registered embedding model ID/name or existing DocGrok transform |
 | `--content-fields` | No | `content` | Comma-separated field names to embed |
 | `--content-mode` | No | `field` | Content extraction mode: `field`, `blob_url`, `http_url` |
 | `--file-types` | No | — | Comma-separated file type filters (e.g., `txt,pdf,md`) |
 | `--content-strategy` | No | `truncate` | Content strategy: `truncate` or `chunk` |
-| `--chunk-size` | No | `1000` | Chunk size in characters (used with `--content-strategy=chunk`) |
-| `--chunk-overlap` | No | `200` | Chunk overlap in characters |
-| `--doc-id-pattern` | No | `{source}` | Document ID pattern (e.g., `{source}-chunk-{chunk}`) |
-| `--vector-index-path` | No | — | Embedding policy path from destination (e.g., `/embedding`) |
+| `--chunk-size` | No | Server default: `1000` | Chunk size in the selected unit; minimum 100 |
+| `--chunk-overlap` | No | Server default: `200` | Overlap; zero is supported and must be smaller than size |
+| `--chunk-unit` | No | `chars` | `chars` or `tokens` (whitespace words, not BPE tokens) |
+| `--store-text` | No | `false` | Persist chunk text |
+| `--text-field` | No | `text` | Stored chunk-text field |
+| `--chunk-doc-id-pattern` | No | Server-generated default | Chunk template; Cosmos requires `{chunk}` and adds an isolation prefix |
+| `--doc-id-pattern` | No | `{source_hash}-{pipeline}` | Destination item template; also supplies chunk template unless its explicit flag is set |
+| `--partition-key-pattern` | No | `{source_partition}` | Destination logical-partition template |
+| `--collision-policy` | No | `reject` | Shared-destination safety policy: `reject` or explicit `overwrite` |
+| `--vector-index-path` | Yes | — | Destination vector path/column, such as `/embedding` |
+| `--processing-mode` | No | `queue` | `queue` or supported same-store `inline` |
+| `--store-content` | No | Connector-dependent | `true`/`false` for single-document text storage |
+| `--content-field` | No | `content` | Cosmos stored-content field |
+| `--metadata-fields` | No | `all` | `all`, `none`, or supported optional fields |
+| `--sharepoint-tenant-id`, `--sharepoint-client-id` | No | Deployment identity | Supply together for pipeline-scoped SharePoint federation |
 | `--description` | No | — | Pipeline description |
-| `--process-existing` | No | true | Process existing documents on creation |
-| `--no-process-existing` | No | — | Only process new documents going forward |
+| `--process-existing` | No | `true` | Initial backfill policy; use `--process-existing=false` to disable |
+
+There is no `--no-process-existing` flag. The create command accepts one source;
+use the REST API for a multi-source pipeline.
+
+The CLI exposes update flags, but the API remains authoritative about immutability:
+source entries, destination, vector path, document/partition/chunk-ID templates
+cannot be changed in place. Cosmos strategy and chunk text-storage settings are
+also immutable. Supported chunk size/overlap/unit changes affect future work.
+See [lifecycle and sharing rules](user-guide.md#pipeline-lifecycle) and
+[chunking details](pipeline-tuning.md#cosmos-text-chunking-queue-mode).
+
+Pause does not cancel queued/in-flight work. Reset can delete records/chunk outputs
+and request replay; it is not a harmless refresh. Deleting a pipeline does not
+purge all vectors.
 
 ---
 
 ## Jobs
 
-Jobs are individual document processing units created automatically by the controller.
+These commands manage metadata job records. Queue and inline pipelines may
+process documents without creating one record per document; use pipeline metrics,
+destination evidence, backlog, and DLQs as well.
 
 ```bash
 # List jobs (with filters)
@@ -343,6 +422,8 @@ omnivec job retry <id>
 
 **Job statuses:** `pending`, `processing`, `completed`, `failed`, `cancelled`
 
+`job retry` is not a Service Bus DLQ redrive.
+
 ---
 
 ## Deployments
@@ -354,17 +435,20 @@ Manage OmniVec Kubernetes deployments.
 omnivec deployment list
 
 # Scale a deployment
-omnivec deployment scale omnivec-worker --replicas 5
+omnivec deployment scale omnivec-dotnet-worker --replicas 5
 
 # Pause (scale to 0) / Resume (scale to 1)
-omnivec deployment pause omnivec-worker
-omnivec deployment resume omnivec-worker
+omnivec deployment pause omnivec-dotnet-worker
+omnivec deployment resume omnivec-dotnet-worker
 
 # Rolling restart
-omnivec deployment restart omnivec-worker -y
+omnivec deployment restart omnivec-dotnet-worker -y
 ```
 
-**Deployment names:** `omnivec-api`, `omnivec-controller`, `omnivec-worker`
+Use names returned by `deployment list`; optional watchers/models and Helm release
+names can vary. Resume scales to one replica, not necessarily the previous count.
+Review autoscaling and maintenance policy before changing replicas. More workers
+do not increase model quota or destination capacity.
 
 ---
 
@@ -434,7 +518,8 @@ fastest path, or `--mcp-deployment <succeeded-job-id>` to reuse only MCP. See
 [`examples/sharepoint-foundry/README.md`](../examples/sharepoint-foundry/README.md)
 for the complete command and synthetic policy question.
 
-For any already registered source type, use the connector-neutral command:
+For an already registered source compatible with the selected Cosmos destination,
+use the connector-neutral command:
 
 ```bash
 omnivec demo source-foundry \
@@ -473,9 +558,9 @@ omnivec model add \
   --name my-azure-openai \
   --type azure-openai \
   --endpoint https://myresource.openai.azure.com \
-  --api-key sk-... \
+  --auth-type managed-identity \
   --api-version 2024-06-01 \
-  --model text-embedding-3-large \
+  --model <azure-deployment-name> \
   --dimensions 3072
 
 # List external providers
@@ -502,8 +587,15 @@ omnivec model delete my-azure-openai -y
 | `--endpoint` | Yes | Endpoint URL |
 | `--model` | Yes | Model or deployment name |
 | `--api-key` | No | API key |
+| `--auth-type` | No | `key` (default) or `managed-identity`; grant the workload identity access first |
+| `--client-id` | No | Optional managed-identity client ID |
 | `--api-version` | No | API version (required for Azure OpenAI) |
 | `--dimensions` | No | Embedding dimensions |
+
+An Azure deployment name is not necessarily the underlying model name. Match the
+actual output dimensions, and use the registered model returned by this command
+when creating the pipeline. Use API-key authentication only with appropriate
+secret handling; do not paste real keys into examples or source files.
 
 ---
 
@@ -518,14 +610,17 @@ omnivec transform list
 # Show details
 omnivec transform show text-azure
 
-# Create from JSON file / inline JSON
+# Create from a complete, valid DocGrok transform definition
 omnivec transform create -f pipeline.json
-omnivec transform create --config '{"name":"my-pipeline","description":"Custom chain","steps":[...]}'
 
 # Update / Delete
 omnivec transform update text-azure -f updated.json
 omnivec transform delete my-pipeline -y
 ```
+
+Inspect an existing transform and the available stage catalog before authoring
+`pipeline.json`; a partial `steps` placeholder is not an executable definition.
+A DocGrok transform is distinct from an OmniVec ingestion pipeline.
 
 ---
 
@@ -541,8 +636,13 @@ omnivec search "kubernetes scaling" --index <dst-id> -o json
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--index` | `-i` | Yes | Destination ID (vector store to search) |
+| `--index` | `-i` | Yes | Destination ID or exact case-insensitive name |
 | `--top-k` | `-k` | No | Number of results (default: 5) |
+
+This command calls the control-plane `/api/playground/search` endpoint with one
+destination. For multi-destination, filtered, full-text, hybrid, or image queries,
+use the [Search API](search-api.md). Prefer `-o json` for complete timing, warnings,
+per-index errors, and untruncated results; scores are not relevance probabilities.
 
 ---
 
@@ -570,7 +670,9 @@ omnivec settings set <key> <value>
 
 ## Output Formats
 
-Every command supports `-o table` (default), `-o json`, and `-o yaml`.
+The global output flag selects `table` (default), `json`, or `yaml` for resource
+results. Some action/interactive commands also print human-readable status; do
+not assume every command's stdout is only a JSON document.
 
 ```bash
 # JSON for scripting with jq
@@ -584,36 +686,43 @@ omnivec pipeline list -o yaml
 
 ## Walkthrough: End-to-End Example
 
+Prerequisites: an accessible Azure OpenAI deployment, the Cosmos source/destination
+containers from the [README](../README.md#4-connect-a-source), matching vector
+policy/index, and workload identity grants. The following Bash example uses
+placeholders for returned IDs; replace them after each create.
+
 ```bash
 # 1. Check the system
 omnivec status
 
 # 2. Add an external embedding model
 omnivec model add --name azure-openai-prod --type azure-openai \
-  --endpoint https://myresource.openai.azure.com --api-key YOUR_KEY \
-  --api-version 2024-06-01 --model text-embedding-3-small --dimensions 1536
+  --endpoint https://myresource.openai.azure.com --auth-type managed-identity \
+  --api-version 2024-06-01 --model <azure-deployment-name> --dimensions 1536
 
 # 3. Create a CosmosDB source
 omnivec source create --name "My Documents" --type cosmosdb \
   --config '{"endpoint":"https://myaccount.documents.azure.com","database":"demo","container":"documents"}'
-omnivec source test src-abc12345
+omnivec source test <source-id>
 
 # 4. Create a CosmosDB vector destination
 omnivec dest create --name "Vectors" --type cosmosdb-vector \
   --config '{"endpoint":"https://myaccount.documents.azure.com","database":"demo","container":"vectors"}'
-omnivec dest test dst-def67890
+omnivec dest test <destination-id>
 
 # 5. Create a pipeline
-omnivec pipeline create --name "My Pipeline" --source src-abc12345 \
-  --destination dst-def67890 --model text-azure \
-  --content-fields content --vector-index-path /embedding --process-existing
+omnivec pipeline create --name "My Pipeline" --source <source-id> \
+  --destination <destination-id> --model <registered-model-id> \
+  --content-fields content --vector-index-path /embedding \
+  --processing-mode queue --store-content true --process-existing
 
-# 6. Monitor progress
-omnivec job list --pipeline pip-ghi11111
-omnivec job stats
+# 6. Activate and inspect progress
+omnivec pipeline run <pipeline-id>
+omnivec pipeline show <pipeline-id>
+omnivec metrics summary
 
-# 7. Search
-omnivec search "my query" --index dst-def67890 --top-k 5
+# 7. After confirming destination writes, search and inspect warnings
+omnivec search "my query" --index <destination-id> --top-k 5 -o json
 ```
 
 ---
@@ -623,7 +732,8 @@ omnivec search "my query" --index dst-def67890 --top-k 5
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `connection refused` | Server unreachable | Check `omnivec config view`, verify the URL is correct |
-| `401 Unauthorized` | Invalid or missing token | Run `omnivec config set token <token>` |
+| `401 Unauthorized` | Invalid, expired, or wrong-scope token | Check server and token precedence; validate with `auth login --token` |
 | `source not found` | Wrong ID | Use `omnivec source list` to get the correct ID |
-| No jobs created | Pipeline paused | Run `omnivec pipeline resume <id>` |
-| Jobs stuck in pending | Workers at 0 replicas | `omnivec deployment scale omnivec-worker --replicas 1` |
+| No Jobs-page records | May be normal for queue/inline mode | Inspect pipeline status, metrics, queue/DLQ, and destination writes |
+| Pipeline paused | New pipelines are created paused | Run `omnivec pipeline run <id>` when ready |
+| No processing progress | Source, model, destination, or worker may be blocked | Inspect `pipeline show`, `deployment list`, and Diagnostics before scaling/resetting |

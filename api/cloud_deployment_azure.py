@@ -311,7 +311,7 @@ class AzureDeployment:
         else:
             raise DeploymentFailure("publish_timeout", "Package publication was not confirmed within 7.5 minutes. Inspect Function deployment logs before retrying.", p["function_id"])
         server_url = self.function_url(props["defaultHostName"]) + "/api/mcp"
-        self.progress("Verifying protected MCP protocol (no inference)")
+        self.progress("Verifying authenticated MCP vector retrieval")
         self.verify_mcp(server_url)
         return {
             "server_url": server_url, "function_id": p["function_id"], "principal_id": principal,

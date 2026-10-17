@@ -44,7 +44,7 @@ jobs:
             context: connectors/worker/dotnet
             dockerfile: connectors/worker/dotnet/Dockerfile
           - image: omnivec-onelake-iceberg-watcher
-            context: connectors/ingestion/onelake_iceberg
+            context: .
             dockerfile: connectors/ingestion/onelake_iceberg/Dockerfile
           - image: docgrok-router
             context: docgrok/router

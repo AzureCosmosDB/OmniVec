@@ -57,6 +57,7 @@ builder.Services.AddSingleton<IDestinationWriter, PostgresDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, MsSqlDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, OneLakeIcebergDestinationWriter>();
 builder.Services.AddSingleton<IDestinationWriter, GarnetDestinationWriter>();
+builder.Services.AddSingleton<IDestinationWriter, NullDestinationWriter>();
 
 // Health endpoint (must be a hosted service so it runs alongside the worker)
 builder.Services.AddHostedService<HealthEndpointService>();

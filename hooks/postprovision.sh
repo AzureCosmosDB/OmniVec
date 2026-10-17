@@ -546,6 +546,7 @@ prepare_source_build_spec() {
       copy_minimal_build_tree "$ROOT_DIR/api" "$_context/api"
       copy_minimal_build_tree "$ROOT_DIR/web" "$_context/web"
       copy_minimal_build_tree "$ROOT_DIR/mcp_servers/cosmos" "$_context/mcp_servers/cosmos"
+      copy_minimal_build_tree "$ROOT_DIR/omnivec_queue" "$_context/omnivec_queue"
       _dockerfile="$_context/api/Dockerfile" ;;
     omnivec-search)
       copy_minimal_build_tree "$ROOT_DIR/search" "$_context/search"
@@ -564,8 +565,9 @@ prepare_source_build_spec() {
       copy_minimal_build_tree "$ROOT_DIR/connectors/worker/dotnet" "$_context"
       _dockerfile="$_context/Dockerfile" ;;
     omnivec-onelake-iceberg-watcher)
-      copy_minimal_build_tree "$ROOT_DIR/connectors/ingestion/onelake_iceberg" "$_context"
-      _dockerfile="$_context/Dockerfile" ;;
+      copy_minimal_build_tree "$ROOT_DIR/connectors/ingestion/onelake_iceberg" "$_context/connectors/ingestion/onelake_iceberg"
+      copy_minimal_build_tree "$ROOT_DIR/omnivec_queue" "$_context/omnivec_queue"
+      _dockerfile="$_context/connectors/ingestion/onelake_iceberg/Dockerfile" ;;
     docgrok-pipeline-worker)
       copy_minimal_build_tree "$ROOT_DIR/docgrok/pipeline-worker" "$_context"
       _dockerfile="$_context/Dockerfile" ;;
@@ -670,7 +672,7 @@ build_missing_images() {
       omnivec-web)              build_image "$image" "${ROOT_DIR}/web/Dockerfile" "${ROOT_DIR}/web/" "latest" ;;
       omnivec-changefeed)       build_image "$image" "${ROOT_DIR}/connectors/ingestion/dotnet/Dockerfile" "${ROOT_DIR}" "latest" ;;
       omnivec-dotnet-worker)    build_image "$image" "${ROOT_DIR}/connectors/worker/dotnet/Dockerfile" "${ROOT_DIR}/connectors/worker/dotnet/" "latest" ;;
-      omnivec-onelake-iceberg-watcher) build_image "$image" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/Dockerfile" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/" "latest" ;;
+      omnivec-onelake-iceberg-watcher) build_image "$image" "${ROOT_DIR}/connectors/ingestion/onelake_iceberg/Dockerfile" "$ROOT_DIR" "latest" ;;
       omnivec-agent)            build_image "$image" "${ROOT_DIR}/agent/Dockerfile" "$ROOT_DIR" "latest" ;;
       docgrok-pipeline-worker)
         if [ -f "${ROOT_DIR}/docgrok/pipeline-worker/Dockerfile" ]; then

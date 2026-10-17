@@ -30,9 +30,11 @@ from pyiceberg.catalog import load_catalog
 
 from helpers import (
     checkpoint_json, checkpoint_key, content_from_row, content_hash, message_id,
-    ordered_source_version, pipeline_fingerprint, read_projected_rows,
+    embedding_request_policy, ordered_source_version, pipeline_fingerprint, read_projected_rows,
     row_has_current_omnivec_embedding,
 )
+from pipeline_lanes import LaneRegistry, broker_message, lane_metadata, validate_topic_name
+from omnivec_queue import publish_queue_documents, queue_publish_policy
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("omnivec.onelake_iceberg")
@@ -50,7 +52,6 @@ DEFAULT_WRITEBACK_COLUMNS = {
     "run_id_field": "omnivec_run_id",
     "embedded_at_field": "embedded_at",
 }
-MAX_SERVICE_BUS_BATCH_BYTES = 240 * 1024
 
 
 @dataclass
@@ -69,7 +70,15 @@ class OneLakeIcebergWatcher:
         self.api_url = os.getenv("OMNIVEC_API_BASE_URL", "http://omnivec-api:80").rstrip("/")
         self.service_bus_namespace = os.environ["ONELAKE_ICEBERG_SERVICEBUS_NAMESPACE"]
         self.topic_name = os.getenv("ONELAKE_ICEBERG_SERVICEBUS_TOPIC", "embeddings")
+        self.lane_mode = os.getenv("ONELAKE_ICEBERG_PIPELINE_LANES_ENABLED", "false").lower() == "true"
+        if self.lane_mode:
+            self.topic_name = os.getenv("ONELAKE_ICEBERG_PIPELINE_LANES_TOPIC", "")
+            validate_topic_name(self.topic_name)
         self.credential = DefaultAzureCredential()
+        self.lanes = LaneRegistry(
+            self.service_bus_namespace, self.credential, self.topic_name,
+            int(os.getenv("ONELAKE_ICEBERG_BACKPRESSURE_MAX_ACTIVE_MESSAGES", "5000")),
+        ) if self.lane_mode else None
         self.pyiceberg_credential = SyncDefaultAzureCredential()
         self._last_scan: dict[str, float] = {}
         self._onelake_credentials: dict[
@@ -91,9 +100,15 @@ class OneLakeIcebergWatcher:
             destinations = (await client.get("/api/destinations")).json().get("destinations", [])
 
         active = [p for p in pipelines if p.get("status") == "active"]
+        if self.lane_mode and any(
+            s.get("type") == "onelake-iceberg" and s.get("enabled")
+            and (s.get("config", {}).get("change_data_feed") or {}).get("enabled")
+            for s in sources
+        ):
+            raise ValueError("Stage-1 pipeline lanes cannot activate with CDF-enabled OneLake sources; Spark CDF publisher is not lane-aware")
         dest_by_id = {
             d["id"]: d for d in destinations
-            if d.get("enabled") and d.get("type") in ("onelake-iceberg", "cosmosdb-vector", "garnet")
+            if d.get("enabled") and d.get("type") in ("onelake-iceberg", "cosmosdb-vector", "garnet", "null")
         }
         for source in sources:
             if source.get("type") != "onelake-iceberg" or not source.get("enabled"):
@@ -115,20 +130,33 @@ class OneLakeIcebergWatcher:
                 if self._pipeline_identity(pipeline, source["id"]) is None
             ]
             plans: list[tuple[str, list[dict[str, Any]], dict[str, str] | None]] = []
-            if legacy_pipelines:
+            if legacy_pipelines and not self.lane_mode:
                 plans.append((source["id"], legacy_pipelines, None))
             for pipeline in source_pipelines:
                 identity = self._pipeline_identity(pipeline, source["id"])
-                if identity is not None:
-                    plans.append((f"{source['id']}--{pipeline['id']}", [pipeline], identity))
+                if identity is not None or self.lane_mode:
+                    scope = f"{source['id']}--{pipeline['id']}"
+                    # Separate from the legacy source-wide cursor; first lane scan is a reconciled replay.
+                    if self.lane_mode:
+                        scope += "--lanes-v1"
+                    plans.append((scope, [pipeline], identity))
             now = asyncio.get_running_loop().time()
             for checkpoint_scope, plan_pipelines, identity in plans:
                 if now - self._last_scan.get(checkpoint_scope, 0) < poll_interval:
                     continue
-                await self.scan_source(
-                    source, plan_pipelines, dest_by_id, checkpoint_scope, identity
-                )
-                self._last_scan[checkpoint_scope] = now
+                try:
+                    if self.lane_mode:
+                        await self.lanes.ensure_capacity(lane_metadata(
+                            plan_pipelines[0], embedding_request_policy(plan_pipelines[0])
+                        ))
+                    await self.scan_source(
+                        source, plan_pipelines, dest_by_id, checkpoint_scope, identity
+                    )
+                    self._last_scan[checkpoint_scope] = now
+                except Exception:
+                    if not self.lane_mode:
+                        raise
+                    log.exception("Lane plan %s failed; checkpoint retained; continuing healthy plans", checkpoint_scope)
 
     async def scan_source(
         self,
@@ -139,6 +167,12 @@ class OneLakeIcebergWatcher:
         identity: dict[str, str] | None = None,
     ) -> None:
         config = source["config"]
+        if self.lane_mode:
+            if (config.get("change_data_feed") or {}).get("enabled"):
+                raise ValueError("Stage-1 lanes do not support OneLake CDF-enabled sources")
+            if len(pipelines) != 1:
+                raise ValueError("Lane scans require an independent single-pipeline checkpoint plan")
+            await self.lanes.ensure_capacity(lane_metadata(pipelines[0], embedding_request_policy(pipelines[0])))
         checkpoint_scope = checkpoint_scope or source["id"]
         onelake_credential, pyiceberg_credential = self._credentials_for(identity)
         checkpoint = await self.load_checkpoint(checkpoint_scope, config, onelake_credential)
@@ -284,6 +318,7 @@ class OneLakeIcebergWatcher:
                 ):
                     continue
                 message = {
+                    **embedding_request_policy(pipeline),
                     "message_id": message_id(
                         pipeline["id"], source["id"], source_ref, digest, source_version
                     ),
@@ -342,6 +377,7 @@ class OneLakeIcebergWatcher:
                 ):
                     continue
                 messages.append(({
+                    **embedding_request_policy(pipeline),
                     "message_id": message_id(
                         pipeline["id"], source["id"], source_ref, delete_digest, source_version
                     ),
@@ -368,27 +404,20 @@ class OneLakeIcebergWatcher:
             checkpoint.pending_empty_refs[pipeline["id"]] = sorted(pending_empty_refs)
 
         async with ServiceBusClient(self.service_bus_namespace, self.credential) as service_bus:
+            if self.lane_mode:
+                await self.lanes.ensure_capacity(lane_metadata(pipelines[0], embedding_request_policy(pipelines[0])))
             sender = service_bus.get_topic_sender(self.topic_name)
             async with sender:
+                queue_limits = {
+                    pipeline["id"]: queue_publish_policy(pipeline.get("resource_policy") or {})
+                    for pipeline in pipelines
+                }
                 for start in range(0, len(messages), batch_size):
                     chunk = messages[start : start + batch_size]
-                    batch = await sender.create_message_batch(
-                        max_size_in_bytes=MAX_SERVICE_BUS_BATCH_BYTES
+                    await publish_queue_documents(
+                        sender, (message for message, _, _ in chunk), queue_limits,
+                        preserve_legacy_identity=not self.lane_mode,
                     )
-                    for message, _, _ in chunk:
-                        outgoing = ServiceBusMessage(json.dumps(message, separators=(",", ":")))
-                        try:
-                            batch.add_message(outgoing)
-                        except MessageSizeExceededError:
-                            if len(batch) == 0:
-                                raise  # one message cannot fit; do not checkpoint it
-                            await sender.send_messages(batch)
-                            batch = await sender.create_message_batch(
-                                max_size_in_bytes=MAX_SERVICE_BUS_BATCH_BYTES
-                            )
-                            batch.add_message(outgoing)
-                    if len(batch):
-                        await sender.send_messages(batch)
                     for _, key, digest in chunk:
                         checkpoint.processed[key] = digest
                         checkpoint.submitted_at[key] = now_epoch
