@@ -1,7 +1,7 @@
 /* OmniVec console: Pipelines list + detail */
 (() => {
 const X = window.OVX;
-const { icon, esc, fmt, ms, ago, when, plural, api, need, invalidate, D, M, T, logo, dot, statusBadge, chipFlow, chart, empty, loadErr, codebox, spinner,
+const { icon, esc, nameLabel, fmt, ms, ago, when, plural, api, need, invalidate, D, M, T, logo, dot, statusBadge, chipFlow, chart, empty, loadErr, codebox, spinner,
   route, go, render, toast, confirmAction, menu, openDrawer, openModal, closeOverlay, $, $$ } = X;
 
 /* ---------- lifecycle actions ---------- */
@@ -69,7 +69,7 @@ route('pipelines', { render(parts) {
       const rank = { err:0, warn:1, unknown:2, ok:3, paused:4 };
       rows.sort(listState.sort==='name' ? (a,b)=>a.name.localeCompare(b.name) : listState.sort==='recent' ? (a,b)=>(X.toDate(b.lastWrite)||0)-(X.toDate(a.lastWrite)||0) : listState.sort==='vectors' ? (a,b)=>(b.vectors||0)-(a.vectors||0) : (a,b)=>rank[a.health]-rank[b.health] || (b.qwait||0)-(a.qwait||0));
       $('#ptbl', v).innerHTML = rows.length ? `<table class="tbl hide-c4 hide-c5"><thead><tr><th>Pipeline</th><th>Flow</th><th>Health</th><th>Mode</th><th class="r">Docs → vectors</th><th class="r">Queue wait</th><th>Last write</th><th></th></tr></thead><tbody>
-        ${rows.map(p => `<tr class="clickrow" data-id="${p.id}"><td><div class="nm trunc" style="max-width:260px">${esc(p.name)}</div><div class="id">${p.id}</div></td><td>${chipFlow(p)}</td><td>${statusBadge(p)}</td>
+        ${rows.map(p => `<tr class="clickrow" data-id="${p.id}"><td><div class="nm trunc" style="max-width:260px">${nameLabel(p.name)}</div><div class="id">${p.id}</div></td><td>${chipFlow(p)}</td><td>${statusBadge(p)}</td>
           <td class="muted small">${p.processing_mode==='inline'?'Inline':'Queue'} · ${p.content_strategy==='chunk' ? 'chunk '+((p.chunk_config||{}).chunk_size||'') : 'document'}</td>
           <td class="r">${p.progress!=null ? `<div class="row" style="justify-content:flex-end"><span class="num">${fmt(p.st.source_doc_count)} → ${fmt(p.vectors)}</span><div class="prog ${p.progress>=100?'ok':''}" style="width:56px"><i style="width:${p.progress}%"></i></div></div>` : `<span class="num">— → ${fmt(p.vectors)}</span>`}</td>
           <td class="r num" ${p.qwait>X.QW_SLOW?'style="color:var(--warn);font-weight:600"':''}>${ms(p.qwait)}</td><td class="muted">${ago(p.lastWrite)}</td>
@@ -119,13 +119,13 @@ function flowMap(p) {
   const qw = p.qwait > X.QW_SLOW; const pol = p.resource_policy || {};
   const live = !p.paused && p.health !== 'err';
   return `<div class="flow">
-   <a class="fnode ${p.src.missing?'err':''}" href="#/connections/source/${p.src.id}"><div class="k">${logo(p.src.type,'sm')}Source</div><div class="n">${esc(p.src.name)}</div><div class="m">${esc(T(p.src.type).short)} · ${esc(listenerOf(p.src))}${M.trig[p.src.id] && M.trig[p.src.id].status==='not_configured' ? ' · <span style="color:var(--warn)">no trigger</span>' : ''}</div><span class="st">${dot(st(hs))}</span></a>
+   <a class="fnode ${p.src.missing?'err':''}" href="#/connections/source/${p.src.id}"><div class="k">${logo(p.src.type,'sm')}Source</div><div class="n">${nameLabel(p.src.name)}</div><div class="m">${esc(T(p.src.type).short)} · ${esc(listenerOf(p.src))}${M.trig[p.src.id] && M.trig[p.src.id].status==='not_configured' ? ' · <span style="color:var(--warn)">no trigger</span>' : ''}</div><span class="st">${dot(st(hs))}</span></a>
    <div class="conn ${live?'live':''}"></div>
    <a class="fnode ${qw?'warn':''}" href="#/pipelines/${p.id}/capacity"><div class="k">${icon('queue','sm')}${p.processing_mode==='inline'?'Inline':'Queue'}</div><div class="n">${p.qwait!=null ? ms(p.qwait)+' wait' : p.processing_mode==='inline' ? 'Processed in place' : 'Wait not observed'}</div><div class="m">weight ${pol.weight??10} · ${pol.priority||'normal'} · ${pol.max_concurrency_per_worker??2}/worker</div><span class="st">${dot(qw?'warn':p.qwait!=null?'ok':'')}</span></a>
    <div class="conn ${live?'live':''}"></div>
-   <a class="fnode" href="${p.model ? '#/models/'+p.model.id : p.recipe ? '#/models/recipes/'+encodeURIComponent(p.recipe) : '#/models'}"><div class="k">${logo(p.model?p.model.type:'recipe','sm')}Embed</div><div class="n">${esc(p.model ? (p.model.deployment||p.model.name) : (p.recipe||'—'))}</div><div class="m">${p.model ? `${p.model.embedding_dim||'—'} dims · ${esc(T(p.model.type).short)}` : 'Processing recipe'}${p.content_strategy==='chunk' ? ` · chunks ${(p.chunk_config||{}).chunk_size||''}/${(p.chunk_config||{}).chunk_overlap||0}` : ''}</div><span class="st">${dot(st(hm))}</span></a>
+   <a class="fnode" href="${p.model ? '#/models/'+p.model.id : p.recipe ? '#/models/recipes/'+encodeURIComponent(p.recipe) : '#/models'}"><div class="k">${logo(p.model?p.model.type:'recipe','sm')}Embed</div><div class="n">${nameLabel(p.model ? (p.model.deployment||p.model.name) : (p.recipe||'—'))}</div><div class="m">${p.model ? `${p.model.embedding_dim||'—'} dims · ${esc(T(p.model.type).short)}` : 'Processing recipe'}${p.content_strategy==='chunk' ? ` · chunks ${(p.chunk_config||{}).chunk_size||''}/${(p.chunk_config||{}).chunk_overlap||0}` : ''}</div><span class="st">${dot(st(hm))}</span></a>
    <div class="conn ${live?'live':''}"></div>
-   <a class="fnode ${p.dst.missing?'err':''}" href="#/connections/store/${p.dst.id}"><div class="k">${logo(p.dst.type,'sm')}Vector store</div><div class="n">${esc(p.dst.name)}</div><div class="m">${esc(storeIndex(p.dst))}</div><span class="st">${dot(st(hd))}</span></a>
+   <a class="fnode ${p.dst.missing?'err':''}" href="#/connections/store/${p.dst.id}"><div class="k">${logo(p.dst.type,'sm')}Vector store</div><div class="n">${nameLabel(p.dst.name)}</div><div class="m">${esc(storeIndex(p.dst))}</div><span class="st">${dot(st(hd))}</span></a>
   </div>`;
 }
 
@@ -146,7 +146,7 @@ function detail(id, tab) {
   if (!p) return { crumbs:[['Pipelines','#/pipelines'],['Not found']], html:`<div class="page">${empty('flow','Pipeline not found',`No pipeline with ID ${esc(id)} exists. It may have been deleted.`, '<a class="btn" href="#/pipelines">Back to pipelines</a>')}</div>` };
   const tabs = [['overview','Overview'],['activity','Activity'],['search','Search'],['capacity','Capacity'],['settings','Settings']];
   const html = `<div class="page">
-   <div class="ph"><div style="min-width:0"><div class="row"><h1 class="trunc">${esc(p.name)}</h1>${statusBadge(p)}</div>
+   <div class="ph"><div style="min-width:0"><div class="row"><h1 class="trunc">${nameLabel(p.name)}</h1>${statusBadge(p)}</div>
      <p class="mono small">${p.id} · ${p.processing_mode||'queue'} mode · created ${ago(p.created_at)}${p.description ? ' · '+esc(p.description) : ''}</p></div>
     <div class="acts">${p.paused ? `<button class="btn pri" data-pa="resume">${icon('play')}Resume</button>` : `<button class="btn" data-pa="pause">${icon('pause')}Pause</button>`}
      <a class="btn" href="#/pipelines/${p.id}/search">${icon('search')}Test search</a><button class="btn icon" id="pmore" title="More actions">${icon('more')}</button></div></div>
@@ -180,7 +180,7 @@ function switchMode(p) {
 }
 function applyAlloc(p) {
   const rec = p.ins && p.ins.recommendation; if (!rec) return; const cur = p.resource_policy || {}, nx = rec.suggested_policy || {};
-  const rows = ['weight','max_concurrency_per_worker','priority','workload_class'].map(k => `<tr><td class="muted">${k.replace(/_/g,' ')}</td><td class="num">${esc(cur[k]??'—')}</td><td class="num"><b>${esc(nx[k]??'—')}</b></td></tr>`).join('');
+  const rows = ['weight','max_concurrency_per_worker','embed_batch_size','priority','workload_class'].map(k => `<tr><td class="muted">${k.replace(/_/g,' ')}</td><td class="num">${esc(cur[k]??'—')}</td><td class="num"><b>${esc(nx[k]??'—')}</b></td></tr>`).join('');
   confirmAction({ title:'Apply recommended allocation?', confirm:'Apply change',
     body:`<div>${esc(rec.detail||rec.title)}</div><table class="tbl" style="margin-top:10px"><thead><tr><th>Setting</th><th>Now</th><th>Proposed</th></tr></thead><tbody>${rows}</tbody></table><div class="muted small" style="margin-top:8px">Changes the pipeline's share of the shared worker pool. Other pipelines keep their settings. Queue wait should improve within a few minutes; check the Capacity tab to confirm.</div>`,
     onOk: async () => { await api(`/api/pipelines/${p.id}/resource-policy`, { method:'PATCH', body:nx }); toast('Allocation updated'); invalidate('pipelines','insights'); render({ force:true, silent:true }); } });
@@ -249,14 +249,25 @@ async function activity(p, t) {
 }
 
 function capacity(p, t) {
-  const pol = { weight:10, max_concurrency_per_worker:2, priority:'normal', workload_class:'shared', ...(p.resource_policy||{}) };
-  const I = p.ins || {}, obs = I.observed || {}, rec = I.recommendation;
+  const pol = { weight:10, max_concurrency_per_worker:2, embed_batch_size:50, queue_documents_per_message:1, queue_max_envelope_bytes:224*1024, queue_send_batch_max_bytes:240*1024, queue_publish_batch_size:200, priority:'normal', workload_class:'shared', ...(p.resource_policy||{}) };
+  const I = p.ins || {}, obs = I.observed || {}, rec = I.recommendation, cap = I.capacity_estimate || {};
+  const readyWorkers = Number(M.workers?.ready_replicas || 0);
+  const safeTotal = cap.status === 'ready' && readyWorkers ? cap.recommended_sustained_docs_per_worker_sec * readyWorkers : null;
+  const typicalTotal = cap.status === 'ready' && readyWorkers ? cap.typical_docs_per_worker_sec * readyWorkers : null;
+  const selectedModel = M.MDL?.[p.docgrok_pipeline] || {};
+  const modelReplicas = Number(selectedModel.ready_replicas || selectedModel.replicas || 0);
+  const safePerModelReplica = safeTotal && modelReplicas ? safeTotal / modelReplicas : null;
   t.innerHTML = `<div class="grid g-main" style="align-items:start">
    <div class="card"><div class="card-h"><h3>Share of the worker pool</h3></div><div class="card-b stack">
     ${rec ? `<div class="callout ${rec.severity==='healthy'?'ok':'warn'}">${icon(rec.severity==='healthy'?'check':'wand','ic')}<div class="grow"><b>${esc(rec.title)}</b>${esc(rec.detail||'')}</div>${rec.severity!=='healthy' ? '<button class="btn sm pri" id="useRec">Use suggestion</button>' : ''}</div>` : ''}
     <div class="grid g2">
      <div class="fld"><label>Weight <span class="muted">(1–100)</span></label><input class="inp" type="number" min="1" max="100" id="cw" value="${pol.weight}"><span class="hint">Relative share when pipelines compete. Default 10.</span></div>
      <div class="fld"><label>Max concurrent per worker <span class="muted">(1–32)</span></label><input class="inp" type="number" min="1" max="32" id="cc" value="${pol.max_concurrency_per_worker}"><span class="hint">Caps parallel documents on each worker replica.</span></div>
+     <div class="fld"><label>Embedding batch size <span class="muted">(1-4096)</span></label><input class="inp" type="number" min="1" max="4096" id="cb" value="${pol.embed_batch_size}"><span class="hint">Live maximum texts per model request. Registered model count limits, token budgets and documents available in an envelope can produce smaller batches.</span></div>
+     <div class="fld"><label>Documents per queue message <span class="muted">(1–1000)</span></label><input class="inp" type="number" min="1" max="1000" id="cqd" value="${pol.queue_documents_per_message}"><span class="hint">Maximum compatible documents in one message. Live setting, independent of model batching. Byte limits, publisher batches and source pages can produce smaller messages.</span></div>
+     <div class="fld"><label>Max envelope size (KiB) <span class="muted">(1-960)</span></label><input class="inp" type="number" min="1" max="960" id="cqe" value="${pol.queue_max_envelope_bytes/1024}"><span class="hint">Serialized UTF-8 body cap. Default 224. Larger envelopes require a matching broker message limit; 500 x 1KiB documents fit within 600KiB.</span></div>
+     <div class="fld"><label>Max send batch size (KiB) <span class="muted">(17-1024)</span></label><input class="inp" type="number" min="17" max="1024" id="cqs" value="${pol.queue_send_batch_max_bytes/1024}"><span class="hint">Default 240. Must exceed the envelope cap by at least 16KiB for protocol headers and framing. The broker still enforces its own limit.</span></div>
+     <div class="fld"><label>Publisher batch documents <span class="muted">(1-1000)</span></label><input class="inp" type="number" min="1" max="1000" id="cqp" value="${pol.queue_publish_batch_size}"><span class="hint">Default 200. Set at least 500 for 500-document envelopes. Synthetic runs refresh these settings within 5 seconds; ingestion applies them at its next control-plane refresh. No rollout required after capability deployment.</span></div>
      <div class="fld"><label>Priority</label><select class="sel" id="cp">${['low','normal','high','critical'].map(x => `<option ${pol.priority===x?'selected':''}>${x}</option>`).join('')}</select></div>
      <div class="fld"><label>Workload class</label><select class="sel" id="ck">${[['shared','Shared pool'],['burst','Burst'],['dedicated','Dedicated']].map(([k,l]) => `<option value="${k}" ${pol.workload_class===k?'selected':''}>${l}</option>`).join('')}</select></div>
     </div>
@@ -268,10 +279,23 @@ function capacity(p, t) {
     <dt>Avg processing</dt><dd>${ms(obs.avg_processing_latency_ms||null)}</dd>
     <dt>Processed · failed</dt><dd>${fmt(obs.processed)} · ${fmt(obs.failed)}</dd>
     <dt>Throttles · retries</dt><dd>${fmt(obs.throttles)} · ${fmt(obs.retries)}</dd>
-    <dt>Workers</dt><dd>${M.workers ? `${M.workers.ready_replicas}/${M.workers.replicas} ready${M.workers.autoscaling ? ' · autoscale to '+M.workers.autoscaling.max_replicas : ''}` : 'Not observed'} · <a class="link" href="#/platform">Platform</a></dd></dl></div></div></div>`;
-  const u = $('#useRec', t); if (u) u.onclick = () => { const s = rec.suggested_policy||{}; $('#cw',t).value = s.weight; $('#cc',t).value = s.max_concurrency_per_worker; $('#cp',t).value = s.priority; $('#ck',t).value = s.workload_class; };
-  $('#csave', t).onclick = async e => { const b = e.currentTarget; const body = { weight:+$('#cw',t).value, max_concurrency_per_worker:+$('#cc',t).value, priority:$('#cp',t).value, workload_class:$('#ck',t).value };
+    <dt>Workers</dt><dd>${M.workers ? `${M.workers.ready_replicas}/${M.workers.replicas} ready${M.workers.autoscaling ? ' · autoscale to '+M.workers.autoscaling.max_replicas : ''}` : 'Not observed'} · <a class="link" href="#/platform">Platform</a></dd>
+    <dt>Effective worker slots</dt><dd>${cap.effective_slots_per_worker == null ? 'Unknown worker configuration' : `${fmt(cap.effective_slots_per_worker)} per worker (global cap ${fmt(cap.worker_global_concurrency)})`}</dd>
+    <dt>Predicted sustained capacity</dt><dd>${safeTotal == null ? (cap.status==='unknown_worker_configuration' ? 'Worker concurrency unavailable' : 'Collecting samples') : `${fmt(Math.round(safeTotal))} docs/sec`} <span class="muted">(70% utilization)</span></dd>
+    <dt>Typical observed capacity</dt><dd>${typicalTotal == null ? '—' : `${fmt(Math.round(typicalTotal))} docs/sec`} ${cap.sample_documents ? `<span class="muted">from ${fmt(cap.sample_batches)} recent batches</span>` : ''}</dd>
+    <dt>Predictability</dt><dd>${cap.predictability ? `<span class="badge ${cap.predictability==='stable'?'ok':'warn'}">${esc(cap.predictability)}</span>` : '—'} ${cap.variability_ratio ? `<span class="muted">${cap.variability_ratio}× p90/p10 spread</span>` : ''}</dd>
+    <dt>Safe capacity per model replica</dt><dd>${safePerModelReplica == null ? 'Unavailable' : `${fmt(Math.round(safePerModelReplica))} docs/sec`}</dd>
+    </dl><div class="muted small" style="margin-top:8px">${esc(cap.scope || 'Capacity adapts to observed model, payload, destination, and contention conditions.')}</div>
+    <div class="fld" style="margin-top:14px"><label>Plan for docs/sec</label><input class="inp" type="number" min="1" id="ctarget" placeholder="Enter any throughput goal"><span class="hint">Uses conservative observed capacity; it does not assume linear scaling beyond the current topology.</span></div>
+    <div class="callout info" id="cplan" style="display:none"></div></div></div></div>`;
+  const u = $('#useRec', t); if (u) u.onclick = () => { const s = rec.suggested_policy||{}; $('#cw',t).value = s.weight; $('#cc',t).value = s.max_concurrency_per_worker; $('#cb',t).value = s.embed_batch_size ?? pol.embed_batch_size; $('#cp',t).value = s.priority; $('#ck',t).value = s.workload_class; };
+  $('#csave', t).onclick = async e => { const b = e.currentTarget; const body = { ...pol, weight:+$('#cw',t).value, max_concurrency_per_worker:+$('#cc',t).value, embed_batch_size:+$('#cb',t).value, queue_documents_per_message:+$('#cqd',t).value, queue_max_envelope_bytes:+$('#cqe',t).value*1024, queue_send_batch_max_bytes:+$('#cqs',t).value*1024, queue_publish_batch_size:+$('#cqp',t).value, priority:$('#cp',t).value, workload_class:$('#ck',t).value };
     b.disabled = true; try { await api(`/api/pipelines/${p.id}/resource-policy`, { method:'PATCH', body }); toast('Allocation saved'); invalidate('pipelines','insights'); render({ force:true, silent:true }); } catch (err) { toast(err.message, 'err'); b.disabled = false; } };
+  $('#ctarget', t).oninput = e => { const target = Number(e.target.value), out = $('#cplan', t);
+    if (!(target > 0) || !safeTotal) { out.style.display = 'none'; return; }
+    const workers = Math.ceil(target / cap.recommended_sustained_docs_per_worker_sec);
+    const models = safePerModelReplica ? Math.ceil(target / safePerModelReplica) : null;
+    out.style.display = ''; out.innerHTML = `${icon('layers','ic')}<div><b>Estimated replicas for ${fmt(target)} docs/sec</b>${fmt(workers)} ready workers${models ? ` · ${fmt(models)} ready model replicas` : ''}. Re-measure after scaling; shared downstream capacity may prevent linear gains.</div>`; };
 }
 
 function settings(p, t) {

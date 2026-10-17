@@ -71,6 +71,30 @@ public class EmbeddingMessage
     [JsonPropertyName("max_concurrency_per_worker")]
     public int MaxConcurrencyPerWorker { get; set; } = 2;
 
+    [JsonPropertyName("embed_batch_size")]
+    public int EmbedBatchSize { get; set; } = 50;
+
+    [JsonIgnore]
+    public int QueueDocumentsPerMessage { get; set; } = 1;
+
+    [JsonIgnore]
+    public int QueueMaxEnvelopeBytes { get; set; } = 224 * 1024;
+
+    [JsonIgnore]
+    public int QueueSendBatchMaxBytes { get; set; } = 240 * 1024;
+
+    [JsonIgnore]
+    public int QueuePublishBatchSize { get; set; } = 200;
+
+    [JsonPropertyName("model_max_batch_size")]
+    public int ModelMaxBatchSize { get; set; } = 256;
+
+    [JsonPropertyName("model_context_window_tokens")]
+    public int ModelContextWindowTokens { get; set; } = 8191;
+
+    [JsonPropertyName("model_max_batch_tokens")]
+    public int ModelMaxBatchTokens { get; set; } = 6000;
+
     [JsonPropertyName("resource_priority")]
     public string ResourcePriority { get; set; } = "normal";
 

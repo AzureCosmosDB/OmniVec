@@ -133,6 +133,21 @@ class ApiRateLimitTests(unittest.TestCase):
         for _ in range(50):
             r = FakeRequest(path="/api/metrics", client_host="1.1.1.1")
             self.assertEqual(self._hit(r).status_code, 200)
+        for _ in range(50):
+            r = FakeRequest(
+                path="/api/pipelines/pip-benchmark/metrics/inline",
+                client_host="1.1.1.1",
+            )
+            self.assertEqual(self._hit(r).status_code, 200)
+
+    def test_similar_pipeline_path_is_not_exempt(self):
+        request = FakeRequest(
+            path="/api/pipelines/pip-benchmark/metrics/inline/other",
+            client_host="3.3.3.3",
+        )
+        for _ in range(3):
+            self.assertEqual(self._hit(request).status_code, 200)
+        self.assertEqual(self._hit(request).status_code, 429)
 
     def test_internal_traffic_skipped(self):
         for _ in range(50):

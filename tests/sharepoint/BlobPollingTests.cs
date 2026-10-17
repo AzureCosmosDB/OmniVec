@@ -249,6 +249,9 @@ internal static class BlobPollingTests
         private bool _firstSend = true;
         public override ValueTask<ServiceBusMessageBatch> CreateMessageBatchAsync(CancellationToken ct = default)
             => inner.CreateMessageBatchAsync(ct);
+        public override ValueTask<ServiceBusMessageBatch> CreateMessageBatchAsync(CreateMessageBatchOptions options,
+            CancellationToken ct = default)
+            => inner.CreateMessageBatchAsync(options, ct);
         public override Task SendMessagesAsync(ServiceBusMessageBatch batch, CancellationToken ct = default)
         {
             if (_firstSend)

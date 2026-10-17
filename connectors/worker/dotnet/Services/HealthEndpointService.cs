@@ -169,6 +169,8 @@ public static class WorkerHeartbeat
         Beat();
     }
 
+    public static void MarkNotReady() => Interlocked.Exchange(ref _isReady, 0);
+
     public static bool IsReady =>
         Interlocked.CompareExchange(ref _isReady, 0, 0) == 1;
 

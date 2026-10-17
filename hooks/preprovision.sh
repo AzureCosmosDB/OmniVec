@@ -239,7 +239,27 @@ apply_quickstart_defaults() {
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
+  azd env set OMNIVEC_SERVICE_BUS_SKU      "Standard" < /dev/null
+  azd env set OMNIVEC_SERVICE_BUS_CAPACITY "1" < /dev/null
   azd env set OMNIVEC_ENTRA_ENABLED       "false" < /dev/null
+}
+
+configure_service_bus() {
+  _sku=$(azd_get OMNIVEC_SERVICE_BUS_SKU)
+  _capacity=$(azd_get OMNIVEC_SERVICE_BUS_CAPACITY)
+  _sku=$(printf '%s' "${_sku:-Standard}" | tr '[:upper:]' '[:lower:]')
+  _capacity=${_capacity:-1}
+  case "$_sku" in
+    standard) _sku=Standard ;;
+    premium) _sku=Premium ;;
+    *) printf 'OMNIVEC_SERVICE_BUS_SKU must be Standard or Premium.\n' >&2; exit 1 ;;
+  esac
+  case "$_capacity" in
+    1|2|4|8|16) ;;
+    *) printf 'OMNIVEC_SERVICE_BUS_CAPACITY must be 1, 2, 4, 8, or 16.\n' >&2; exit 1 ;;
+  esac
+  azd env set OMNIVEC_SERVICE_BUS_SKU "$_sku" < /dev/null
+  azd env set OMNIVEC_SERVICE_BUS_CAPACITY "$_capacity" < /dev/null
 }
 
 # a2: Fail fast when we would need to prompt but can't. Far better than a
@@ -358,6 +378,7 @@ fi
 SUBSCRIPTION=$(az account show --query name -o tsv < /dev/null)
 SUBSCRIPTION_ID=$(az account show --query id -o tsv < /dev/null)
 printf "${GREEN}Logged in to subscription: ${SUBSCRIPTION} (${SUBSCRIPTION_ID})${NC}\n"
+configure_service_bus
 
 # ── c1: Ensure required resource providers are registered ───────────────────
 if command -v preflight_require_providers >/dev/null 2>&1; then
@@ -454,11 +475,15 @@ if [ "$setup_mode" = "1" ]; then
   azd env set OMNIVEC_GPU_NODE_VM_SIZE    "" < /dev/null
   azd env set OMNIVEC_GPU_NODE_COUNT      "0" < /dev/null
   azd env set OMNIVEC_METADATA_STORE      "cosmosdb-serverless" < /dev/null
+  azd env set OMNIVEC_SERVICE_BUS_SKU      "Standard" < /dev/null
+  azd env set OMNIVEC_SERVICE_BUS_CAPACITY "1" < /dev/null
   echo "  OMNIVEC_SYSTEM_NODE_VM_SIZE = Standard_D4s_v5"
   echo "  OMNIVEC_SYSTEM_NODE_COUNT   = 2"
   echo "  OMNIVEC_GPU_NODE_VM_SIZE    = (none)"
   echo "  OMNIVEC_GPU_NODE_COUNT      = 0"
   echo "  OMNIVEC_METADATA_STORE      = cosmosdb-serverless"
+  echo "  OMNIVEC_SERVICE_BUS_SKU     = Standard"
+  echo "  OMNIVEC_SERVICE_BUS_CAPACITY = 1"
   echo ""
   echo "  System pool: 2x Standard_D4s_v5 (4 vCPU, 16 GB each)"
   echo "  GPU pool: none (use Azure OpenAI for embeddings)"
@@ -638,7 +663,7 @@ configure_auth_choice
 
 # ── Sanitize env values: strip BOM, tabs, carriage returns ──────────────────
 printf "\n${CYAN}Sanitizing environment values...${NC}\n"
-for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE OMNIVEC_ENTRA_ENABLED OMNIVEC_PUBLIC_URL; do
+for key in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE OMNIVEC_SERVICE_BUS_SKU OMNIVEC_SERVICE_BUS_CAPACITY OMNIVEC_ENTRA_ENABLED OMNIVEC_PUBLIC_URL; do
   raw=$(azd_get "$key")
   if [ -n "$raw" ]; then
     clean=$(printf '%s' "$raw" | tr -d '\r\t' | sed 's/^\xEF\xBB\xBF//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -662,7 +687,7 @@ if command -v preflight_vcpu_quota >/dev/null 2>&1; then
   preflight_vcpu_quota "$LOCATION" "$_sys_sku" "$_sys_count" "$_gpu_sku" "$_gpu_count" || true
 fi
 if command -v preflight_sanitize_env >/dev/null 2>&1; then
-  for _k in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE; do
+  for _k in OMNIVEC_SYSTEM_NODE_VM_SIZE OMNIVEC_SYSTEM_NODE_COUNT OMNIVEC_GPU_NODE_VM_SIZE OMNIVEC_GPU_NODE_COUNT OMNIVEC_METADATA_STORE OMNIVEC_SERVICE_BUS_SKU OMNIVEC_SERVICE_BUS_CAPACITY; do
     preflight_sanitize_env "$_k" || true
   done
 fi

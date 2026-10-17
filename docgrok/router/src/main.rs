@@ -10,9 +10,17 @@ use dashmap::DashMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, env, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::sync::{Mutex, RwLock};
-use tower_http::{cors::CorsLayer, compression::CompressionLayer, limit::RequestBodyLimitLayer};
+use tower_http::{compression::CompressionLayer, cors::CorsLayer, limit::RequestBodyLimitLayer};
 use tracing::{error, info, warn};
 
 // 50 MiB raw input expands to ~66.7 MiB base64, plus JSON metadata.
@@ -36,8 +44,14 @@ struct AppState {
     pipelines: Arc<DashMap<String, Value>>,
     /// native model name -> URL (e.g. "bge-small" -> "http://bge-small-svc:8000")
     native_urls: Arc<HashMap<String, String>>,
-    /// Shared HTTP client with connection pooling
+    /// Shared HTTP client with connection pooling for external services
     http: Client,
+    /// Native backend client with independently tunable keep-alive behavior
+    native_http: Client,
+    /// Round-robin counter for DNS-resolved native backend endpoints
+    native_endpoint_counter: Arc<AtomicUsize>,
+    /// Attempts across independently resolved native backend endpoints
+    native_max_attempts: usize,
     /// K8s client (None if not in cluster)
     k8s: Option<kube::Client>,
     /// K8s namespace for model deployments
@@ -121,6 +135,22 @@ struct RegisterModelRequest {
     api_version: String,
     #[serde(default)]
     embedding_dim: u32,
+    #[serde(default)]
+    max_batch_size: Option<u32>,
+    #[serde(default)]
+    context_window_tokens: Option<u32>,
+    #[serde(default)]
+    max_batch_tokens: Option<u32>,
+}
+
+fn default_model_max_batch_size() -> u32 {
+    256
+}
+fn default_model_context_window() -> u32 {
+    8191
+}
+fn default_model_max_batch_tokens() -> u32 {
+    6000
 }
 
 #[derive(Deserialize)]
@@ -167,9 +197,10 @@ async fn main() {
         .init();
 
     let mode = env::var("DOCGROK_MODE").unwrap_or_else(|_| "router".into());
-    let port: u16 = env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(
-        if mode == "controller" { 8081 } else { 8080 }
-    );
+    let port: u16 = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(if mode == "controller" { 8081 } else { 8080 });
 
     info!("DocGrok starting in {mode} mode on port {port}");
 
@@ -182,12 +213,48 @@ async fn main() {
         .build()
         .expect("Failed to build HTTP client");
 
+    let native_pool_max_idle_per_host = env::var("NATIVE_BACKEND_MAX_IDLE_PER_HOST")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let native_pool_idle_timeout_seconds = env::var("NATIVE_BACKEND_IDLE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let native_max_attempts = env::var("NATIVE_BACKEND_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3);
+    let native_http = Client::builder()
+        .pool_max_idle_per_host(native_pool_max_idle_per_host)
+        .pool_idle_timeout(Duration::from_secs(native_pool_idle_timeout_seconds))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("Failed to build native backend HTTP client");
+    info!(
+        "Native backend HTTP pool: max_idle_per_host={native_pool_max_idle_per_host}, idle_timeout_seconds={native_pool_idle_timeout_seconds}"
+    );
+
     // Native model URLs
     let native_urls: HashMap<String, String> = [
-        ("dse-qwen2", env::var("DSE_QWEN2_URL").unwrap_or_else(|_| "http://dse-qwen2-svc:8000".into())),
-        ("clip", env::var("CLIP_URL").unwrap_or_else(|_| "http://clip-svc:8000".into())),
-        ("bge", env::var("BGE_URL").unwrap_or_else(|_| "http://bge-svc:8000".into())),
-        ("bge-small", env::var("BGE_SMALL_URL").unwrap_or_else(|_| "http://bge-small-svc:8000".into())),
+        (
+            "dse-qwen2",
+            env::var("DSE_QWEN2_URL").unwrap_or_else(|_| "http://dse-qwen2-svc:8000".into()),
+        ),
+        (
+            "clip",
+            env::var("CLIP_URL").unwrap_or_else(|_| "http://clip-svc:8000".into()),
+        ),
+        (
+            "bge",
+            env::var("BGE_URL").unwrap_or_else(|_| "http://bge-svc:8000".into()),
+        ),
+        (
+            "bge-small",
+            env::var("BGE_SMALL_URL").unwrap_or_else(|_| "http://bge-small-svc:8000".into()),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -221,10 +288,17 @@ async fn main() {
         (Ok(endpoint), Ok(database), Ok(container)) => {
             let api_key = env::var("COSMOS_KEY").unwrap_or_default();
             info!("CosmosDB model store: {endpoint}/{database}/{container}");
-            Some(CosmosConfig { endpoint, database, container, api_key })
+            Some(CosmosConfig {
+                endpoint,
+                database,
+                container,
+                api_key,
+            })
         }
         _ if ["COSMOS_ENDPOINT", "COSMOS_DATABASE", "COSMOS_CONTAINER"]
-            .iter().any(|key| env::var_os(key).is_some()) => {
+            .iter()
+            .any(|key| env::var_os(key).is_some()) =>
+        {
             error!("Incomplete Cosmos registry configuration: endpoint, database and container are all required");
             std::process::exit(1);
         }
@@ -244,13 +318,20 @@ async fn main() {
     let mock_1536_single = Arc::new(serde_json::to_string(&json!([mock_1536_vec])).unwrap());
     let mock_128_vec: Vec<f64> = (0..128).map(|i| (i as f64 * 0.01).sin()).collect();
     let mock_128_single = Arc::new(serde_json::to_string(&json!([mock_128_vec])).unwrap());
-    info!("Pre-computed mock embeddings: 1536-dim ({}B), 128-dim ({}B)", mock_1536_single.len(), mock_128_single.len());
+    info!(
+        "Pre-computed mock embeddings: 1536-dim ({}B), 128-dim ({}B)",
+        mock_1536_single.len(),
+        mock_128_single.len()
+    );
 
     let state = AppState {
         registry: registry.clone(),
         pipelines: pipelines.clone(),
         native_urls: Arc::new(native_urls),
         http: http.clone(),
+        native_http,
+        native_endpoint_counter: Arc::new(AtomicUsize::new(0)),
+        native_max_attempts,
         k8s,
         namespace,
         cosmos,
@@ -276,7 +357,9 @@ async fn main() {
                     error!("Model registry refresh failed; retaining last successful state: {e}");
                 }
                 if let Err(e) = load_pipelines_from_cosmos(&registry_state).await {
-                    error!("Pipeline registry refresh failed; retaining last successful state: {e}");
+                    error!(
+                        "Pipeline registry refresh failed; retaining last successful state: {e}"
+                    );
                 }
             }
         });
@@ -288,9 +371,15 @@ async fn main() {
         let health_state = state.clone();
         tokio::spawn(async move {
             let interval = Duration::from_secs(
-                env::var("HEALTH_CHECK_INTERVAL").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+                env::var("HEALTH_CHECK_INTERVAL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60),
             );
-            info!("Controller health loop starting (interval: {}s)", interval.as_secs());
+            info!(
+                "Controller health loop starting (interval: {}s)",
+                interval.as_secs()
+            );
             loop {
                 run_model_health_checks(&health_state).await;
                 tokio::time::sleep(interval).await;
@@ -357,7 +446,9 @@ async fn main() {
             .route("/admin/pipelines/options", get(pipeline_options))
             .route(
                 "/admin/pipelines/{name}",
-                get(get_pipeline).put(update_pipeline).delete(delete_pipeline),
+                get(get_pipeline)
+                    .put(update_pipeline)
+                    .delete(delete_pipeline),
             )
             .route("/admin/pipelines/{name}/reset", post(reset_pipeline))
             // Pipeline-worker proxy — keeps "all requests go through the
@@ -422,7 +513,9 @@ async fn cosmos_query(
     let mut continuation: Option<String> = None;
     let mut seen = HashSet::new();
     loop {
-        let mut request = state.http.post(&url)
+        let mut request = state
+            .http
+            .post(&url)
             .timeout(Duration::from_secs(30))
             .header("Authorization", format!("type=aad&ver=1.0&sig={token}"))
             .header("Content-Type", "application/query+json")
@@ -433,25 +526,38 @@ async fn cosmos_query(
         if let Some(value) = &continuation {
             request = request.header("x-ms-continuation", value);
         }
-        let resp = request.send().await
+        let resp = request
+            .send()
+            .await
             .map_err(|e| format!("CosmosDB request failed: {e}"))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("CosmosDB query failed ({status}): {text}"));
         }
-        continuation = resp.headers().get("x-ms-continuation")
+        continuation = resp
+            .headers()
+            .get("x-ms-continuation")
             .map(|value| value.to_str().map(str::to_owned))
-            .transpose().map_err(|e| format!("Invalid Cosmos continuation header: {e}"))?
+            .transpose()
+            .map_err(|e| format!("Invalid Cosmos continuation header: {e}"))?
             .filter(|value| !value.is_empty());
-        let data: Value = resp.json().await
+        let data: Value = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse CosmosDB response: {e}"))?;
-        documents.extend(data["Documents"].as_array()
-            .ok_or("CosmosDB query response is missing Documents")?.iter().cloned());
+        documents.extend(
+            data["Documents"]
+                .as_array()
+                .ok_or("CosmosDB query response is missing Documents")?
+                .iter()
+                .cloned(),
+        );
         match &continuation {
             None => return Ok(documents),
-            Some(value) if !seen.insert(value.clone()) =>
-                return Err("CosmosDB query repeated a continuation token".into()),
+            Some(value) if !seen.insert(value.clone()) => {
+                return Err("CosmosDB query repeated a continuation token".into())
+            }
             _ => {}
         }
     }
@@ -478,12 +584,20 @@ async fn cosmos_write(state: &AppState, doc: &Value, mode: RegistryWrite) -> Res
     let doc_type = doc["doc_type"].as_str().unwrap_or("unknown");
 
     let request = match mode {
-        RegistryWrite::Upsert => state.http.post(&url).header("x-ms-documentdb-is-upsert", "true"),
+        RegistryWrite::Upsert => state
+            .http
+            .post(&url)
+            .header("x-ms-documentdb-is-upsert", "true"),
         RegistryWrite::Create => state.http.post(&url),
         RegistryWrite::Replace(etag) => {
-            let id = doc["id"].as_str().ok_or("Registry document requires an id")?;
+            let id = doc["id"]
+                .as_str()
+                .ok_or("Registry document requires an id")?;
             let mut item_url = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
-            item_url.path_segments_mut().map_err(|_| "Invalid CosmosDB URL")?.push(id);
+            item_url
+                .path_segments_mut()
+                .map_err(|_| "Invalid CosmosDB URL")?
+                .push(id);
             state.http.put(item_url).header("If-Match", etag)
         }
     };
@@ -625,7 +739,9 @@ async fn fetch_aad_token(http: &Client, resource: &str) -> Result<String, String
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warn!("Workload identity token exchange failed ({status}): {body}; falling back to IMDS");
+            warn!(
+                "Workload identity token exchange failed ({status}): {body}; falling back to IMDS"
+            );
         }
     }
 
@@ -660,18 +776,31 @@ async fn load_pipelines_from_cosmos(state: &AppState) -> Result<(), String> {
 }
 
 async fn load_registry_from_cosmos(
-    state: &AppState, doc_type: &str, cache: &DashMap<String, Value>,
+    state: &AppState,
+    doc_type: &str,
+    cache: &DashMap<String, Value>,
 ) -> Result<(), String> {
     if state.cosmos.is_none() {
         return Ok(());
     }
     let _guard = state.metadata_lock.lock().await;
-    let docs = cosmos_query(state, "SELECT * FROM c WHERE c.doc_type = @type", &[("@type", doc_type)]).await?;
-    let snapshot: HashMap<String, Value> = docs.into_iter().map(|doc| {
-        let id = doc["id"].as_str().filter(|id| !id.is_empty())
-            .ok_or_else(|| format!("Invalid {doc_type} document: missing id"))?.to_owned();
-        Ok((id, doc))
-    }).collect::<Result<_, String>>()?;
+    let docs = cosmos_query(
+        state,
+        "SELECT * FROM c WHERE c.doc_type = @type",
+        &[("@type", doc_type)],
+    )
+    .await?;
+    let snapshot: HashMap<String, Value> = docs
+        .into_iter()
+        .map(|doc| {
+            let id = doc["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| format!("Invalid {doc_type} document: missing id"))?
+                .to_owned();
+            Ok((id, doc))
+        })
+        .collect::<Result<_, String>>()?;
     let ids: HashSet<String> = snapshot.keys().cloned().collect();
     for (id, doc) in snapshot {
         cache.insert(id, doc);
@@ -687,7 +816,8 @@ async fn initialize_registry(state: &AppState) -> Result<(), String> {
         let result = async {
             load_models_from_cosmos(state).await?;
             load_pipelines_from_cosmos(state).await
-        }.await;
+        }
+        .await;
         match result {
             Ok(()) => return Ok(()),
             Err(e) if attempt == 5 => return Err(e),
@@ -700,31 +830,50 @@ async fn initialize_registry(state: &AppState) -> Result<(), String> {
 
 fn registry_unavailable(error: String) -> AppError {
     error!("Registry operation failed: {error}");
-    AppError(StatusCode::SERVICE_UNAVAILABLE, "Model/pipeline registry storage is unavailable; retry the operation".into())
+    AppError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Model/pipeline registry storage is unavailable; retry the operation".into(),
+    )
 }
 
 async fn save_registry_document(
-    state: &AppState, cache: &DashMap<String, Value>, doc: &Value,
+    state: &AppState,
+    cache: &DashMap<String, Value>,
+    doc: &Value,
 ) -> Result<(), AppError> {
-    let id = doc["id"].as_str()
-        .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "Registry document requires an id".into()))?;
+    let id = doc["id"].as_str().ok_or_else(|| {
+        AppError(
+            StatusCode::BAD_REQUEST,
+            "Registry document requires an id".into(),
+        )
+    })?;
     let _guard = state.metadata_lock.lock().await;
     if state.cosmos.is_some() {
-        cosmos_upsert(state, doc).await.map_err(registry_unavailable)?;
+        cosmos_upsert(state, doc)
+            .await
+            .map_err(registry_unavailable)?;
     }
     cache.insert(id.to_owned(), doc.clone());
     Ok(())
 }
 
 async fn remove_registry_document(
-    state: &AppState, cache: &DashMap<String, Value>, id: &str, doc_type: &str,
+    state: &AppState,
+    cache: &DashMap<String, Value>,
+    id: &str,
+    doc_type: &str,
 ) -> Result<(), AppError> {
     let _guard = state.metadata_lock.lock().await;
     if !cache.contains_key(id) {
-        return Err(AppError(StatusCode::NOT_FOUND, format!("Registry entry '{id}' not found")));
+        return Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("Registry entry '{id}' not found"),
+        ));
     }
     if state.cosmos.is_some() {
-        cosmos_delete(state, id, doc_type).await.map_err(registry_unavailable)?;
+        cosmos_delete(state, id, doc_type)
+            .await
+            .map_err(registry_unavailable)?;
     }
     cache.remove(id);
     Ok(())
@@ -734,28 +883,130 @@ async fn remove_registry_document(
 // Embed hot path
 // ============================================================================
 
-async fn call_model(
-    state: &AppState,
-    model_id: &str,
-    text: TextInput,
-) -> Result<Value, AppError> {
+async fn native_backend_url(state: &AppState, base_url: &str, path: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(base_url) else {
+        return format!("{}{path}", base_url.trim_end_matches('/'));
+    };
+    let Some(host) = url.host_str().map(str::to_owned) else {
+        return format!("{}{path}", base_url.trim_end_matches('/'));
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return format!("{}{path}", base_url.trim_end_matches('/'));
+    };
+    let Ok(addresses) = tokio::net::lookup_host((host.as_str(), port)).await else {
+        return format!("{}{path}", base_url.trim_end_matches('/'));
+    };
+    let addresses: Vec<_> = addresses.collect();
+    if addresses.len() > 1 {
+        let index = state
+            .native_endpoint_counter
+            .fetch_add(1, Ordering::Relaxed)
+            % addresses.len();
+        let address = addresses[index];
+        if url.set_host(Some(&address.ip().to_string())).is_ok() {
+            let _ = url.set_port(Some(address.port()));
+        }
+    }
+    format!("{}{path}", url.as_str().trim_end_matches('/'))
+}
+
+fn native_model_limits(name: &str) -> (u32, u32, u32) {
+    match name {
+        "bge-small" | "bge-base" | "bge-large" => (256, 512, 6000),
+        "clip" => (256, 77, 6000),
+        "dse-qwen2" => (64, 32768, 32768),
+        _ => (
+            default_model_max_batch_size(),
+            default_model_context_window(),
+            default_model_max_batch_tokens(),
+        ),
+    }
+}
+
+fn estimated_tokens(text: &str) -> u64 {
+    let chars = text.chars().count() as u64;
+    let non_ascii = text.chars().filter(|c| !c.is_ascii()).count() as u64;
+    ((chars - non_ascii) + 2) / 3 + non_ascii
+}
+
+fn validate_model_request(
+    text: &TextInput,
+    max_batch_size: u64,
+    context_window_tokens: u64,
+    max_batch_tokens: u64,
+) -> Result<(), AppError> {
+    let texts: Vec<&str> = match text {
+        TextInput::Single(value) => vec![value],
+        TextInput::Batch(values) => values.iter().map(String::as_str).collect(),
+    };
+    if texts.len() as u64 > max_batch_size {
+        return Err(AppError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Model request contains {} inputs; maximum is {max_batch_size}",
+                texts.len()
+            ),
+        ));
+    }
+    let mut total = 0;
+    for value in texts {
+        let tokens = estimated_tokens(value);
+        if tokens > context_window_tokens {
+            return Err(AppError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Model input is estimated at {tokens} tokens; context window is {context_window_tokens}"
+                ),
+            ));
+        }
+        total += tokens;
+    }
+    if total > max_batch_tokens {
+        return Err(AppError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Model request is estimated at {total} tokens; batch maximum is {max_batch_tokens}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn checked_native_response(response: reqwest::Response) -> Result<reqwest::Response, AppError> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await?;
+    Err(AppError(
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+        format!("Native model error: {body}"),
+    ))
+}
+
+async fn call_model(state: &AppState, model_id: &str, text: TextInput) -> Result<Value, AppError> {
     if model_id.starts_with("mdl-native-") {
         let name = &model_id["mdl-native-".len()..];
-        let url = state
-            .native_urls
-            .get(name)
-            .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, format!("Unknown native model: '{name}'")))?;
+        let limits = native_model_limits(name);
+        validate_model_request(&text, limits.0.into(), limits.1.into(), limits.2.into())?;
+        let url = state.native_urls.get(name).ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                format!("Unknown native model: '{name}'"),
+            )
+        })?;
 
         match &text {
             TextInput::Single(t) => {
                 let payload = json!({"text": t, "model_id": model_id});
+                let endpoint = native_backend_url(state, url, "/embed").await;
                 let resp = state
-                    .http
-                    .post(format!("{url}/embed"))
+                    .native_http
+                    .post(endpoint)
                     .json(&payload)
                     .send()
                     .await?;
-                let result: Value = resp.json().await?;
+                let result: Value = checked_native_response(resp).await?.json().await?;
                 let pages = result.get("pages").or_else(|| result.get("embeddings"));
                 Ok(json!({
                     "model_id": model_id,
@@ -764,55 +1015,113 @@ async fn call_model(
                 }))
             }
             TextInput::Batch(texts) => {
-                // Try batch endpoint first
-                let payload = json!({"texts": texts, "model_id": model_id});
-                let resp = state
-                    .http
-                    .post(format!("{url}/embed/batch"))
-                    .json(&payload)
-                    .send()
-                    .await;
-
-                match resp {
-                    Ok(r) if r.status().is_success() => {
-                        let r: Value = r.json().await?;
-                        Ok(json!({
-                            "embeddings": r.get("embeddings").unwrap_or(&json!([])),
-                            "model_id": model_id,
-                        }))
+                // Prefer the OpenAI-compatible endpoint used by BGE and CLIP.
+                let payload = json!({"input": texts, "model": model_id});
+                let mut legacy_endpoint = false;
+                for attempt in 0..state.native_max_attempts {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
                     }
-                    _ => {
-                        // Fallback: call one at a time
-                        let mut results = Vec::with_capacity(texts.len());
-                        for t in texts {
-                            let payload = json!({"text": t});
-                            let resp = state
-                                .http
-                                .post(format!("{url}/embed"))
-                                .json(&payload)
-                                .send()
-                                .await?;
-                            let r: Value = resp.json().await?;
-                            let embedding = r
-                                .get("pages")
-                                .or_else(|| r.get("embeddings"))
-                                .and_then(|v| v.as_array())
-                                .and_then(|a| a.first())
-                                .cloned()
-                                .unwrap_or(json!([]));
-                            results.push(embedding);
+                    let endpoint = native_backend_url(state, url, "/v1/embeddings").await;
+                    match state.native_http.post(endpoint).json(&payload).send().await {
+                        Ok(r) if r.status().is_success() => {
+                            let r: Value = r.json().await?;
+                            let embeddings: Vec<Value> = r
+                                .get("data")
+                                .and_then(|value| value.as_array())
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|item| item.get("embedding").cloned())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if embeddings.len() == texts.len() {
+                                return Ok(json!({
+                                    "embeddings": embeddings,
+                                    "model_id": model_id,
+                                }));
+                            }
+                            return Err(AppError(StatusCode::BAD_GATEWAY,
+                                "Native model returned an incorrect embedding count".into()));
                         }
-                        Ok(json!({
-                            "embeddings": results,
-                            "model_id": model_id,
-                        }))
+                        Ok(r) if r.status().is_server_error() => continue,
+                        Ok(r) if matches!(r.status().as_u16(), 404 | 405) => {
+                            legacy_endpoint = true;
+                            break;
+                        }
+                        Ok(r) => {
+                            let status = r.status();
+                            let body = r.text().await?;
+                            return Err(AppError(
+                                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                                format!("Native model error: {body}"),
+                            ));
+                        }
+                        Err(_) => continue,
                     }
                 }
+                if !legacy_endpoint {
+                    return Err(AppError(StatusCode::SERVICE_UNAVAILABLE,
+                        "Native model is unavailable after bounded retries".into()));
+                }
+
+                // Preserve compatibility with native backends that expose the
+                // older OmniVec batch endpoint instead of the OpenAI shape.
+                let payload = json!({"texts": texts, "model_id": model_id});
+                let endpoint = native_backend_url(state, url, "/embed/batch").await;
+                let r = state.native_http.post(endpoint).json(&payload).send().await?;
+                if !matches!(r.status().as_u16(), 404 | 405) {
+                    let r = checked_native_response(r).await?;
+                    if r.status().is_success() {
+                        let r: Value = r.json().await?;
+                        if let Some(embeddings) = r.get("embeddings").and_then(|v| v.as_array()) {
+                            if embeddings.len() == texts.len() {
+                                return Ok(json!({
+                                    "embeddings": embeddings,
+                                    "model_id": model_id,
+                                }));
+                            }
+                        }
+                        return Err(AppError(StatusCode::BAD_GATEWAY,
+                            "Native legacy batch returned an incorrect embedding count".into()));
+                    }
+                }
+
+                // Last-resort compatibility for backends that only accept one
+                // input per request.
+                let mut results = Vec::with_capacity(texts.len());
+                for t in texts {
+                    let payload = json!({"text": t});
+                    let endpoint = native_backend_url(state, url, "/embed").await;
+                    let resp = state
+                        .native_http
+                        .post(endpoint)
+                        .json(&payload)
+                        .send()
+                        .await?;
+                    let r: Value = checked_native_response(resp).await?.json().await?;
+                    let embedding = r
+                        .get("pages")
+                        .or_else(|| r.get("embeddings"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .cloned()
+                        .ok_or_else(|| AppError(StatusCode::BAD_GATEWAY,
+                            "Native model returned no embedding for an input".into()))?;
+                    results.push(embedding);
+                }
+                Ok(json!({
+                    "embeddings": results,
+                    "model_id": model_id,
+                }))
             }
         }
     } else if model_id.starts_with("mdl-ext-") {
         if !state.registry.contains_key(model_id) {
-            load_models_from_cosmos(state).await.map_err(registry_unavailable)?;
+            load_models_from_cosmos(state)
+                .await
+                .map_err(registry_unavailable)?;
         }
         let cfg = state
             .registry
@@ -827,9 +1136,9 @@ async fn call_model(
             .clone();
 
         let model_type = cfg["type"].as_str().unwrap_or("");
-        let endpoint = cfg["endpoint"]
-            .as_str()
-            .ok_or_else(|| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Missing endpoint".into()))?;
+        let endpoint = cfg["endpoint"].as_str().ok_or_else(|| {
+            AppError(StatusCode::INTERNAL_SERVER_ERROR, "Missing endpoint".into())
+        })?;
         let deployment = cfg["deployment"]
             .as_str()
             .or_else(|| cfg["name"].as_str())
@@ -838,6 +1147,18 @@ async fn call_model(
         let api_key = cfg["api_key"].as_str().unwrap_or("");
         let embedding_dim = cfg["embedding_dim"].as_u64().unwrap_or(0);
         let name = cfg["name"].as_str().unwrap_or(model_id);
+        validate_model_request(
+            &text,
+            cfg["max_batch_size"]
+                .as_u64()
+                .unwrap_or(default_model_max_batch_size().into()),
+            cfg["context_window_tokens"]
+                .as_u64()
+                .unwrap_or(default_model_context_window().into()),
+            cfg["max_batch_tokens"]
+                .as_u64()
+                .unwrap_or(default_model_max_batch_tokens().into()),
+        )?;
 
         let input_data = match &text {
             TextInput::Single(t) => json!([t]),
@@ -860,10 +1181,7 @@ async fn call_model(
                             format!("Failed to get AOAI token: {e}"),
                         )
                     })?;
-                    h.insert(
-                        "Authorization",
-                        format!("Bearer {token}").parse().unwrap(),
-                    );
+                    h.insert("Authorization", format!("Bearer {token}").parse().unwrap());
                 }
                 (url, h)
             }
@@ -945,7 +1263,8 @@ enum TextInput {
 }
 
 fn pipeline_model_id(config: &Value) -> Option<&str> {
-    config["model_id"].as_str()
+    config["model_id"]
+        .as_str()
         .or_else(|| config["model"].as_str())
         .or_else(|| {
             config["steps"].as_array().and_then(|steps| {
@@ -964,7 +1283,8 @@ fn pipeline_model_id(config: &Value) -> Option<&str> {
 fn request_model_id(req: &EmbedRequest, pipelines: &DashMap<String, Value>) -> Option<String> {
     req.model_id.clone().or_else(|| {
         req.pipeline.as_ref().and_then(|pipeline| {
-            pipelines.get(pipeline)
+            pipelines
+                .get(pipeline)
                 .and_then(|config| pipeline_model_id(&config).map(str::to_owned))
         })
     })
@@ -974,8 +1294,15 @@ async fn handle_embed(
     State(state): State<AppState>,
     Json(req): Json<EmbedRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if req.model_id.is_none() && req.pipeline.as_ref().is_some_and(|id| !state.pipelines.contains_key(id)) {
-        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    if req.model_id.is_none()
+        && req
+            .pipeline
+            .as_ref()
+            .is_some_and(|id| !state.pipelines.contains_key(id))
+    {
+        load_pipelines_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
     let resolved_model_id = request_model_id(&req, &state.pipelines);
     // Blob/data requests always go through the pipeline-worker so that
@@ -983,9 +1310,7 @@ async fn handle_embed(
     // text, image, video, ...) by extension. The model_id (if any) is
     // passed through for transforms whose `embed` stage needs it; image
     // and video transforms ignore it.
-    let has_blob_or_data = req.blob_url.is_some()
-        || req.blob_name.is_some()
-        || req.data.is_some();
+    let has_blob_or_data = req.blob_url.is_some() || req.blob_name.is_some() || req.data.is_some();
     if has_blob_or_data {
         let body = serde_json::json!({
             "data": req.data,
@@ -1002,14 +1327,22 @@ async fn handle_embed(
             "transform": req.transform,
             "expected_dim": req.expected_dim,
         });
-        let url = format!("{}/process", state.pipeline_worker_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/process",
+            state.pipeline_worker_url.trim_end_matches('/')
+        );
         let resp = state
             .http
             .post(&url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Pipeline worker error: {e}")))?;
+            .map_err(|e| {
+                AppError(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Pipeline worker error: {e}"),
+                )
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
@@ -1018,10 +1351,12 @@ async fn handle_embed(
                 format!("Pipeline worker returned {status}: {body_text}"),
             ));
         }
-        let mut result: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Pipeline worker response error: {e}")))?;
+        let mut result: Value = resp.json().await.map_err(|e| {
+            AppError(
+                StatusCode::BAD_GATEWAY,
+                format!("Pipeline worker response error: {e}"),
+            )
+        })?;
         result["_routed_to"] = serde_json::json!("pipeline-worker");
         return Ok(Json(result));
     }
@@ -1041,14 +1376,22 @@ async fn handle_embed(
             "transform": req.transform,
             "expected_dim": req.expected_dim,
         });
-        let url = format!("{}/process", state.pipeline_worker_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/process",
+            state.pipeline_worker_url.trim_end_matches('/')
+        );
         let resp = state
             .http
             .post(&url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Pipeline worker error: {e}")))?;
+            .map_err(|e| {
+                AppError(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Pipeline worker error: {e}"),
+                )
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
@@ -1057,10 +1400,12 @@ async fn handle_embed(
                 format!("Pipeline worker returned {status}: {body_text}"),
             ));
         }
-        let mut result: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Pipeline worker response error: {e}")))?;
+        let mut result: Value = resp.json().await.map_err(|e| {
+            AppError(
+                StatusCode::BAD_GATEWAY,
+                format!("Pipeline worker response error: {e}"),
+            )
+        })?;
         result["_routed_to"] = serde_json::json!("pipeline-worker");
         return Ok(Json(result));
     }
@@ -1104,7 +1449,10 @@ async fn handle_embed(
 
         // Real pipeline — look up config
         let all_keys: Vec<String> = state.pipelines.iter().map(|e| e.key().clone()).collect();
-        info!("Looking for pipeline '{}', available pipelines: {:?}", pipeline, all_keys);
+        info!(
+            "Looking for pipeline '{}', available pipelines: {:?}",
+            pipeline, all_keys
+        );
         let pipeline_cfg = state.pipelines.get(pipeline).map(|v| v.value().clone());
         if let Some(cfg) = pipeline_cfg {
             // Resolve the embedding model from pipeline config or steps
@@ -1142,24 +1490,30 @@ async fn handle_embed(
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Pipeline worker error: {e}")))?;
-                let mut result: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Pipeline worker response error: {e}")))?;
+                    .map_err(|e| {
+                        AppError(
+                            StatusCode::BAD_GATEWAY,
+                            format!("Pipeline worker error: {e}"),
+                        )
+                    })?;
+                let mut result: Value = resp.json().await.map_err(|e| {
+                    AppError(
+                        StatusCode::BAD_GATEWAY,
+                        format!("Pipeline worker response error: {e}"),
+                    )
+                })?;
                 result["_routed_to"] = serde_json::json!(format!("pipeline:{}", pipeline));
                 return Ok(Json(result));
             }
 
             // Route B: Pipeline references a model — call model directly
-            if let Some(model) = pipeline_model_id
-            {
-                let text = req
-                    .text
-                    .or(req.data)
-                    .ok_or_else(|| {
-                        AppError(StatusCode::BAD_REQUEST, "Pipeline requires 'text' or 'data'".into())
-                    })?;
+            if let Some(model) = pipeline_model_id {
+                let text = req.text.or(req.data).ok_or_else(|| {
+                    AppError(
+                        StatusCode::BAD_REQUEST,
+                        "Pipeline requires 'text' or 'data'".into(),
+                    )
+                })?;
                 let result = call_model(&state, model, TextInput::Single(text)).await?;
                 return Ok(Json(result));
             }
@@ -1173,7 +1527,8 @@ async fn handle_embed(
 
     // Legacy content-type routing
     let content_type = req.content_type_hint.as_deref().unwrap_or("");
-    let (backend_name, backend_url) = get_backend_for_content_type(content_type, &state.native_urls);
+    let (backend_name, backend_url) =
+        get_backend_for_content_type(content_type, &state.native_urls);
 
     let body = json!({
         "text": req.text,
@@ -1217,7 +1572,9 @@ async fn handle_embed_batch(
             let mut buf = String::with_capacity(single.len() * n + 100);
             buf.push_str(r#"{"outputs":["#);
             for i in 0..n {
-                if i > 0 { buf.push(','); }
+                if i > 0 {
+                    buf.push(',');
+                }
                 buf.push_str(single);
             }
             buf.push_str(r#"],"pipeline":""#);
@@ -1225,17 +1582,19 @@ async fn handle_embed_batch(
             buf.push_str(r#"","batch_size":"#);
             buf.push_str(&n.to_string());
             buf.push('}');
-            return Ok((
-                [(header::CONTENT_TYPE, "application/json")],
-                buf,
-            ).into_response());
+            return Ok(([(header::CONTENT_TYPE, "application/json")], buf).into_response());
         }
 
         // Real pipeline — resolve model_id from pipeline config and batch embed via model
         if !state.pipelines.contains_key(pipeline.as_str()) {
-            load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+            load_pipelines_from_cosmos(&state)
+                .await
+                .map_err(registry_unavailable)?;
         }
-        let pipeline_cfg = state.pipelines.get(pipeline.as_str()).map(|v| v.value().clone());
+        let pipeline_cfg = state
+            .pipelines
+            .get(pipeline.as_str())
+            .map(|v| v.value().clone());
         if let Some(cfg) = pipeline_cfg {
             let resolved_model = pipeline_model_id(&cfg);
             if let Some(model_id) = resolved_model {
@@ -1254,7 +1613,8 @@ async fn handle_embed_batch(
                     "batch_size": req.texts.len(),
                     "usage": result.get("usage").unwrap_or(&json!({})),
                     "model": result.get("model").unwrap_or(&json!({})),
-                })).into_response());
+                }))
+                .into_response());
             }
         }
         return Err(AppError(
@@ -1265,8 +1625,7 @@ async fn handle_embed_batch(
 
     // Model ID routing
     if let Some(model_id) = &req.model_id {
-        let result =
-            call_model(&state, model_id, TextInput::Batch(req.texts.clone())).await?;
+        let result = call_model(&state, model_id, TextInput::Batch(req.texts.clone())).await?;
         let embeddings = result
             .get("embeddings")
             .and_then(|v| v.as_array())
@@ -1279,7 +1638,8 @@ async fn handle_embed_batch(
             "batch_size": req.texts.len(),
             "usage": result.get("usage").unwrap_or(&json!({})),
             "model": result.get("model").unwrap_or(&json!({})),
-        })).into_response());
+        }))
+        .into_response());
     }
 
     Err(AppError(
@@ -1316,7 +1676,7 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let mut backends = json!({});
     for (name, url) in state.native_urls.iter() {
         let health = state
-            .http
+            .native_http
             .get(format!("{url}/health"))
             .timeout(Duration::from_secs(3))
             .send()
@@ -1357,8 +1717,12 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
 // Admin — Model Registry
 // ============================================================================
 
-async fn list_registry_models(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+async fn list_registry_models(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    load_models_from_cosmos(&state)
+        .await
+        .map_err(registry_unavailable)?;
     let mut models = Vec::new();
 
     // Native models from K8s — only deployments with omnivec/role=model label
@@ -1366,7 +1730,9 @@ async fn list_registry_models(State(state): State<AppState>) -> Result<impl Into
         let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
             kube::Api::namespaced(k8s.clone(), &state.namespace);
         let lp = kube::api::ListParams::default().labels("omnivec/role=model");
-        let list = api.list(&lp).await
+        let list = api
+            .list(&lp)
+            .await
             .map_err(|e| registry_unavailable(format!("Native model discovery failed: {e}")))?;
         {
             for dep in list.items {
@@ -1384,7 +1750,9 @@ async fn list_registry_models(State(state): State<AppState>) -> Result<impl Into
                     .and_then(|s| s.template.spec.as_ref())
                     .and_then(|ps| ps.containers.first());
 
-                let image = container.map(|c| c.image.clone().unwrap_or_default()).unwrap_or_default();
+                let image = container
+                    .map(|c| c.image.clone().unwrap_or_default())
+                    .unwrap_or_default();
                 let resources = container.and_then(|c| c.resources.as_ref());
                 let gpu = resources
                     .and_then(|r| r.requests.as_ref())
@@ -1402,6 +1770,7 @@ async fn list_registry_models(State(state): State<AppState>) -> Result<impl Into
                 } else {
                     "text"
                 };
+                let limits = native_model_limits(&name);
 
                 models.push(json!({
                     "id": format!("mdl-native-{name}"),
@@ -1414,6 +1783,9 @@ async fn list_registry_models(State(state): State<AppState>) -> Result<impl Into
                     "image": image,
                     "gpu": gpu,
                     "memory": memory,
+                    "max_batch_size": limits.0,
+                    "context_window_tokens": limits.1,
+                    "max_batch_tokens": limits.2,
                 }));
             }
         }
@@ -1431,6 +1803,9 @@ async fn list_registry_models(State(state): State<AppState>) -> Result<impl Into
             "deployment": cfg["deployment"].as_str().unwrap_or(""),
             "embedding_dim": cfg["embedding_dim"].as_u64().unwrap_or(0),
             "api_version": cfg["api_version"].as_str().unwrap_or(""),
+            "max_batch_size": cfg["max_batch_size"].as_u64().unwrap_or(default_model_max_batch_size().into()),
+            "context_window_tokens": cfg["context_window_tokens"].as_u64().unwrap_or(default_model_context_window().into()),
+            "max_batch_tokens": cfg["max_batch_tokens"].as_u64().unwrap_or(default_model_max_batch_tokens().into()),
             "status": "available",
         }));
     }
@@ -1442,6 +1817,13 @@ async fn register_model(
     State(state): State<AppState>,
     Json(req): Json<RegisterModelRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if req.max_batch_size.is_some_and(|value| !(1..=4096).contains(&value))
+        || req.context_window_tokens.is_some_and(|value| !(1..=2_000_000).contains(&value))
+        || req.max_batch_tokens.is_some_and(|value| !(1..=2_000_000).contains(&value))
+    {
+        return Err(AppError(StatusCode::BAD_REQUEST,
+            "Model request limits are outside supported ranges".into()));
+    }
     let model_id = req.id.unwrap_or_else(|| {
         let hash = format!("{:x}", md5_hash(&req.name));
         format!("mdl-ext-{}", &hash[..8])
@@ -1453,20 +1835,33 @@ async fn register_model(
             &state,
             "SELECT * FROM c WHERE c.doc_type = @type AND c.id = @id",
             &[("@type", "docgrok_model"), ("@id", &model_id)],
-        ).await.map_err(registry_unavailable)?;
-        if docs.len() > 1 || docs.first().is_some_and(|doc|
-            doc["id"].as_str() != Some(model_id.as_str()) || doc["doc_type"] != "docgrok_model")
+        )
+        .await
+        .map_err(registry_unavailable)?;
+        if docs.len() > 1
+            || docs.first().is_some_and(|doc| {
+                doc["id"].as_str() != Some(model_id.as_str()) || doc["doc_type"] != "docgrok_model"
+            })
         {
-            return Err(registry_unavailable("Invalid model registry lookup response".into()));
+            return Err(registry_unavailable(
+                "Invalid model registry lookup response".into(),
+            ));
         }
         docs.pop().unwrap_or_else(|| json!({}))
     } else {
-        state.registry.get(&model_id).map(|entry| entry.value().clone())
+        state
+            .registry
+            .get(&model_id)
+            .map(|entry| entry.value().clone())
             .unwrap_or_else(|| json!({}))
     };
     let write_mode = if state.cosmos.is_some() && cfg.get("id").is_some() {
-        RegistryWrite::Replace(cfg["_etag"].as_str()
-            .ok_or_else(|| registry_unavailable("Stored model is missing its ETag".into()))?.to_owned())
+        RegistryWrite::Replace(
+            cfg["_etag"]
+                .as_str()
+                .ok_or_else(|| registry_unavailable("Stored model is missing its ETag".into()))?
+                .to_owned(),
+        )
     } else {
         RegistryWrite::Create
     };
@@ -1479,8 +1874,12 @@ async fn register_model(
         "deployment": if req.deployment.is_empty() { req.name.clone() } else { req.deployment },
         "api_version": if req.api_version.is_empty() { "2024-06-01".to_string() } else { req.api_version },
         "embedding_dim": req.embedding_dim,
+        "max_batch_size": req.max_batch_size.map(u64::from).or_else(|| cfg["max_batch_size"].as_u64()).unwrap_or(default_model_max_batch_size().into()),
+        "context_window_tokens": req.context_window_tokens.map(u64::from).or_else(|| cfg["context_window_tokens"].as_u64()).unwrap_or(default_model_context_window().into()),
+        "max_batch_tokens": req.max_batch_tokens.map(u64::from).or_else(|| cfg["max_batch_tokens"].as_u64()).unwrap_or(default_model_max_batch_tokens().into()),
     });
-    let fields = cfg.as_object_mut()
+    let fields = cfg
+        .as_object_mut()
         .ok_or_else(|| registry_unavailable("Invalid stored model document".into()))?;
     fields.extend(updates.as_object().unwrap().clone());
     // Empty/omitted keys are non-credential edits, not credential deletion.
@@ -1497,7 +1896,9 @@ async fn register_model(
     // Keep lookup/merge/persist/cache under one lock without recursively calling
     // the locking load/save helpers. Never publish an unpersisted cache update.
     if state.cosmos.is_some() {
-        cosmos_write(&state, &cfg, write_mode).await.map_err(registry_unavailable)?;
+        cosmos_write(&state, &cfg, write_mode)
+            .await
+            .map_err(registry_unavailable)?;
     }
     state.registry.insert(model_id.clone(), cfg);
 
@@ -1514,7 +1915,9 @@ async fn get_registry_model(
 ) -> Result<impl IntoResponse, AppError> {
     // Check external registry
     if !state.registry.contains_key(&model_id) && !model_id.starts_with("mdl-native-") {
-        load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        load_models_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
     if let Some(entry) = state.registry.get(&model_id) {
         return Ok(Json(entry.value().clone()));
@@ -1527,13 +1930,18 @@ async fn get_registry_model(
             let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
                 kube::Api::namespaced(k8s.clone(), &state.namespace);
             if let Ok(dep) = api.get(name).await {
-                let replicas = dep.spec.as_ref().map(|s| s.replicas.unwrap_or(0)).unwrap_or(0);
+                let replicas = dep
+                    .spec
+                    .as_ref()
+                    .map(|s| s.replicas.unwrap_or(0))
+                    .unwrap_or(0);
                 let ready = dep
                     .status
                     .as_ref()
                     .and_then(|s| s.ready_replicas)
                     .unwrap_or(0);
                 let status = if ready > 0 { "running" } else { "stopped" };
+                let limits = native_model_limits(name);
                 return Ok(Json(json!({
                     "id": model_id,
                     "name": name,
@@ -1541,6 +1949,9 @@ async fn get_registry_model(
                     "status": status,
                     "replicas": replicas,
                     "ready_replicas": ready,
+                    "max_batch_size": limits.0,
+                    "context_window_tokens": limits.1,
+                    "max_batch_tokens": limits.2,
                 })));
             }
         }
@@ -1556,7 +1967,9 @@ async fn delete_registry_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    load_models_from_cosmos(&state)
+        .await
+        .map_err(registry_unavailable)?;
     remove_registry_document(&state, &state.registry, &model_id, "docgrok_model").await?;
 
     info!("Deleted model: {model_id}");
@@ -1575,23 +1988,37 @@ async fn healthcheck_model(
     Path(model_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.registry.contains_key(&model_id) {
-        load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        load_models_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
     let cfg = state
         .registry
         .get(&model_id)
-        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Model '{model_id}' not found")))?
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::NOT_FOUND,
+                format!("Model '{model_id}' not found"),
+            )
+        })?
         .value()
         .clone();
 
     let model_type = cfg["type"].as_str().unwrap_or("").to_string();
-    let endpoint = cfg["endpoint"].as_str().unwrap_or("").trim_end_matches('/').to_string();
+    let endpoint = cfg["endpoint"]
+        .as_str()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_string();
     let deployment = cfg["deployment"]
         .as_str()
         .or_else(|| cfg["name"].as_str())
         .unwrap_or("")
         .to_string();
-    let api_version = cfg["api_version"].as_str().unwrap_or("2024-06-01").to_string();
+    let api_version = cfg["api_version"]
+        .as_str()
+        .unwrap_or("2024-06-01")
+        .to_string();
     let api_key = cfg["api_key"].as_str().unwrap_or("").to_string();
 
     if endpoint.is_empty() {
@@ -1660,12 +2087,19 @@ async fn chat_via_model(
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.registry.contains_key(&model_id) {
-        load_models_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        load_models_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
     let cfg = state
         .registry
         .get(&model_id)
-        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Model '{model_id}' not found")))?
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::NOT_FOUND,
+                format!("Model '{model_id}' not found"),
+            )
+        })?
         .value()
         .clone();
 
@@ -1681,14 +2115,13 @@ async fn chat_via_model(
         .as_str()
         .or_else(|| cfg["name"].as_str())
         .unwrap_or("");
-    let api_version = cfg["api_version"]
-        .as_str()
-        .unwrap_or("2024-08-01-preview");
+    let api_version = cfg["api_version"].as_str().unwrap_or("2024-08-01-preview");
     let api_key = cfg["api_key"].as_str().unwrap_or("");
 
-    let messages = body.get("messages").cloned().ok_or_else(|| {
-        AppError(StatusCode::BAD_REQUEST, "'messages' is required".into())
-    })?;
+    let messages = body
+        .get("messages")
+        .cloned()
+        .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "'messages' is required".into()))?;
     let mut payload = json!({
         "messages": messages,
         "temperature": body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.1),
@@ -1719,10 +2152,7 @@ async fn chat_via_model(
                 format!("Failed to get AOAI token: {e}"),
             )
         })?;
-        headers.insert(
-            "Authorization",
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        headers.insert("Authorization", format!("Bearer {token}").parse().unwrap());
     }
 
     let resp = state
@@ -1793,7 +2223,12 @@ async fn scale_model(
         &kube::api::Patch::Merge(&patch),
     )
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Scale failed: {e}")))?;
+    .map_err(|e| {
+        AppError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Scale failed: {e}"),
+        )
+    })?;
 
     info!("Scaled {name} to {} replicas", req.replicas);
     Ok(Json(json!({"name": name, "replicas": req.replicas})))
@@ -1813,7 +2248,11 @@ async fn disable_model(
     scale_model_to(state, &name, 0).await
 }
 
-async fn scale_model_to(state: AppState, name: &str, replicas: i32) -> Result<impl IntoResponse, AppError> {
+async fn scale_model_to(
+    state: AppState,
+    name: &str,
+    replicas: i32,
+) -> Result<impl IntoResponse, AppError> {
     let k8s = state
         .k8s
         .as_ref()
@@ -1865,7 +2304,12 @@ async fn restart_model(
         &kube::api::Patch::Merge(&patch),
     )
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Restart failed: {e}")))?;
+    .map_err(|e| {
+        AppError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Restart failed: {e}"),
+        )
+    })?;
 
     info!("Restarted {name}");
     Ok(Json(json!({"name": name, "restarted": true})))
@@ -1920,10 +2364,7 @@ async fn system_info(State(state): State<AppState>) -> impl IntoResponse {
         if let Ok(list) = nodes.list(&Default::default()).await {
             for node in list.items {
                 let name = node.metadata.name.clone().unwrap_or_default();
-                let allocatable = node
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.allocatable.as_ref());
+                let allocatable = node.status.as_ref().and_then(|s| s.allocatable.as_ref());
                 let gpus = allocatable
                     .and_then(|a| a.get("nvidia.com/gpu"))
                     .map(|q| q.0.clone())
@@ -1945,7 +2386,9 @@ async fn system_info(State(state): State<AppState>) -> impl IntoResponse {
 // ============================================================================
 
 async fn list_pipelines(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    load_pipelines_from_cosmos(&state)
+        .await
+        .map_err(registry_unavailable)?;
     let pipelines: Vec<Value> = state.pipelines.iter().map(|e| e.value().clone()).collect();
     Ok(Json(json!({"pipelines": pipelines})))
 }
@@ -1955,13 +2398,20 @@ async fn get_pipeline(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.pipelines.contains_key(&name) {
-        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        load_pipelines_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
     state
         .pipelines
         .get(&name)
         .map(|v| Json(v.value().clone()))
-        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Pipeline '{name}' not found")))
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::NOT_FOUND,
+                format!("Pipeline '{name}' not found"),
+            )
+        })
 }
 
 async fn create_pipeline(
@@ -1970,7 +2420,12 @@ async fn create_pipeline(
 ) -> Result<impl IntoResponse, AppError> {
     let name = req.config["name"]
         .as_str()
-        .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "Pipeline 'name' is required".into()))?
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                "Pipeline 'name' is required".into(),
+            )
+        })?
         .to_string();
 
     // ID is auto-generated as trp-<hash> unless the caller supplies one.
@@ -1992,7 +2447,10 @@ async fn create_pipeline(
 
     save_registry_document(&state, &state.pipelines, &doc).await?;
 
-    Ok((StatusCode::CREATED, Json(json!({"id": pipeline_id, "name": name}))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": pipeline_id, "name": name})),
+    ))
 }
 
 async fn update_pipeline(
@@ -2001,7 +2459,9 @@ async fn update_pipeline(
     Json(req): Json<PipelineRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.pipelines.contains_key(&id) {
-        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        load_pipelines_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
     if !state.pipelines.contains_key(&id) {
         return Err(AppError(
@@ -2023,7 +2483,9 @@ async fn delete_pipeline(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+    load_pipelines_from_cosmos(&state)
+        .await
+        .map_err(registry_unavailable)?;
     remove_registry_document(&state, &state.pipelines, &name, "docgrok_pipeline").await?;
 
     Ok(Json(json!({"deleted": name})))
@@ -2034,10 +2496,20 @@ async fn reset_pipeline(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.pipelines.contains_key(&name) {
-        load_pipelines_from_cosmos(&state).await.map_err(registry_unavailable)?;
+        load_pipelines_from_cosmos(&state)
+            .await
+            .map_err(registry_unavailable)?;
     }
-    let mut doc = state.pipelines.get(&name).map(|entry| entry.value().clone())
-        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Pipeline '{name}' not found")))?;
+    let mut doc = state
+        .pipelines
+        .get(&name)
+        .map(|entry| entry.value().clone())
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::NOT_FOUND,
+                format!("Pipeline '{name}' not found"),
+            )
+        })?;
     doc["reset_at"] = json!(chrono::Utc::now().to_rfc3339());
     save_registry_document(&state, &state.pipelines, &doc).await?;
     Ok(Json(json!({"name": name, "reset": true})))
@@ -2074,7 +2546,11 @@ async fn run_model_health_checks(state: &AppState) {
                 let model_id = format!("mdl-native-{name}");
                 let spec = dep.spec.as_ref();
                 let replicas = spec.map(|s| s.replicas.unwrap_or(0)).unwrap_or(0);
-                let ready = dep.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
+                let ready = dep
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.ready_replicas)
+                    .unwrap_or(0);
 
                 let (status, detail) = if replicas == 0 {
                     ("stopped", format!("Scaled to 0 replicas"))
@@ -2088,48 +2564,66 @@ async fn run_model_health_checks(state: &AppState) {
                 let mut endpoint_check = json!(null);
                 if ready > 0 {
                     if let Some(url) = state.native_urls.get(&name) {
-                        match state.http.get(format!("{url}/health"))
+                        match state
+                            .http
+                            .get(format!("{url}/health"))
                             .timeout(Duration::from_secs(10))
-                            .send().await
+                            .send()
+                            .await
                         {
                             Ok(r) if r.status().is_success() => {
-                                endpoint_check = json!({"status": "pass", "detail": "Health endpoint OK"});
+                                endpoint_check =
+                                    json!({"status": "pass", "detail": "Health endpoint OK"});
                             }
                             Ok(r) => {
                                 endpoint_check = json!({"status": "fail", "detail": format!("HTTP {}", r.status())});
                             }
                             Err(e) => {
-                                endpoint_check = json!({"status": "fail", "detail": format!("{e}")});
+                                endpoint_check =
+                                    json!({"status": "fail", "detail": format!("{e}")});
                             }
                         }
                     }
                 }
 
-                state.model_health.insert(model_id.clone(), json!({
-                    "id": model_id,
-                    "name": name,
-                    "kind": "native",
-                    "status": status,
-                    "detail": detail,
-                    "replicas": replicas,
-                    "ready_replicas": ready,
-                    "endpoint_check": endpoint_check,
-                    "checked_at": now,
-                }));
+                state.model_health.insert(
+                    model_id.clone(),
+                    json!({
+                        "id": model_id,
+                        "name": name,
+                        "kind": "native",
+                        "status": status,
+                        "detail": detail,
+                        "replicas": replicas,
+                        "ready_replicas": ready,
+                        "endpoint_check": endpoint_check,
+                        "checked_at": now,
+                    }),
+                );
                 checked += 1;
             }
         }
     }
 
     // Never retain DashMap shard guards across remote health-probe awaits.
-    let external_models: Vec<(String, Value)> = state.registry.iter()
-        .map(|item| (item.key().clone(), item.value().clone())).collect();
+    let external_models: Vec<(String, Value)> = state
+        .registry
+        .iter()
+        .map(|item| (item.key().clone(), item.value().clone()))
+        .collect();
     for (model_id, cfg) in external_models {
         let name = cfg["name"].as_str().unwrap_or("").to_string();
         let model_type = cfg["type"].as_str().unwrap_or("").to_string();
         let endpoint = cfg["endpoint"].as_str().unwrap_or("").to_string();
-        let deployment = cfg["deployment"].as_str().or_else(|| cfg["name"].as_str()).unwrap_or("").to_string();
-        let api_version = cfg["api_version"].as_str().unwrap_or("2024-06-01").to_string();
+        let deployment = cfg["deployment"]
+            .as_str()
+            .or_else(|| cfg["name"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_version = cfg["api_version"]
+            .as_str()
+            .unwrap_or("2024-06-01")
+            .to_string();
         let api_key = cfg["api_key"].as_str().unwrap_or("").to_string();
 
         let mut status = "healthy";
@@ -2143,7 +2637,9 @@ async fn run_model_health_checks(state: &AppState) {
                 _ => endpoint.clone(),
             };
 
-            let mut req = state.http.post(&test_url)
+            let mut req = state
+                .http
+                .post(&test_url)
                 .timeout(Duration::from_secs(10))
                 .json(&json!({"input": "health", "model": &deployment}));
 
@@ -2177,17 +2673,20 @@ async fn run_model_health_checks(state: &AppState) {
             }
         }
 
-        state.model_health.insert(model_id.clone(), json!({
-            "id": model_id,
-            "name": name,
-            "kind": "external",
-            "type": model_type,
-            "status": status,
-            "detail": detail,
-            "endpoint": endpoint,
-            "endpoint_check": endpoint_check,
-            "checked_at": now,
-        }));
+        state.model_health.insert(
+            model_id.clone(),
+            json!({
+                "id": model_id,
+                "name": name,
+                "kind": "external",
+                "type": model_type,
+                "status": status,
+                "detail": detail,
+                "endpoint": endpoint,
+                "endpoint_check": endpoint_check,
+                "checked_at": now,
+            }),
+        );
         checked += 1;
     }
 
@@ -2211,11 +2710,18 @@ async fn controller_health(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn get_model_health(State(state): State<AppState>) -> impl IntoResponse {
-    let results: Vec<Value> = state.model_health.iter().map(|e| e.value().clone()).collect();
+    let results: Vec<Value> = state
+        .model_health
+        .iter()
+        .map(|e| e.value().clone())
+        .collect();
     let last = state.last_health_check.read().await;
     let age_secs = last.map(|t| t.elapsed().as_secs());
     let healthy = results.iter().filter(|r| r["status"] == "healthy").count();
-    let unhealthy = results.iter().filter(|r| r["status"] == "unhealthy").count();
+    let unhealthy = results
+        .iter()
+        .filter(|r| r["status"] == "unhealthy")
+        .count();
 
     Json(json!({
         "models": results,
@@ -2252,9 +2758,11 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
                 let role = labels.get("omnivec/role").cloned().unwrap_or_default();
 
                 // Include DocGrok router, controller, pipeline-worker, and model deployments
-                let is_docgrok = app_label == "docgrok" || app_label == "docgrok-controller"
+                let is_docgrok = app_label == "docgrok"
+                    || app_label == "docgrok-controller"
                     || app_label == "docgrok-pipeline-worker"
-                    || component == "orchestrator" || component == "controller"
+                    || component == "orchestrator"
+                    || component == "controller"
                     || component == "pipeline-worker"
                     || role == "model";
                 if !is_docgrok {
@@ -2263,13 +2771,23 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
 
                 let spec = dep.spec.as_ref();
                 let replicas = spec.map(|s| s.replicas.unwrap_or(0)).unwrap_or(0);
-                let ready = dep.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
-                let available = dep.status.as_ref().and_then(|s| s.available_replicas).unwrap_or(0);
+                let ready = dep
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.ready_replicas)
+                    .unwrap_or(0);
+                let available = dep
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.available_replicas)
+                    .unwrap_or(0);
 
                 let container = spec
                     .and_then(|s| s.template.spec.as_ref())
                     .and_then(|ps| ps.containers.first());
-                let image = container.map(|c| c.image.clone().unwrap_or_default()).unwrap_or_default();
+                let image = container
+                    .map(|c| c.image.clone().unwrap_or_default())
+                    .unwrap_or_default();
 
                 let status = if replicas == 0 {
                     "stopped"
@@ -2279,30 +2797,49 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
                     "starting"
                 };
 
-                let kind = if role == "model" { "model" }
-                    else if component == "controller" || app_label == "docgrok-controller" { "controller" }
-                    else if component == "pipeline-worker" || app_label == "docgrok-pipeline-worker" { "pipeline-worker" }
-                    else { "router" };
+                let kind = if role == "model" {
+                    "model"
+                } else if component == "controller" || app_label == "docgrok-controller" {
+                    "controller"
+                } else if component == "pipeline-worker" || app_label == "docgrok-pipeline-worker" {
+                    "pipeline-worker"
+                } else {
+                    "router"
+                };
 
                 // Query pods for this deployment
                 let mut pods = Vec::new();
                 let pod_selector = format!("app={}", app_label);
-                if let Ok(pod_list) = pods_api.list(&kube::api::ListParams::default().labels(&pod_selector)).await {
+                if let Ok(pod_list) = pods_api
+                    .list(&kube::api::ListParams::default().labels(&pod_selector))
+                    .await
+                {
                     for pod in pod_list.items {
                         let pod_name = pod.metadata.name.clone().unwrap_or_default();
-                        let pod_status = pod.status.as_ref()
+                        let pod_status = pod
+                            .status
+                            .as_ref()
                             .and_then(|s| s.phase.clone())
                             .unwrap_or_else(|| "Unknown".to_string());
-                        let restarts: i32 = pod.status.as_ref()
+                        let restarts: i32 = pod
+                            .status
+                            .as_ref()
                             .and_then(|s| s.container_statuses.as_ref())
                             .map(|cs| cs.iter().map(|c| c.restart_count).sum())
                             .unwrap_or(0);
-                        let age = pod.metadata.creation_timestamp.as_ref()
+                        let age = pod
+                            .metadata
+                            .creation_timestamp
+                            .as_ref()
                             .map(|ts| {
                                 let elapsed = chrono::Utc::now() - ts.0;
-                                if elapsed.num_days() > 0 { format!("{}d", elapsed.num_days()) }
-                                else if elapsed.num_hours() > 0 { format!("{}h", elapsed.num_hours()) }
-                                else { format!("{}m", elapsed.num_minutes()) }
+                                if elapsed.num_days() > 0 {
+                                    format!("{}d", elapsed.num_days())
+                                } else if elapsed.num_hours() > 0 {
+                                    format!("{}h", elapsed.num_hours())
+                                } else {
+                                    format!("{}m", elapsed.num_minutes())
+                                }
                             })
                             .unwrap_or_else(|| "-".to_string());
                         pods.push(json!({
@@ -2335,18 +2872,30 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn proxy_model_health(State(state): State<AppState>) -> impl IntoResponse {
     let url = format!("{}/admin/health/models", state.controller_url);
-    match state.http.get(&url).timeout(Duration::from_secs(5)).send().await {
+    match state
+        .http
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             let body: Value = resp.json().await.unwrap_or(json!({"error": "parse error"}));
             (StatusCode::OK, Json(body)).into_response()
         }
         Ok(resp) => {
             let status = resp.status();
-            (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("Controller returned HTTP {status}")}))).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("Controller returned HTTP {status}")})),
+            )
+                .into_response()
         }
-        Err(e) => {
-            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": format!("Controller unreachable: {e}")}))).into_response()
-        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": format!("Controller unreachable: {e}")})),
+        )
+            .into_response(),
     }
 }
 
@@ -2363,7 +2912,6 @@ fn md5_hash(input: &str) -> u64 {
     }
     h
 }
-
 
 // ============================================================================
 // Pipeline-worker transparent proxy
@@ -2437,37 +2985,49 @@ mod registry_tests {
     }
 
     fn registration_store(
-        stored: Arc<Mutex<Value>>, fail_read: Arc<AtomicBool>,
-        fail_write: Arc<AtomicBool>, writes: Arc<AtomicUsize>,
+        stored: Arc<Mutex<Value>>,
+        fail_read: Arc<AtomicBool>,
+        fail_write: Arc<AtomicBool>,
+        writes: Arc<AtomicUsize>,
     ) -> Router {
         let handler = move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
-                let (stored, fail_read, fail_write, writes) =
-                    (stored.clone(), fail_read.clone(), fail_write.clone(), writes.clone());
-                async move {
-                    if headers.contains_key("x-ms-documentdb-isquery") {
-                        if fail_read.load(Ordering::SeqCst) {
-                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                        }
-                        assert_eq!(body["parameters"], json!([
+            let (stored, fail_read, fail_write, writes) = (
+                stored.clone(),
+                fail_read.clone(),
+                fail_write.clone(),
+                writes.clone(),
+            );
+            async move {
+                if headers.contains_key("x-ms-documentdb-isquery") {
+                    if fail_read.load(Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    assert_eq!(
+                        body["parameters"],
+                        json!([
                             {"name":"@type", "value":"docgrok_model"},
                             {"name":"@id", "value":"mdl-ext-existing"}
-                        ]));
-                        Json(json!({"Documents":[stored.lock().await.clone()]})).into_response()
-                    } else {
-                        writes.fetch_add(1, Ordering::SeqCst);
-                        assert!(!headers.contains_key("x-ms-documentdb-is-upsert"));
-                        assert_eq!(headers.get("if-match").unwrap(), "version-1");
-                        if fail_write.load(Ordering::SeqCst) {
-                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                        }
-                        *stored.lock().await = body;
-                        StatusCode::CREATED.into_response()
+                        ])
+                    );
+                    Json(json!({"Documents":[stored.lock().await.clone()]})).into_response()
+                } else {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    assert!(!headers.contains_key("x-ms-documentdb-is-upsert"));
+                    assert_eq!(headers.get("if-match").unwrap(), "version-1");
+                    if fail_write.load(Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
                     }
+                    *stored.lock().await = body;
+                    StatusCode::CREATED.into_response()
                 }
-            };
+            }
+        };
         Router::new()
             .route("/dbs/test/colls/metadata/docs", post(handler.clone()))
-            .route("/dbs/test/colls/metadata/docs/mdl-ext-existing", put(handler))
+            .route(
+                "/dbs/test/colls/metadata/docs/mdl-ext-existing",
+                put(handler),
+            )
     }
 
     #[tokio::test]
@@ -2476,30 +3036,56 @@ mod registry_tests {
             "id":"mdl-ext-existing", "doc_type":"docgrok_model", "name":"old", "_etag":"version-1",
             "api_key":"persisted-test-key", "model_category":"embedding",
             "auth_type":"api_key", "client_id":"existing-client",
-            "api_key_envelope":{"version":1, "ciphertext":"test-envelope"}, "custom":{"keep":true}
+            "api_key_envelope":{"version":1, "ciphertext":"test-envelope"}, "custom":{"keep":true},
+            "max_batch_size":16, "context_window_tokens":512, "max_batch_tokens":1000
         });
         let stored = Arc::new(Mutex::new(original.clone()));
         let writes = Arc::new(AtomicUsize::new(0));
-        let app = registration_store(stored.clone(), Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)), writes.clone());
+        let app = registration_store(
+            stored.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            writes.clone(),
+        );
         let (state, server) = test_state(app).await;
         for key in [None, Some(""), Some("rotated-test-key")] {
             // Even a populated but stale cache must not be used as the merge base.
-            state.registry.insert("mdl-ext-existing".into(), json!({
-                "id":"mdl-ext-existing", "api_key":"stale-test-key", "model_category":"stale"
-            }));
-            let response = register_model(State(state.clone()), Json(registration_request(key))).await
-                .unwrap_or_else(|_| panic!("Model edit failed")).into_response();
+            state.registry.insert(
+                "mdl-ext-existing".into(),
+                json!({
+                    "id":"mdl-ext-existing", "api_key":"stale-test-key", "model_category":"stale"
+                }),
+            );
+            let response = register_model(State(state.clone()), Json(registration_request(key)))
+                .await
+                .unwrap_or_else(|_| panic!("Model edit failed"))
+                .into_response();
             assert_eq!(response.status(), StatusCode::CREATED);
             let doc = stored.lock().await.clone();
             assert_eq!(doc["id"], "mdl-ext-existing");
             assert_eq!(doc["name"], "edited name");
             assert_eq!(doc["endpoint"], "https://edited.invalid");
-            assert_eq!(doc["api_key"], key.filter(|key| !key.is_empty()).unwrap_or("persisted-test-key"));
-            for field in ["model_category", "api_key_envelope", "custom", "auth_type", "client_id"] {
+            assert_eq!(
+                doc["api_key"],
+                key.filter(|key| !key.is_empty())
+                    .unwrap_or("persisted-test-key")
+            );
+            for field in [
+                "model_category",
+                "api_key_envelope",
+                "custom",
+                "auth_type",
+                "client_id",
+                "max_batch_size",
+                "context_window_tokens",
+                "max_batch_tokens",
+            ] {
                 assert_eq!(doc[field], original[field]);
             }
-            assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &doc);
+            assert_eq!(
+                state.registry.get("mdl-ext-existing").unwrap().value(),
+                &doc
+            );
         }
         assert_eq!(writes.load(Ordering::SeqCst), 3);
         server.abort();
@@ -2511,8 +3097,12 @@ mod registry_tests {
             "id":"mdl-ext-existing", "doc_type":"docgrok_model", "_etag":"version-1",
             "api_key":"persisted-test-key", "auth_type":"api_key", "client_id":"old-client"
         })));
-        let app = registration_store(stored.clone(), Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+        let app = registration_store(
+            stored.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+        );
         let (state, server) = test_state(app).await;
         for update in [
             json!({"auth_type":"managed_identity", "client_id":"new-client"}),
@@ -2523,14 +3113,36 @@ mod registry_tests {
                 "id":"mdl-ext-existing", "name":"edited", "type":"azure-openai",
                 "endpoint":"https://edited.invalid", "api_key":""
             });
-            request.as_object_mut().unwrap().extend(update.as_object().unwrap().clone());
-            register_model(State(state.clone()), Json(serde_json::from_value(request).unwrap())).await
-                .unwrap_or_else(|_| panic!("Auth metadata edit failed"));
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(update.as_object().unwrap().clone());
+            register_model(
+                State(state.clone()),
+                Json(serde_json::from_value(request).unwrap()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("Auth metadata edit failed"));
             let doc = stored.lock().await.clone();
-            assert_eq!(doc["auth_type"], update.get("auth_type").cloned().unwrap_or(json!("managed_identity")));
-            assert_eq!(doc["client_id"], update.get("client_id").cloned().unwrap_or(json!("new-client")));
+            assert_eq!(
+                doc["auth_type"],
+                update
+                    .get("auth_type")
+                    .cloned()
+                    .unwrap_or(json!("managed_identity"))
+            );
+            assert_eq!(
+                doc["client_id"],
+                update
+                    .get("client_id")
+                    .cloned()
+                    .unwrap_or(json!("new-client"))
+            );
             assert_eq!(doc["api_key"], "persisted-test-key");
-            assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &doc);
+            assert_eq!(
+                state.registry.get("mdl-ext-existing").unwrap().value(),
+                &doc
+            );
         }
         server.abort();
     }
@@ -2545,19 +3157,38 @@ mod registry_tests {
         let fail_read = Arc::new(AtomicBool::new(true));
         let fail_write = Arc::new(AtomicBool::new(false));
         let writes = Arc::new(AtomicUsize::new(0));
-        let app = registration_store(stored.clone(), fail_read.clone(), fail_write.clone(), writes.clone());
+        let app = registration_store(
+            stored.clone(),
+            fail_read.clone(),
+            fail_write.clone(),
+            writes.clone(),
+        );
         let (state, server) = test_state(app).await;
-        let cached = json!({"id":"mdl-ext-existing", "api_key":"last-good-cache-key", "name":"cached"});
-        state.registry.insert("mdl-ext-existing".into(), cached.clone());
+        let cached =
+            json!({"id":"mdl-ext-existing", "api_key":"last-good-cache-key", "name":"cached"});
+        state
+            .registry
+            .insert("mdl-ext-existing".into(), cached.clone());
         for lookup_failure in [true, false] {
             fail_read.store(lookup_failure, Ordering::SeqCst);
             fail_write.store(!lookup_failure, Ordering::SeqCst);
-            let failure = register_model(State(state.clone()), Json(registration_request(Some("replacement"))))
-                .await.err().unwrap();
+            let failure = register_model(
+                State(state.clone()),
+                Json(registration_request(Some("replacement"))),
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(failure.0, StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(writes.load(Ordering::SeqCst), if lookup_failure { 0 } else { 1 });
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                if lookup_failure { 0 } else { 1 }
+            );
             assert_eq!(*stored.lock().await, original);
-            assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &cached);
+            assert_eq!(
+                state.registry.get("mdl-ext-existing").unwrap().value(),
+                &cached
+            );
         }
         server.abort();
     }
@@ -2565,33 +3196,45 @@ mod registry_tests {
     #[tokio::test]
     async fn concurrent_model_edit_cannot_overwrite_a_newer_credential() {
         let app = Router::new()
-            .route("/dbs/test/colls/metadata/docs", post(|| async {
-                Json(json!({"Documents":[{
-                    "id":"mdl-ext-existing", "doc_type":"docgrok_model",
-                    "_etag":"old-version", "api_key":"old-test-key"
-                }]}))
-            }))
-            .route("/dbs/test/colls/metadata/docs/mdl-ext-existing", put(
-                |headers: axum::http::HeaderMap| async move {
+            .route(
+                "/dbs/test/colls/metadata/docs",
+                post(|| async {
+                    Json(json!({"Documents":[{
+                        "id":"mdl-ext-existing", "doc_type":"docgrok_model",
+                        "_etag":"old-version", "api_key":"old-test-key"
+                    }]}))
+                }),
+            )
+            .route(
+                "/dbs/test/colls/metadata/docs/mdl-ext-existing",
+                put(|headers: axum::http::HeaderMap| async move {
                     assert_eq!(headers.get("if-match").unwrap(), "old-version");
                     // Another replica rotated the credential after the lookup.
                     StatusCode::PRECONDITION_FAILED
-                },
-            ));
+                }),
+            );
         let (state, server) = test_state(app).await;
         let cached = json!({"id":"mdl-ext-existing", "api_key":"last-good-test-key"});
-        state.registry.insert("mdl-ext-existing".into(), cached.clone());
+        state
+            .registry
+            .insert("mdl-ext-existing".into(), cached.clone());
         let error = register_model(State(state.clone()), Json(registration_request(None)))
-            .await.err().unwrap();
+            .await
+            .err()
+            .unwrap();
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(state.registry.get("mdl-ext-existing").unwrap().value(), &cached);
+        assert_eq!(
+            state.registry.get("mdl-ext-existing").unwrap().value(),
+            &cached
+        );
         server.abort();
     }
 
     #[tokio::test]
     async fn new_model_registration_does_not_upsert_over_a_concurrent_creator() {
-        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(
-            |headers: axum::http::HeaderMap| async move {
+        let app = Router::new().route(
+            "/dbs/test/colls/metadata/docs",
+            post(|headers: axum::http::HeaderMap| async move {
                 if headers.contains_key("x-ms-documentdb-isquery") {
                     Json(json!({"Documents":[]})).into_response()
                 } else {
@@ -2599,11 +3242,16 @@ mod registry_tests {
                     assert!(!headers.contains_key("if-match"));
                     StatusCode::CONFLICT.into_response()
                 }
-            },
-        ));
+            }),
+        );
         let (state, server) = test_state(app).await;
-        let error = register_model(State(state.clone()), Json(registration_request(Some("test-key"))))
-            .await.err().unwrap();
+        let error = register_model(
+            State(state.clone()),
+            Json(registration_request(Some("test-key"))),
+        )
+        .await
+        .err()
+        .unwrap();
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(state.registry.is_empty());
         server.abort();
@@ -2613,18 +3261,27 @@ mod registry_tests {
     async fn standalone_model_registration_keeps_stable_ids_and_preserves_credentials() {
         let (mut state, server) = test_state(Router::new()).await;
         state.cosmos = None;
-        for key in [Some("initial-test-key"), None, Some(""), Some("rotated-test-key")] {
+        for key in [
+            Some("initial-test-key"),
+            None,
+            Some(""),
+            Some("rotated-test-key"),
+        ] {
             let mut request = registration_request(key);
             request.id = None;
-            register_model(State(state.clone()), Json(request)).await
+            register_model(State(state.clone()), Json(request))
+                .await
                 .unwrap_or_else(|_| panic!("Standalone registration failed"));
             assert_eq!(state.registry.len(), 1);
             let mut entry = state.registry.iter_mut().next().unwrap();
-            assert_eq!(entry["api_key"], if key == Some("rotated-test-key") {
-                "rotated-test-key"
-            } else {
-                "initial-test-key"
-            });
+            assert_eq!(
+                entry["api_key"],
+                if key == Some("rotated-test-key") {
+                    "rotated-test-key"
+                } else {
+                    "initial-test-key"
+                }
+            );
             if key != Some("initial-test-key") {
                 assert_eq!(entry["custom"], "retained");
             }
@@ -2634,48 +3291,158 @@ mod registry_tests {
     }
 
     async fn test_state(app: Router) -> (AppState, tokio::task::JoinHandle<()>) {
-        let cache = TOKEN_CACHE.get_or_init(|| RwLock::new((String::new(), std::time::Instant::now())));
+        let cache =
+            TOKEN_CACHE.get_or_init(|| RwLock::new((String::new(), std::time::Instant::now())));
         *cache.write().await = ("local-test-token".into(), std::time::Instant::now());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (AppState {
-            registry: Arc::new(DashMap::new()),
-            pipelines: Arc::new(DashMap::new()),
-            native_urls: Arc::new(HashMap::new()),
-            http: Client::builder().timeout(Duration::from_secs(5)).build().unwrap(),
-            k8s: None,
-            namespace: "test".into(),
-            cosmos: Some(CosmosConfig {
-                endpoint: endpoint.clone(), database: "test".into(), container: "metadata".into(), api_key: String::new(),
-            }),
-            mock_1536_single: Arc::new(String::new()),
-            mock_128_single: Arc::new(String::new()),
-            controller_url: endpoint.clone(),
-            pipeline_worker_url: endpoint,
-            model_health: Arc::new(DashMap::new()),
-            last_health_check: Arc::new(RwLock::new(None)),
-            metadata_lock: Arc::new(Mutex::new(())),
-        }, server)
+        (
+            AppState {
+                registry: Arc::new(DashMap::new()),
+                pipelines: Arc::new(DashMap::new()),
+                native_urls: Arc::new(HashMap::new()),
+                http: Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+                native_http: Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+                native_endpoint_counter: Arc::new(AtomicUsize::new(0)),
+                native_max_attempts: 3,
+                k8s: None,
+                namespace: "test".into(),
+                cosmos: Some(CosmosConfig {
+                    endpoint: endpoint.clone(),
+                    database: "test".into(),
+                    container: "metadata".into(),
+                    api_key: String::new(),
+                }),
+                mock_1536_single: Arc::new(String::new()),
+                mock_128_single: Arc::new(String::new()),
+                controller_url: endpoint.clone(),
+                pipeline_worker_url: endpoint,
+                model_health: Arc::new(DashMap::new()),
+                last_health_check: Arc::new(RwLock::new(None)),
+                metadata_lock: Arc::new(Mutex::new(())),
+            },
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn native_context_errors_preserve_status_without_compatibility_fallback() {
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let fallback = fallback_calls.clone();
+        let app = Router::new()
+            .route("/v1/embeddings", post(|| async {
+                (StatusCode::BAD_REQUEST, Json(json!({
+                    "error": {"code": "context_length_exceeded", "message": "maximum context length is 10 tokens"}
+                })))
+            }))
+            .route("/embed/batch", post(move || {
+                let fallback = fallback.clone();
+                async move {
+                    fallback.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NOT_FOUND
+                }
+            }));
+        let (mut state, server) = test_state(app).await;
+        state.native_urls = Arc::new(HashMap::from([
+            ("bge-small".into(), state.controller_url.clone()),
+        ]));
+        let result = call_model(&state, "mdl-native-bge-small", TextInput::Batch(vec!["hello".into()])).await;
+        let error = result.err().expect("Expected preserved context error");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("context_length_exceeded"));
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn native_outage_has_bounded_attempts_without_singleton_fanout() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = Router::new().fallback(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+        let (mut state, server) = test_state(app).await;
+        state.native_urls = Arc::new(HashMap::from([
+            ("bge-small".into(), state.controller_url.clone()),
+        ]));
+        let result = call_model(&state, "mdl-native-bge-small",
+            TextInput::Batch(vec!["one".into(), "two".into()])).await;
+        assert_eq!(result.err().expect("Expected unavailable model").0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(Ordering::SeqCst), state.native_max_attempts);
+        server.abort();
     }
 
     #[tokio::test]
     async fn failed_registry_writes_and_deletes_do_not_change_memory_or_report_success() {
         let app = Router::new()
-            .route("/dbs/test/colls/metadata/docs", post(|| async { StatusCode::SERVICE_UNAVAILABLE }))
-            .route("/dbs/test/colls/metadata/docs/{id}", delete(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+            .route(
+                "/dbs/test/colls/metadata/docs",
+                post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route(
+                "/dbs/test/colls/metadata/docs/{id}",
+                delete(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            );
         let (state, server) = test_state(app).await;
-        let original = json!({"id":"trp-existing", "doc_type":"docgrok_pipeline", "model_id":"mdl-ext-old"});
-        state.pipelines.insert("trp-existing".into(), original.clone());
-        let changed = json!({"id":"trp-existing", "doc_type":"docgrok_pipeline", "model_id":"mdl-ext-new"});
-        assert_eq!(save_registry_document(&state, &state.pipelines, &changed).await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(state.pipelines.get("trp-existing").unwrap().value(), &original);
-        assert_eq!(remove_registry_document(&state, &state.pipelines, "trp-existing", "docgrok_pipeline").await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        let original =
+            json!({"id":"trp-existing", "doc_type":"docgrok_pipeline", "model_id":"mdl-ext-old"});
+        state
+            .pipelines
+            .insert("trp-existing".into(), original.clone());
+        let changed =
+            json!({"id":"trp-existing", "doc_type":"docgrok_pipeline", "model_id":"mdl-ext-new"});
+        assert_eq!(
+            save_registry_document(&state, &state.pipelines, &changed)
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            state.pipelines.get("trp-existing").unwrap().value(),
+            &original
+        );
+        assert_eq!(
+            remove_registry_document(&state, &state.pipelines, "trp-existing", "docgrok_pipeline")
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert!(state.pipelines.contains_key("trp-existing"));
-        let request: PipelineRequest = serde_json::from_value(json!({"name":"cannot-persist", "model_id":"mdl-ext-new"})).unwrap();
-        assert_eq!(create_pipeline(State(state.clone()), Json(request)).await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        let request: PipelineRequest =
+            serde_json::from_value(json!({"name":"cannot-persist", "model_id":"mdl-ext-new"}))
+                .unwrap();
+        assert_eq!(
+            create_pipeline(State(state.clone()), Json(request))
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(state.pipelines.len(), 1);
-        assert_eq!(list_registry_models(State(state.clone())).await.err().unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            list_registry_models(State(state.clone()))
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         server.abort();
     }
 
@@ -2683,26 +3450,38 @@ mod registry_tests {
     async fn registry_load_reads_every_page_and_retains_last_good_snapshot_on_failure() {
         let fail_second = Arc::new(AtomicBool::new(false));
         let failure = fail_second.clone();
-        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(move |headers: axum::http::HeaderMap| {
-            let failure = failure.clone();
-            async move {
-                if headers.contains_key("x-ms-continuation") {
-                    if failure.load(Ordering::SeqCst) {
-                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        let app = Router::new().route(
+            "/dbs/test/colls/metadata/docs",
+            post(move |headers: axum::http::HeaderMap| {
+                let failure = failure.clone();
+                async move {
+                    if headers.contains_key("x-ms-continuation") {
+                        if failure.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        Json(json!({"Documents":[{"id":"mdl-second","doc_type":"docgrok_model"}]}))
+                            .into_response()
+                    } else {
+                        (
+                            [("x-ms-continuation", "second")],
+                            Json(json!({
+                                "Documents":[{"id":"mdl-first","doc_type":"docgrok_model"}]
+                            })),
+                        )
+                            .into_response()
                     }
-                    Json(json!({"Documents":[{"id":"mdl-second","doc_type":"docgrok_model"}]})).into_response()
-                } else {
-                    ([("x-ms-continuation", "second")], Json(json!({
-                        "Documents":[{"id":"mdl-first","doc_type":"docgrok_model"}]
-                    }))).into_response()
                 }
-            }
-        }));
+            }),
+        );
         let (state, server) = test_state(app).await;
         load_models_from_cosmos(&state).await.unwrap();
-        assert!(state.registry.contains_key("mdl-first") && state.registry.contains_key("mdl-second"));
+        assert!(
+            state.registry.contains_key("mdl-first") && state.registry.contains_key("mdl-second")
+        );
         fail_second.store(true, Ordering::SeqCst);
-        state.registry.insert("mdl-retained".into(), json!({"id":"mdl-retained"}));
+        state
+            .registry
+            .insert("mdl-retained".into(), json!({"id":"mdl-retained"}));
         assert!(load_models_from_cosmos(&state).await.is_err());
         assert_eq!(state.registry.len(), 3);
         server.abort();
@@ -2710,11 +3489,14 @@ mod registry_tests {
 
     #[tokio::test]
     async fn malformed_registry_response_cannot_clear_a_working_cache() {
-        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(|| async {
-            Json(json!({"unexpected":"response"}))
-        }));
+        let app = Router::new().route(
+            "/dbs/test/colls/metadata/docs",
+            post(|| async { Json(json!({"unexpected":"response"})) }),
+        );
         let (state, server) = test_state(app).await;
-        state.registry.insert("mdl-existing".into(), json!({"id":"mdl-existing"}));
+        state
+            .registry
+            .insert("mdl-existing".into(), json!({"id":"mdl-existing"}));
         assert!(load_models_from_cosmos(&state).await.is_err());
         assert!(state.registry.contains_key("mdl-existing"));
         server.abort();
@@ -2722,11 +3504,19 @@ mod registry_tests {
 
     #[tokio::test]
     async fn repeated_continuation_fails_without_losing_cached_models() {
-        let app = Router::new().route("/dbs/test/colls/metadata/docs", post(|| async {
-            ([("x-ms-continuation", "repeated")], Json(json!({"Documents":[]})))
-        }));
+        let app = Router::new().route(
+            "/dbs/test/colls/metadata/docs",
+            post(|| async {
+                (
+                    [("x-ms-continuation", "repeated")],
+                    Json(json!({"Documents":[]})),
+                )
+            }),
+        );
         let (state, server) = test_state(app).await;
-        state.registry.insert("mdl-existing".into(), json!({"id":"mdl-existing"}));
+        state
+            .registry
+            .insert("mdl-existing".into(), json!({"id":"mdl-existing"}));
         assert!(load_models_from_cosmos(&state).await.is_err());
         assert!(state.registry.contains_key("mdl-existing"));
         server.abort();
@@ -2765,27 +3555,76 @@ mod registry_tests {
         let (state, server) = test_state(app).await;
         let model = json!({"id":"mdl-ext-durable","doc_type":"docgrok_model","name":"durable"});
         let pipeline = json!({"id":"trp-durable","doc_type":"docgrok_pipeline","name":"files","model_id":"mdl-ext-durable"});
-        save_registry_document(&state, &state.registry, &model).await.unwrap_or_else(|_| panic!("Model persistence failed"));
-        save_registry_document(&state, &state.pipelines, &pipeline).await.unwrap_or_else(|_| panic!("Pipeline persistence failed"));
+        save_registry_document(&state, &state.registry, &model)
+            .await
+            .unwrap_or_else(|_| panic!("Model persistence failed"));
+        save_registry_document(&state, &state.pipelines, &pipeline)
+            .await
+            .unwrap_or_else(|_| panic!("Pipeline persistence failed"));
 
         let mut replica = state.clone();
         replica.registry = Arc::new(DashMap::new());
         replica.pipelines = Arc::new(DashMap::new());
         replica.metadata_lock = Arc::new(Mutex::new(()));
-        let request = serde_json::from_value(json!({"pipeline":"trp-durable","blob_name":"demo.txt"})).unwrap();
-        let response = handle_embed(State(replica.clone()), Json(request)).await
-            .unwrap_or_else(|_| panic!("File request did not recover persisted model routing")).into_response();
+        let request =
+            serde_json::from_value(json!({"pipeline":"trp-durable","blob_name":"demo.txt"}))
+                .unwrap();
+        let response = handle_embed(State(replica.clone()), Json(request))
+            .await
+            .unwrap_or_else(|_| panic!("File request did not recover persisted model routing"))
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         initialize_registry(&replica).await.unwrap();
-        assert_eq!(replica.registry.get("mdl-ext-durable").unwrap().value(), &model);
-        assert_eq!(replica.pipelines.get("trp-durable").unwrap().value(), &pipeline);
+        assert_eq!(
+            replica.registry.get("mdl-ext-durable").unwrap().value(),
+            &model
+        );
+        assert_eq!(
+            replica.pipelines.get("trp-durable").unwrap().value(),
+            &pipeline
+        );
 
-        remove_registry_document(&state, &state.registry, "mdl-ext-durable", "docgrok_model").await
+        remove_registry_document(&state, &state.registry, "mdl-ext-durable", "docgrok_model")
+            .await
             .unwrap_or_else(|_| panic!("Model deletion failed"));
         load_models_from_cosmos(&replica).await.unwrap();
         assert!(!replica.registry.contains_key("mdl-ext-durable"));
         assert!(stored.lock().await.contains_key("trp-durable"));
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod model_limit_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_batches_over_count_limit() {
+        let input = TextInput::Batch(vec!["one".into(), "two".into()]);
+        let error = validate_model_request(&input, 1, 512, 6000).unwrap_err();
+        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(error.1.contains("maximum is 1"));
+    }
+
+    #[test]
+    fn rejects_single_input_over_context_limit() {
+        let input = TextInput::Single("a".repeat(300));
+        let error = validate_model_request(&input, 256, 50, 6000).unwrap_err();
+        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(error.1.contains("context window is 50"));
+    }
+
+    #[test]
+    fn rejects_batches_over_token_budget() {
+        let input = TextInput::Batch(vec!["a".repeat(30), "b".repeat(30)]);
+        let error = validate_model_request(&input, 256, 512, 15).unwrap_err();
+        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(error.1.contains("batch maximum is 15"));
+    }
+
+    #[test]
+    fn bge_limits_match_runtime_contract() {
+        assert_eq!(native_model_limits("bge-small"), (256, 512, 6000));
     }
 }
 
@@ -2801,21 +3640,32 @@ mod request_body_tests {
             let mut input = json!({"pipeline": "trp-demo"});
             input[field] = json!("demo.txt");
             let req: EmbedRequest = serde_json::from_value(input).unwrap();
-            assert_eq!(request_model_id(&req, &pipelines).as_deref(), Some("mdl-ext-demo"));
+            assert_eq!(
+                request_model_id(&req, &pipelines).as_deref(),
+                Some("mdl-ext-demo")
+            );
         }
     }
 
     #[test]
     fn explicit_model_overrides_pipeline_and_model_free_transforms_remain_valid() {
         let pipelines = DashMap::new();
-        pipelines.insert("trp-demo".to_owned(), json!({"model_id": "mdl-ext-default"}));
+        pipelines.insert(
+            "trp-demo".to_owned(),
+            json!({"model_id": "mdl-ext-default"}),
+        );
         let req: EmbedRequest = serde_json::from_value(json!({
             "pipeline": "trp-demo", "model_id": "mdl-ext-override", "blob_name": "demo.txt"
-        })).unwrap();
-        assert_eq!(request_model_id(&req, &pipelines).as_deref(), Some("mdl-ext-override"));
+        }))
+        .unwrap();
+        assert_eq!(
+            request_model_id(&req, &pipelines).as_deref(),
+            Some("mdl-ext-override")
+        );
         let req: EmbedRequest = serde_json::from_value(json!({
             "blob_name": "image.png", "transform_name": "image"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(request_model_id(&req, &pipelines).is_none());
     }
 
@@ -2835,27 +3685,36 @@ mod request_body_tests {
 
     #[tokio::test]
     async fn request_body_limits_allow_base64_maximum_and_reject_overflow() {
-        let app = with_request_body_limits(
-            Router::new().route("/process", post(|body: Bytes| async move {
-                Json(json!({ "bytes": body.len() }))
-            })),
-        );
+        let app = with_request_body_limits(Router::new().route(
+            "/process",
+            post(|body: Bytes| async move { Json(json!({ "bytes": body.len() })) }),
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/process", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = Client::new();
         // Also exceeds Axum's default 2 MiB extractor cap.
         let base64_length = 4 * ((50 * 1024 * 1024 + 2) / 3);
-        let payload = json!({ "data": "A".repeat(base64_length), "source_name": "file.txt" }).to_string();
+        let payload =
+            json!({ "data": "A".repeat(base64_length), "source_name": "file.txt" }).to_string();
         assert!(payload.len() < MAX_REQUEST_BODY_BYTES);
         let response = client.post(&url).body(payload).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let response = client.post(&url).body(vec![b'A'; MAX_REQUEST_BODY_BYTES]).send().await.unwrap();
+        let response = client
+            .post(&url)
+            .body(vec![b'A'; MAX_REQUEST_BODY_BYTES])
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         // Send only headers for an oversized request. Sending the entire body
         // can race the early 413 with a connection reset on Windows.
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let address = url.strip_prefix("http://").unwrap().strip_suffix("/process").unwrap();
+        let address = url
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/process")
+            .unwrap();
         let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
         let headers = format!(
             "POST /process HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2864,7 +3723,9 @@ mod request_body_tests {
         connection.write_all(headers.as_bytes()).await.unwrap();
         let mut response = [0u8; 4096];
         let length = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut response))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(String::from_utf8_lossy(&response[..length]).starts_with("HTTP/1.1 413"));
         server.abort();
     }

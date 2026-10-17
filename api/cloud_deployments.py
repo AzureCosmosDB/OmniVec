@@ -151,7 +151,7 @@ def build_plan(body, store):
             agent_name=parent["result"]["agent_name"], agent_version=parent["result"]["agent_version"],
             question=body.question.strip(), resources=[previous["project_resource_id"]],
             authorization_scopes=[previous["foundry_account_id"]],
-            notice="Runs ONE billable Foundry response against the saved agent version, including MCP retrieval and embedding calls. The question, answer and returned source references are saved in administrator-only job metadata. No SharePoint files are modified. A timed-out inference is not replayed automatically.",
+            notice="Runs ONE billable Foundry response against the saved agent version, including MCP retrieval and embedding calls. The question, answer and returned source references are saved in administrator-only job metadata. No source documents are modified. A timed-out inference is not replayed automatically.",
         )
     elif body.kind == "mcp":
         destination = _record(store, body.destination_id, "destination")

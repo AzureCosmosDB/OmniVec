@@ -2,6 +2,8 @@ namespace OmniVec.Worker.Configuration;
 
 public class WorkerOptions
 {
+    public bool PipelineLanesEnabled { get; set; } = false;
+    public string PipelineLanesTopicName { get; set; } = "";
     /// <summary>Service Bus fully qualified namespace (e.g., omnivec-sb-xxx.servicebus.windows.net)</summary>
     public string ServiceBusNamespace { get; set; } = "";
 
@@ -32,16 +34,25 @@ public class WorkerOptions
     /// <summary>Max concurrent Service Bus message processing</summary>
     public int MaxConcurrentCalls { get; set; } = 10;
 
+    /// <summary>Independent Service Bus receiver links per worker replica.</summary>
+    public int ReceivePumpCount { get; set; } = 4;
+
+    /// <summary>Messages prefetched per link. Default zero avoids unrenewed envelope locks aging in the cache.</summary>
+    public int PrefetchCount { get; set; } = 0;
+
     /// <summary>How many texts to batch per /embed/batch call</summary>
     public int EmbedBatchSize { get; set; } = 50;
+
+    /// <summary>Maximum messages pulled at once so per-pipeline batch sizes can be applied dynamically.</summary>
+    public int MaxReceiveBatchSize { get; set; } = 256;
 
     /// <summary>How long to wait to accumulate a micro-batch (ms)</summary>
     public int BatchAccumulateMs { get; set; } = 500;
 
-    /// <summary>Auto-lock renewal duration for long-running processing</summary>
+    /// <summary>Maximum scheduler admission wait. Locks are renewed during admission and processing.</summary>
     public int MaxLockRenewalMinutes { get; set; } = 10;
 
-    /// <summary>Maximum lifetime of a received batch, including retries and waiting for concurrency slots.</summary>
+    /// <summary>Maximum processing time after scheduler admission, including retries.</summary>
     public int MaxProcessingMinutes { get; set; } = 8;
 
     /// <summary>
@@ -77,6 +88,9 @@ public class WorkerOptions
 
     /// <summary>SharePoint buffers raw bytes and base64 JSON; keep its memory-heavy concurrency separate from images.</summary>
     public int SharePointConcurrency { get; set; } = 1;
+
+    /// <summary>Allow benchmark-only messages to bypass DocGrok with deterministic vectors.</summary>
+    public bool EnableBenchmarkMockEmbedding { get; set; } = false;
 
     /// <summary>
     /// Number of blob_ref messages bundled into a single bulk /embed call.

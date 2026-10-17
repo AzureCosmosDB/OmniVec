@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Text;
@@ -58,6 +59,23 @@ var cosmos = new CosmosDbDestinationWriter(NullLogger<CosmosDbDestinationWriter>
 Task<bool> Replace(MemorySyncStore store, SharePointReplacement replacement)
     => cosmos.ReplaceSharePointInStoreAsync(store, "/document_id", "embedding", replacement, default);
 
+Test("Null destination discards batches and enforces its per-worker rate", async () =>
+{
+    var writer = new NullDestinationWriter();
+    var results = Enumerable.Range(0, 4).Select(i => new EmbeddingResult(
+        $"doc-{i}", $"row-{i}", [0.1f, 0.2f], "hash", $"row-{i}",
+        "pipeline", "name", "generation", "content")).ToList();
+    var config = new Dictionary<string, object>
+    {
+        ["max_docs_per_second"] = 20,
+        ["rate_key"] = "test",
+    };
+    await writer.WriteBatchAsync(config, results, default);
+    var started = Stopwatch.StartNew();
+    await writer.WriteBatchAsync(config, results, default);
+    Assert(started.Elapsed >= TimeSpan.FromMilliseconds(100));
+});
+
 Test("Garnet vector element IDs and FP32 payloads are deterministic", () =>
 {
     var first = OneLakeIcebergDestinationWriter.BuildGarnetElementId("pipeline", "source", "row-1");
@@ -68,6 +86,58 @@ Test("Garnet vector element IDs and FP32 payloads are deterministic", () =>
     Assert(BitConverter.ToSingle(bytes, 0) == 0.25f);
     Assert(BitConverter.ToSingle(bytes, 4) == -2.5f);
     return Task.CompletedTask;
+});
+
+Test("Garnet batch writes enforce bounded concurrency", async () =>
+{
+    var active = 0;
+    var peak = 0;
+    var completed = 0;
+    var sync = new object();
+    await GarnetDestinationWriter.RunBoundedAsync(
+        Enumerable.Range(0, 40),
+        4,
+        async (_, ct) =>
+        {
+            var current = Interlocked.Increment(ref active);
+            lock (sync) peak = Math.Max(peak, current);
+            await Task.Delay(5, ct);
+            Interlocked.Decrement(ref active);
+            Interlocked.Increment(ref completed);
+        },
+        default);
+    Assert(completed == 40);
+    Assert(peak == 4);
+});
+
+Test("Garnet batch writes propagate failures and cancellation", async () =>
+{
+    var completed = 0;
+    await Throws(() => GarnetDestinationWriter.RunBoundedAsync(
+        Enumerable.Range(0, 40),
+        4,
+        async (item, ct) =>
+        {
+            if (item == 0) throw new InvalidOperationException("write failed");
+            await Task.Delay(100, ct);
+            Interlocked.Increment(ref completed);
+        },
+        default));
+    Assert(completed < 40);
+
+    using var cts = new CancellationTokenSource();
+    cts.Cancel();
+    var started = 0;
+    await Throws(() => GarnetDestinationWriter.RunBoundedAsync(
+        Enumerable.Range(0, 40),
+        4,
+        (_, _) =>
+        {
+            Interlocked.Increment(ref started);
+            return Task.CompletedTask;
+        },
+        cts.Token));
+    Assert(started == 0);
 });
 
 Test("Legacy Redis ACL configuration is applied to worker connections", async () =>
@@ -526,7 +596,8 @@ var connectorFailures = await ConnectorReliabilityTests.RunAsync();
 var cosmosSourceFailures = await CosmosSourceContentTests.RunAsync();
 var blobPollingFailures = await BlobPollingTests.RunAsync();
 var cosmosChunkFailures = await CosmosChunkTests.RunAsync();
-return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures == 0 ? 0 : 1;
+var laneFailures = await PipelineLaneTests.RunAsync();
+return failed + connectorFailures + cosmosSourceFailures + blobPollingFailures + cosmosChunkFailures + laneFailures == 0 ? 0 : 1;
 
 sealed class MemorySyncStore : ISharePointSyncStore
 {
@@ -592,6 +663,7 @@ sealed class LocalSender : ServiceBusSender
     public int FailSend { get; set; }
     public List<ServiceBusMessage> Sent { get; } = [];
     public List<string> AttemptedIds { get; } = [];
+    public List<long?> BatchLimits { get; } = [];
     private readonly Dictionary<ServiceBusMessageBatch, IList<ServiceBusMessage>> _batches = new();
     public override ValueTask<ServiceBusMessageBatch> CreateMessageBatchAsync(CancellationToken ct = default)
     {
@@ -601,12 +673,25 @@ sealed class LocalSender : ServiceBusSender
         _batches[batch] = messages;
         return ValueTask.FromResult(batch);
     }
+    public override ValueTask<ServiceBusMessageBatch> CreateMessageBatchAsync(CreateMessageBatchOptions options,
+        CancellationToken ct = default)
+    {
+        BatchLimits.Add(options.MaxSizeInBytes);
+        return CreateMessageBatchAsync(ct);
+    }
     public override Task SendMessagesAsync(ServiceBusMessageBatch batch, CancellationToken ct = default)
     {
         Sends++;
         AttemptedIds.Add(string.Join(",", _batches[batch].Select(m => m.MessageId)));
         if (Sends == FailSend) throw new InvalidOperationException("Simulated queue failure");
         Sent.AddRange(_batches[batch]);
+        return Task.CompletedTask;
+    }
+    public override Task SendMessageAsync(ServiceBusMessage message, CancellationToken ct = default)
+    {
+        Sends++;
+        if (Sends == FailSend) throw new InvalidOperationException("Simulated queue failure");
+        Sent.Add(message);
         return Task.CompletedTask;
     }
 }

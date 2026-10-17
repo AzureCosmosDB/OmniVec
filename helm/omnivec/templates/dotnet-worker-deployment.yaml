@@ -1,4 +1,5 @@
 {{- if .Values.dotnetWorker.enabled -}}
+{{- include "omnivec.pipelineLanes.validate" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +53,10 @@ spec:
               value: {{ .Values.azure.serviceBus.namespace | quote }}
             - name: Worker__TopicName
               value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            - name: Worker__PipelineLanesEnabled
+              value: {{ .Values.azure.serviceBus.pipelineLanes.workerEnabled | quote }}
+            - name: Worker__PipelineLanesTopicName
+              value: {{ .Values.azure.serviceBus.pipelineLanes.topicName | quote }}
             - name: Worker__SubscriptionName
               value: {{ .Values.dotnetWorker.subscriptionName | default "worker" | quote }}
             - name: Worker__DocGrokBaseUrl
@@ -60,10 +65,22 @@ spec:
               value: "http://omnivec-api:80"
             - name: Worker__MaxConcurrentCalls
               value: {{ .Values.dotnetWorker.maxConcurrentCalls | default 10 | quote }}
+            - name: Worker__ReceivePumpCount
+              value: {{ .Values.dotnetWorker.receivePumpCount | default 4 | quote }}
+            - name: Worker__PrefetchCount
+              value: {{ .Values.dotnetWorker.prefetchCount | default 0 | quote }}
             - name: Worker__EmbedBatchSize
               value: {{ .Values.dotnetWorker.embedBatchSize | default 50 | quote }}
+            - name: Worker__MaxReceiveBatchSize
+              value: {{ .Values.dotnetWorker.maxReceiveBatchSize | default 256 | quote }}
             - name: Worker__BatchAccumulateMs
               value: {{ .Values.dotnetWorker.batchAccumulateMs | default 500 | quote }}
+            - name: Worker__EnableBenchmarkMockEmbedding
+              value: {{ .Values.dotnetWorker.enableBenchmarkMockEmbedding | default false | quote }}
+            {{- if .Values.azure.appInsights.connectionString }}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: {{ .Values.azure.appInsights.connectionString | quote }}
+            {{- end }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
           ports:

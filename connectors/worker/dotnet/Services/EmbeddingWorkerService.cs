@@ -3,10 +3,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using OmniVec.Worker.Configuration;
 using OmniVec.Worker.Destinations;
 using OmniVec.Worker.Models;
+using OmniVec.Worker.Lanes;
+using Azure.Messaging.ServiceBus.Administration;
 
 namespace OmniVec.Worker.Services;
 
@@ -27,7 +30,9 @@ public class EmbeddingWorkerService : BackgroundService
     private readonly SemaphoreSlim _documentGate;
     private readonly SemaphoreSlim _sharePointGate;
     private readonly SemaphoreSlim _textGate;
+    private readonly SemaphoreSlim _queueEnvelopeGate;
     private readonly PipelineFairScheduler _pipelineScheduler;
+    internal TimeSpan ProcessingBudget { get; set; }
 
     public EmbeddingWorkerService(
         IOptions<WorkerOptions> options,
@@ -39,7 +44,14 @@ public class EmbeddingWorkerService : BackgroundService
         ILogger<EmbeddingWorkerService> logger)
     {
         _options = options.Value;
-        if (_options.EmbedBatchSize <= 0 || _options.MaxConcurrentCalls <= 0
+        if (_options.PipelineLanesEnabled)
+        {
+            PipelineLaneProtocol.ValidateTopicName(_options.PipelineLanesTopicName);
+            if (sbClient is null || string.IsNullOrWhiteSpace(_options.ServiceBusNamespace))
+                throw new InvalidOperationException("Lane worker requires a configured Service Bus client and namespace");
+        }
+        if (_options.EmbedBatchSize <= 0 || _options.MaxReceiveBatchSize <= 0 || _options.MaxConcurrentCalls <= 0
+            || _options.ReceivePumpCount <= 0 || _options.PrefetchCount < 0
             || _options.BlobConcurrency <= 0 || _options.BlobBatchSize <= 0
             || _options.SharePointConcurrency <= 0
             || _options.MaxProcessingMinutes <= 0 || _options.MaxLockRenewalMinutes <= 0
@@ -49,7 +61,9 @@ public class EmbeddingWorkerService : BackgroundService
         _documentGate = new(_options.BlobConcurrency, _options.BlobConcurrency);
         _sharePointGate = new(_options.SharePointConcurrency, _options.SharePointConcurrency);
         _textGate = new(_options.MaxConcurrentCalls, _options.MaxConcurrentCalls);
+        _queueEnvelopeGate = new(_options.MaxConcurrentCalls, _options.MaxConcurrentCalls);
         _pipelineScheduler = new(_options.MaxConcurrentCalls);
+        ProcessingBudget = TimeSpan.FromMinutes(_options.MaxProcessingMinutes);
         _sbClient = sbClient;
         _docGrok = docGrok;
         _sharePoint = sharePoint;
@@ -60,6 +74,11 @@ public class EmbeddingWorkerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
+        if (_options.PipelineLanesEnabled)
+        {
+            await RunLanesAsync(ct);
+            return;
+        }
         if (_sbClient is null)
         {
             _logger.LogWarning("Service Bus not configured — worker idle. Set Worker__ServiceBusNamespace to enable queue processing.");
@@ -72,30 +91,101 @@ public class EmbeddingWorkerService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Embedding worker starting: topic={Topic}, sub={Sub}, batchSize={BatchSize}",
-            _options.TopicName, _options.SubscriptionName, _options.EmbedBatchSize);
+            "Embedding worker starting: topic={Topic}, sub={Sub}, batchSize={BatchSize}, pumps={Pumps}, prefetch={Prefetch}",
+            _options.TopicName, _options.SubscriptionName, _options.EmbedBatchSize,
+            _options.ReceivePumpCount, _options.PrefetchCount);
+        var pumps = Enumerable.Range(0, _options.ReceivePumpCount)
+            .Select(index => RunReceivePumpAsync(index, ct)).ToArray();
+        await Task.WhenAll(pumps);
+        _logger.LogInformation("Embedding worker stopped");
+    }
 
-        var receiver = _sbClient.CreateReceiver(
-            _options.TopicName,
-            _options.SubscriptionName,
+    private async Task RunReceivePumpAsync(int pumpIndex, CancellationToken ct)
+    {
+        await using var receiver = _sbClient!.CreateReceiver(
+            _options.TopicName, _options.SubscriptionName,
             new ServiceBusReceiverOptions
             {
-                // Prefetched locks age before we can register them for renewal.
-                PrefetchCount = 0,
+                PrefetchCount = _options.PrefetchCount,
                 ReceiveMode = ServiceBusReceiveMode.PeekLock,
+                Identifier = $"worker-{Environment.MachineName}-{pumpIndex}",
             });
+        await ReceiveLoopAsync(receiver, ct);
+    }
 
-        // A successful receive, including an empty one, establishes readiness.
+    private async Task RunLanesAsync(CancellationToken ct)
+    {
+        var registry = new PipelineLaneRegistry(new ServiceBusAdministrationClient(
+            _options.ServiceBusNamespace, new Azure.Identity.DefaultAzureCredential()), _options.PipelineLanesTopicName);
+        var running = new Dictionary<string, (LaneMetadata Metadata, CancellationTokenSource Stop, Task Task)>();
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                WorkerHeartbeat.Beat();
+                // Invalid ownership/rules and discovery failures are fatal, not an empty discovery result.
+                var lanes = await registry.DiscoverAsync(ct);
+                foreach (var name in running.Keys.ToArray())
+                {
+                    var lane = running[name];
+                    if (lane.Task.IsCompleted) await lane.Task;
+                    if (!lanes.TryGetValue(name, out var metadata) || metadata != lane.Metadata)
+                    {
+                        lane.Stop.Cancel();
+                        await lane.Task;
+                        lane.Stop.Dispose();
+                        running.Remove(name);
+                    }
+                }
+                foreach (var (name, metadata) in lanes)
+                {
+                    if (running.ContainsKey(name)) continue;
+                    var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    running.Add(name, (metadata, stop, RunLaneAsync(name, metadata, stop.Token)));
+                }
+                // Successful marked-topic/rule discovery establishes broker readiness, including zero lanes.
+                WorkerHeartbeat.MarkReady();
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
+            }
+        }
+        finally
+        {
+            WorkerHeartbeat.MarkNotReady();
+            foreach (var lane in running.Values) lane.Stop.Cancel();
+            try { await Task.WhenAll(running.Values.Select(lane => lane.Task)); }
+            finally { foreach (var lane in running.Values) lane.Stop.Dispose(); }
+        }
+    }
 
-        // Run multiple concurrent receive loops
-        var tasks = Enumerable.Range(0, _options.MaxConcurrentCalls)
-            .Select(_ => ReceiveLoopAsync(receiver, ct))
-            .ToArray();
-
-        await Task.WhenAll(tasks);
-
-        await receiver.DisposeAsync();
-        _logger.LogInformation("Embedding worker stopped");
+    private async Task RunLaneAsync(string subscription, LaneMetadata lane, CancellationToken ct)
+    {
+        await using var receiver = _sbClient!.CreateReceiver(_options.PipelineLanesTopicName, subscription,
+            new ServiceBusReceiverOptions { PrefetchCount = 0, ReceiveMode = ServiceBusReceiveMode.PeekLock });
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await LaneDispatch.RunOnceAsync(_pipelineScheduler, lane, async token =>
+                {
+                    WorkerHeartbeat.Beat();
+                    var messages = await receiver.ReceiveMessagesAsync(_options.MaxReceiveBatchSize,
+                        TimeSpan.FromMilliseconds(Math.Min(100, _options.BatchAccumulateMs)), token);
+                    if (messages.Count == 0) return;
+                    await using var scope = new MessageProcessingScope(receiver, messages,
+                        TimeSpan.FromMinutes((long)_options.MaxProcessingMinutes + _options.MaxLockRenewalMinutes), token);
+                    await ProcessLaneBatchAsync(scope.Receiver, messages, scope.Token, lane.PipelineId);
+                }, ct);
+                // Empty lanes release permits before delay; at most one pending admission per lane.
+                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Lane {PipelineId} receive/processing failed; unfinished messages remain broker-owned", lane.PipelineId);
+                try { await Task.Delay(TimeSpan.FromSeconds(5), ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            }
+        }
     }
 
     internal static async Task RunIdleAsync(CancellationToken ct, TimeSpan interval)
@@ -119,7 +209,7 @@ public class EmbeddingWorkerService : BackgroundService
 
                 // Pull a batch of messages
                 var sbMessages = await receiver.ReceiveMessagesAsync(
-                    _options.EmbedBatchSize,
+                    _options.MaxReceiveBatchSize,
                     TimeSpan.FromMilliseconds(_options.BatchAccumulateMs),
                     ct);
 
@@ -127,7 +217,7 @@ public class EmbeddingWorkerService : BackgroundService
                 if (sbMessages.Count == 0) continue;
 
                 await using var scope = new MessageProcessingScope(receiver, sbMessages,
-                    TimeSpan.FromMinutes(Math.Min(_options.MaxProcessingMinutes, _options.MaxLockRenewalMinutes)), ct);
+                    TimeSpan.FromMinutes((long)_options.MaxProcessingMinutes + _options.MaxLockRenewalMinutes), ct);
                 await ProcessReceivedBatchAsync(scope.Receiver, sbMessages, scope.Token);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
@@ -145,6 +235,104 @@ public class EmbeddingWorkerService : BackgroundService
 
     private async Task ProcessReceivedBatchAsync(ServiceBusReceiver receiver,
         IReadOnlyList<ServiceBusReceivedMessage> sbMessages, CancellationToken ct)
+        => await ProcessLaneBatchAsync(receiver, sbMessages, ct, null);
+
+    private async Task ProcessLaneBatchAsync(ServiceBusReceiver receiver,
+        IReadOnlyList<ServiceBusReceivedMessage> sbMessages, CancellationToken ct, string? admittedPipelineId)
+    {
+        var legacy = new List<ServiceBusReceivedMessage>();
+        var envelopes = new List<ServiceBusReceivedMessage>();
+        var deadLetters = new List<(ServiceBusReceivedMessage Message, string Reason, string? Description)>();
+        foreach (var message in sbMessages)
+        {
+            if (message.ApplicationProperties.TryGetValue(QueueEnvelopeReceiver.DeadLetterReasonProperty, out var reason)
+                && reason is string deadLetterReason)
+            {
+                var description = message.ApplicationProperties.TryGetValue(
+                    QueueEnvelopeReceiver.DeadLetterDescriptionProperty, out var detail) ? detail as string : null;
+                deadLetters.Add((message, deadLetterReason, description));
+                continue;
+            }
+            try
+            {
+                using var body = JsonDocument.Parse(message.Body);
+                if (body.RootElement.ValueKind == JsonValueKind.Object
+                    && body.RootElement.TryGetProperty("queue_envelope_version", out _))
+                {
+                    envelopes.Add(message);
+                    continue;
+                }
+            }
+            catch (JsonException) { /* The legacy validator records malformed deliveries. */ }
+            legacy.Add(message);
+        }
+        var tasks = envelopes.Select(message => ProcessQueueEnvelopeAsync(
+            receiver, message, ct, admittedPipelineId)).Concat(deadLetters.Select(item =>
+                receiver.DeadLetterMessageAsync(item.Message, item.Reason, item.Description, ct))).ToList();
+        if (legacy.Count > 0) tasks.Add(ProcessDocumentBatchAsync(receiver, legacy, ct, admittedPipelineId));
+        await Task.WhenAll(tasks);
+    }
+
+    private async Task ProcessQueueEnvelopeAsync(ServiceBusReceiver receiver, ServiceBusReceivedMessage parent,
+        CancellationToken ct, string? admittedPipelineId)
+    {
+        EmbeddingMessage head;
+        int count;
+        try
+        {
+            using var body = JsonDocument.Parse(parent.Body);
+            var documents = body.RootElement.GetProperty("documents");
+            if (documents.ValueKind != JsonValueKind.Array || documents.GetArrayLength() is < 1 or > 1000)
+                throw new JsonException("Queue envelope document count must be from 1 to 1000");
+            count = documents.GetArrayLength();
+            head = documents[0].Deserialize<EmbeddingMessage>() ?? throw new JsonException("Invalid envelope document");
+            if (string.IsNullOrWhiteSpace(head.PipelineId)) throw new JsonException("Envelope requires a pipeline ID");
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            _logger.LogError(ex, "Invalid queue envelope {MessageId}", parent.MessageId);
+            await receiver.DeadLetterMessageAsync(parent, "InvalidQueueEnvelope", ex.Message, ct);
+            return;
+        }
+        // Acquire pipeline admission before expansion: queued envelopes cannot hoard
+        // document memory or consume the permits needed by an unrelated healthy pipeline.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(TimeSpan.FromMinutes(_options.MaxLockRenewalMinutes));
+        await using var admission = admittedPipelineId is null
+            ? await _pipelineScheduler.AcquireAsync(head.PipelineId, head.ResourceWeight,
+                head.MaxConcurrencyPerWorker, head.ResourcePriority, head.WorkloadClass, count, budget.Token)
+            : null;
+        using var processing = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        processing.CancelAfter(ProcessingBudget);
+        await _queueEnvelopeGate.WaitAsync(processing.Token);
+        try
+        {
+            QueueEnvelopeReceiver envelope;
+            try { envelope = new QueueEnvelopeReceiver(receiver, parent, HandoffQueueDeadLetterAsync); }
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "Invalid queue envelope {MessageId}", parent.MessageId);
+                await receiver.DeadLetterMessageAsync(parent, "InvalidQueueEnvelope", ex.Message, ct);
+                return;
+            }
+            await ProcessDocumentBatchAsync(envelope, envelope.Documents, processing.Token,
+                admittedPipelineId ?? head.PipelineId);
+            await envelope.SettleParentAsync(processing.Token);
+        }
+        finally { _queueEnvelopeGate.Release(); }
+    }
+
+    private async Task HandoffQueueDeadLetterAsync(ServiceBusMessage message, CancellationToken ct)
+    {
+        if (_sbClient is null)
+            throw new InvalidOperationException("Queue envelope dead-letter isolation requires a configured Service Bus client");
+        var topic = _options.PipelineLanesEnabled ? _options.PipelineLanesTopicName : _options.TopicName;
+        await using var sender = _sbClient.CreateSender(topic);
+        await sender.SendMessageAsync(message, ct);
+    }
+
+    private async Task ProcessDocumentBatchAsync(ServiceBusReceiver receiver,
+        IReadOnlyList<ServiceBusReceivedMessage> sbMessages, CancellationToken ct, string? admittedPipelineId)
     {
                 // First message received ever → mark ready.
                 WorkerHeartbeat.MarkReceivedFirstMessage();
@@ -162,12 +350,20 @@ public class EmbeddingWorkerService : BackgroundService
                             await DeadLetterWithMetricsAsync(receiver, sbMsg, "InvalidMessage", "Could not deserialize", ct);
                             continue;
                         }
+                        if (admittedPipelineId is not null
+                            && (msg.PipelineId != admittedPipelineId || sbMsg.Subject != admittedPipelineId))
+                        {
+                            await DeadLetterWithMetricsAsync(receiver, sbMsg, "InvalidLaneRouting",
+                                "Body pipeline ID and broker subject must exactly match the admitted lane", ct);
+                            continue;
+                        }
                         if (string.IsNullOrWhiteSpace(msg.DestinationType) || !_writers.ContainsKey(msg.DestinationType))
                         {
                             await DeadLetterWithMetricsAsync(receiver, sbMsg, "UnknownDestinationType",
                                 $"No writer for {msg.DestinationType}", ct);
                             continue;
                         }
+                        ValidateRequestLimits(msg);
                         msg.PartitionKeyValue = IdentityTemplateRenderer.RenderPartitionKey(msg);
                         items.Add((msg, sbMsg));
                     }
@@ -184,13 +380,22 @@ public class EmbeddingWorkerService : BackgroundService
                 }
 
                 if (items.Count == 0) return;
+                if (admittedPipelineId is not null)
+                {
+                    using var laneBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    laneBudget.CancelAfter(ProcessingBudget);
+                    await ProcessItemsAsync(receiver, items, laneBudget.Token);
+                    return;
+                }
                 // A slow/unavailable pipeline must not hold unrelated pipelines in
                 // the same receive batch behind its retries.
-                await Task.WhenAll(items.GroupBy(item => (item.msg.PipelineId, item.msg.DestinationId))
+                await Task.WhenAll(items.GroupBy(item => item.msg.PipelineId)
                     .Select(async group =>
                     {
                         var groupedItems = group.ToList();
                         var head = groupedItems[0].msg;
+                        using var admissionBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        admissionBudget.CancelAfter(TimeSpan.FromMinutes(_options.MaxLockRenewalMinutes));
                         await using var admission = await _pipelineScheduler.AcquireAsync(
                             head.PipelineId,
                             head.ResourceWeight,
@@ -198,8 +403,10 @@ public class EmbeddingWorkerService : BackgroundService
                             head.ResourcePriority,
                             head.WorkloadClass,
                             groupedItems.Count,
-                            ct);
-                        await ProcessItemsAsync(receiver, groupedItems, ct);
+                            admissionBudget.Token);
+                        using var processingBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        processingBudget.CancelAfter(ProcessingBudget);
+                        await ProcessItemsAsync(receiver, groupedItems, processingBudget.Token);
                     }));
     }
 
@@ -305,6 +512,7 @@ public class EmbeddingWorkerService : BackgroundService
 
                 // Group text messages by model for batch embedding
                 var byModel = textItems.GroupBy(i => i.msg.DocgrokPipeline).ToList();
+                var textBatchTasks = new List<Task>();
 
                 foreach (var group in byModel)
                 {
@@ -314,10 +522,20 @@ public class EmbeddingWorkerService : BackgroundService
                     foreach (var subBatch in PackByTokenBudget(validated))
                     {
                         await _textGate.WaitAsync(ct);
-                        try { await ProcessBatchAsync(receiver, subBatch, ct); }
-                        finally { _textGate.Release(); }
+                        textBatchTasks.Add(ProcessTextBatchWithGateAsync(
+                            receiver, subBatch, ct));
                     }
                 }
+                await Task.WhenAll(textBatchTasks);
+    }
+
+    private async Task ProcessTextBatchWithGateAsync(
+        ServiceBusReceiver receiver,
+        List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> batch,
+        CancellationToken ct)
+    {
+        try { await ProcessBatchAsync(receiver, batch, ct); }
+        finally { _textGate.Release(); }
     }
 
     private async Task ProcessTextChunksAsync(ServiceBusReceiver receiver,
@@ -330,11 +548,14 @@ public class EmbeddingWorkerService : BackgroundService
                 throw new NotSupportedException("Text chunking requires a Cosmos vector destination");
             var config = msg.ChunkConfig ?? new();
             var texts = CosmosTextChunker.Split(msg.Content, config);
+            var contextLimit = EffectiveTokenLimit(_options.MaxSingleTextTokens, msg.ModelContextWindowTokens);
+            var batchTokenLimit = EffectiveTokenLimit(_options.MaxBatchTokens, msg.ModelMaxBatchTokens);
+            var batchSize = EffectiveBatchSize(msg);
             // Reject unsafe IDs and oversized chunks before making any model calls.
             for (var i = 0; i < texts.Count; i++)
             {
                 _ = CosmosTextChunker.DocId(msg, config, i);
-                if (TokenEstimator.Estimate(texts[i]) > Math.Min(_options.MaxSingleTextTokens, _options.MaxBatchTokens))
+                if (TokenEstimator.Estimate(texts[i]) > Math.Min(contextLimit, batchTokenLimit))
                     throw new ArgumentException("Configured chunk exceeds worker token limits; reduce chunk_size");
             }
             var results = new List<EmbeddingResult>();
@@ -342,11 +563,11 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 var inputs = new List<string>();
                 var budget = 0;
-                while (start + inputs.Count < texts.Count && inputs.Count < _options.EmbedBatchSize)
+                while (start + inputs.Count < texts.Count && inputs.Count < batchSize)
                 {
                     var text = texts[start + inputs.Count];
                     var tokens = TokenEstimator.Estimate(text);
-                    if (inputs.Count > 0 && budget + tokens > _options.MaxBatchTokens) break;
+                    if (inputs.Count > 0 && budget + tokens > batchTokenLimit) break;
                     inputs.Add(text);
                     budget += tokens;
                 }
@@ -363,9 +584,6 @@ public class EmbeddingWorkerService : BackgroundService
                 throw new InvalidOperationException("Chunk embedding dimensions are inconsistent");
             await writer.ReplaceTextChunksAsync(msg.DestinationConfig,
                 new(msg.SourceId, msg.SourceRef, msg.PartitionKeyValue, msg.PipelineId), results, ct);
-            await receiver.CompleteMessageAsync(item.sbMsg, ct);
-            _logger.LogInformation("Cosmos text chunked source={SourceId}/{SourceRef} pipeline={Pipeline}: {Count} chunks",
-                msg.SourceId, msg.SourceRef, msg.PipelineId, results.Count);
             await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, 1, 0, 0, $"chunk:{msg.MessageId}", ct,
                 sourceId: msg.SourceId, destinationId: msg.DestinationId,
@@ -375,6 +593,9 @@ public class EmbeddingWorkerService : BackgroundService
                 queueWaitMs: Math.Max(
                     0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds),
                 lastDocument: msg.SourceRef);
+            await receiver.CompleteMessageAsync(item.sbMsg, ct);
+            _logger.LogInformation("Cosmos text chunked source={SourceId}/{SourceRef} pipeline={Pipeline}: {Count} chunks",
+                msg.SourceId, msg.SourceRef, msg.PipelineId, results.Count);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -553,21 +774,19 @@ public class EmbeddingWorkerService : BackgroundService
                 throw new NotSupportedException($"No writer for destination type {msg.DestinationType}");
             }
 
-            await receiver.CompleteMessageAsync(item.sbMsg, ct);
-
             sw.Stop();
-            _logger.LogInformation(
-                "Blob processed: {BlobName} → {ChunkCount} chunks for pipeline={Pipeline} in {Elapsed}ms",
-                msg.BlobName, chunks.Count, msg.PipelineName, sw.ElapsedMilliseconds);
-
             await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, chunks.Count, 0, sw.ElapsedMilliseconds,
-                $"blob:{msg.SourceRef}:{chunks.Count}", ct,
+                $"blob:{msg.MessageId}", ct,
                 sourceId: msg.SourceId, destinationId: msg.DestinationId,
                 modelId: msg.DocgrokPipeline,
                 queueWaitMs: Math.Max(
                     0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds),
                 lastDocument: msg.SourceRef);
+            await receiver.CompleteMessageAsync(item.sbMsg, ct);
+            _logger.LogInformation(
+                "Blob processed: {BlobName} → {ChunkCount} chunks for pipeline={Pipeline} in {Elapsed}ms",
+                msg.BlobName, chunks.Count, msg.PipelineName, sw.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -629,10 +848,6 @@ public class EmbeddingWorkerService : BackgroundService
                 new SharePointReplacement(identity, msg.SharePointRevision, msg.SourceId,
                     msg.PipelineId, msg.SourceRef, results), ct);
 
-            await receiver.CompleteMessageAsync(item.sbMsg, ct);
-            _logger.LogInformation("SharePoint {Identity} revision={Revision}: {Outcome}, chunks={Count}",
-                identity, msg.SharePointRevision, !applied ? "superseded" : deleted ? "deleted" : results.Count == 0 ? "skipped (empty/filtered)" : "indexed",
-                results.Count);
             await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, applied ? results.Count : 0, 0, 0,
                 $"sharepoint:{identity}:{msg.SharePointRevision}", ct,
@@ -641,6 +856,10 @@ public class EmbeddingWorkerService : BackgroundService
                 queueWaitMs: Math.Max(
                     0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds),
                 lastDocument: msg.SourceRef);
+            await receiver.CompleteMessageAsync(item.sbMsg, ct);
+            _logger.LogInformation("SharePoint {Identity} revision={Revision}: {Outcome}, chunks={Count}",
+                identity, msg.SharePointRevision, !applied ? "superseded" : deleted ? "deleted" : results.Count == 0 ? "skipped (empty/filtered)" : "indexed",
+                results.Count);
         }
         catch (OperationCanceledException) { throw; }
         catch (SharePointVersionChangedException ex)
@@ -733,30 +952,22 @@ public class EmbeddingWorkerService : BackgroundService
             bucket.docs.Add(res);
         }
 
-        foreach (var ((cfg, docs), kvp) in resultsByDest.Select(p => (p.Value, p)))
-        {
-            var destType = kvp.Key.Split('|', 2)[0];
-            if (!_writers.TryGetValue(destType, out var writer))
+        await Parallel.ForEachAsync(
+            resultsByDest,
+            new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+            async (kvp, token) =>
             {
-                throw new NotSupportedException($"No writer for destination type {destType}");
-            }
-            try { await writer.WriteBatchAsync(cfg, docs, ct); }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Writer {Type} failed on bulk blob batch ({Count} docs)", destType, docs.Count);
-                throw;
-            }
-        }
-
-        // Complete messages
-        foreach (var it in batch)
-        {
-            try { await receiver.CompleteMessageAsync(it.sbMsg, ct); }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Complete failed for {BlobName}", it.msg.BlobName);
-            }
-        }
+                var destType = kvp.Key.Split('|', 2)[0];
+                if (!_writers.TryGetValue(destType, out var writer))
+                    throw new NotSupportedException($"No writer for destination type {destType}");
+                try { await writer.WriteBatchAsync(kvp.Value.cfg, kvp.Value.docs, token); }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Writer {Type} failed on bulk blob batch ({Count} docs)",
+                        destType, kvp.Value.docs.Count);
+                    throw;
+                }
+            });
 
         sw.Stop();
         _logger.LogInformation(
@@ -766,12 +977,25 @@ public class EmbeddingWorkerService : BackgroundService
 
         await _metrics.ReportInlineMetricsAsync(
             head.PipelineId, batch.Count, 0, sw.ElapsedMilliseconds,
-            $"blobbatch:{head.PipelineId}:{Guid.NewGuid()}", ct,
+            BuildMetricsBatchKey(head.PipelineId, batch.Select(item => item.msg)), ct,
             sourceId: head.SourceId, destinationId: head.DestinationId,
             modelId: head.DocgrokPipeline,
             queueWaitMs: batch.Average(item =>
                 Math.Max(0, (DateTimeOffset.UtcNow - item.sbMsg.EnqueuedTime).TotalMilliseconds)),
             lastDocument: batch[^1].msg.SourceRef);
+
+        // Settle broker deliveries concurrently only after metrics are durable.
+        try
+        {
+            await Parallel.ForEachAsync(
+                batch,
+                new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = ct },
+                async (item, token) => await receiver.CompleteMessageAsync(item.sbMsg, token));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Batch completion failed for {Count} blob messages", batch.Count);
+        }
     }
 
     private static string RenderDocumentId(EmbeddingMessage message)
@@ -849,29 +1073,23 @@ public class EmbeddingWorkerService : BackgroundService
             }
 
             // Phase 3: Write to destinations
-            foreach (var (destId, (destType, config, results)) in resultsByDest)
-            {
-                if (!_writers.TryGetValue(destType, out var writer))
+            await Parallel.ForEachAsync(
+                resultsByDest,
+                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+                async (kvp, token) =>
                 {
-                    throw new NotSupportedException($"No writer for destination type {destType}");
-                }
-
-                await writer.WriteBatchAsync(config, results, ct);
-            }
-
-            // Phase 4: Complete all messages
-            foreach (var (_, sbMsg) in batch)
-            {
-                try { await receiver.CompleteMessageAsync(sbMsg, ct); }
-                catch (Exception ex) { _logger.LogWarning("Could not complete message: {Error}", ex.Message); }
-            }
+                    var (_, (destType, config, results)) = kvp;
+                    if (!_writers.TryGetValue(destType, out var writer))
+                        throw new NotSupportedException($"No writer for destination type {destType}");
+                    await writer.WriteBatchAsync(config, results, token);
+                });
 
             sw.Stop();
             _logger.LogInformation(
                 "Worker batch complete: {Count} docs for pipeline={Pipeline} in {Elapsed}ms",
                 batch.Count, batch[0].msg.PipelineName, sw.ElapsedMilliseconds);
 
-            // Phase 5: Report metrics
+            // Phase 4: Make metrics durable before acknowledging broker deliveries.
             var batchKey = BuildMetricsBatchKey(pipelineId, batch.Select(item => item.msg));
             var tokensUsed = texts.Sum(TokenEstimator.Estimate);
             var inputBytes = texts.Sum(text => Encoding.UTF8.GetByteCount(text));
@@ -890,6 +1108,20 @@ public class EmbeddingWorkerService : BackgroundService
                 maxConcurrencyPerWorker: batch[0].msg.MaxConcurrencyPerWorker,
                 resourcePriority: batch[0].msg.ResourcePriority,
                 workloadClass: batch[0].msg.WorkloadClass);
+
+            // Phase 5: Settle broker deliveries concurrently; redelivery is safe
+            // because destination writes and metric batch keys are idempotent.
+            try
+            {
+                await Parallel.ForEachAsync(
+                    batch,
+                    new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = ct },
+                    async (item, token) => await receiver.CompleteMessageAsync(item.sbMsg, token));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not complete message batch of {Count}", batch.Count);
+            }
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -932,7 +1164,10 @@ public class EmbeddingWorkerService : BackgroundService
         {
             var content = item.msg.Content ?? "";
             var tokens = TokenEstimator.Estimate(content);
-            if (tokens <= _options.MaxSingleTextTokens)
+            var contextLimit = Math.Min(
+                EffectiveTokenLimit(_options.MaxSingleTextTokens, item.msg.ModelContextWindowTokens),
+                EffectiveTokenLimit(_options.MaxBatchTokens, item.msg.ModelMaxBatchTokens));
+            if (tokens <= contextLimit)
             {
                 kept.Add(item);
                 continue;
@@ -940,10 +1175,17 @@ public class EmbeddingWorkerService : BackgroundService
 
             if (_options.TruncateOversized)
             {
-                // Truncate by chars, scaled to fit under the limit with 5% slack.
-                var ratio = (double)_options.MaxSingleTextTokens * 0.95 / tokens;
-                var newLen = Math.Max(1, (int)(content.Length * ratio));
-                item.msg.Content = content.Substring(0, newLen);
+                try
+                {
+                    item.msg.Content = TruncateToTokenBudget(content, contextLimit);
+                }
+                catch (ArgumentException ex)
+                {
+                    _logger.LogWarning("Input {SourceRef} cannot fit its token budget: {Reason}", item.msg.SourceRef, ex.Message);
+                    await DeadLetterWithMetricsAsync(receiver, item.sbMsg, "TokenLimitExceeded", ex.Message, ct);
+                    continue;
+                }
+                var newLen = item.msg.Content.Length;
                 _logger.LogWarning(
                     "Truncated oversized input {SourceRef}: {OrigChars} chars (~{OrigTokens} tok) → {NewChars} chars",
                     item.msg.SourceRef, content.Length, tokens, newLen);
@@ -953,13 +1195,13 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 _logger.LogWarning(
                     "Dead-lettering oversized input {SourceRef}: ~{Tokens} tokens > {Max}",
-                    item.msg.SourceRef, tokens, _options.MaxSingleTextTokens);
+                    item.msg.SourceRef, tokens, contextLimit);
                 try
                 {
                     await DeadLetterWithMetricsAsync(
                         receiver, item.sbMsg,
                         "TokenLimitExceeded",
-                        $"Estimated {tokens} tokens exceeds MaxSingleTextTokens={_options.MaxSingleTextTokens}",
+                        $"Estimated {tokens} tokens exceeds effective model context limit={contextLimit}",
                         ct);
                 }
                 catch (Exception ex)
@@ -973,35 +1215,85 @@ public class EmbeddingWorkerService : BackgroundService
 
     /// <summary>
     /// Pack messages into sub-batches that respect both the message-count cap
-    /// (EmbedBatchSize) and the token budget (MaxBatchTokens). A single
-    /// oversized message that already passed validation always forms its own
-    /// sub-batch.
+    /// (pipeline and model limits) and the effective request token budget.
     /// </summary>
     private IEnumerable<List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)>> PackByTokenBudget(
         List<(EmbeddingMessage msg, ServiceBusReceivedMessage sbMsg)> items)
     {
         var current = new List<(EmbeddingMessage, ServiceBusReceivedMessage)>();
         int currentTokens = 0;
+        int batchSize = int.MaxValue;
+        int batchTokenLimit = EffectiveTokenLimit(_options.MaxBatchTokens, null);
 
         foreach (var item in items)
         {
             int t = TokenEstimator.Estimate(item.msg.Content);
+            var nextBatchSize = Math.Min(batchSize, EffectiveBatchSize(item.msg));
+            var nextTokenLimit = Math.Min(batchTokenLimit,
+                EffectiveTokenLimit(_options.MaxBatchTokens, item.msg.ModelMaxBatchTokens));
             bool wouldOverflow =
-                current.Count >= _options.EmbedBatchSize ||
-                (current.Count > 0 && currentTokens + t > _options.MaxBatchTokens);
+                current.Count >= nextBatchSize ||
+                (current.Count > 0 && currentTokens + t > nextTokenLimit);
 
             if (wouldOverflow)
             {
                 yield return current;
                 current = new List<(EmbeddingMessage, ServiceBusReceivedMessage)>();
                 currentTokens = 0;
+                batchSize = int.MaxValue;
+                batchTokenLimit = EffectiveTokenLimit(_options.MaxBatchTokens, null);
             }
 
+            batchSize = Math.Min(batchSize, EffectiveBatchSize(item.msg));
+            batchTokenLimit = Math.Min(batchTokenLimit,
+                EffectiveTokenLimit(_options.MaxBatchTokens, item.msg.ModelMaxBatchTokens));
             current.Add(item);
             currentTokens += t;
         }
 
         if (current.Count > 0) yield return current;
+    }
+
+    private int EffectiveBatchSize(EmbeddingMessage message)
+    {
+        var pipelineLimit = message.EmbedBatchSize is >= 1 and <= 4096
+            ? message.EmbedBatchSize.Value
+            : _options.EmbedBatchSize;
+        var modelLimit = message.ModelMaxBatchSize is >= 1 and <= 4096
+            ? message.ModelMaxBatchSize.Value
+            : int.MaxValue;
+        return Math.Min(pipelineLimit, modelLimit);
+    }
+
+    private static int EffectiveTokenLimit(int workerLimit, int? modelLimit)
+    {
+        var hardLimit = modelLimit is > 0 ? Math.Min(workerLimit, modelLimit.Value) : workerLimit;
+        return Math.Max(1, (int)Math.Floor(hardLimit * 0.95));
+    }
+
+    private static string TruncateToTokenBudget(string content, int tokenLimit)
+    {
+        while (TokenEstimator.Estimate(content) > tokenLimit)
+        {
+            var nextLength = Math.Min(content.Length - 1,
+                (int)Math.Floor(content.Length * (double)tokenLimit / TokenEstimator.Estimate(content)));
+            if (nextLength <= 0)
+                throw new ArgumentException("Input cannot fit the effective model token budget");
+            if (char.IsHighSurrogate(content[nextLength - 1])) nextLength--;
+            if (nextLength <= 0)
+                throw new ArgumentException("Input cannot fit the effective model token budget");
+            content = content.Substring(0, nextLength);
+        }
+        return content;
+    }
+
+    private static void ValidateRequestLimits(EmbeddingMessage message)
+    {
+        if (message.EmbedBatchSize is < 1 or > 4096
+            || message.ModelMaxBatchSize is < 1 or > 4096
+            || message.ModelContextWindowTokens is < 1 or > 2_000_000
+            || message.ModelMaxBatchTokens is < 1 or > 2_000_000)
+            throw new ArgumentException("Queued pipeline/model request limits are outside supported ranges");
     }
 
     /// <summary>
@@ -1020,10 +1312,25 @@ public class EmbeddingWorkerService : BackgroundService
     {
         var modelKey = batch[0].msg.DocgrokPipeline;
         var texts = batch.Select(b => b.msg.Content).ToList();
+        var head = batch[0].msg;
+        if (head.BenchmarkMockEmbedding)
+        {
+            if (!_options.EnableBenchmarkMockEmbedding)
+                throw new InvalidOperationException(
+                    "Benchmark mock embedding is disabled on this worker");
+            if (batch.Any(item =>
+                !item.msg.BenchmarkMockEmbedding
+                || item.msg.BenchmarkMockEmbeddingDimensions
+                    != head.BenchmarkMockEmbeddingDimensions))
+                throw new InvalidOperationException(
+                    "Benchmark mock embedding settings must match within a batch");
+            var vector = Enumerable.Repeat(
+                0.01f, head.BenchmarkMockEmbeddingDimensions).ToArray();
+            return batch.Select(_ => vector).ToList();
+        }
 
         try
         {
-            var head = batch[0].msg;
             return await _docGrok.EmbedBatchAsync(
                 modelKey, texts, ct, head.PipelineId,
                 head.SourceId, head.DestinationId, head.SourceRef);
@@ -1034,26 +1341,39 @@ public class EmbeddingWorkerService : BackgroundService
             {
                 var only = batch[0];
 
-                // Most common cause of a single-message 400 is "context length
-                // exceeded" — our token estimate was off. Try truncating to half
-                // and re-embedding once before giving up.
-                if (_options.TruncateOversized && ex.StatusCode is 400 or 413 && only.msg.Content?.Length > 1)
+                if (_options.TruncateOversized && IsSizeLimitError(ex) && only.msg.Content?.Length > 1)
                 {
-                    var orig = only.msg.Content;
-                    only.msg.Content = orig.Substring(0, orig.Length / 2);
-                    _logger.LogWarning(
-                        "Embed rejected {SourceRef} with {Status}; truncating {OrigLen}→{NewLen} chars and retrying once.",
-                        only.msg.SourceRef, ex.StatusCode, orig.Length, only.msg.Content.Length);
-                    try
+                    for (var reduction = 1; reduction <= 6; reduction++)
                     {
-                        return await _docGrok.EmbedBatchAsync(
-                            modelKey, new List<string> { only.msg.Content }, ct,
-                            only.msg.PipelineId, only.msg.SourceId,
-                            only.msg.DestinationId, only.msg.SourceRef);
-                    }
-                    catch (EmbeddingClientException ex2) when (DocGrokClient.IsInputError(ex2.StatusCode))
-                    {
-                        ex = ex2; // fall through to dead-letter with the second error
+                        var orig = only.msg.Content;
+                        var reportedLimit = ReportedContextLimit(ex.ResponseBody);
+                        var targetTokens = reportedLimit is > 0
+                            ? Math.Max(1, (int)Math.Floor(reportedLimit.Value * 0.95))
+                            : Math.Max(1, TokenEstimator.Estimate(orig) / 2);
+                        var ratio = Math.Min(0.8, (double)targetTokens / Math.Max(1, TokenEstimator.Estimate(orig)));
+                        var newLength = Math.Max(1, (int)Math.Floor(orig.Length * ratio));
+                        if (newLength >= orig.Length) newLength = orig.Length - 1;
+                        only.msg.Content = orig.Substring(0, newLength);
+                        _logger.LogWarning(
+                            "Embed size limit for {SourceRef}; reducing {OrigLen}→{NewLen} chars (attempt {Attempt}/6).",
+                            only.msg.SourceRef, orig.Length, newLength, reduction);
+                        try
+                        {
+                            return await _docGrok.EmbedBatchAsync(
+                                modelKey, new List<string> { only.msg.Content }, ct,
+                                only.msg.PipelineId, only.msg.SourceId,
+                                only.msg.DestinationId, only.msg.SourceRef);
+                        }
+                        catch (EmbeddingClientException ex2) when (IsSizeLimitError(ex2))
+                        {
+                            ex = ex2;
+                            if (only.msg.Content.Length <= 1) break;
+                        }
+                        catch (EmbeddingClientException ex2) when (DocGrokClient.IsInputError(ex2.StatusCode))
+                        {
+                            ex = ex2;
+                            break;
+                        }
                     }
                 }
 
@@ -1102,5 +1422,31 @@ public class EmbeddingWorkerService : BackgroundService
             if (rightEmb is not null) combined.AddRange(rightEmb);
             return combined;
         }
+    }
+
+    private static bool IsSizeLimitError(EmbeddingClientException error)
+    {
+        if (error.StatusCode == 413) return true;
+        var body = error.ResponseBody ?? "";
+        return error.StatusCode is 400 or 422
+            && (body.Contains("context_length_exceeded", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("context window", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("maximum context length", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("context length exceeded", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("too many tokens", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("token limit", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("token budget", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("batch maximum", StringComparison.OrdinalIgnoreCase)
+                || body.Contains("too large", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static int? ReportedContextLimit(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        var match = Regex.Match(
+            body,
+            @"(?:context window is|maximum context length is|context_window_tokens["":\s]+)\s*(\d+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var limit) ? limit : null;
     }
 }

@@ -33,6 +33,11 @@ from PIL import Image
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List, Iterator, Any, Dict
+from blob_limits import (
+    BlobSizeLimitExceeded,
+    enforce_blob_size,
+    require_positive_byte_limit,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [pipeline-worker] %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -79,6 +84,14 @@ PDF_DPI = int(os.environ.get("DOCGROK_PDF_DPI", "150"))
 PDF_MAX_PAGES = int(os.environ.get("DOCGROK_PDF_MAX_PAGES", "500"))
 PDF_OCR_MIN_CHARS = int(os.environ.get("DOCGROK_PDF_OCR_MIN_CHARS", "40"))
 PDF_FORCE_OCR = os.environ.get("DOCGROK_PDF_FORCE_OCR", "0") == "1"
+MAX_BUFFERED_BLOB_BYTES = require_positive_byte_limit(
+    "DOCGROK_MAX_BUFFERED_BLOB_BYTES",
+    os.environ.get("DOCGROK_MAX_BUFFERED_BLOB_BYTES", str(50 * 1024 * 1024)),
+)
+MAX_STREAMED_BLOB_BYTES = require_positive_byte_limit(
+    "DOCGROK_MAX_STREAMED_BLOB_BYTES",
+    os.environ.get("DOCGROK_MAX_STREAMED_BLOB_BYTES", str(1024 * 1024 * 1024)),
+)
 
 app = FastAPI(title="DocGrok Pipeline Worker", version="1.1.0")
 
@@ -762,7 +775,12 @@ def _download_blob(container: str, blob_name: str,
                    account_url: Optional[str] = None) -> bytes:
     """Download blob into memory (small blobs / text path)."""
     client = _blob_service_client(connection_string, account_url)
-    return client.get_container_client(container).get_blob_client(blob_name).download_blob().readall()
+    blob_client = client.get_container_client(container).get_blob_client(blob_name)
+    try:
+        enforce_blob_size(blob_client, MAX_BUFFERED_BLOB_BYTES, "buffered document")
+    except BlobSizeLimitExceeded as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    return blob_client.download_blob().readall()
 
 
 def _download_blob_to_file(container: str, blob_name: str,
@@ -776,6 +794,10 @@ def _download_blob_to_file(container: str, blob_name: str,
     """
     client = _blob_service_client(connection_string, account_url)
     blob_client = client.get_container_client(container).get_blob_client(blob_name)
+    try:
+        enforce_blob_size(blob_client, MAX_STREAMED_BLOB_BYTES, "streamed document")
+    except BlobSizeLimitExceeded as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="docgrok-")
     try:
         with os.fdopen(fd, "wb") as f:

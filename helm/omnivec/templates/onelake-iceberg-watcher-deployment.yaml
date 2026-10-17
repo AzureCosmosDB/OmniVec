@@ -30,6 +30,11 @@ spec:
               value: {{ .Values.azure.serviceBus.namespace | quote }}
             - name: ONELAKE_ICEBERG_SERVICEBUS_TOPIC
               value: {{ .Values.azure.serviceBus.embeddingsTopic | default "embeddings" | quote }}
+            {{- include "omnivec.pipelineLanes.validate" . }}
+            - name: ONELAKE_ICEBERG_PIPELINE_LANES_ENABLED
+              value: {{ .Values.azure.serviceBus.pipelineLanes.producersEnabled | quote }}
+            - name: ONELAKE_ICEBERG_PIPELINE_LANES_TOPIC
+              value: {{ .Values.azure.serviceBus.pipelineLanes.topicName | quote }}
             - name: ONELAKE_ICEBERG_DISCOVERY_INTERVAL_SECONDS
               value: {{ .Values.onelakeIcebergWatcher.discoveryIntervalSeconds | quote }}
             - name: AZURE_CLIENT_ID

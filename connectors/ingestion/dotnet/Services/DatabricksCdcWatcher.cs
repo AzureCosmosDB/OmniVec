@@ -117,7 +117,10 @@ public class DatabricksCdcWatcher : ISourceWatcher
                 var since = _lastVersion + 1;
                 if (_sbPublisher?.IsEnabled != true)
                     throw new InvalidOperationException("Databricks queue processing requires Service Bus");
-                if (!await _sbPublisher.HasCapacityAsync(ct))
+                string[] ids;
+                lock (_pipelineLock)
+                    ids = _activePipelines.Where(p => p.Sources.Any(s => s.SourceId == _source.Id)).Select(p => p.Id).ToArray();
+                if (!await _sbPublisher.HasSourceCapacityAsync(ids, ct))
                 {
                     await Task.Delay(pollInterval, ct);
                     continue;
@@ -517,6 +520,7 @@ public class DatabricksCdcWatcher : ISourceWatcher
         List<(string docId, string content, string contentHash, Dictionary<string, object?> row)> docs,
         List<Pipeline> pipelines, CancellationToken ct)
     {
+        var laneMessages = new List<EmbeddingMessage>();
         foreach (var pipeline in pipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
@@ -543,15 +547,25 @@ public class DatabricksCdcWatcher : ISourceWatcher
                 MetadataFields = pipeline.MetadataFields,
                 ResourceWeight = pipeline.ResourcePolicy.Weight,
                 MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                EmbedBatchSize = pipeline.ResourcePolicy.EmbedBatchSize,
+                QueueDocumentsPerMessage = pipeline.ResourcePolicy.QueueDocumentsPerMessage,
+                QueueMaxEnvelopeBytes = pipeline.ResourcePolicy.QueueMaxEnvelopeBytes,
+                QueueSendBatchMaxBytes = pipeline.ResourcePolicy.QueueSendBatchMaxBytes,
+                QueuePublishBatchSize = pipeline.ResourcePolicy.QueuePublishBatchSize,
+                ModelMaxBatchSize = pipeline.ModelLimits.MaxBatchSize,
+                ModelContextWindowTokens = pipeline.ModelLimits.ContextWindowTokens,
+                ModelMaxBatchTokens = pipeline.ModelLimits.MaxBatchTokens,
                 ResourcePriority = pipeline.ResourcePolicy.Priority,
                 WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
             }).ToList();
 
-            await _sbPublisher!.PublishBatchAsync(messages, ct);
+            if (_sbPublisher!.PipelineLanesEnabled) laneMessages.AddRange(messages);
+            else await _sbPublisher.PublishBatchAsync(messages, ct);
             _logger.LogInformation(
-                "Published {Count} Databricks messages to SB for pipeline={Pipeline}",
+                "Prepared/published {Count} Databricks messages to SB for pipeline={Pipeline}",
                 messages.Count, pipeline.Name);
         }
+        if (_sbPublisher!.PipelineLanesEnabled) await _sbPublisher.PublishBatchAsync(laneMessages, ct);
     }
 
     public async ValueTask DisposeAsync()

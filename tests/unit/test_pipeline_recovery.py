@@ -101,28 +101,40 @@ def test_store_uses_supported_cosmos_etag_contract(modules):
     )
 
 
-def test_connector_metrics_are_deduplicated_and_visible_in_pipeline_stats(modules, monkeypatch):
-    source = {
-        "id": "source", "doc_type": "source", "name": "OneLake",
-        "type": "onelake-iceberg", "config": {},
-    }
-    store = MemoryStore(pipeline(), source)
+def test_connector_metrics_are_recorded_without_metadata_writes(modules, monkeypatch):
+    store = MemoryStore(pipeline())
     attach(monkeypatch, modules.api, store)
     modules.api._pipeline_stats_cache.clear()
+    recorded = []
+    monkeypatch.setattr(
+        modules.api, "record_embedding_batch",
+        lambda **kwargs: recorded.append(kwargs),
+    )
 
     payload = {
         "processed": 3, "failed": 0, "processing_time_ms": 300,
         "batch_key": "worker:pipeline:stable",
     }
     assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True}
-    assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True, "dedup": True}
-
-    stats = modules.api._compute_pipeline_stats("pipeline")
-    assert stats.documents_processed == 3
-    assert stats.embedded_count == 3
-    assert stats.lifetime_embedded_count == 3
-    assert stats.avg_processing_time_ms == 100
-    assert stats.recent_throughput_docs_per_sec == 0.1
+    assert store.get("global", "metrics") is None
+    assert recorded == [{
+        "pipeline_id": "pipeline",
+        "docs_embedded": 3,
+        "docs_failed": 0,
+        "tokens_used": 0,
+        "latency_ms": 300.0,
+        "source_id": "",
+        "model_id": "",
+        "destination_id": "",
+        "input_bytes": 0,
+        "queue_wait_ms": 0.0,
+        "retry_count": 0,
+        "throttle_count": 0,
+        "throttle_delay_ms": 0.0,
+        "error_category": "",
+        "last_document": "",
+        "batch_key": "worker:pipeline:stable",
+    }]
 
 
 def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatch):
@@ -149,19 +161,7 @@ def test_worker_metrics_are_attributed_to_pipeline_and_model(modules, monkeypatc
     }
 
     assert modules.api.report_inline_metrics("pipeline", payload) == {"ok": True}
-    assert modules.api.report_inline_metrics("pipeline", payload) == {
-        "ok": True, "dedup": True,
-    }
-
-    persisted = store.get("global", "metrics")
-    pipeline_metrics = persisted["pipelines"]["pipeline"]
-    model_metrics = persisted["models"]["mdl-embedding"]
-    assert pipeline_metrics["processed"] == 4
-    assert pipeline_metrics["tokens"] == 120
-    assert pipeline_metrics["throttles"] == 1
-    assert pipeline_metrics["last_document"] == "document-4"
-    assert pipeline_metrics["models"]["mdl-embedding"]["retries"] == 2
-    assert model_metrics["processed"] == 4
+    assert store.get("global", "metrics") is None
 
     live = modules.api.get_live_metrics()
     assert live["pipelines"]["pipeline"]["embedded"] == 4
@@ -201,62 +201,115 @@ def test_metrics_timeseries_applies_pipeline_and_model_filters(modules, monkeypa
     assert result["model_id"] == "mdl-embedding"
 
 
-def test_worker_metrics_retry_concurrent_cosmos_update(modules, monkeypatch):
-    metrics = {
-        "id": "global",
-        "doc_type": "metrics",
-        "_etag": "1",
-        "events_processed": 10,
-        "events_failed": 0,
-        "pipelines": {},
-        "models": {},
-    }
-    store = MemoryStore(pipeline(), metrics)
+def test_worker_metrics_do_not_read_or_write_cosmos(modules, monkeypatch):
+    store = MemoryStore(pipeline())
     attach(monkeypatch, modules.api, store)
-
-    def concurrent_update():
-        current = store.get("global", "metrics")
-        current["events_processed"] = 11
-        store.upsert(current)
-
-    store.before_replace = concurrent_update
+    original = deepcopy(store.docs)
     assert modules.api.report_inline_metrics("pipeline", {
         "processed": 2,
-        "batch_key": "concurrent-update",
+        "batch_key": "app-insights-only",
     }) == {"ok": True}
+    assert store.docs == original
 
-    persisted = store.get("global", "metrics")
-    assert persisted["events_processed"] == 13
-    assert persisted["pipelines"]["pipeline"]["processed"] == 2
+
+def test_synthetic_source_requires_benchmark_only(modules, monkeypatch):
+    store = MemoryStore()
+    attach(monkeypatch, modules.api, store)
+
+    with pytest.raises(modules.api.HTTPException) as error:
+        asyncio.run(modules.api.create_source(modules.api.CreateSourceRequest(
+            name="Synthetic",
+            type=modules.api.SourceType.SYNTHETIC,
+            config={
+                "benchmark_only": False,
+                "document_count": 1000,
+                "message_size_bytes": 2048,
+                "docs_per_second": 100,
+            },
+        )))
+    assert error.value.status_code == 422
+
+
+def test_synthetic_source_run_uses_configurable_count_size_and_rate(modules, monkeypatch):
+    source = {
+        "id": "source", "doc_type": "source", "name": "Synthetic",
+        "type": "synthetic", "enabled": True,
+        "config": {
+            "benchmark_only": True,
+            "document_count": 1000,
+            "message_size_bytes": 2048,
+            "docs_per_second": 100,
+            "content_pattern": "deterministic",
+        },
+    }
+    destination = {
+        "id": "destination", "doc_type": "destination", "name": "Null",
+        "type": "null", "enabled": True,
+        "config": {
+            "benchmark_only": True,
+            "max_docs_per_second": 0,
+            "rate_key": "synthetic",
+        },
+    }
+    store = MemoryStore(pipeline(), source, destination)
+    attach(monkeypatch, modules.api, store)
+    monkeypatch.setenv("SYNTHETIC_SERVICEBUS_NAMESPACE", "example.servicebus.windows.net")
+
+    class FakeTask:
+        def add_done_callback(self, _callback):
+            return None
+
+    def create_task(coroutine):
+        coroutine.close()
+        return FakeTask()
+
+    monkeypatch.setattr(modules.api.asyncio, "create_task", create_task)
+    result = asyncio.run(modules.api.generate_synthetic_source(
+        "source",
+        modules.api.SyntheticGenerateRequest(
+            document_count=100_000,
+            message_size_bytes=5000,
+            docs_per_second=500,
+        ),
+        SimpleNamespace(state=SimpleNamespace(internal=True)),
+    ))
+
+    assert result["document_count"] == 100_000
+    assert result["message_size_bytes"] == 5000
+    assert result["docs_per_second"] == 500
+    assert result["status"] == "publishing"
+    persisted = store.get(result["id"], "synthetic_run")
+    assert persisted["pipeline_id"] == "pipeline"
 
 
 def test_operator_resource_policy_and_insights(modules, monkeypatch):
-    metrics = {
-        "id": "global",
-        "doc_type": "metrics",
-        "_etag": "1",
-        "events_processed": 10,
-        "events_failed": 0,
-        "models": {},
-        "pipelines": {
-            "pipeline": {
-                "processed": 10,
-                "failed": 0,
-                "requests": 10,
-                "queue_wait_ms": 150000,
-                "total_time_ms": 2000,
-                "tokens": 1000,
-                "input_bytes": 5000,
-                "throttles": 0,
-                "retries": 0,
-            },
-        },
+    observed = {
+        "processed": 10,
+        "failed": 0,
+        "requests": 10,
+        "queue_wait_ms": 150000,
+        "total_time_ms": 2000,
+        "tokens": 1000,
+        "input_bytes": 5000,
+        "throttles": 0,
+        "retries": 0,
+        "recent": [
+            {"n": 1, "latency_ms": 200}
+            for _ in range(10)
+        ],
     }
-    store = MemoryStore(pipeline(), metrics)
+    store = MemoryStore(pipeline())
     attach(monkeypatch, modules.api, store)
+    monkeypatch.setattr(
+        modules.api, "_get_app_insights_pipeline_metrics",
+        lambda *_args: observed,
+    )
+    monkeypatch.setattr(modules.api, "_deployed_worker_concurrency", lambda: 10)
     policy = modules.api.PipelineResourcePolicy(
         weight=20,
         max_concurrency_per_worker=3,
+        embed_batch_size=2,
+        queue_documents_per_message=100,
         priority="high",
         workload_class="burst",
     )
@@ -266,6 +319,15 @@ def test_operator_resource_policy_and_insights(modules, monkeypatch):
     saved = store.get("pipeline", "pipeline")
     assert saved["resource_policy"]["weight"] == 20
     assert saved["resource_policy"]["max_concurrency_per_worker"] == 3
+    assert saved["resource_policy"]["embed_batch_size"] == 2
+    assert saved["resource_policy"]["queue_documents_per_message"] == 100
+    for invalid in (0, -1, 1001):
+        with pytest.raises(ValueError):
+            modules.api.PipelineResourcePolicy(queue_documents_per_message=invalid)
+    with pytest.raises(ValueError):
+        modules.api.PipelineResourcePolicy(embed_batch_size=0)
+    with pytest.raises(ValueError):
+        modules.api.PipelineResourcePolicy(embed_batch_size=4097)
 
     insights = modules.api.get_resource_insights()
     row = insights["pipelines"][0]
@@ -273,6 +335,121 @@ def test_operator_resource_policy_and_insights(modules, monkeypatch):
     assert row["observed"]["avg_queue_wait_ms"] == 15000
     assert row["recommendation"]["suggested_policy"]["weight"] == 25
     assert row["recommendation"]["suggested_policy"]["max_concurrency_per_worker"] == 4
+    assert row["capacity_estimate"]["status"] == "ready"
+    assert row["capacity_estimate"]["lower_percentile_docs_per_slot_sec"] == 5.0
+    assert row["capacity_estimate"]["recommended_sustained_docs_per_worker_sec"] == 10.5
+    assert row["capacity_estimate"]["predictability"] == "stable"
+    modules.api.update_pipeline_resource_policy(
+        "pipeline", modules.api.PipelineResourcePolicy(max_concurrency_per_worker=32),
+    )
+    estimate = modules.api.get_resource_insights()["pipelines"][0]["capacity_estimate"]
+    assert store.get("pipeline", "pipeline")["resource_policy"]["queue_documents_per_message"] == 100
+    assert estimate["configured_slots_per_worker"] == 32
+    assert estimate["effective_slots_per_worker"] == 10
+    assert estimate["recommended_sustained_docs_per_worker_sec"] == 35
+    monkeypatch.setattr(modules.api, "_deployed_worker_concurrency", lambda: None)
+    estimate = modules.api.get_resource_insights()["pipelines"][0]["capacity_estimate"]
+    assert estimate["status"] == "unknown_worker_configuration"
+    assert estimate["recommended_sustained_docs_per_worker_sec"] is None
+
+
+def test_live_queue_capacity_survives_partial_updates_and_rejects_invalid_merge(modules, monkeypatch):
+    store = MemoryStore(pipeline())
+    attach(monkeypatch, modules.api, store)
+    full = {
+        "queue_documents_per_message": 500,
+        "queue_max_envelope_bytes": 600 * 1024,
+        "queue_send_batch_max_bytes": 640 * 1024,
+        "queue_publish_batch_size": 500,
+    }
+    modules.api.update_pipeline_resource_policy("pipeline", modules.api.PipelineResourcePolicy(**full))
+    modules.api.update_pipeline_resource_policy(
+        "pipeline", modules.api.PipelineResourcePolicy(max_concurrency_per_worker=8),
+    )
+    saved = store.get("pipeline", "pipeline")["resource_policy"]
+    assert {key: saved[key] for key in full} == full
+    assert saved["max_concurrency_per_worker"] == 8
+    with pytest.raises(modules.api.HTTPException) as error:
+        modules.api.update_pipeline_resource_policy(
+            "pipeline", modules.api.PipelineResourcePolicy(queue_send_batch_max_bytes=256 * 1024),
+        )
+    assert error.value.status_code == 422
+    assert store.get("pipeline", "pipeline")["resource_policy"] == saved
+    for field, invalid in (("queue_max_envelope_bytes", 961 * 1024),
+                           ("queue_send_batch_max_bytes", 1025 * 1024),
+                           ("queue_publish_batch_size", 1001)):
+        with pytest.raises(ValueError):
+            modules.api.PipelineResourcePolicy(**{**full, field: invalid})
+
+
+def test_model_request_limits_validate_and_refresh_pipeline_snapshots(modules, monkeypatch):
+    stored_pipeline = pipeline(docgrok_pipeline="mdl-ext-test")
+    store = MemoryStore(stored_pipeline)
+    attach(monkeypatch, modules.api, store)
+
+    limits = modules.api._validated_model_request_limits({
+        "max_batch_size": 32,
+        "context_window_tokens": 512,
+        "max_batch_tokens": 4096,
+    })
+    modules.api._refresh_pipeline_limit_snapshots(store, "mdl-ext-test", limits)
+
+    saved = store.get("pipeline", "pipeline")
+    assert saved["model_limits"] == {
+        "max_batch_size": 32,
+        "context_window_tokens": 512,
+        "max_batch_tokens": 4096,
+    }
+    with pytest.raises(modules.api.HTTPException) as error:
+        modules.api._validated_model_request_limits({"context_window_tokens": 0})
+    assert error.value.status_code == 400
+
+
+def test_limit_snapshot_conflicts_do_not_block_other_pipelines_or_serve_stale_limits(modules, monkeypatch):
+    model = {
+        "id": "mdl-ext-test", "doc_type": "docgrok_model", "_etag": "1",
+        "max_batch_size": 16, "context_window_tokens": 512, "max_batch_tokens": 1000,
+    }
+    first = pipeline(docgrok_pipeline=model["id"])
+    second = pipeline(id="other", docgrok_pipeline=model["id"])
+    store = MemoryStore(first, second, model)
+    attach(monkeypatch, modules.api, store)
+    original_replace = modules.api._replace_control_doc
+
+    def conflicting_replace(store, current, updated, kind):
+        if current["id"] == "pipeline":
+            raise modules.api.HTTPException(status_code=409, detail="Concurrent edit")
+        return original_replace(store, current, updated, kind)
+
+    monkeypatch.setattr(modules.api, "_replace_control_doc", conflicting_replace)
+    limits = modules.api.ModelRequestLimits(**{key: model[key] for key in (
+        "max_batch_size", "context_window_tokens", "max_batch_tokens",
+    )})
+    assert modules.api._refresh_pipeline_limit_snapshots(store, model["id"], limits) == ["pipeline"]
+    assert store.get("other", "pipeline")["model_limits"]["max_batch_size"] == 16
+    assert "model_limits" not in store.get("pipeline", "pipeline")
+    listed = modules.api.list_pipelines(include_stats=False)["pipelines"]
+    assert all(item["model_limits"]["max_batch_size"] == 16 for item in listed)
+
+    monkeypatch.setattr(modules.api, "_replace_control_doc", original_replace)
+    modules.api.list_pipelines(include_stats=False)
+    assert store.get("pipeline", "pipeline")["model_limits"]["max_batch_size"] == 16
+
+    store.upsert({**model, "max_batch_size": 8})
+    modules.api._refresh_pipeline_limit_snapshots(store, model["id"], limits)
+    assert store.get("pipeline", "pipeline")["model_limits"]["max_batch_size"] == 8
+
+
+def test_worker_concurrency_discovery_uses_deployed_override(modules, monkeypatch):
+    worker = SimpleNamespace(env=[SimpleNamespace(name="Worker__MaxConcurrentCalls", value="6")], env_from=[])
+    deployment = SimpleNamespace(spec=SimpleNamespace(template=SimpleNamespace(
+        spec=SimpleNamespace(containers=[worker]),
+    )))
+    apps = SimpleNamespace(read_namespaced_deployment=Mock(return_value=deployment))
+    monkeypatch.setattr(modules.api, "_get_k8s_clients", lambda: (apps, None, None))
+    assert modules.api._deployed_worker_concurrency() == 6
+    worker.env[0].value = None
+    assert modules.api._deployed_worker_concurrency() is None
 
 
 def test_new_checkpoint_and_external_reset_clear_cached_state(modules, monkeypatch):

@@ -1,19 +1,40 @@
-using System.Net.Http.Json;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 
 namespace OmniVec.Worker.Services;
 
-public class MetricsReporter
+public sealed class MetricsReporter
 {
-    private readonly HttpClient _http;
-    private readonly ILogger<MetricsReporter> _logger;
+    public const string MeterName = "omnivec";
+    private static readonly Meter Meter = new(MeterName, "1.0.0");
+    private static readonly Counter<long> DocumentsEmbedded =
+        Meter.CreateCounter<long>("omnivec.documents.embedded", "documents");
+    private static readonly Counter<long> DocumentsFailed =
+        Meter.CreateCounter<long>("omnivec.documents.failed", "documents");
+    private static readonly Counter<long> TokensUsed =
+        Meter.CreateCounter<long>("omnivec.tokens.used", "tokens");
+    private static readonly Counter<long> Retries =
+        Meter.CreateCounter<long>("omnivec.model.retries", "retries");
+    private static readonly Counter<long> Throttles =
+        Meter.CreateCounter<long>("omnivec.model.throttles", "throttles");
+    private static readonly Counter<long> PipelineRequests =
+        Meter.CreateCounter<long>("omnivec.pipeline.requests", "requests");
+    private static readonly Counter<double> ProcessingTime =
+        Meter.CreateCounter<double>("omnivec.pipeline.processing_time", "ms");
+    private static readonly Counter<long> InputBytes =
+        Meter.CreateCounter<long>("omnivec.pipeline.input_bytes", "bytes");
+    private static readonly Histogram<double> EmbeddingLatency =
+        Meter.CreateHistogram<double>("omnivec.embedding.latency", "ms");
+    private static readonly Histogram<double> QueueWait =
+        Meter.CreateHistogram<double>("omnivec.queue.wait", "ms");
+    private static readonly Histogram<double> ThrottleDelay =
+        Meter.CreateHistogram<double>("omnivec.model.throttle_delay", "ms");
 
-    public MetricsReporter(HttpClient http, ILogger<MetricsReporter> logger)
+    public MetricsReporter(HttpClient _, ILogger<MetricsReporter> __)
     {
-        _http = http;
-        _logger = logger;
     }
 
-    public async Task ReportInlineMetricsAsync(
+    public Task ReportInlineMetricsAsync(
         string pipelineId, int processed, int failed, long processingTimeMs,
         string batchKey, CancellationToken ct = default, string sourceId = "",
         string destinationId = "", string modelId = "", long tokensUsed = 0,
@@ -23,36 +44,34 @@ public class MetricsReporter
         int resourceWeight = 10, int maxConcurrencyPerWorker = 2,
         string resourcePriority = "normal", string workloadClass = "shared")
     {
-        try
+        var tags = new TagList
         {
-            var payload = new
-            {
-                processed,
-                failed,
-                processing_time_ms = processingTimeMs,
-                batch_key = batchKey,
-                source_id = sourceId,
-                destination_id = destinationId,
-                model_id = modelId,
-                tokens_used = tokensUsed,
-                input_bytes = inputBytes,
-                queue_wait_ms = queueWaitMs,
-                retry_count = retryCount,
-                throttle_count = throttleCount,
-                throttle_delay_ms = throttleDelayMs,
-                error_category = errorCategory,
-                last_document = lastDocument,
-                resource_weight = resourceWeight,
-                max_concurrency_per_worker = maxConcurrencyPerWorker,
-                resource_priority = resourcePriority,
-                workload_class = workloadClass,
-            };
-            using var response = await _http.PostAsJsonAsync($"/api/pipelines/{pipelineId}/metrics/inline", payload, ct);
-            response.EnsureSuccessStatusCode();
-        }
-        catch (Exception ex)
+            { "pipeline_id", pipelineId },
+            { "source_id", sourceId },
+            { "model_id", modelId },
+            { "destination_id", destinationId },
+            { "resource_weight", resourceWeight },
+            { "max_concurrency_per_worker", maxConcurrencyPerWorker },
+            { "resource_priority", resourcePriority },
+            { "workload_class", workloadClass },
+        };
+        if (!string.IsNullOrEmpty(errorCategory))
+            tags.Add("error_category", errorCategory);
+
+        if (processed > 0) DocumentsEmbedded.Add(processed, tags);
+        if (failed > 0) DocumentsFailed.Add(failed, tags);
+        if (tokensUsed > 0) TokensUsed.Add(tokensUsed, tags);
+        if (retryCount > 0) Retries.Add(retryCount, tags);
+        if (throttleCount > 0) Throttles.Add(throttleCount, tags);
+        PipelineRequests.Add(1, tags);
+        if (processingTimeMs > 0)
         {
-            _logger.LogWarning(ex, "Failed to report metrics for pipeline {PipelineId}", pipelineId);
+            ProcessingTime.Add(processingTimeMs, tags);
+            EmbeddingLatency.Record(processingTimeMs, tags);
         }
+        if (inputBytes > 0) InputBytes.Add(inputBytes, tags);
+        if (queueWaitMs > 0) QueueWait.Record(queueWaitMs, tags);
+        if (throttleDelayMs > 0) ThrottleDelay.Record(throttleDelayMs, tags);
+        return Task.CompletedTask;
     }
 }

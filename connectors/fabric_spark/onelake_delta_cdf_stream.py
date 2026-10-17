@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+from pathlib import Path
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -21,6 +22,7 @@ import requests
 from pyspark.sql import DataFrame, SparkSession, functions as F
 
 from onelake_delta_cdf_helpers import build_messages, ordered_source_version
+from omnivec_queue import queue_publish_policy, queue_messages
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,7 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-location", required=True)
     parser.add_argument("--service-bus-namespace", required=True)
     parser.add_argument("--service-bus-topic", default="embeddings")
-    parser.add_argument("--pipeline-config-base64", required=True)
+    config = parser.add_mutually_exclusive_group(required=True)
+    config.add_argument("--pipeline-config-base64")
+    config.add_argument("--pipeline-config-path")
     parser.add_argument("--trigger-interval-seconds", type=int, default=10)
     parser.add_argument("--starting-version", type=int)
     parser.add_argument("--max-files-per-trigger", type=int, default=1000)
@@ -124,7 +128,7 @@ def _send_message(
     response = requests.post(
         endpoint,
         headers=headers,
-        data=json.dumps(message, separators=(",", ":")).encode("utf-8"),
+        data=json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8"),
         timeout=30,
     )
     if response.status_code >= 400:
@@ -164,10 +168,22 @@ def _publish_microbatch(
         print(f"OmniVec CDF batch {batch_id}: no source-content changes")
         return
 
+    queue_limits = {
+        plan["pipeline_id"]: queue_publish_policy(plan.get("resource_policy") or {})
+        for plan in plans
+    }
+    envelopes = [
+        envelope
+        for pipeline_id, limit in queue_limits.items()
+        for envelope, _, _ in queue_messages(
+            (message for message in messages if message["pipeline_id"] == pipeline_id),
+            limit,
+        )
+    ]
     resource_uri = endpoint.removesuffix("/messages")
-    send_concurrency = min(8, max(1, len(messages)))
+    send_concurrency = min(8, max(1, len(envelopes)))
     token_refresh_batch_size = 1000
-    for start in range(0, len(messages), token_refresh_batch_size):
+    for start in range(0, len(envelopes), token_refresh_batch_size):
         if auth_mode == "aad":
             authorization = f"Bearer {_get_service_bus_access_token()}"
         else:
@@ -178,7 +194,7 @@ def _publish_microbatch(
                 connection["SharedAccessKeyName"],
                 connection["SharedAccessKey"],
             )
-        chunk = messages[start : start + token_refresh_batch_size]
+        chunk = envelopes[start : start + token_refresh_batch_size]
         with ThreadPoolExecutor(max_workers=send_concurrency) as executor:
             futures = [
                 executor.submit(_send_message, endpoint, authorization, message)
@@ -186,7 +202,18 @@ def _publish_microbatch(
             ]
             for future in futures:
                 future.result()
-    print(f"OmniVec CDF batch {batch_id}: published {len(messages)} messages")
+    print(f"OmniVec CDF batch {batch_id}: published {len(messages)} documents in {len(envelopes)} messages")
+
+
+def load_plans(args: argparse.Namespace) -> list[dict[str, Any]]:
+    encoded = (Path(args.pipeline_config_path).read_text(encoding="utf-8")
+               if args.pipeline_config_path else base64.b64decode(args.pipeline_config_base64).decode("utf-8"))
+    plans = json.loads(encoded)
+    if not isinstance(plans, list) or not plans:
+        raise ValueError("Pipeline config must be a non-empty JSON list")
+    for plan in plans:
+        queue_publish_policy(plan.get("resource_policy") or {})
+    return plans
 
 
 def main() -> None:
@@ -196,11 +223,7 @@ def main() -> None:
     if args.max_files_per_trigger < 1:
         raise ValueError("max-files-per-trigger must be at least 1")
 
-    plans = json.loads(
-        base64.b64decode(args.pipeline_config_base64).decode("utf-8")
-    )
-    if not isinstance(plans, list) or not plans:
-        raise ValueError("pipeline-config-base64 must decode to a non-empty list")
+    load_plans(args)
     connection = None
     if args.service_bus_auth_mode == "sas":
         if not (
@@ -258,7 +281,7 @@ def main() -> None:
             lambda batch, batch_id: _publish_microbatch(
                 batch,
                 batch_id,
-                plans,
+                load_plans(args),
                 endpoint,
                 args.service_bus_auth_mode,
                 connection,

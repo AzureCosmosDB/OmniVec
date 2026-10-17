@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 
 import pytest
 
@@ -35,7 +36,7 @@ def cloud(ui_page):
             state["jobs"][-1]["status"] = "queued"
             result = state["jobs"][-1]
         request.fulfill(status=200, content_type="application/json", body=json.dumps(result))
-    page.route("**/api/cloud-deployments**", route)
+    page.route(re.compile(r"/api/cloud-deployments(?:/.*)?$"), route)
     page.route("**/api/destinations", lambda r: r.fulfill(content_type="application/json", body=json.dumps({
         "destinations": [{"id": "dst-1", "name": "Vectors", "type": "cosmosdb-vector"}]})))
     page.route("**/api/models", lambda r: r.fulfill(content_type="application/json", body=json.dumps({

@@ -446,6 +446,7 @@ public class MsSqlCdcWatcher : ISourceWatcher
         List<Pipeline> pipelines,
         CancellationToken ct)
     {
+        var laneMessages = new List<EmbeddingMessage>();
         foreach (var pipeline in pipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
@@ -472,14 +473,24 @@ public class MsSqlCdcWatcher : ISourceWatcher
                 MetadataFields = pipeline.MetadataFields,
                 ResourceWeight = pipeline.ResourcePolicy.Weight,
                 MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                EmbedBatchSize = pipeline.ResourcePolicy.EmbedBatchSize,
+                QueueDocumentsPerMessage = pipeline.ResourcePolicy.QueueDocumentsPerMessage,
+                QueueMaxEnvelopeBytes = pipeline.ResourcePolicy.QueueMaxEnvelopeBytes,
+                QueueSendBatchMaxBytes = pipeline.ResourcePolicy.QueueSendBatchMaxBytes,
+                QueuePublishBatchSize = pipeline.ResourcePolicy.QueuePublishBatchSize,
+                ModelMaxBatchSize = pipeline.ModelLimits.MaxBatchSize,
+                ModelContextWindowTokens = pipeline.ModelLimits.ContextWindowTokens,
+                ModelMaxBatchTokens = pipeline.ModelLimits.MaxBatchTokens,
                 ResourcePriority = pipeline.ResourcePolicy.Priority,
                 WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
             }).ToList();
 
-            await _sbPublisher!.PublishBatchAsync(messages, ct);
-            _logger.LogInformation("Published {Count} messages to SB for pipeline={Pipeline}",
+            if (_sbPublisher!.PipelineLanesEnabled) laneMessages.AddRange(messages);
+            else await _sbPublisher.PublishBatchAsync(messages, ct);
+            _logger.LogInformation("Prepared/published {Count} messages to SB for pipeline={Pipeline}",
                 messages.Count, pipeline.Name);
         }
+        if (_sbPublisher!.PipelineLanesEnabled) await _sbPublisher.PublishBatchAsync(laneMessages, ct);
     }
 
     private static int CompareBytes(byte[] a, byte[] b)
