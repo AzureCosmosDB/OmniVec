@@ -806,6 +806,7 @@ public class EmbeddingWorkerService : BackgroundService
         try
         {
             var identity = SharePointIdentity.Create(msg);
+            var provenance = SharePointProvenance.FromMessage(msg);
             if (msg.SharePointRevision <= 0)
                 throw new InvalidOperationException("Legacy SharePoint message has no synchronization revision; drain old messages before migration");
             if (!_writers.TryGetValue(msg.DestinationType, out var writer))
@@ -819,7 +820,8 @@ public class EmbeddingWorkerService : BackgroundService
                 var bytes = await _sharePoint.DownloadAsync(
                     msg.SharePointSiteId!, msg.SharePointDriveId!, msg.SharePointItemId!,
                     msg.SharePointMaxFileSizeBytes, ct, msg.SharePointETag,
-                    msg.SharePointGraphTenantId, msg.SharePointGraphClientId, msg.PipelineId);
+                    msg.SharePointGraphTenantId, msg.SharePointGraphClientId, msg.PipelineId,
+                    provenance.ResourceTenantId);
                 // A zero-byte file is an explicit empty document, not a malformed processor response.
                 if (bytes.Length > 0)
                     chunks = await _docGrok.EmbedDataAsync(
@@ -847,7 +849,7 @@ public class EmbeddingWorkerService : BackgroundService
 
             var applied = await writer.ReplaceSharePointAsync(msg.DestinationConfig,
                 new SharePointReplacement(identity, msg.SharePointRevision, msg.SourceId,
-                    msg.PipelineId, msg.SourceRef, results), ct);
+                    msg.PipelineId, msg.SourceRef, results, provenance), ct);
 
             await _metrics.ReportInlineMetricsAsync(
                 msg.PipelineId, applied ? results.Count : 0, 0, 0,

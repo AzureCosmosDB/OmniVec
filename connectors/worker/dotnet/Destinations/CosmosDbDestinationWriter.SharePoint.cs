@@ -3,15 +3,17 @@ using System.Text;
 using Microsoft.Azure.Cosmos;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using OmniVec.Worker.Models;
 
 namespace OmniVec.Worker.Destinations;
 
 public partial class CosmosDbDestinationWriter
 {
     private const string SyncField = "_omnivec_sync";
+    private const string ProvenanceField = "_omnivec_provenance";
     private static readonly HashSet<string> SyncReservedFields = new(StringComparer.Ordinal)
     {
-        "id", SyncField, "source_id", "pipeline_id", "source_ref", "embedded_at",
+        "id", SyncField, ProvenanceField, "source_id", "pipeline_id", "source_ref", "embedded_at",
         "pipeline_generation", "pipeline_name", "content_hash", "embedding_dims", "ttl",
     };
 
@@ -191,6 +193,13 @@ public partial class CosmosDbDestinationWriter
         if (replacement.Revision <= 0 || string.IsNullOrWhiteSpace(replacement.Identity)
             || string.IsNullOrWhiteSpace(replacement.SourceId) || string.IsNullOrWhiteSpace(replacement.PipelineId))
             throw new InvalidOperationException("Invalid SharePoint synchronization identity/revision");
+        if (replacement.Provenance is null)
+            throw new InvalidOperationException("SharePoint provenance is required");
+        replacement.Provenance.Validate(requireETag: replacement.Chunks.Count > 0);
+        if (replacement.Identity != SharePointIdentity.Create(
+            replacement.SourceId, replacement.Provenance.SiteId, replacement.Provenance.DriveId,
+            replacement.Provenance.ItemId, replacement.PipelineId))
+            throw new InvalidOperationException("SharePoint provenance does not match the synchronization identity");
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var chunk in replacement.Chunks)
         {
@@ -216,6 +225,16 @@ public partial class CosmosDbDestinationWriter
             ["source_id"] = replacement.SourceId,
             ["pipeline_id"] = replacement.PipelineId,
             ["source_ref"] = replacement.SourceRef,
+            [ProvenanceField] = new JObject
+            {
+                ["schema_version"] = 1,
+                ["provider"] = "sharepoint",
+                ["resource_tenant_id"] = replacement.Provenance.ResourceTenantId,
+                ["site_id"] = replacement.Provenance.SiteId,
+                ["drive_id"] = replacement.Provenance.DriveId,
+                ["item_id"] = replacement.Provenance.ItemId,
+                ["source_etag"] = replacement.Provenance.SourceETag,
+            },
             [SyncField] = new JObject
             {
                 ["identity"] = replacement.Identity,

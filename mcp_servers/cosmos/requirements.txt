@@ -2,3 +2,6 @@ azure-functions==1.26.0b3
 azure-cosmos>=4.9,<5.0
 azure-identity>=1.19,<2.0
 openai>=1.68,<2.0
+PyJWT[crypto]>=2.10,<3.0
+msal>=1.31,<2.0
+requests>=2.32,<3.0

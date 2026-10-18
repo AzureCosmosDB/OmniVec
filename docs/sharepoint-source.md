@@ -32,6 +32,12 @@ Grant the OmniVec workload identity a Microsoft Graph application permission:
 Admin consent is required. No SharePoint client secret, certificate, or download
 URL is stored in source configuration or placed on Service Bus.
 
+These are **ingestion workload permissions**, not permission to expose every
+indexed file to every user. For user-facing retrieval, configure the separate
+[protected Cosmos MCP endpoint](../mcp_servers/cosmos/README.md#protected-sharepoint-deployment).
+It uses each user's delegated Graph access, not the ingestion identity or an
+ACL snapshot.
+
 The SharePoint watcher also requires Service Bus and the .NET embedding worker.
 Cross-tenant pipelines get isolated watchers, ownership leases, Graph
 credentials, delta cursors, revision sequences, and item-to-path mappings.
@@ -155,7 +161,8 @@ keys are not supported.
   independent of filenames. Chunk IDs append the durable revision and index.
   Renames update display metadata, not identity; different sources and pipelines
   cannot overwrite each other's chunks.
-- `source_id`, `pipeline_id`, `source_ref`, and `_omnivec_sync` are mandatory
+- `source_id`, `pipeline_id`, `source_ref`, `_omnivec_sync`, and
+  `_omnivec_provenance` are mandatory
   synchronization fields for SharePoint, independent of optional metadata
   selections. Content/vector/partition fields cannot overwrite these fields.
   `_omnivec_sync.kind` distinguishes `chunk` from `state`; the latter has no
@@ -190,6 +197,11 @@ keys are not supported.
 - Downloads verify Graph's queued eTag before and after reading content.
   Superseded/missing versions are logged as skipped and leave the last good
   vectors intact until the watcher's newer update/delete is processed.
+  The watcher resolves the resource tenant from the drive root's
+  `sharepointIds.tenantId`, verifies it against an explicitly selected tenant,
+  and pins it in the checkpoint. The worker checks the tenant on file metadata
+  before and after download. A configured application tenant is not a substitute
+  for the actual SharePoint resource tenant.
 - Missing/malformed processor `chunks`, empty vectors, missing embeddings, and
   dimension failures are errors and cause message retry. A zero-byte file or
   an explicit processor `skipped: true` with a reason is an intentional empty
@@ -199,6 +211,49 @@ keys are not supported.
 Cosmos-source and Blob chunk upserts keep their existing writer path. The
 shared legacy delete path now also scopes deletion to `pipeline_id` and
 propagates unsuccessful delete batches instead of acknowledging them.
+
+Every chunk and synchronization manifest contains this reserved provenance
+block, independent of optional metadata selection:
+
+```json
+{
+  "_omnivec_provenance": {
+    "schema_version": 1,
+    "provider": "sharepoint",
+    "resource_tenant_id": "11111111-1111-1111-1111-111111111111",
+    "site_id": "contoso.sharepoint.com,site-guid,web-guid",
+    "drive_id": "drive-id",
+    "item_id": "item-id",
+    "source_etag": "<exact Graph eTag of the embedded file>"
+  }
+}
+```
+
+These are stable source identifiers and the embedded version, not a flattened
+permission list. They contain no user tokens or preauthenticated download URLs.
+The writer validates their binding to the source/pipeline document identity.
+Destination field settings cannot overwrite either reserved block.
+
+## Permission-aware retrieval
+
+Enable protected retrieval explicitly for dedicated, trusted-writer SharePoint
+containers. The MCP server validates an Entra user token for its own API and
+uses OBO to check Graph metadata **and content-read access** as that user. It
+returns text/citations only from the exact indexed eTag and a completed current
+Cosmos revision, hiding stale, incomplete, missing-provenance and inaccessible
+rows. Both listing and vector search apply this gate. Graph outages and consent
+challenges are explicit failures rather than apparently successful empty results.
+
+The first supported caller is Foundry custom per-user OAuth in the same tenant.
+Cross-tenant ingestion still works, but retrieval of another resource tenant's
+rows is denied. Shared Function keys, project/agent managed identity, and native
+Functions MCP tool triggers do not provide a user context for protected reads.
+Generic/admin search remains privileged and must not be exposed as an alternate
+path to the same private data.
+
+Follow the [MCP identity, supported-file limits and client setup](../mcp_servers/cosmos/README.md).
+This feature is not a general Purview/IRM/no-download enforcement engine. It
+does not retroactively erase previously returned data or Foundry history.
 
 ## Upgrade from path-based SharePoint documents
 
@@ -222,6 +277,22 @@ avoid either duplicate legacy search results or deletion of unrelated data.
 Changing a source's site/drive identity likewise requires a new source ID and
 an explicit migration rather than reusing its existing checkpoint.
 
+### Upgrade from revision-based records without provenance
+
+This also requires a coordinated watcher/worker upgrade. Stop the old watcher
+and drain or explicitly retire already-published legacy envelopes before
+starting the new worker: upserts without a resource tenant or source eTag fail
+closed. The upgraded watcher can enrich its own persisted, unpublished outbox
+with the verified resource tenant without changing event IDs.
+
+Checkpoint schema 3 forces a full scan of earlier checkpoints, preserving
+revision high-water marks and reconciliation state. Keep both the lease state
+and destination manifests. The scan rewrites chunks with mandatory provenance;
+do not simply copy source IDs onto old vectors or reset revisions. Protected
+retrieval hides legacy chunks until the new version is fully committed.
+Enable the protected Function App only with its complete Entra/OBO configuration
+and verify the backfill and per-user access before switching callers.
+
 ## Local regression validation
 
 No live Azure resources are needed:
@@ -229,6 +300,7 @@ No live Azure resources are needed:
 ```powershell
 dotnet run --project tests\sharepoint\SharePoint.Regression.csproj
 python -m pytest tests\unit\test_sharepoint_processing.py tests\unit\test_models.py tests\unit\test_openapi_snapshots.py -q
+python -m pytest tests\unit\test_sharepoint_mcp.py tests\unit\test_cosmos_mcp.py tests\unit\test_foundry_cosmos_mcp_agent.py -q
 cargo test --manifest-path docgrok\router\Cargo.toml request_body
 ```
 
@@ -236,3 +308,5 @@ The dependency-free .NET console exercises production identity, watcher,
 publisher, worker, and chunk-replacement logic with local HTTP/queue/Cosmos
 transaction doubles. It does not substitute for a deployed Azure end-to-end
 test, Cosmos transaction/consistency verification, or a production memory test.
+The MCP tests use local signed tokens and Graph/Cosmos doubles; they do not
+grant consent, configure a Foundry connection, or exercise a real tenant.

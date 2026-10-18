@@ -1027,7 +1027,8 @@ internal static class ConnectorReliabilityTests
             var graph = new SharePointContentClient(new HttpClient(new AsyncHandler(async (request, ct) =>
             {
                 if (!request.RequestUri!.AbsolutePath.EndsWith("/content"))
-                    return new(HttpStatusCode.OK) { Content = new StringContent("""{"eTag":"v1"}""") };
+                    return new(HttpStatusCode.OK) { Content = new StringContent(
+                        """{"eTag":"v1","sharepointIds":{"tenantId":"11111111-1111-1111-1111-111111111111"}}""") };
                 var concurrent = Interlocked.Increment(ref active);
                 maximum = Math.Max(maximum, concurrent);
                 try
@@ -1046,6 +1047,7 @@ internal static class ConnectorReliabilityTests
                 var message = TextMessage(id);
                 message.ContentType = "sharepoint_ref";
                 message.SharePointSiteId = "site";
+                message.SharePointResourceTenantId = "11111111-1111-1111-1111-111111111111";
                 message.SharePointDriveId = "drive";
                 message.SharePointItemId = id;
                 message.SharePointETag = "v1";
@@ -1064,7 +1066,8 @@ internal static class ConnectorReliabilityTests
             var graph = new SharePointContentClient(new HttpClient(new LocalHttpHandler(request =>
             {
                 if (!request.RequestUri!.AbsolutePath.EndsWith("/content"))
-                    return new(HttpStatusCode.OK) { Content = new StringContent("""{"eTag":"v1"}""") };
+                    return new(HttpStatusCode.OK) { Content = new StringContent(
+                        """{"eTag":"v1","sharepointIds":{"tenantId":"11111111-1111-1111-1111-111111111111"}}""") };
                 downloads++;
                 return new(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[11]) };
             })));
@@ -1074,6 +1077,7 @@ internal static class ConnectorReliabilityTests
             var message = TextMessage();
             message.ContentType = "sharepoint_ref";
             message.SharePointSiteId = "site";
+            message.SharePointResourceTenantId = "11111111-1111-1111-1111-111111111111";
             message.SharePointDriveId = "drive";
             message.SharePointItemId = "item";
             message.SharePointETag = "v1";

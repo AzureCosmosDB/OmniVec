@@ -32,6 +32,7 @@ async Task Throws(Func<Task> action)
     throw new Exception("Expected failure");
 }
 const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+const string SharePointTenant = "11111111-1111-1111-1111-111111111111";
 void Set(object target, string field, object value)
     => target.GetType().GetField(field, Private)!.SetValue(target, value);
 async Task Invoke(object target, string method, params object[] args)
@@ -41,6 +42,7 @@ EmbeddingMessage Message() => new()
     SourceId = "source", SourceRef = "Policies/a?#.txt", PipelineId = "pipeline",
     SharePointSiteId = "site", SharePointDriveId = "drive", SharePointItemId = "item",
     SharePointRevision = 1, SharePointETag = "v1", SharePointFileName = "a.txt",
+    SharePointResourceTenantId = SharePointTenant,
     SharePointMaxFileSizeBytes = 50 * 1024 * 1024, DestinationType = "cosmosdb-vector",
     DocgrokPipeline = "mdl-test", StoreContent = true, MetadataFields = [],
 };
@@ -53,7 +55,8 @@ SharePointReplacement Replacement(long revision, int count, string pipeline = "p
         Enumerable.Range(0, count).Select(i => new EmbeddingResult(
             $"{identity}-{revision}-chunk-{i}", msg.SourceRef, [0.1f, 0.2f],
             "hash", identity, pipeline, "name", "generation", $"text-{i}",
-            SourceId: msg.SourceId, StoreContent: true, MetadataFields: [])).ToList());
+            SourceId: msg.SourceId, StoreContent: true, MetadataFields: [])).ToList(),
+        SharePointProvenance.FromMessage(msg));
 }
 var cosmos = new CosmosDbDestinationWriter(NullLogger<CosmosDbDestinationWriter>.Instance);
 Task<bool> Replace(MemorySyncStore store, SharePointReplacement replacement)
@@ -233,8 +236,30 @@ Test("Chunk shrink writes new first, removes obsolete and persists mandatory syn
     Assert(chunk["pipeline_id"]!.Value<string>() == "pipeline");
     Assert(chunk["source_ref"]!.Value<string>() == Message().SourceRef);
     Assert(chunk["_omnivec_sync"]!["revision"]!.Value<long>() == 2);
+    Assert(chunk["_omnivec_provenance"]!["resource_tenant_id"]!.Value<string>() == SharePointTenant);
+    Assert(chunk["_omnivec_provenance"]!["item_id"]!.Value<string>() == "item");
+    Assert(chunk["_omnivec_provenance"]!["source_etag"]!.Value<string>() == "v1");
     Assert(chunk["pipeline_name"] is null && chunk["embedding_dims"] is null);
     Assert(store.Operations.LastIndexOf("write:2") < store.Operations.LastIndexOf("delete:2"));
+});
+Test("Provenance cannot be omitted, forged or overwritten by destination field configuration", async () =>
+{
+    var store = new MemorySyncStore();
+    var replacement = Replacement(1, 1);
+    await Throws(() => Replace(store, replacement with { Provenance = replacement.Provenance with { ItemId = "other" } }));
+    await Throws(() => Replace(store, replacement with { Provenance = replacement.Provenance with { ResourceTenantId = "" } }));
+    await Throws(() => Replace(store, replacement with { Provenance = replacement.Provenance with { SourceETag = null } }));
+    await Throws(() => cosmos.ReplaceSharePointInStoreAsync(
+        store, "/_omnivec_provenance/key", "embedding", replacement, default));
+    await Throws(() => cosmos.ReplaceSharePointInStoreAsync(
+        store, "/document_id", "_omnivec_provenance", replacement, default));
+    replacement.Chunks[0] = replacement.Chunks[0] with { ContentField = "_omnivec_provenance" };
+    await Throws(() => Replace(store, replacement));
+    Assert(store.Documents.Count == 0);
+    replacement.Chunks[0] = replacement.Chunks[0] with { ContentField = "content", StoreContent = false };
+    await Replace(store, replacement);
+    Assert(store.Chunks.Single()["content"] is null);
+    Assert(store.Documents.Values.All(d => d["_omnivec_provenance"]!["site_id"]!.Value<string>() == "site"));
 });
 Test("Failed new chunk batch preserves old vectors; retry completes and prunes", async () =>
 {
@@ -343,6 +368,7 @@ Test("Rename publication failure retains checkpoint references and replays exact
         Config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"site_id":"site","drive_id":"drive"}""")! };
     await using var watcher = new SharePointSourceWatcher(source, new(), null!, new(),
         NullLogger<SharePointSourceWatcher>.Instance, sbPublisher: publisher);
+    Set(watcher, "_resourceTenantId", SharePointTenant);
     var pipeline = JsonSerializer.Deserialize<Pipeline>(
         """{"id":"pipeline","sources":[{"source_id":"source","sharepoint_identity":{"tenant_id":"11111111-1111-1111-1111-111111111111","client_id":"22222222-2222-2222-2222-222222222222"}}],"destination_id":"dest"}""")!;
     watcher.UpdatePipelines([pipeline]);
@@ -366,6 +392,7 @@ Test("Rename publication failure retains checkpoint references and replays exact
     var message = JsonSerializer.Deserialize<EmbeddingMessage>(sender.Sent.Single().Body)!;
     Assert(message.PartitionKeyValue == SharePointIdentity.Create(message));
     Assert(message.SharePointRevision > 0 && message.MessageType == "upsert");
+    Assert(message.SharePointResourceTenantId == SharePointTenant);
     Assert(message.SharePointGraphTenantId == "11111111-1111-1111-1111-111111111111"
         && message.SharePointGraphClientId == "22222222-2222-2222-2222-222222222222");
     Assert(sender.AttemptedIds[0] == sender.AttemptedIds[1]);
@@ -380,6 +407,7 @@ Test("Initial scan, new pipeline replay, reset and expired delta preserve increa
         Config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"site_id":"site","drive_id":"drive"}""")! };
     await using var watcher = new SharePointSourceWatcher(source, new(), null!, new(),
         NullLogger<SharePointSourceWatcher>.Instance, sbPublisher: publisher);
+    Set(watcher, "_resourceTenantId", SharePointTenant);
     Pipeline PipelineFor(string id) => JsonSerializer.Deserialize<Pipeline>(
         $$"""{"id":"{{id}}","sources":[{"source_id":"source"}],"destination_id":"dest"}""")!;
     watcher.UpdatePipelines([PipelineFor("p1")]);
@@ -418,6 +446,37 @@ Test("Initial scan, new pipeline replay, reset and expired delta preserve increa
     await Poll();
     Assert(sender.Sent.Count == 7 && urls[^2].EndsWith("/checkpoint") && urls[^1].Contains("/root/delta"));
     Assert(sender.Sent.Select(m => m.MessageId).Distinct().Count() == sender.Sent.Count);
+    var state = typeof(SharePointSourceWatcher).GetField("_state", Private)!.GetValue(watcher)!;
+    state.GetType().GetProperty("SchemaVersion")!.SetValue(state, 2);
+    await Poll();
+    Assert(urls.Last().Contains("/root/delta"), "Provenance upgrade must re-scan without resetting revision history");
+    Assert(JsonSerializer.Deserialize<EmbeddingMessage>(sender.Sent.Last().Body)!.SharePointRevision > previous);
+});
+Test("Watcher resolves the resource tenant from Graph and rejects a changed tenancy", async () =>
+{
+    await using var publisher = new ServiceBusPublisher(Options.Create(new ChangeFeedOptions()),
+        NullLogger<ServiceBusPublisher>.Instance);
+    var source = new Source { Id = "source", Type = "sharepoint",
+        Config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"site_id":"site","drive_id":"drive"}""")! };
+    await using var watcher = new SharePointSourceWatcher(source, new(), null!, new(),
+        NullLogger<SharePointSourceWatcher>.Instance, sbPublisher: publisher);
+    Set(watcher, "_credential", new LocalCredential());
+    var tenant = SharePointTenant;
+    using var http = new HttpClient(new LocalHttpHandler(request =>
+    {
+        Assert(request.RequestUri!.AbsolutePath.EndsWith("/root"));
+        return new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new { sharepointIds = new { tenantId = tenant } }))
+        };
+    }));
+    Set(watcher, "_http", http);
+    await Invoke(watcher, "ValidateDriveAsync", CancellationToken.None);
+    await Invoke(watcher, "PersistDeltaUrlAsync", CancellationToken.None);
+    tenant = "22222222-2222-2222-2222-222222222222";
+    await Throws(() => Invoke(watcher, "ValidateDriveAsync", CancellationToken.None));
+    tenant = "";
+    await Throws(() => Invoke(watcher, "ValidateDriveAsync", CancellationToken.None));
 });
 Test("Unknown deletion retains stable item identity without guessing display path", async () =>
 {
@@ -501,7 +560,8 @@ var graph = new SharePointContentClient(new HttpClient(new LocalHttpHandler(requ
     {
         Content = request.RequestUri!.AbsolutePath.EndsWith("/content")
             ? new ByteArrayContent(graphBytes)
-            : new StringContent(JsonSerializer.Serialize(new { eTag = graphETag }))
+            : new StringContent(JsonSerializer.Serialize(new
+                { eTag = graphETag, sharepointIds = new { tenantId = SharePointTenant } }))
     })));
 Set(graph, "_credential", new LocalCredential());
 var reply = """{"chunks":[{"text":"hello","embedding":[0.1,0.2]}]}""";
@@ -537,6 +597,8 @@ Test("Download validates byte cap and detects changed Graph version", async () =
     graphETag = "v2";
     await Throws(() => graph.DownloadAsync("site", "drive", "item", 100, default, "v1"));
     graphETag = "v1";
+    await Throws(() => graph.DownloadAsync("site", "drive", "item", 100, default, "v1",
+        expectedResourceTenantId: "22222222-2222-2222-2222-222222222222"));
 });
 Test("Version change during download is detected before any document processing", async () =>
 {
@@ -573,6 +635,8 @@ Test("Worker retries malformed extraction and writer failure; empty and deletes 
     writer.Fail = false;
     await Process();
     Assert(receiver.Completed == 1 && writer.Replacements.Last().Chunks.Count == 1);
+    Assert(writer.Replacements.Last().Provenance.ResourceTenantId == SharePointTenant);
+    Assert(writer.Replacements.Last().Provenance.SourceETag == "v1");
     graphBytes = [];
     await Process();
     Assert(receiver.Completed == 2 && writer.Replacements.Last().Chunks.Count == 0);

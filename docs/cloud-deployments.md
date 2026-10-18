@@ -77,6 +77,15 @@ keys and public blobs. The public HTTPS MCP endpoint requires a Function key.
 Deployment uses Entra-authenticated OneDeploy and the prebuilt package, with
 remote build disabled.
 
+**This builder configures a shared trust boundary, not per-user SharePoint
+authorization.** For private SharePoint documents, deploy a separate
+[protected Cosmos MCP Function App](../mcp_servers/cosmos/README.md#protected-sharepoint-deployment)
+with Entra/OBO settings and a Foundry custom per-user OAuth connection.
+Do not reuse this builder against that protected app; its generated settings,
+shared-key readiness checks and connection creation do not support that mode.
+The synthetic SharePoint CLI demo and administrative search do not prove user
+permission enforcement.
+
 Readiness verifies anonymous requests are rejected, authenticated initialization
 identifies this deployment, the expected tools are advertised, and one bounded
 authenticated `vector_search` call can embed and query the selected Cosmos

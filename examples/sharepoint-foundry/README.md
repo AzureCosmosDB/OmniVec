@@ -5,6 +5,12 @@
 The three `.txt` files in this directory contain synthetic policies with distinctive
 test values. They are not real company policies.
 
+The automated CLI/portal workflow below uses a **shared Function key** and is
+only a synthetic ingestion/retrieval demonstration. It does not enforce each
+user's SharePoint permissions. For private documents, use the
+[per-user OAuth workflow](#per-user-oauth-workflow) instead of its MCP/Foundry
+deployment and inference steps.
+
 ## Prerequisites
 
 Use an authorized test environment with a working SharePoint watcher, Graph
@@ -144,6 +150,40 @@ must identify the new synthetic travel document, not an older SharePoint policy.
 Do not call this an end-to-end pass until new-document ingestion, new-container
 search, MCP retrieval and the Foundry answer/reference have all been observed.
 A successful agent creation alone is not sufficient.
+
+## Per-user OAuth workflow
+
+Use the same isolated source, queue pipeline, stored-text field `content`, and
+dedicated `/document_id` container. Deploy the upgraded watcher and worker and
+wait for chunks with `_omnivec_provenance` and completed `_omnivec_sync` state.
+Do not use the shared-key agent or administrative vector search as the user
+permission boundary.
+
+Deploy a **separate protected Cosmos MCP Function App** with
+`COSMOS_SHAREPOINT_PROTECTED_CONTAINERS` set to this container and complete the
+[Entra/OBO and Foundry custom OAuth setup](../../mcp_servers/cosmos/README.md#protected-sharepoint-deployment).
+The signed-in user, Foundry project, MCP API and SharePoint resource must be in
+the same tenant. The cross-tenant ingestion flags above do not enable
+cross-tenant user retrieval.
+
+Create the agent and ask the synthetic meal-policy question using
+`scripts\foundry_cosmos_mcp_agent.py`, the per-user OAuth connection, and fields
+`id,title,content,source_ref`. The script prints `requires_consent` and sign-in
+links when needed. Complete consent as the interacting user and use
+`--resume-response-id`, `--agent-name`, `--agent-version` and the same question
+to resume; do not create a new agent just to finish consent.
+
+Check actual tool results with two authorized test identities: one that can
+read the demo files and one that cannot. The latter must receive no file text
+or source references. Remove the first user's access and issue a fresh request;
+then edit/delete a fixture and verify stale cached versions are hidden until
+reingestion. Test missing consent or a conditional-access challenge separately.
+Use separate conversations per user and fresh requests for revocation checks:
+previously disclosed model history cannot be revoked by an MCP tool.
+
+The expected policy values above apply only to the user with current access.
+Report end-to-end success only after observing real ingestion, delegated MCP
+retrieval and Foundry consent/answer behavior in the configured tenant.
 
 ## Approval and isolation
 
