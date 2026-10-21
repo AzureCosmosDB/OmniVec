@@ -1,0 +1,44 @@
+{{- if and .Values.api.enabled .Values.api.mockBenchmark.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnivec-mock-embedding
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: {{ .Values.api.mockBenchmark.model.replicaCount }}
+  selector:
+    matchLabels:
+      app: omnivec-mock-embedding
+  template:
+    metadata:
+      labels:
+        app: omnivec-mock-embedding
+    spec:
+      containers:
+        - name: model
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.api.mockBenchmark.model.image.repository }}:{{ .Values.api.mockBenchmark.model.image.tag }}
+          ports:
+            - containerPort: 8000
+          resources:
+            {{- toYaml .Values.api.mockBenchmark.model.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnivec-mock-embedding
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: omnivec-mock-embedding
+  ports:
+    - port: 8000
+      targetPort: 8000
+{{- end }}

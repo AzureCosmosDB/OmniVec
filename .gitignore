@@ -45,6 +45,7 @@ openia.7m.key
 
 scripts/bench_embedding_rs/target/
 docgrok/router/target/
+docgrok/services/embedding/mock/target/
 
 # Local linked worktrees
 .worktrees/

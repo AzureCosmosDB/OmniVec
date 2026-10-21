@@ -359,6 +359,7 @@ function Get-SourceBuildSpec {
             Copy-MinimalBuildTree "$RootDir\api" (Join-Path $context "api")
             Copy-MinimalBuildTree "$RootDir\web" (Join-Path $context "web")
             Copy-MinimalBuildTree "$RootDir\mcp_servers\cosmos" (Join-Path $context "mcp_servers\cosmos")
+            Copy-MinimalBuildTree "$RootDir\omnivec_queue" (Join-Path $context "omnivec_queue")
             $dockerfile = Join-Path $context "api\Dockerfile"
         }
         "omnivec-search" {
@@ -374,16 +375,18 @@ function Get-SourceBuildSpec {
             $dockerfile = Join-Path $context "Dockerfile"
         }
         "omnivec-changefeed" {
-            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\dotnet" $context
-            $dockerfile = Join-Path $context "Dockerfile"
+            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\dotnet" (Join-Path $context "connectors\ingestion\dotnet")
+            Copy-MinimalBuildTree "$RootDir\connectors\worker\dotnet" (Join-Path $context "connectors\worker\dotnet")
+            $dockerfile = Join-Path $context "connectors\ingestion\dotnet\Dockerfile"
         }
         "omnivec-dotnet-worker" {
             Copy-MinimalBuildTree "$RootDir\connectors\worker\dotnet" $context
             $dockerfile = Join-Path $context "Dockerfile"
         }
         "omnivec-onelake-iceberg-watcher" {
-            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\onelake_iceberg" $context
-            $dockerfile = Join-Path $context "Dockerfile"
+            Copy-MinimalBuildTree "$RootDir\connectors\ingestion\onelake_iceberg" (Join-Path $context "connectors\ingestion\onelake_iceberg")
+            Copy-MinimalBuildTree "$RootDir\omnivec_queue" (Join-Path $context "omnivec_queue")
+            $dockerfile = Join-Path $context "connectors\ingestion\onelake_iceberg\Dockerfile"
         }
         "docgrok-pipeline-worker" {
             Copy-MinimalBuildTree "$RootDir\docgrok\pipeline-worker" $context
@@ -515,9 +518,9 @@ function Build-MissingImages {
             "omnivec-api"             { Build-Image -Name $image -Dockerfile "$RootDir/api/Dockerfile" -Context $RootDir -Tag "latest" }
             "omnivec-search"          { Build-Image -Name $image -Dockerfile "$RootDir/search/Dockerfile" -Context $RootDir -Tag "latest" }
             "omnivec-web"             { Build-Image -Name $image -Dockerfile "$RootDir/web/Dockerfile" -Context "$RootDir/web/" -Tag "latest" }
-            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir/connectors/ingestion/dotnet/" -Tag "latest" }
+            "omnivec-changefeed"      { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/dotnet/Dockerfile" -Context "$RootDir" -Tag "latest" }
             "omnivec-dotnet-worker"   { Build-Image -Name $image -Dockerfile "$RootDir/connectors/worker/dotnet/Dockerfile" -Context "$RootDir/connectors/worker/dotnet/" -Tag "latest" }
-            "omnivec-onelake-iceberg-watcher" { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/onelake_iceberg/Dockerfile" -Context "$RootDir/connectors/ingestion/onelake_iceberg/" -Tag "latest" }
+            "omnivec-onelake-iceberg-watcher" { Build-Image -Name $image -Dockerfile "$RootDir/connectors/ingestion/onelake_iceberg/Dockerfile" -Context $RootDir -Tag "latest" }
             "omnivec-agent"           { Build-Image -Name $image -Dockerfile "$RootDir/agent/Dockerfile" -Context $RootDir -Tag "latest" }
             "docgrok-pipeline-worker" {
                 if (Test-Path "$RootDir/docgrok/pipeline-worker/Dockerfile") {

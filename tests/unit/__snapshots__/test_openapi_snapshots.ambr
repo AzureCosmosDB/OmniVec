@@ -1944,11 +1944,13 @@
         }),
         'DestinationType': dict({
           'enum': list([
+            'mock',
             'cosmosdb-vector',
             'pgvector',
             'mssql',
             'onelake-iceberg',
             'garnet',
+            'null',
           ]),
           'title': 'DestinationType',
           'type': 'string',
@@ -2112,8 +2114,15 @@
           'type': 'object',
         }),
         'PipelineResourcePolicy': dict({
-          'description': 'Operator-adjustable fairness policy for the shared worker pool.',
+          'description': 'Operator-adjustable fairness, model batching and queue packing controls.',
           'properties': dict({
+            'embed_batch_size': dict({
+              'default': 50,
+              'maximum': 4096.0,
+              'minimum': 1.0,
+              'title': 'Embed Batch Size',
+              'type': 'integer',
+            }),
             'max_concurrency_per_worker': dict({
               'default': 2,
               'maximum': 32.0,
@@ -2131,6 +2140,34 @@
               ]),
               'title': 'Priority',
               'type': 'string',
+            }),
+            'queue_documents_per_message': dict({
+              'default': 1,
+              'maximum': 1000.0,
+              'minimum': 1.0,
+              'title': 'Queue Documents Per Message',
+              'type': 'integer',
+            }),
+            'queue_max_envelope_bytes': dict({
+              'default': 229376,
+              'maximum': 983040.0,
+              'minimum': 1024.0,
+              'title': 'Queue Max Envelope Bytes',
+              'type': 'integer',
+            }),
+            'queue_publish_batch_size': dict({
+              'default': 200,
+              'maximum': 1000.0,
+              'minimum': 1.0,
+              'title': 'Queue Publish Batch Size',
+              'type': 'integer',
+            }),
+            'queue_send_batch_max_bytes': dict({
+              'default': 245760,
+              'maximum': 1048576.0,
+              'minimum': 1024.0,
+              'title': 'Queue Send Batch Max Bytes',
+              'type': 'integer',
             }),
             'weight': dict({
               'default': 10,
@@ -2369,6 +2406,7 @@
         }),
         'SourceType': dict({
           'enum': list([
+            'mock',
             'azure-blob',
             'cosmosdb',
             'postgresql',
@@ -2378,6 +2416,8 @@
             'databricks',
             'onelake-iceberg',
             'sharepoint',
+            'synthetic',
+            'garnet',
           ]),
           'title': 'SourceType',
           'type': 'string',
@@ -2399,6 +2439,101 @@
             }),
           }),
           'title': 'SyncSourceRequest',
+          'type': 'object',
+        }),
+        'SyntheticGenerateRequest': dict({
+          'properties': dict({
+            'content_pattern': dict({
+              'anyOf': list([
+                dict({
+                  'enum': list([
+                    'repeated',
+                    'deterministic',
+                  ]),
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Content Pattern',
+            }),
+            'docs_per_second': dict({
+              'anyOf': list([
+                dict({
+                  'maximum': 100000.0,
+                  'minimum': 0.0,
+                  'type': 'number',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Docs Per Second',
+            }),
+            'document_count': dict({
+              'anyOf': list([
+                dict({
+                  'maximum': 1000000.0,
+                  'minimum': 1.0,
+                  'type': 'integer',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Document Count',
+            }),
+            'message_size_bytes': dict({
+              'anyOf': list([
+                dict({
+                  'maximum': 200000.0,
+                  'minimum': 1024.0,
+                  'type': 'integer',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Message Size Bytes',
+            }),
+            'mock_embedding': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'boolean',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Mock Embedding',
+            }),
+            'mock_embedding_dimensions': dict({
+              'anyOf': list([
+                dict({
+                  'maximum': 4096.0,
+                  'minimum': 1.0,
+                  'type': 'integer',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Mock Embedding Dimensions',
+            }),
+            'pipeline_id': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'title': 'Pipeline Id',
+            }),
+          }),
+          'title': 'SyntheticGenerateRequest',
           'type': 'object',
         }),
         'TestConnectionRequest': dict({
@@ -5869,7 +6004,7 @@
       }),
       '/api/operations/resource-insights': dict({
         'get': dict({
-          'description': 'Recommend operator-adjustable fairness settings from durable telemetry.',
+          'description': 'Recommend operator-adjustable fairness settings from exported worker batches.',
           'operationId': 'get_resource_insights_api_operations_resource_insights_get',
           'responses': dict({
             '200': dict({
@@ -6167,7 +6302,7 @@
       }),
       '/api/pipelines/{pipeline_id}/metrics/inline': dict({
         'post': dict({
-          'description': 'Report authoritative worker metrics with bounded batch deduplication.',
+          'description': 'Enqueue best-effort telemetry for asynchronous App Insights export; no DB I/O.',
           'operationId': 'report_inline_metrics_api_pipelines__pipeline_id__metrics_inline_post',
           'parameters': list([
             dict({
@@ -6214,6 +6349,44 @@
             }),
           }),
           'summary': 'Report Inline Metrics',
+        }),
+      }),
+      '/api/pipelines/{pipeline_id}/mock-run': dict({
+        'get': dict({
+          'operationId': 'mock_pipeline_run_api_pipelines__pipeline_id__mock_run_get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'pipeline_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Pipeline Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Mock Pipeline Run',
         }),
       }),
       '/api/pipelines/{pipeline_id}/pause': dict({
@@ -6353,7 +6526,7 @@
       }),
       '/api/pipelines/{pipeline_id}/resource-policy': dict({
         'patch': dict({
-          'description': 'Update shared-worker fairness controls without resetting the pipeline.',
+          'description': 'Update shared-worker fairness and queue packing without resetting the pipeline.',
           'operationId': 'update_pipeline_resource_policy_api_pipelines__pipeline_id__resource_policy_patch',
           'parameters': list([
             dict({
@@ -6956,6 +7129,147 @@
           'summary': 'Create Source Deployments',
         }),
       }),
+      '/api/sources/{source_id}/generate': dict({
+        'post': dict({
+          'description': 'Start a benchmark-only synthetic Service Bus publication run.',
+          'operationId': 'generate_synthetic_source_api_sources__source_id__generate_post',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'source_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Source Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'requestBody': dict({
+            'content': dict({
+              'application/json': dict({
+                'schema': dict({
+                  '$ref': '#/components/schemas/SyntheticGenerateRequest',
+                }),
+              }),
+            }),
+            'required': True,
+          }),
+          'responses': dict({
+            '202': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Generate Synthetic Source',
+        }),
+      }),
+      '/api/sources/{source_id}/generate/{run_id}': dict({
+        'delete': dict({
+          'operationId': 'cancel_synthetic_source_run_api_sources__source_id__generate__run_id__delete',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'source_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Source Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'path',
+              'name': 'run_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Run Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Cancel Synthetic Source Run',
+        }),
+        'get': dict({
+          'operationId': 'get_synthetic_source_run_api_sources__source_id__generate__run_id__get',
+          'parameters': list([
+            dict({
+              'in': 'path',
+              'name': 'source_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Source Id',
+                'type': 'string',
+              }),
+            }),
+            dict({
+              'in': 'path',
+              'name': 'run_id',
+              'required': True,
+              'schema': dict({
+                'title': 'Run Id',
+                'type': 'string',
+              }),
+            }),
+          ]),
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '422': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                    '$ref': '#/components/schemas/HTTPValidationError',
+                  }),
+                }),
+              }),
+              'description': 'Validation Error',
+            }),
+          }),
+          'summary': 'Get Synthetic Source Run',
+        }),
+      }),
       '/api/sources/{source_id}/sample': dict({
         'get': dict({
           'description': 'Return a small random sample of items currently in the source.',
@@ -7369,6 +7683,26 @@
             }),
           }),
           'summary': 'Health',
+        }),
+      }),
+      '/ready': dict({
+        'get': dict({
+          'operationId': 'ready_ready_get',
+          'responses': dict({
+            '200': dict({
+              'content': dict({
+                'application/json': dict({
+                  'schema': dict({
+                  }),
+                }),
+              }),
+              'description': 'Successful Response',
+            }),
+            '503': dict({
+              'description': 'Metadata storage unavailable',
+            }),
+          }),
+          'summary': 'Ready',
         }),
       }),
       '/ui': dict({
@@ -8446,6 +8780,17 @@
       ]),
     ),
     tuple(
+      'get',
+      '/api/pipelines/{pipeline_id}/mock-run',
+      list([
+        'pipeline_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'post',
       '/api/pipelines/{pipeline_id}/pause',
       list([
@@ -8648,6 +8993,41 @@
       ]),
     ),
     tuple(
+      'post',
+      '/api/sources/{source_id}/generate',
+      list([
+        'source_id',
+      ]),
+      list([
+        '202',
+        '422',
+      ]),
+    ),
+    tuple(
+      'delete',
+      '/api/sources/{source_id}/generate/{run_id}',
+      list([
+        'run_id',
+        'source_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/api/sources/{source_id}/generate/{run_id}',
+      list([
+        'run_id',
+        'source_id',
+      ]),
+      list([
+        '200',
+        '422',
+      ]),
+    ),
+    tuple(
       'get',
       '/api/sources/{source_id}/sample',
       list([
@@ -8775,6 +9155,16 @@
       ]),
       list([
         '200',
+      ]),
+    ),
+    tuple(
+      'get',
+      '/ready',
+      list([
+      ]),
+      list([
+        '200',
+        '503',
       ]),
     ),
     tuple(

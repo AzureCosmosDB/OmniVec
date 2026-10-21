@@ -69,7 +69,8 @@ public record DeleteRequest(
     HashSet<string>? KeepIds = null,
     long SourceVersion = 0,
     long PipelineRevision = 0,
-    string? DocumentId = null);
+    string? DocumentId = null,
+    string ChunkCleanupOrder = "insert-first");
 
 public record SharePointReplacement(
     string Identity,

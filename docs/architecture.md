@@ -1,155 +1,263 @@
-# OmniVec Architecture
+# OmniVec architecture
 
-## 1. Overview
+[README](../README.md) | [User guide](user-guide.md) | [Deployment](deployment.md)
 
-OmniVec is a **Universal Vector Ingestion Platform** deployed on Azure Kubernetes Service (AKS). It watches data sources, extracts content, generates vector embeddings via DocGrok, and writes vectors to destination stores.
+OmniVec separates **configuration**, **ingestion**, **embedding**, and
+**retrieval**. It runs on AKS, but customer data, models, and destination stores
+can live outside the OmniVec resource group. Connector access must be configured
+separately from deploying the application.
 
-**DocGrok** is the embedded AI model orchestration layer — a unified API for routing embedding requests to self-hosted GPU models (DSE-Qwen2, CLIP, BGE) or external providers (Azure OpenAI), with multi-step transform pipelines (PDF → OCR → text → embeddings).
+## System overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              OmniVec Platform                               │
-│                                                                             │
-│  ┌──────────┐   ┌───────────┐   ┌───────────┐   ┌──────────────────────┐   │
-│  │  Web UI   │──▶│ OmniVec   │──▶│  DocGrok  │──▶│  Embedding Models   │   │
-│  │ (nginx)   │   │   API     │   │  Router   │   │  (GPU / External)   │   │
-│  └──────────┘   └─────┬─────┘   └─────┬─────┘   └──────────────────────┘   │
-│                       │               │                                     │
-│            ┌──────────┼───────────────┼──────────────┐                      │
-│            ▼          ▼               ▼              ▼                      │
-│  ┌──────────┐  ┌───────────┐  ┌────────────┐  ┌──────────────┐            │
-│  │Controller │  │  Workers  │  │  Pipeline  │  │  DocGrok     │            │
-│  │(bookkeep)│  │(job proc) │  │  Worker    │  │  Controller  │            │
-│  └──────┬───┘  └─────┬─────┘  │(OCR/PDF)   │  │(health/scale)│            │
-│         │            │        └────────────┘  └──────────────┘            │
-│         ▼            ▼                                                     │
-│  ┌───────────────────────────┐     ┌──────────────────────┐                │
-│  │    Azure CosmosDB         │     │  Azure Blob Storage  │                │
-│  │  (metadata + vectors)     │     │  (document source)   │                │
-│  └───────────────────────────┘     └──────────────────────┘                │
-│                                                                             │
-│  ┌───────────────────┐   ┌──────────────────┐                              │
-│  │  Change Feed       │   │  Event Grid +    │                              │
-│  │  Processor (.NET)  │   │  Service Bus     │                              │
-│  │  (CosmosDB CDC)    │   │  (Blob events)   │                              │
-│  └───────────────────┘   └──────────────────┘                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```text
+Browser / CLI / application
+              |
+        web proxy / API -------- metadata, model and pipeline configuration
+              |                                  |
+              |                         source watchers
+              |                          /           \
+              |                  queue mode         inline mode
+              |                      |                   |
+              |                 Service Bus              |
+              |                      |                   |
+              |                .NET workers              |
+              |                      \                   /
+              |                         DocGrok
+              |                    extract / embed
+              |                           |
+              |                     destinations
+              |
+       search resolver -> search service -> destination indexes
+                               |
+                         query embedding
+                          via DocGrok
 ```
 
----
+This is a logical flow, not a claim that all connectors support both modes.
+See the [compatibility matrix](user-guide.md#source-and-destination-compatibility).
 
-## 2. OmniVec Components
+## Components
 
-### 2.1 Web UI (omnivec-web)
+| Component | Responsibility |
+|-----------|----------------|
+| `omnivec-web` | Static HTML/JavaScript console and nginx reverse proxy |
+| `omnivec-api` | Python FastAPI control plane: configuration, validation, auth, lifecycle, metrics, and proxies |
+| `omnivec-controller` | Control-plane bookkeeping and metadata job/stat maintenance |
+| `omnivec-changefeed` | .NET Cosmos change feed and supported SQL/PostgreSQL watchers |
+| `omnivec-blob-ingestor` | Blob enumeration/polling and optional Event Grid consumption |
+| Dedicated Databricks/SharePoint watchers | Connector-specific ingestion using the .NET ingestion image |
+| `omnivec-onelake-iceberg-watcher` | Python/PyIceberg scans and OneLake checkpoint management |
+| `omnivec-dotnet-worker` | Service Bus consumption, content processing, model requests, destination writes, and settlement |
+| `docgrok` router | Embedding dispatch to registered external/native models and document transforms |
+| DocGrok pipeline worker / model workloads | Document extraction/OCR and model execution as configured |
+| `omnivec-search` | Multi-index retrieval with per-index embedding policies |
+| `omnivec-agent` | Read-only diagnostics and bounded approval-gated recovery |
 
-| Attribute | Detail |
-|-----------|--------|
-| Technology | Static HTML/JS + nginx reverse proxy |
-| Image | `omnivec-web:latest` |
-| Replicas | 2 |
-| Service | LoadBalancer (external IP) |
+The current queue processing path uses .NET workers, **not Python workers polling
+Cosmos job records**. Actual deployment names, optional components, replica counts,
+and resource requests come from [Helm values](../helm/omnivec/values.yaml).
 
-**Routing (nginx):**
-- `/api/*` → `omnivec-api:80` (control plane)
-- `/docgrok/*` → `docgrok:80` (DocGrok router)
-- `/*` → Static files (SPA)
+The web service exposes `/ui`, static assets, `/api/*`, and API `/health`.
+`/nginx-health` checks nginx itself. There is no direct `/docgrok` web-proxy route;
+the control plane exposes supported DocGrok operations under `/api/docgrok/*`.
 
-**Features:** Dashboard, source/destination/pipeline management, vector search playground, DocGrok health, deployment scaling, light/dark theme toggle.
+## Ingestion paths
 
-### 2.2 OmniVec API (omnivec-api) — Control Plane
+### Queue mode
 
-| Attribute | Detail |
-|-----------|--------|
-| Technology | Python FastAPI |
-| Image | `omnivec-api:latest` |
-| Replicas | 2 |
-| Port | 8080 |
+1. A source watcher reads a page, feed batch, or event for active pipelines.
+2. It resolves the pipeline's model, identity, content, destination, and resource
+   policy into work messages.
+3. It publishes to Service Bus. Source progress advances only after required
+   publications succeed; this means **queued**, not **stored in the destination**.
+4. Workers receive deliveries, obtain processing capacity, extract content, and
+   request embeddings through DocGrok.
+5. Workers write results and settle the delivery, or retry/hand off a durable
+   failure according to the worker/broker policy.
 
-**Key API Endpoints:**
+The normal broker path uses the `embeddings` topic and `worker` subscription.
+Ordinary pipelines share the worker pool. Optional version-1 envelopes pack
+multiple compatible documents into one message. Optional pipeline lanes change
+broker routing but do not isolate model or destination capacity.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET/POST/PUT/DELETE` | `/api/sources` | CRUD for data sources |
-| `POST` | `/api/sources/{id}/test` | Test source connection |
-| `GET/POST/PUT/DELETE` | `/api/destinations` | CRUD for vector destinations |
-| `POST` | `/api/destinations/{id}/test` | Test + probe vector indexes |
-| `GET/POST/PUT/DELETE` | `/api/pipelines` | CRUD for pipelines |
-| `POST` | `/api/pipelines/identity-preview` | Render document, chunk, and partition identities before save |
-| `POST` | `/api/pipelines/{id}/pause\|resume\|run\|reset` | Pipeline lifecycle |
-| `GET` | `/api/jobs` | List/filter jobs |
-| `POST` | `/api/jobs/{id}/retry\|cancel` | Job management |
-| `GET/POST` | `/api/models` | Model registration |
-| `POST` | `/api/search` | Multi-index vector search |
-| `GET` | `/api/deployments` | K8s deployment management |
-| `GET` | `/health` | Health check |
+Both features, including rollout and rollback restrictions, are documented in
+[pipeline tuning](pipeline-tuning.md).
 
-**Data Storage:** Control-plane metadata (sources, destinations, pipelines, jobs,
-metrics, and asynchronous sync operation records) is stored in Cosmos DB
-container `metadata` with partition key `/doc_type`. Ingestion workers use the
-preprovisioned shared `source-leases` container for CFP checkpoints and
-polling-source ownership, and `source-state` for durable polling cursors/outboxes;
-the partition keys are `/id` and `/scopeId`, respectively. Containers are shared,
-and state documents are co-located and namespaced by source/pipeline scope,
-avoiding container-per-source control-plane work and cross-source reconciliation
-scans.
+### Inline mode
 
-### 2.2.1 Destination Identity Policy
+Supported Cosmos/SQL/PostgreSQL same-store pipelines embed and update the
+original container/table without sending work through the embedding queue.
+Source and destination must refer to the same physical store.
 
-Queue-mode pipelines define three independent identities:
+Only one active inline owner is allowed per physical source, even when two
+pipelines select different vector fields or register the same store under
+different source IDs. Discovery checks are not a transactional cancellation
+fence: already-running work can finish before reconciliation. Use queue-mode
+fan-out to separate destinations for independent pipelines.
 
-- `doc_id_pattern` renders the destination item ID. The safe default is
-  `{source_hash}-{pipeline}`. When a destination is shared, OmniVec rejects
-  patterns without `{pipeline}` or `{pipeline_hash}` unless the operator sets
-  `collision_policy: overwrite`.
-- `chunk_config.doc_id_pattern` renders the readable suffix for chunk items.
-  The worker always prepends a deterministic namespace derived from source,
-  source partition, and pipeline identity, so replay and fan-out cannot collide.
-- `partition_key_pattern` renders the destination logical partition key. The
-  compatibility default is `{source_partition}`; templates can additionally use
-  source, pipeline, destination, and model identifiers or hashes.
+Cosmos patch-feedback detection uses content hash, pipeline identity, and reset
+metadata. An existing embedding timestamp alone does not mean changed content
+can be skipped.
 
-The worker renders partition identity exactly once before document ID rendering,
-chunking, destination writes, and tombstone deletion. Messages produced before
-this policy existed retain their original behavior because a missing partition
-template defaults to `{source_partition}`.
+Inline Cosmos requests contain at most 50 texts and 2 MiB of serialized JSON,
+with bounded parallel model calls (2 external or 8 native by default). All
+required PATCH writes must succeed before advancing the feed checkpoint.
+`ChangeFeed__InlinePatchConcurrency` is per feed range: `0` chooses the default;
+explicit values accept 1-256. Same-partition transactions contain at most 100
+operations, and throttled writes honor Retry-After.
 
-Changing an active document-ID template is a migration, not a cosmetic edit:
-pause the pipeline, delete destination records attributed to its `pipeline_id`,
-save the new policy, reset for a full replay, and resume. The Cosmos connector's
-`delete_by_pipeline_id` helper performs partition-key-aware cleanup for this
-operation.
+Native Garnet sources also use inline processing, but write to a separate vector
+set on the same endpoint rather than overwriting the source HASH. Versioned
+documents and explicit tombstones drive polling convergence. Isolated mock
+sources use their own inline HTTP runner and discard-only sink.
 
-### 2.3 OmniVec Controller (Bookkeeper)
+### Connector-specific paths
 
-| Attribute | Detail |
-|-----------|--------|
-| Replicas | 1 (singleton) |
+| Source/path | Change tracking and important boundary |
+|-------------|----------------------------------------|
+| Cosmos DB | Native partitioned change feed; lease ownership controls processing |
+| Blob | Initial enumeration and polling for creates/updates; Event Grid delivery is required for delete events |
+| PostgreSQL | Recognized non-null tracking timestamp plus primary-key bookmark; otherwise repeated full scans |
+| SQL Server | Initial scan followed by CDC; an expired CDC position requires replay |
+| Databricks | Version-pinned snapshot followed by complete Delta CDF commits |
+| SharePoint | Graph delta, durable outbox, stable item identity, and revision-fenced Cosmos synchronization |
+| OneLake | Iceberg scans; optional separate long-running Spark CDF publisher for live changes |
+| OneLake write-back | Worker stages embeddings durably; a separate Fabric Spark MERGE updates existing source rows asynchronously |
+| Synthetic | Explicit benchmark publication, not a continuously watched customer store |
+| Garnet HASH | Polls versioned JSON records; source checkpoints advance after version-fenced vector writes |
+| Isolated mock | Separate source/model/sink services; inline HTTP benchmark, no vector persistence |
 
-**Responsibilities:**
-- Source enumeration — iterates source documents and creates pending jobs
-- CosmosDB change feed monitoring — detects new/updated documents
-- Blob storage enumeration — lists blobs matching file type filters
-- Job lifecycle management — marks stale processing jobs as failed
-- Metrics aggregation — rolls up job stats
+SharePoint requires queue mode and a Cosmos vector container with a dedicated
+document partition key, such as `/document_id`. OneLake write-back is restricted
+to the same lakehouse/source table and `truncate`; it is not an append sink.
+See the [SharePoint](sharepoint-source.md) and [OneLake](onelake-iceberg.md)
+contracts for their additional permissions and ordering behavior.
 
-### 2.4 OmniVec Workers (Job Processors)
+## State, checkpoints, and replay
 
-| Attribute | Detail |
-|-----------|--------|
-| Replicas | Shared pool; fixed by default, optional CPU HPA or Service Bus KEDA scaling |
+Control-plane records use the Cosmos `metadata` container, partitioned by
+`/doc_type`. Sources, destinations, pipelines, models, auth records, and other
+control entities are distinct from customer vector data.
 
-**Processing flow:**
-1. Poll pending jobs from CosmosDB
-2. Download content from source (field value, blob, HTTP URL)
-3. Determine content type
-4. Apply content strategy: `truncate` (single vector) or `chunk` (split → multiple vectors)
-5. Send to DocGrok `/embed/batch`
-6. Write vector(s) to destination
-7. Update job status
+API `/health` reports liveness; `/ready` checks metadata storage and returns 503
+when it is unavailable. Liveness alone does not establish pipeline readiness.
 
-The .NET queue worker spreads replicas across nodes and uses a PodDisruptionBudget
-so a single node drain does not remove all embedding capacity. Queue-driven scaling
-is opt-in:
+The ingestion service uses preprovisioned shared containers:
+
+| State | Container / location | Scope |
+|-------|----------------------|-------|
+| Cosmos feed checkpoints and polling-source ownership | `source-leases`, partition key `/id` | Namespaced processor/source/generation ownership |
+| Durable Blob state and SharePoint synchronization state/outboxes | `source-state`, partition key `/scopeId` | Source/pipeline scope |
+| OneLake scan checkpoints | Configured OneLake checkpoint files | Source/pipeline configuration and identity scope |
+| Fabric CDF streaming progress | Configured Spark checkpoint location | Streaming query/microbatch |
+
+SQL, PostgreSQL, and Databricks watcher cursors remain process-local; restart
+can replay source data. Do not generalize SharePoint's durable revision/outbox
+protocol to every connector.
+
+Delivery is **at least once**. A failed publication can replay a source page;
+a failed envelope can replay documents already written; an uncertain settlement
+can redeliver work. Deterministic IDs help avoid duplicate items but do not make
+every multi-document update atomic or revision-fenced.
+
+Metadata Jobs-page records are not the complete queue ledger. Observe source
+progress, broker backlog/DLQ, worker errors, and actual destination writes.
+OneLake staging acceptance is not proof that Spark MERGE has completed.
+
+## Destination identity
+
+Queue pipelines distinguish three identities:
+
+| Field | Purpose / default |
+|-------|-------------------|
+| `doc_id_pattern` | Destination item ID; default `{source_hash}-{pipeline}` |
+| `chunk_config.doc_id_pattern` | Human-readable chunk suffix; Cosmos chunk processing adds a deterministic isolation prefix |
+| `partition_key_pattern` | Destination logical partition; compatibility default `{source_partition}` |
+
+When a destination is shared, the API rejects item templates without
+`{pipeline}` or `{pipeline_hash}` unless `collision_policy: "overwrite"` is
+explicitly selected. Overwrite is a deliberate collision/data-replacement risk,
+not an isolation mechanism.
+
+Partition templates may use supported source, pipeline, destination, and model
+identifiers/hashes. The worker renders partition identity consistently for
+writing and tombstone deletion. Older messages without a partition template
+retain `{source_partition}` behavior.
+
+Use `POST /api/pipelines/identity-preview` to inspect identities before saving.
+Document, partition, and chunk-ID templates are immutable after creation.
+Changing them requires a new pipeline and a scoped migration plan; do not delete
+records and then attempt an unsupported in-place template update.
+
+Before cleanup or migration, quiesce producers/workers and reconcile queued
+deliveries. Verify ownership and actual partition keys of every affected record.
+For Cosmos chunk variables, required namespace prefixes, replacement behavior,
+and immutable text-storage settings, see the
+[chunking contract](pipeline-tuning.md#cosmos-text-chunking-queue-mode).
+
+## Models and DocGrok
+
+An **OmniVec pipeline** connects sources to a destination. A **DocGrok transform**
+defines processing stages such as file extraction, OCR, chunking, and embedding.
+A registered embedding model may also be selected directly.
+
+The Rust router dispatches to external providers such as Azure OpenAI or
+self-hosted model workloads such as BGE, CLIP, and DSE-Qwen2. Compute, memory,
+modality, and output dimensions depend on the chosen model; there is no universal
+GPU size or dimension count. External models do not require an OmniVec GPU pool.
+
+Model `max_batch_size`, `context_window_tokens`, and `max_batch_tokens` bound
+requests. Pipeline settings can lower those limits, not raise them. The
+[tuning guide](pipeline-tuning.md#embedding-limits-and-resilience) covers estimates,
+token headroom, retries, and snapshot refresh behavior.
+
+## Retrieval
+
+Most clients use `POST /api/playground/search` on the control-plane origin.
+The API resolves registered destination IDs into search specifications and calls
+the internal search service using `SEARCH_INTERNAL_TOKEN`.
+
+The standalone `POST /search` endpoint instead accepts self-describing index
+specifications. Its Helm service is **ClusterIP by default**, not a second public
+load balancer. Expose it only through a deliberately configured, authenticated,
+TLS-protected access path.
+
+Supported stores are Cosmos DB, pgvector, and Garnet. A OneLake destination is
+searchable through a configured Garnet mirror, not by querying the lakehouse
+directly. SQL Server and null sinks are not search backends. Full-text search is
+Cosmos-only; hybrid retrieval combines vector and full-text rankings.
+
+Per-index failures can produce a partial successful response. Inspect errors,
+warnings, and result provenance rather than treating HTTP 200 as complete
+retrieval. See [Search API](search-api.md).
+
+## Identity and access
+
+| Layer | Responsibility |
+|-------|----------------|
+| User/API credential | Console/API role and operation authorization |
+| AKS workload identity | Azure data/management access granted to the workload |
+| Connector-specific credentials | Database credentials, Graph/Fabric federation, Garnet ACL, or supported secret references |
+| Search token | Standalone search scope, separate from control-plane credentials |
+| Cloud deployment identity | Explicitly allowed Azure scopes and administrator-approved provisioning |
+
+Workload identity reduces the need for static Azure keys; it does not make all
+connectors keyless. Credentials and configured secret references still require
+access controls. Metadata, stored content, vectors, staging, and telemetry have
+different retention and deletion requirements.
+
+SharePoint/OneLake cross-tenant identity selectors are pipeline-scoped and require
+federated application setup plus service grants. Signing in to OmniVec does not
+grant those permissions.
+
+The [Recovery Agent](agent.md) and [MCP/Foundry deployment](cloud-deployments.md)
+have separate bounded approval contracts. Readiness, a successful grant plan,
+or a model-generated answer does not prove data processing or semantic correctness.
+
+## Scaling and operations
+
+The worker pool uses fixed replicas by default, with optional CPU HPA or
+Service Bus KEDA scaling. KEDA must be installed before enabling it:
 
 ```yaml
 dotnetWorker:
@@ -161,343 +269,22 @@ dotnetWorker:
     messageCountPerReplica: 50
 ```
 
-KEDA must be installed before enabling this mode. It scales the shared worker pool
-from the `embeddings/worker` Service Bus subscription backlog. The minimum remains
-two for availability and cold-start protection. CPU HPA remains available with
-`type: hpa`, but queue backlog is the preferred demand signal because workers can
-be waiting on model or destination I/O while CPU remains low.
-
-Ordinary pipelines share the worker pool; OmniVec does not create a Kubernetes
-deployment or Service Bus subscription for every pipeline. Pipeline/model metrics
-track throughput, queue wait, tokens, retries, throttles, errors, and last activity.
-Sustained high-cost, GPU-heavy, premium, or noisy pipelines can then be promoted to
-a dedicated worker-class subscription and deployment without imposing per-pipeline
-infrastructure on the common case.
-
-### 2.5 Change Feed Processor (CFP)
-
-| Attribute | Detail |
-|-----------|--------|
-| Technology | .NET (Azure CosmosDB SDK) |
-| Image | `omnivec-changefeed:latest` |
-| Replicas | 15 (fixed, matches CosmosDB physical partitions) |
-
-Real-time Change Data Capture from CosmosDB source containers.
-
-**Component hierarchy:**
-```
-SourceDiscoveryService (BackgroundService)
-    │  Polls API every 30s for active pipelines + CosmosDB sources
-    ▼
-SourceWatcherManager
-    │  Reconciles running watchers against desired state
-    │  Handles generation-based resets (stop old, start new)
-    ▼
-SourceWatcher [per source]
-    │  Wraps one ChangeFeedProcessor instance
-    │  Handles onChanges delegate (inline or queue mode)
-    ▼
-LeaseContainerManager
-    │  Creates/manages lease containers: leases-{source_id}
-    ▼
-ChangeFeedProcessor (Azure SDK)
-```
-
-**Inline Mode (high-throughput):** The CFP processes documents end-to-end without the job queue:
-- Extract content, compute content_hash, filter eligible docs
-- Sub-batch (100 native / 50 external) to DocGrok `/embed/batch`
-- `PatchByPartitionBatch` back to source container
-
-**Queue Mode:** CFP creates pending jobs in metadata store → Workers pick up and process.
-
-### 2.6 Blob Watcher (optional)
-
-Monitors Azure Blob Storage via Event Grid → Service Bus → Queue polling pattern. Creates pending jobs for matching pipelines.
-
----
-
-## 3. Data Model
-
-All control plane state lives in CosmosDB container `metadata` with partition key `/doc_type`.
-
-| Entity | ID Prefix | doc_type | Purpose |
-|--------|-----------|----------|---------|
-| Source | `src-` | `source` | Connection info to a data store |
-| Destination | `dst-` | `destination` | Where to write vectors |
-| Pipeline | `pip-` | `pipeline` | Binds source(s) to model + destination |
-| Job | `job-` | `job` | Single document processing unit |
-
-### 3.1 Source
-
-Stores connection info only. No content extraction config.
-
-```python
-class Source:
-    id, name, type, config, triggers, schedule, enabled, created_at, updated_at
-```
-
-### 3.2 Destination
-
-Connection to a vector store. When tested, returns `vector_indexes` from the container's vector indexing policy.
-
-```python
-class Destination:
-    id, name, type, config, enabled, created_at, updated_at
-```
-
-### 3.3 PipelineSource
-
-Content extraction config — how a pipeline reads content from a specific source.
-
-```python
-class PipelineSource:
-    source_id: str
-    filters: Dict = {}
-    content_fields: List[str] = ["content"]
-    content_mode: str = "field"        # "field", "blob_url", "http_url", "s3_url"
-    url_content_types: List[str] = ["txt", "json", "pdf"]
-    content_type_field: Optional[str] = None
-    file_types: List[str] = ["txt", "json", "pdf", "docx", "md", "csv"]
-```
-
-### 3.4 Pipeline
-
-```python
-class Pipeline:
-    id, name, description
-    sources: List[PipelineSource]
-    docgrok_pipeline: str              # Model ID or transform pipeline name
-    destination_id: str
-    vector_index_path: str             # From destination's vector policy (e.g., "/embedding")
-    status: "active" | "paused" | "error"
-    process_existing: bool = True
-    metadata_mapping: Dict = {}
-    processing_mode: str = "queue"     # "queue" or "inline"
-    content_strategy: str = "truncate" # "truncate" or "chunk"
-    chunk_config: Optional[ChunkConfig]
-    doc_id_pattern: str = "{source}"
-```
-
-### 3.5 ChunkConfig
-
-```python
-class ChunkConfig:
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
-    chunk_unit: str = "chars"          # "chars" or "tokens"
-    store_text: bool = False
-    text_field: str = "text"
-    doc_id_pattern: str = "{source}-chunk-{chunk}"
-```
-
-**Pattern variables:** `{source}` (filename), `{source_ref}` (full path), `{source_hash}` (12-char SHA256), `{chunk}` (zero-padded index), `{pipeline}` (pipeline ID).
-
----
-
-## 4. DocGrok — AI Model Orchestration
-
-### 4.1 DocGrok Router
-
-| Attribute | Detail |
-|-----------|--------|
-| Technology | Rust (Axum web framework) |
-| Service | ClusterIP port 80 |
-
-**Key Endpoints:** `/embed`, `/embed/batch`, `/models`, `/health`, `/pipelines`
-
-**Model discovery:**
-- **Native models:** Discovered via Kubernetes API — scans deployments with label `role=model`
-- **External models:** Configured in Helm values under `providers`
-
-**Routing logic:**
-- `mdl-ext-*` → call external API (Azure OpenAI)
-- `mdl-*` → forward to native model service
-- Pipeline name → resolve pipeline config → route to pipeline worker
-
-### 4.2 Model Types
-
-| Model | Type | Dimensions | GPU | Use Case |
-|-------|------|-----------|-----|----------|
-| DSE-Qwen2 | Visual Document | 1536 | V100 16Gi | PDF page images |
-| CLIP ViT-L/14 | Image | 768 | V100 4Gi | Image embeddings |
-| BGE-Large-EN | Text | 1024 | V100 4Gi | English text |
-| BGE-Small-EN | Text | 384 | V100 2Gi | Lightweight text |
-| text-embedding-3-small | Text (External) | 1536 | — | Azure OpenAI |
-| text-embedding-3-large | Text (External) | 3072 | — | Azure OpenAI |
-
-### 4.3 Transform Pipelines
-
-Multi-step processing workflows:
-
-```
-PDF Binary → Pipeline Worker → PaddleOCR → Text → Embedding Model → Vectors
-```
-
-Available pipelines: `text-azure`, `text-bge`, `pdf-text-azure`, `pdf-vision`, `pdf-ocr-text`, `image-clip`.
-
-### 4.4 DocGrok Controller
-
-Health checks on all models (every 60s), persists scale state to CosmosDB, restores replica counts on startup.
-
-### 4.5 Pipeline Worker
-
-Python FastAPI + PaddleOCR. Memory-intensive (8–12 Gi) due to OCR model loading.
-
----
-
-## 5. Infrastructure
-
-### 5.1 Provisioning
-
-Infrastructure is provisioned via `azd up` with Bicep templates (`infra/main.bicep`).
-
-### 5.2 Resource Map
-
-| Resource | Service | Purpose |
-|----------|---------|---------|
-| AKS Cluster | Azure Kubernetes Service | Container orchestration |
-| System Node Pool | Configurable VM SKU (2+ nodes) | OmniVec + DocGrok workloads |
-| GPU Node Pool | NC-series VMs (0+ nodes) | Self-hosted embedding models |
-| ACR | Azure Container Registry | Docker image storage |
-| CosmosDB | Azure Cosmos DB (NoSQL) | Metadata store |
-| Storage Account | Azure Blob Storage | Document source (optional) |
-| Service Bus | Azure Service Bus | Job queue for blob events (optional) |
-| Event Grid | Azure Event Grid | Blob change notifications (optional) |
-| Key Vault | Azure Key Vault | Model API key storage |
-| Managed Identity | User-Assigned MI | Workload Identity federation |
-
-### 5.3 Identity and Security
-
-- **Workload Identity Federation:** AKS pods authenticate via federated tokens — no secrets in pods
-- **CosmosDB RBAC:** Native SQL RBAC (no master keys)
-  - `Cosmos DB Built-in Data Contributor` (role `00000000-0000-0000-0000-000000000002`)
-  - `Cosmos DB Account Reader Role` (ARM RBAC — required for SDK `readMetadata`)
-- **ACR Pull:** AKS kubelet identity has `AcrPull` role
-
-### 5.4 Kubernetes Namespace Layout
-
-```
-Namespace: omnivec
-├── omnivec-web              (2 replicas, LoadBalancer)
-├── omnivec-api              (2 replicas, ClusterIP)
-├── omnivec-controller       (1 replica)
-├── omnivec-worker           (1–10 replicas, HPA)
-├── omnivec-changefeed       (15 replicas)
-├── omnivec-blob-watcher     (1 replica, optional)
-├── omnivec-dotnet-worker    (optional)
-├── docgrok                  (1 replica, ClusterIP — router)
-├── docgrok-controller       (1 replica)
-├── docgrok-pipeline-worker  (1 replica, optional)
-├── dse-qwen2               (0–N replicas, GPU)
-├── clip                    (0–N replicas, GPU)
-├── bge                     (0–N replicas, GPU)
-└── bge-small               (0–N replicas, GPU)
-```
-
-### 5.5 Helm Charts
-
-- **`helm/omnivec/`** — Main chart: deploys all OmniVec components, includes DocGrok as subchart
-- **`helm/docgrok/`** — Standalone DocGrok chart (can be deployed independently)
-
----
-
-## 6. Data Flows
-
-### 6.1 CosmosDB Source → Inline Embedding
-
-```
-CosmosDB Source Container
-    │ Change Feed (batches of 500)
-    ▼
-Change Feed Processor
-    │ Extract content, compute content_hash
-    │ Send to DocGrok /embed/batch
-    │ PatchByPartitionBatch back to source
-    ▼
-Source Container (doc + /embedding, /embedded_at, /content_hash)
-```
-
-### 6.2 CosmosDB Source → Queue Mode
-
-```
-CosmosDB Source → Change Feed Processor → Create Job (metadata)
-                                               │
-Worker picks up → Download content → DocGrok → Write to Destination
-```
-
-Physical deletes are not emitted by the standard Cosmos change feed. Sources
-that require deletion propagation configure `soft_delete_field` and,
-optionally, `soft_delete_value` (the default marker is boolean `true`). A
-matching tombstone bypasses embedding and publishes a delete message that
-removes every destination record for the source reference and pipeline.
-Tombstones require queue mode. Attachment tombstones must retain the attachment
-list so each previously emitted attachment reference can be deleted safely.
-
-### 6.3 Blob Source → Event-Driven
-
-```
-Blob uploaded → Event Grid → Service Bus → Worker → Job → Process
-```
-
-### 6.4 Blob Source → Chunked PDF
-
-```
-Azure Blob (PDF) → Worker → DocGrok Pipeline Worker (PaddleOCR)
-    → Extracted text → Split into chunks → DocGrok /embed/batch
-    → Write chunk documents (report-chunk-000, -001, ...)
-    → Destination Vector Container
-```
-
----
-
-## 7. Scaling
-
-| Component | Strategy | Trigger |
-|-----------|----------|---------|
-| API | Manual (2 replicas default) | API request load |
-| Workers | HPA (1–10 replicas) | CPU > 70% |
-| Changefeed | Fixed (15 replicas) | Matches CosmosDB partitions |
-| GPU Models | Manual via UI/API | On-demand; scale to 0 saves GPU |
-
----
-
-## 8. Monitoring
-
-### Health Endpoints
-
-| Component | Endpoint | Checks |
-|-----------|----------|--------|
-| Web | `/nginx-health` | nginx alive |
-| API | `/health` | FastAPI + CosmosDB connectivity |
-| DocGrok Router | `/health` | Router alive |
-| DocGrok Models | `/health/models` | Per-model health status |
-
-### Metrics
-
-`GET /api/metrics` returns per-pipeline and daily aggregations of processed/failed counts, processing times, and throughput.
-
----
-
-## 9. Deployment Hooks
-
-### preprovision
-
-1. Validates prerequisites (az, kubectl, helm — installs kubectl/helm if missing)
-2. Checks Azure login
-3. If RG exists → imports config from RG tags → skips prompts
-4. If config already set via `azd env set` → skips prompts
-5. Fresh deploy → interactive prompts for metadata store, blob source, node pools
-6. Validates VM SKU availability in the target region
-7. Stores all choices in azd env
-
-### postprovision
-
-1. Tries anonymous image import from shared registry
-2. Falls back to token-based import if auth required
-3. If no token → prompts → fallback to ACR source build
-4. Gets AKS credentials
-5. Creates namespaces and K8s secrets
-6. Deploys via Helm (`helm upgrade --install`)
-7. Auto rollout restart if images changed
-8. Saves config as RG tags (enables cross-machine sync)
-9. Prints deployment URL and admin token
+This observes the normal `embeddings/worker` backlog. Packing documents into
+envelopes changes the meaning of that message count. Stage-1 pipeline lanes
+reject both HPA and KEDA and require fixed replicas. Do not mix their configurations.
+
+Scale according to the bottleneck: source partitions/polling, worker memory,
+model quota/latency, destination throughput, or Spark capacity. More replicas
+cannot overcome an unrelated quota or single-writer restriction.
+
+| Signal | What it establishes |
+|--------|---------------------|
+| `/health` on the API | API liveness |
+| `/api/health/checks` | Dependency/component observations |
+| `/ready` on search | DocGrok reachability from search |
+| Live/historical metrics | Observed throughput, latency, failures, and coverage within their respective windows |
+| Destination growth plus expected retrieval | Evidence of processing and retrieval, within the checked scope |
+
+New pipelines start paused. Pause/delete/reset are not worker-cancellation
+fences. Use the [lifecycle guide](user-guide.md#pipeline-lifecycle) before recovery
+actions and the [deployment guide](deployment.md) for infrastructure/image changes.

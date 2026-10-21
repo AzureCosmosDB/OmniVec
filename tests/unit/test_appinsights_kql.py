@@ -63,6 +63,8 @@ def test_get_metrics_reads_split_union_columns(api, monkeypatch):
         ["embed_lat_cnt", None, 248.0],
     ]
     monkeypatch.setattr(api, "_run_kql", lambda *_a, **_k: rows)
+    monkeypatch.setattr(api.batch_metrics, "pipeline_summary",
+                        lambda *_a, **_k: {"pip-123": {"processed": 110025}})
 
     result = asyncio.run(api.get_metrics())
 

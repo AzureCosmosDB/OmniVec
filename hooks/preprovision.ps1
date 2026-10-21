@@ -81,6 +81,32 @@ function Release-Lock {
     if ($script:preLockHandle) { $script:preLockHandle.Dispose() }
 }
 
+function Initialize-ServiceBusConfig {
+    $ErrorActionPreference = "SilentlyContinue"
+    $sku = azd env get-value OMNIVEC_SERVICE_BUS_SKU 2>$null
+    if ($LASTEXITCODE -ne 0 -or "$sku" -match '^ERROR' -or [string]::IsNullOrWhiteSpace("$sku")) {
+        $sku = "Standard"
+    }
+    $capacity = azd env get-value OMNIVEC_SERVICE_BUS_CAPACITY 2>$null
+    if ($LASTEXITCODE -ne 0 -or "$capacity" -match '^ERROR' -or [string]::IsNullOrWhiteSpace("$capacity")) {
+        $capacity = "1"
+    }
+    $ErrorActionPreference = "Stop"
+    switch ("$sku".Trim().ToLowerInvariant()) {
+        "standard" { $sku = "Standard" }
+        "premium" { $sku = "Premium" }
+        default { throw "OMNIVEC_SERVICE_BUS_SKU must be Standard or Premium." }
+    }
+    $capacity = "$capacity".Trim()
+    if ($capacity -notin @("1", "2", "4", "8", "16")) {
+        throw "OMNIVEC_SERVICE_BUS_CAPACITY must be 1, 2, 4, 8, or 16."
+    }
+    azd env set OMNIVEC_SERVICE_BUS_SKU $sku
+    Assert-NativeSuccess 'Saving Service Bus SKU'
+    azd env set OMNIVEC_SERVICE_BUS_CAPACITY $capacity
+    Assert-NativeSuccess 'Saving Service Bus capacity'
+}
+
 # -- a1/a3: Interactive-safety helpers (mirror of hooks/preprovision.sh) ----
 function Test-CanPrompt {
     if ($env:OMNIVEC_FORCE_NO_TTY) { return $false }
@@ -205,6 +231,8 @@ function Use-QuickstartDefaults {
         'OMNIVEC_GPU_NODE_VM_SIZE'    = ''
         'OMNIVEC_GPU_NODE_COUNT'      = '0'
         'OMNIVEC_METADATA_STORE'      = 'cosmosdb-serverless'
+        'OMNIVEC_SERVICE_BUS_SKU'     = 'Standard'
+        'OMNIVEC_SERVICE_BUS_CAPACITY' = '1'
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value 2>$null
@@ -292,6 +320,7 @@ if (-not $acct) {
     exit 1
 }
 Write-Host "`e[32mLogged in to subscription: $($acct.name) ($($acct.id))`e[0m"
+Initialize-ServiceBusConfig
 
 # -- Check for existing deployment (RG exists = update in-place) --
 $rgName = "rg-omnivec-$env:AZURE_ENV_NAME"
@@ -370,6 +399,8 @@ if ($setupMode -eq "1") {
         "OMNIVEC_GPU_NODE_VM_SIZE"    = ""
         "OMNIVEC_GPU_NODE_COUNT"      = "0"
         "OMNIVEC_METADATA_STORE"      = "cosmosdb-serverless"
+        "OMNIVEC_SERVICE_BUS_SKU"     = "Standard"
+        "OMNIVEC_SERVICE_BUS_CAPACITY" = "1"
     }
     foreach ($kv in $defaults.GetEnumerator()) {
         azd env set $kv.Key $kv.Value
@@ -628,7 +659,7 @@ Configure-Authentication
 
 # -- Sanitize env values: strip BOM, tabs, carriage returns --
 Write-Host "`n`e[36mSanitizing environment values...`e[0m"
-$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_METADATA_STORE", "OMNIVEC_ENTRA_ENABLED", "OMNIVEC_PUBLIC_URL")
+$envKeys = @("OMNIVEC_SYSTEM_NODE_VM_SIZE", "OMNIVEC_SYSTEM_NODE_COUNT", "OMNIVEC_GPU_NODE_VM_SIZE", "OMNIVEC_GPU_NODE_COUNT", "OMNIVEC_METADATA_STORE", "OMNIVEC_SERVICE_BUS_SKU", "OMNIVEC_SERVICE_BUS_CAPACITY", "OMNIVEC_ENTRA_ENABLED", "OMNIVEC_PUBLIC_URL")
 foreach ($key in $envKeys) {
     $ErrorActionPreference = "SilentlyContinue"
     $raw = azd env get-value $key 2>$null

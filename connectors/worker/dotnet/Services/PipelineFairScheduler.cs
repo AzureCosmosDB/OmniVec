@@ -3,7 +3,7 @@ namespace OmniVec.Worker.Services;
 /// <summary>
 /// Per-worker weighted fair admission with pipeline concurrency caps.
 /// Service Bus remains the durable queue; this scheduler only orders groups
-/// already received by the worker.
+/// already received in legacy mode, or reserves capacity before lane receives.
 /// </summary>
 public sealed class PipelineFairScheduler
 {
@@ -80,7 +80,7 @@ public sealed class PipelineFairScheduler
                 while (state.Pending.TryPeek(out var stale) && stale.Completion.Task.IsCompleted)
                 {
                     state.Pending.Dequeue();
-                    stale.Cancellation.Dispose();
+                    stale.Cancellation.Unregister();
                 }
                 if (state.Pending.Count == 0 || state.Active >= state.MaxConcurrency)
                     continue;
@@ -97,7 +97,7 @@ public sealed class PipelineFairScheduler
             if (selected is null || selectedId is null) return;
 
             var request = selected.Pending.Dequeue();
-            request.Cancellation.Dispose();
+            request.Cancellation.Unregister();
             selected.Active++;
             _active++;
             selected.VirtualRuntime += request.Cost / (double)Math.Max(1, selected.Weight);

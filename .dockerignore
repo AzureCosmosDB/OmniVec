@@ -1,9 +1,13 @@
 # Ignore node_modules and other large directories
 node_modules/
+**/node_modules/
 .git/
 .worktrees/
 .venv/
+**/.venv/
 venv/
+**/venv/
+**/.python_packages/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -27,8 +31,15 @@ tests/
 *.md
 !api/*.md
 
-# Ignore other connectors (not needed in API image)
-connectors/
+# Keep ingestion sources and the worker project required by root-context builds.
+connectors/*
+!connectors/ingestion/
+connectors/ingestion/*
+!connectors/ingestion/dotnet/
+!connectors/ingestion/onelake_iceberg/
+!connectors/worker/
+connectors/worker/*
+!connectors/worker/dotnet/
 
 # Ignore CLI (not needed in API image)
 cli/
@@ -57,3 +68,5 @@ web/static/lib/
 .claude/
 connectors/ingestion/dotnet/bin/
 connectors/ingestion/dotnet/obj/
+connectors/worker/dotnet/bin/
+connectors/worker/dotnet/obj/

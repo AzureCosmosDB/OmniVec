@@ -47,7 +47,7 @@ public sealed class SharePointContentClient
         response.EnsureSuccessStatusCode();
 
         if (response.Content.Headers.ContentLength is long length && length > maxBytes)
-            throw new InvalidOperationException(
+            throw new FileSizeLimitExceededException(
                 $"SharePoint file is {length} bytes, exceeding the configured limit of {maxBytes} bytes");
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
@@ -58,7 +58,7 @@ public sealed class SharePointContentClient
             var read = await stream.ReadAsync(block, ct);
             if (read == 0) break;
             if (buffer.Length + read > maxBytes)
-                throw new InvalidOperationException(
+                throw new FileSizeLimitExceededException(
                     $"SharePoint file exceeds the configured limit of {maxBytes} bytes");
             await buffer.WriteAsync(block.AsMemory(0, read), ct);
         }
@@ -94,3 +94,5 @@ public sealed class SharePointContentClient
 }
 
 public sealed class SharePointVersionChangedException(string message) : Exception(message);
+
+public sealed class FileSizeLimitExceededException(string message) : ArgumentException(message);

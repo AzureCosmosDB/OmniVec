@@ -4,9 +4,11 @@ from enum import Enum
 import re
 import uuid
 from urllib.parse import urlsplit
+from garnet_endpoint import garnet_endpoint_identity
 from typing import Optional, List, Dict, Any, Union, Literal  # lgtm[py/unused-import]
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
+from omnivec_queue import queue_publish_policy
 
 
 # Optional informational metadata fields that destination writers may persist
@@ -22,6 +24,7 @@ ALLOWED_METADATA_FIELDS = {"pipeline_name", "embedding_dims", "source_ref"}
 # =============================================================================
 
 class SourceType(str, Enum):
+    MOCK = "mock"
     AZURE_BLOB = "azure-blob"
     COSMOSDB = "cosmosdb"
     POSTGRESQL = "postgresql"
@@ -31,14 +34,18 @@ class SourceType(str, Enum):
     DATABRICKS = "databricks"
     ONELAKE_ICEBERG = "onelake-iceberg"
     SHAREPOINT = "sharepoint"
+    SYNTHETIC = "synthetic"
+    GARNET = "garnet"
 
 
 class DestinationType(str, Enum):
+    MOCK = "mock"
     COSMOSDB_VECTOR = "cosmosdb-vector"
     PGVECTOR = "pgvector"
     MSSQL = "mssql"
     ONELAKE_ICEBERG = "onelake-iceberg"
     GARNET = "garnet"
+    NULL = "null"
 
 
 class TriggerType(str, Enum):
@@ -301,6 +308,58 @@ class SharePointSourceConfig(BaseModel):
         return normalized
 
 
+class SyntheticSourceConfig(BaseModel):
+    """Benchmark-only source that emits deterministic Service Bus messages."""
+    benchmark_only: Literal[True]
+    document_count: int = Field(default=10_000, ge=1, le=1_000_000)
+    message_size_bytes: int = Field(default=1024, ge=1024, le=200_000)
+    docs_per_second: float = Field(default=100, ge=0, le=100_000)
+    content_pattern: Literal["repeated", "deterministic"] = "deterministic"
+    mock_embedding: bool = False
+    mock_embedding_dimensions: int = Field(default=384, ge=1, le=4096)
+
+    model_config = {"extra": "forbid"}
+
+
+class GarnetSourceConfig(BaseModel):
+    """A versioned JSON document collection stored in a Garnet HASH."""
+    endpoint: str
+    hash_key: str
+    tls: bool = True
+    use_entra_auth: bool = False
+    username: Optional[str] = None
+    password_secret_ref: Optional[str] = None
+    poll_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    scan_page_size: int = Field(default=500, ge=1, le=10000)
+    batch_size: int = Field(default=50, ge=1, le=50)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint(cls, value: str) -> str:
+        value = value.strip()
+        garnet_endpoint_identity({"endpoint": value})
+        return value
+
+    @field_validator("hash_key")
+    @classmethod
+    def _validate_hash_key(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,256}", value):
+            raise ValueError("hash_key must contain only letters, numbers, ':', '_' or '-'")
+        if value.lower().startswith("__omnivec:source-checkpoints:"):
+            raise ValueError("hash_key cannot use OmniVec's reserved internal checkpoint namespace")
+        return value
+
+    @field_validator("password_secret_ref")
+    @classmethod
+    def _validate_garnet_password_secret_ref(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.startswith("kv://"):
+            raise ValueError("password_secret_ref must use kv://<vault>/<secret>")
+        return value
+
+
 # =============================================================================
 # DESTINATION CONFIGURATIONS
 # =============================================================================
@@ -348,6 +407,7 @@ class GarnetDestinationConfig(BaseModel):
     quantization: Literal["NOQUANT", "Q8", "BIN"] = "NOQUANT"
     m: int = Field(default=16, ge=4, le=4096)
     ef: int = Field(default=200, ge=1, le=1_000_000)
+    write_concurrency: int = Field(default=16, ge=1, le=128)
     search_ef: int = Field(default=100, ge=1, le=1_000_000)
     filter_ef: int = Field(default=16, ge=4, le=256)
     vector_indexes: List[Dict[str, Any]] = Field(default_factory=list)
@@ -360,9 +420,7 @@ class GarnetDestinationConfig(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("endpoint is required")
-        parsed = urlsplit(value if "://" in value else f"redis://{value}")
-        if not parsed.hostname or parsed.scheme not in ("redis", "rediss"):
-            raise ValueError("endpoint must be a Redis-compatible host[:port] or redis[s] URL")
+        garnet_endpoint_identity({"endpoint": value})
         return value
 
     @field_validator("vector_set")
@@ -523,6 +581,7 @@ class ChunkConfig(BaseModel):
     chunk_size: int = 1000         # Max characters per chunk
     chunk_overlap: int = 200       # Overlap between adjacent chunks
     chunk_unit: str = "chars"      # "chars" or "tokens"
+    cleanup_order: Literal["insert-first", "delete-first"] = "insert-first"
     store_text: bool = False       # Store chunk text in vector docs
     text_field: str = "text"       # Field name for stored text in vector doc
     doc_id_pattern: str = "{source}-chunk-{chunk}"  # Legacy-safe fallback; new pipelines set an explicit collision-safe pattern
@@ -617,12 +676,28 @@ class PipelineSource(BaseModel):
 
 
 class PipelineResourcePolicy(BaseModel):
-    """Operator-adjustable fairness policy for the shared worker pool."""
+    """Operator-adjustable fairness, model batching and queue packing controls."""
 
     weight: int = Field(default=10, ge=1, le=100)
     max_concurrency_per_worker: int = Field(default=2, ge=1, le=32)
+    embed_batch_size: int = Field(default=50, ge=1, le=4096)
+    queue_documents_per_message: int = Field(default=1, ge=1, le=1000)
+    queue_max_envelope_bytes: int = Field(default=224 * 1024, ge=1024, le=960 * 1024, strict=True)
+    queue_send_batch_max_bytes: int = Field(default=240 * 1024, ge=1024, le=1024 * 1024, strict=True)
+    queue_publish_batch_size: int = Field(default=200, ge=1, le=1000, strict=True)
     priority: Literal["low", "normal", "high", "critical"] = "normal"
     workload_class: Literal["shared", "burst", "dedicated"] = "shared"
+
+    @model_validator(mode="after")
+    def _validate_queue_capacity(self):
+        queue_publish_policy(self.model_dump())
+        return self
+
+
+class ModelRequestLimits(BaseModel):
+    max_batch_size: int = Field(default=256, ge=1, le=4096)
+    context_window_tokens: int = Field(default=8191, ge=1, le=2_000_000)
+    max_batch_tokens: int = Field(default=6000, ge=1, le=2_000_000)
 
 
 class Pipeline(BaseModel):
@@ -660,6 +735,7 @@ class Pipeline(BaseModel):
     # Allowed values: see ALLOWED_METADATA_FIELDS.
     metadata_fields: Optional[List[str]] = None
     resource_policy: PipelineResourcePolicy = Field(default_factory=PipelineResourcePolicy)
+    model_limits: ModelRequestLimits = Field(default_factory=ModelRequestLimits)
     generation: str = "1"  # Incremented on reset - docs with mismatched generation are reprocessed
     reset_at: Optional[datetime] = None  # Set when pipeline is reset for reprocessing
     created_at: Optional[datetime] = None
@@ -815,6 +891,16 @@ class SyncSourceRequest(BaseModel):
     )
 
 
+class SyntheticGenerateRequest(BaseModel):
+    pipeline_id: Optional[str] = None
+    document_count: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    message_size_bytes: Optional[int] = Field(default=None, ge=1024, le=200_000)
+    docs_per_second: Optional[float] = Field(default=None, ge=0, le=100_000)
+    content_pattern: Optional[Literal["repeated", "deterministic"]] = None
+    mock_embedding: Optional[bool] = None
+    mock_embedding_dimensions: Optional[int] = Field(default=None, ge=1, le=4096)
+
+
 class PipelineRunStats(BaseModel):
     pipeline_id: str
     pipeline_name: str
@@ -828,6 +914,8 @@ class PipelineRunStats(BaseModel):
     avg_processing_time_ms: Optional[float] = None
     throughput_docs_per_sec: Optional[float] = None
     recent_throughput_docs_per_sec: Optional[float] = None  # last 60s
+    telemetry_source: str = "unavailable"
+    telemetry_coverage: str = "unavailable"
 
 
 # =============================================================================

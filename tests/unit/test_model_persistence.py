@@ -102,6 +102,18 @@ def test_registration_metadata_patch_preserves_envelope_and_uses_etag(registry):
     registry.store.upsert.assert_not_called()
 
 
+def test_registration_edit_preserves_omitted_model_limits(registry):
+    registry.doc.update({
+        "max_batch_size": 16, "context_window_tokens": 512, "max_batch_tokens": 1000,
+    })
+    registry.store.query.return_value = [deepcopy(registry.doc)]
+    asyncio.run(registry.api.create_model({"name": "fixture-model"}))
+    sent = registry.client.post.call_args.kwargs["json"]
+    assert sent["max_batch_size"] == 16
+    assert sent["context_window_tokens"] == 512
+    assert sent["max_batch_tokens"] == 1000
+
+
 def test_registration_metadata_conflict_does_not_overwrite_new_credentials(registry):
     registry.doc.pop("model_category")
     registry.store.replace_with_etag.side_effect = CosmosAccessConditionFailedError(status_code=412)

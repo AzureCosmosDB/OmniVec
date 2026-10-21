@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using OmniVec.ChangeFeed.Configuration;
 using OmniVec.ChangeFeed.Hosting;
 using OmniVec.ChangeFeed.Services;
+using OmniVec.Worker.Services;
 
 // Prevent thread starvation under high concurrency (CosmosDB patches + DocGrok calls)
 // 500 threads for 100K RU/s provisioned throughput
@@ -49,6 +50,11 @@ builder.Services.AddKeyedSingleton<CosmosClient>("lease", (sp, _) =>
             MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
         });
 });
+
+// Best-effort inline metrics: singleton bounded transport hosted service, registered
+// before the watchers' hosted services so it stops last and drains final reports.
+builder.Services.AddMetricsTransport(builder.Configuration,
+    sp => sp.GetRequiredService<IOptions<ChangeFeedOptions>>().Value.OmniVecApiBaseUrl);
 
 // HTTP client for OmniVec API
 builder.Services.AddHttpClient<OmniVecApiClient>((sp, client) =>

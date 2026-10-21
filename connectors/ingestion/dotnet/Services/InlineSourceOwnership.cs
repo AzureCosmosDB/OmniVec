@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 using OmniVec.ChangeFeed.Models;
+using OmniVec.Worker.Destinations;
 
 namespace OmniVec.ChangeFeed.Services;
 
@@ -72,6 +73,14 @@ internal static class InlineSourceOwnership
             return JsonSerializer.Serialize(new[] { type, host.Trim().TrimEnd('.'),
                 port.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 Required(connection.InitialCatalog), source.SchemaName ?? "dbo", Required(source.Table) });
+        }
+        if (type == "garnet")
+        {
+            var tls = !source.Config.TryGetValue("tls", out var tlsValue) || tlsValue.GetBoolean();
+            var endpoint = GarnetEndpoint.Parse(Required(source.Endpoint), tls);
+            return JsonSerializer.Serialize(new[] { type, endpoint.Host,
+                endpoint.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                endpoint.Tls.ToString(), Required(source.GarnetHashKey) });
         }
         return JsonSerializer.Serialize(new[] { "source", source.Id });
     }

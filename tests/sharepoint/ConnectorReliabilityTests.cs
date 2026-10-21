@@ -1,6 +1,7 @@
 using System.Net;
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using Azure;
 using Azure.Messaging.ServiceBus;
@@ -67,8 +68,9 @@ internal static class ConnectorReliabilityTests
         { DelayAsync = (_, _) => Task.CompletedTask };
     private static EmbeddingWorkerService Worker(DocGrokClient client, ReliabilityWriter? writer = null,
         SharePointContentClient? sharePoint = null, MetricsReporter? metrics = null,
-        ILogger<EmbeddingWorkerService>? logger = null)
-        => new(Options.Create(new WorkerOptions { MaxConcurrentCalls = 2 }), null, client,
+        ILogger<EmbeddingWorkerService>? logger = null, WorkerOptions? options = null,
+        ServiceBusClient? bus = null)
+        => new(Options.Create(options ?? new WorkerOptions { MaxConcurrentCalls = 2 }), bus, client,
             sharePoint ?? new SharePointContentClient(new HttpClient()),
             metrics ?? new MetricsReporter(new HttpClient(new LocalHttpHandler(_ => new(HttpStatusCode.OK)))
                 { BaseAddress = new("http://local.invalid") }, NullLogger<MetricsReporter>.Instance),
@@ -83,10 +85,372 @@ internal static class ConnectorReliabilityTests
         => ServiceBusModelFactory.ServiceBusReceivedMessage(body: BinaryData.FromString(JsonSerializer.Serialize(message)),
             messageId: id, lockedUntil: DateTimeOffset.UtcNow.AddSeconds(1));
 
+    private static ServiceBusReceivedMessage Envelope(IEnumerable<Message> documents, string id = "envelope")
+        => ServiceBusModelFactory.ServiceBusReceivedMessage(
+            body: BinaryData.FromString(JsonSerializer.Serialize(new
+            {
+                queue_envelope_version = 1, pipeline_id = documents.First().PipelineId,
+                documents = documents.ToArray(),
+            })), messageId: id, subject: documents.First().PipelineId,
+            enqueuedTime: DateTimeOffset.UtcNow, lockedUntil: DateTimeOffset.UtcNow.AddSeconds(1));
+
+    private static List<Message> EnvelopeDocuments(int count = 100, string pipeline = "pipeline")
+        => Enumerable.Range(0, count).Select(index =>
+        {
+            var message = TextMessage(pipeline);
+            message.MessageId = $"doc-{index}";
+            message.SourceRef = $"doc-{index}";
+            message.PartitionKeyValue = $"doc-{index}";
+            message.BenchmarkMockEmbedding = true;
+            return message;
+        }).ToList();
+
     public static async Task<int> RunAsync()
     {
         var tests = new List<(string, Func<Task>)>();
         void Test(string name, Func<Task> action) => tests.Add((name, action));
+        Test("Queue envelopes pack 100 documents, retain legacy tails and split incompatible routes", () =>
+        {
+            var documents = Enumerable.Range(0, 201).Select(index => new OmniVec.ChangeFeed.Models.EmbeddingMessage
+            {
+                MessageId = $"doc-{index}", PipelineId = "pipeline", DestinationId = "destination",
+                DocgrokPipeline = "model", QueueDocumentsPerMessage = 100, Content = "hello",
+            }).ToList();
+            var packed = QueueEnvelopeBuilder.Build(documents).ToList();
+            Check(packed.Count == 3);
+            using var first = JsonDocument.Parse(packed[0].Body);
+            Check(first.RootElement.GetProperty("queue_envelope_version").GetInt32() == 1);
+            Check(first.RootElement.GetProperty("documents").GetArrayLength() == 100);
+            using var tail = JsonDocument.Parse(packed[2].Body);
+            Check(!tail.RootElement.TryGetProperty("documents", out _));
+            Check(packed.Select(item => item.MessageId).SequenceEqual(
+                QueueEnvelopeBuilder.Build(documents).Select(item => item.MessageId)));
+            documents[1].DestinationId = "other";
+            Check(QueueEnvelopeBuilder.Build(documents.Take(3)).Count() == 3);
+            documents[1].DestinationId = "destination";
+            documents[1].MessageId = documents[0].MessageId;
+            Check(QueueEnvelopeBuilder.Build(documents.Take(2)).Count() == 2);
+            return Task.CompletedTask;
+        });
+        Test("Queue envelope byte caps use serialized UTF-8 and invalid counts fail closed", () =>
+        {
+            var documents = Enumerable.Range(0, 10).Select(index => new OmniVec.ChangeFeed.Models.EmbeddingMessage
+            {
+                MessageId = $"doc-{index}", PipelineId = "pipeline",
+                QueueDocumentsPerMessage = 100, Content = new string('\u6771', 10_000),
+            }).ToList();
+            var packed = QueueEnvelopeBuilder.Build(documents).ToList();
+            Check(packed.Count > 1);
+            Check(packed.All(item => item.Body.ToMemory().Length <= QueueEnvelopeBuilder.MaxEnvelopeBytes));
+            foreach (var invalid in new[] { 0, -1, 1001 })
+            {
+                documents[0].QueueDocumentsPerMessage = invalid;
+                try { QueueEnvelopeBuilder.Build(documents).ToList(); throw new Exception("Invalid count accepted"); }
+                catch (ArgumentOutOfRangeException) { }
+            }
+            return Task.CompletedTask;
+        });
+        Test("Live larger .NET queue limits pack 500 documents and use the configured native batch", async () =>
+        {
+            var documents = Enumerable.Range(0, 500).Select(index => new OmniVec.ChangeFeed.Models.EmbeddingMessage
+            {
+                MessageId = $"doc-{index}", PipelineId = "pipeline", Content = "hello",
+                QueueDocumentsPerMessage = 500, QueuePublishBatchSize = 500,
+                QueueMaxEnvelopeBytes = 960 * 1024, QueueSendBatchMaxBytes = 1024 * 1024,
+            }).ToList();
+            var packed = QueueEnvelopeBuilder.Build(documents).ToList();
+            Check(packed.Count == 1 && packed[0].Body.ToMemory().Length > 224 * 1024);
+            using var json = JsonDocument.Parse(packed[0].Body);
+            Check(json.RootElement.GetProperty("documents").GetArrayLength() == 500);
+            var sender = new LocalSender();
+            var publisher = new ServiceBusPublisher(Options.Create(new ChangeFeedOptions()),
+                NullLogger<ServiceBusPublisher>.Instance);
+            Set(publisher, "_sender", sender);
+            await publisher.PublishBatchAsync(documents, CancellationToken.None);
+            Check(sender.Sent.Count == 1 && sender.BatchLimits.SequenceEqual(new long?[] { 1024 * 1024 }));
+            documents.ForEach(message => message.QueueMaxEnvelopeBytes = 224 * 1024);
+            Check(QueueEnvelopeBuilder.Build(documents).Count() > 1);
+            documents[0].QueueSendBatchMaxBytes = 224 * 1024;
+            try { QueueEnvelopeBuilder.Build(documents).ToList(); throw new Exception("Invalid byte relationship accepted"); }
+            catch (ArgumentOutOfRangeException) { }
+        });
+        Test("500-document envelopes above the old byte cap retain one-parent settlement and model limits", async () =>
+        {
+            var writer = new ReliabilityWriter();
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                writer, options: new WorkerOptions
+                {
+                    MaxConcurrentCalls = 2, MaxReceiveBatchSize = 1, EnableBenchmarkMockEmbedding = true,
+                });
+            var body = JsonSerializer.Serialize(new
+            {
+                queue_envelope_version = 1, pipeline_id = "pipeline",
+                documents = Enumerable.Range(0, 500).Select(index => new
+                {
+                    message_id = $"doc-{index}", pipeline_id = "pipeline", pipeline_name = "pipeline",
+                    source_id = "source", source_ref = $"doc-{index}", partition_key_value = $"doc-{index}",
+                    destination_id = "dest", destination_type = "cosmosdb-vector", destination_config = new { },
+                    docgrok_pipeline = "mdl-test", content = new string('x', 600),
+                    benchmark_mock_embedding = true, embed_batch_size = 50,
+                }),
+            });
+            Check(Encoding.UTF8.GetByteCount(body) > 224 * 1024);
+            Check(Encoding.UTF8.GetByteCount(body) <= QueueEnvelopeReceiver.MaxEnvelopeBytes);
+            var parent = ServiceBusModelFactory.ServiceBusReceivedMessage(body: BinaryData.FromString(body),
+                messageId: "large-parent", subject: "pipeline", lockedUntil: DateTimeOffset.UtcNow.AddMinutes(1));
+            var receiver = new ReliabilityReceiver();
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { parent }, CancellationToken.None, null!);
+            Check(writer.Written.Count == 500 && writer.BatchSizes.All(count => count <= 50));
+            Check(receiver.Completed == 1 && receiver.CompletedIds.Single() == "large-parent");
+            Check(receiver.Abandoned == 0 && receiver.DeadLettered == 0);
+            var oversized = ServiceBusModelFactory.ServiceBusReceivedMessage(
+                body: BinaryData.FromString(new string('x', QueueEnvelopeReceiver.MaxEnvelopeBytes + 1)));
+            try
+            {
+                _ = new QueueEnvelopeReceiver(receiver, oversized, (_, _) => Task.CompletedTask);
+                throw new Exception("Protocol byte ceiling was ignored");
+            }
+            catch (JsonException) { }
+        });
+        foreach (var modelCap in new[] { 256, 512 })
+        {
+            Test($"Pipeline batches512 honor a declared model count cap of {modelCap}", async () =>
+            {
+                var writer = new ReliabilityWriter();
+                using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                    writer, options: new WorkerOptions
+                    {
+                        MaxConcurrentCalls = 2, MaxReceiveBatchSize = 1, EnableBenchmarkMockEmbedding = true,
+                    });
+                var documents = EnvelopeDocuments(512);
+                documents.ForEach(message =>
+                {
+                    message.EmbedBatchSize = 512;
+                    message.ModelMaxBatchSize = modelCap;
+                });
+                var receiver = new ReliabilityReceiver();
+                await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { Envelope(documents) },
+                    CancellationToken.None, null!);
+                Check(writer.Written.Count == 512 && receiver.Completed == 1);
+                Check(writer.BatchSizes.SequenceEqual(modelCap == 512 ? new[] { 512 } : new[] { 256, 256 }));
+                Check(receiver.Abandoned == 0 && receiver.DeadLettered == 0);
+            });
+        }
+        Test("100 mock documents write separately and acknowledge exactly one parent delivery", async () =>
+        {
+            var calls = 0;
+            var writer = new ReliabilityWriter();
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+            {
+                calls++;
+                throw new Exception("Mock envelope must not call DocGrok");
+            })), writer, options: new WorkerOptions { MaxConcurrentCalls = 2, EnableBenchmarkMockEmbedding = true });
+            var receiver = new ReliabilityReceiver();
+            var parent = Envelope(EnvelopeDocuments());
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { parent }, CancellationToken.None, null!);
+            Check(calls == 0 && writer.Written.Count == 100);
+            Check(writer.Written.Select(item => item.SourceRef).Distinct().Count() == 100);
+            Check(receiver.Completed == 1 && receiver.CompletedIds.Single() == "envelope");
+            Check(receiver.Abandoned == 0 && receiver.DeadLettered == 0);
+        });
+        foreach (var receiveSize in new[] { 1, 2 })
+        {
+            Test($"Receiving {receiveSize} broker messages does not shrink 50-document model batches", async () =>
+            {
+                var writer = new ReliabilityWriter();
+                using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                    writer, options: new WorkerOptions
+                    {
+                        MaxConcurrentCalls = 2, MaxReceiveBatchSize = receiveSize,
+                        EnableBenchmarkMockEmbedding = true,
+                    });
+                var documents = EnvelopeDocuments();
+                documents.ForEach(message =>
+                {
+                    message.EmbedBatchSize = 50;
+                    message.ModelMaxBatchSize = 256;
+                });
+                var receiver = new ReliabilityReceiver();
+                await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { Envelope(documents) },
+                    CancellationToken.None, null!);
+                Check(writer.BatchSizes.Order().SequenceEqual(new[] { 50, 50 }));
+                Check(writer.Written.Count == 100 && receiver.Completed == 1);
+                Check(receiver.Abandoned == 0 && receiver.DeadLettered == 0);
+            });
+        }
+        Test("Expanded envelopes still respect the smaller model batch limit", async () =>
+        {
+            var writer = new ReliabilityWriter();
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                writer, options: new WorkerOptions
+                {
+                    MaxConcurrentCalls = 2, MaxReceiveBatchSize = 1,
+                    EnableBenchmarkMockEmbedding = true,
+                });
+            var documents = EnvelopeDocuments();
+            documents.ForEach(message =>
+            {
+                message.EmbedBatchSize = 50;
+                message.ModelMaxBatchSize = 16;
+            });
+            var receiver = new ReliabilityReceiver();
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { Envelope(documents) },
+                CancellationToken.None, null!);
+            Check(writer.BatchSizes.Order().SequenceEqual(new[] { 4, 16, 16, 16, 16, 16, 16 }));
+            Check(writer.Written.Count == 100 && receiver.Completed == 1);
+        });
+        Test("Envelope destination failure abandons once and never acknowledges successful sub-batches early", async () =>
+        {
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                new ReliabilityWriter { Fail = true },
+                options: new WorkerOptions { MaxConcurrentCalls = 2, EnableBenchmarkMockEmbedding = true });
+            var receiver = new ReliabilityReceiver();
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { Envelope(EnvelopeDocuments()) },
+                CancellationToken.None, null!);
+            Check(receiver.Completed == 0 && receiver.Abandoned == 1 && receiver.DeadLettered == 0);
+        });
+        Test("Partial envelope write failure replays stable document IDs and completes only after retry", async () =>
+        {
+            var writer = new ReliabilityWriter { FailOnWrite = 2 };
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))), writer,
+                options: new WorkerOptions { MaxConcurrentCalls = 2, EnableBenchmarkMockEmbedding = true });
+            var receiver = new ReliabilityReceiver();
+            var parent = Envelope(EnvelopeDocuments());
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { parent }, CancellationToken.None, null!);
+            Check(receiver.Completed == 0 && receiver.Abandoned == 1);
+            Check(writer.Written.Count > 0 && writer.Written.Count < 100);
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { parent }, CancellationToken.None, null!);
+            Check(receiver.Completed == 1 && receiver.Abandoned == 1);
+            Check(writer.Written.Select(item => item.DocId).Distinct().Count() == 100);
+        });
+        Test("Queued envelopes for a blocked pipeline do not hoard healthy pipeline admission", async () =>
+        {
+            var writer = new EnvelopeBlockingWriter();
+            using var worker = new EmbeddingWorkerService(
+                Options.Create(new WorkerOptions { MaxConcurrentCalls = 2, EnableBenchmarkMockEmbedding = true }),
+                null, Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                new SharePointContentClient(new HttpClient()),
+                new MetricsReporter(new HttpClient(), NullLogger<MetricsReporter>.Instance),
+                [writer], NullLogger<EmbeddingWorkerService>.Instance);
+            var receiver = new ReliabilityReceiver();
+            var blocked = EnvelopeDocuments(2, "blocked");
+            blocked.ForEach(message => message.MaxConcurrencyPerWorker = 1);
+            var parents = Enumerable.Range(0, 5).Select(index => Envelope(blocked, $"blocked-{index}"))
+                .Append(Envelope(EnvelopeDocuments(2, "healthy"), "fast")).ToArray();
+            var processing = Invoke(worker, "ProcessLaneBatchAsync", receiver, parents, CancellationToken.None, null!);
+            try
+            {
+                await receiver.FastCompleted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                Check(writer.BadStarted.Task.IsCompleted && receiver.CompletedIds.Contains("fast"));
+            }
+            finally
+            {
+                writer.ReleaseBad.TrySetResult();
+                await processing.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        });
+        Test("Poison document is durably handed off alone; healthy documents complete their parent", async () =>
+        {
+            var sender = new LocalSender();
+            var documents = EnvelopeDocuments();
+            documents[42].DestinationType = "unknown";
+            var writer = new ReliabilityWriter();
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))), writer,
+                options: new WorkerOptions { MaxConcurrentCalls = 2, EnableBenchmarkMockEmbedding = true },
+                bus: new EnvelopeBus(sender));
+            var receiver = new ReliabilityReceiver();
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { Envelope(documents) },
+                CancellationToken.None, null!);
+            Check(writer.Written.Count == 99 && receiver.Completed == 1 && receiver.Abandoned == 0);
+            Check(sender.Sent.Count == 1 && sender.Sent[0].MessageId == "doc-42");
+            Check((string)sender.Sent[0].ApplicationProperties[QueueEnvelopeReceiver.DeadLetterReasonProperty]
+                == "UnknownDestinationType");
+            var outgoing = sender.Sent[0];
+            var handoff = ServiceBusModelFactory.ServiceBusReceivedMessage(body: outgoing.Body,
+                messageId: outgoing.MessageId, subject: outgoing.Subject,
+                properties: new Dictionary<string, object>(outgoing.ApplicationProperties));
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { handoff }, CancellationToken.None, null!);
+            Check(receiver.DeadLettered == 1 && writer.Written.Count == 99 && sender.Sent.Count == 1);
+        });
+        Test("Failed poison handoff or incomplete document cannot acknowledge the envelope", async () =>
+        {
+            var receiver = new ReliabilityReceiver();
+            var parent = Envelope(EnvelopeDocuments(3));
+            var envelope = new QueueEnvelopeReceiver(receiver, parent, (_, _) =>
+                Task.FromException(new InvalidOperationException("Handoff unavailable")));
+            await envelope.CompleteMessageAsync(envelope.Documents[0]);
+            await Fails(() => envelope.DeadLetterMessageAsync(envelope.Documents[1], "Poison"));
+            Check(receiver.Completed == 0);
+            await envelope.SettleParentAsync(default);
+            Check(receiver.Completed == 0 && receiver.Abandoned == 1);
+        });
+        Test("Envelope completion waits for every child and renewal targets only the parent", async () =>
+        {
+            var receiver = new ReliabilityReceiver();
+            var parent = Envelope(EnvelopeDocuments(3));
+            await using var scope = new MessageProcessingScope(receiver, [parent], TimeSpan.FromSeconds(10),
+                default, TimeSpan.FromMilliseconds(5));
+            var envelope = new QueueEnvelopeReceiver(scope.Receiver, parent, (_, _) => Task.CompletedTask);
+            await receiver.LockRenewed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await envelope.CompleteMessageAsync(envelope.Documents[0]);
+            await envelope.CompleteMessageAsync(envelope.Documents[1]);
+            Check(receiver.Completed == 0);
+            await envelope.CompleteMessageAsync(envelope.Documents[2]);
+            await envelope.SettleParentAsync(default);
+            Check(receiver.Completed == 1 && receiver.Renewed > 0 && receiver.Abandoned == 0);
+        });
+        Test("Envelope and legacy documents coexist; unknown versions and duplicate IDs are terminal", async () =>
+        {
+            using var worker = Worker(Client(new LocalHttpHandler(_ => throw new Exception("Mock only"))),
+                options: new WorkerOptions { MaxConcurrentCalls = 2, EnableBenchmarkMockEmbedding = true });
+            var receiver = new ReliabilityReceiver();
+            var legacy = EnvelopeDocuments(1)[0];
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver,
+                new[] { Envelope(EnvelopeDocuments(2)), Delivery(legacy, "legacy") }, CancellationToken.None, null!);
+            Check(receiver.Completed == 2);
+            var duplicate = EnvelopeDocuments(2);
+            duplicate[1].MessageId = duplicate[0].MessageId;
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { Envelope(duplicate) },
+                CancellationToken.None, null!);
+            var unknown = ServiceBusModelFactory.ServiceBusReceivedMessage(
+                body: BinaryData.FromString(Envelope(EnvelopeDocuments(2)).Body.ToString()
+                    .Replace("\"queue_envelope_version\":1", "\"queue_envelope_version\":2")),
+                messageId: "unknown", subject: "pipeline");
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { unknown },
+                CancellationToken.None, null!);
+            Check(receiver.Completed == 2 && receiver.DeadLettered == 2);
+            var wrongType = ServiceBusModelFactory.ServiceBusReceivedMessage(
+                body: BinaryData.FromString(Envelope(EnvelopeDocuments(2)).Body.ToString()
+                    .Replace("\"queue_envelope_version\":1", "\"queue_envelope_version\":\"bad\"")),
+                messageId: "wrong-type", subject: "pipeline");
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { wrongType },
+                CancellationToken.None, null!);
+            Check(receiver.DeadLettered == 3);
+        });
+        Test("Lane body/subject mismatch is terminal, and pre-admitted lane does not reacquire capacity (in-memory)", async () =>
+        {
+            var calls = 0;
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+            {
+                calls++;
+                return new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.1]]}""") };
+            })));
+            var receiver = new ReliabilityReceiver();
+            var invalid = ServiceBusModelFactory.ServiceBusReceivedMessage(
+                body: BinaryData.FromString(JsonSerializer.Serialize(TextMessage("B"))),
+                messageId: "wrong", subject: "A");
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { invalid }, CancellationToken.None, "A");
+            Check(receiver.DeadLettered == 1 && calls == 0);
+            var scheduler = (PipelineFairScheduler)Get(worker, "_pipelineScheduler")!;
+            await using var permitA = await scheduler.AcquireAsync("A", 10, 1, "normal", "shared", 1, default);
+            await using var permitB = await scheduler.AcquireAsync("B", 10, 1, "normal", "shared", 1, default);
+            var valid = ServiceBusModelFactory.ServiceBusReceivedMessage(
+                body: BinaryData.FromString(JsonSerializer.Serialize(TextMessage("A"))),
+                messageId: "valid", subject: "A");
+            await Invoke(worker, "ProcessLaneBatchAsync", receiver, new[] { valid }, CancellationToken.None, "A")
+                .WaitAsync(TimeSpan.FromSeconds(3));
+            Check(receiver.Completed == 1 && calls == 1, "Pre-admitted work must not wait on already reserved scheduler permits");
+        });
         Test("Cosmos soft-delete markers require an exact configured scalar match", () =>
         {
             var defaultMarker = new Source
@@ -151,7 +515,7 @@ internal static class ConnectorReliabilityTests
                     Check(calls == 4, $"{path}: {calls} attempts");
                 }
             });
-        Test("DocGrok throttling reports model and pipeline retry telemetry", async () =>
+        Test("DocGrok telemetry is delivered without synchronous HTTP", async () =>
         {
             var metricCalls = 0;
             var metricHandler = new LocalHttpHandler(_ =>
@@ -173,6 +537,7 @@ internal static class ConnectorReliabilityTests
                 "mdl-test", ["hello"], default,
                 "pipeline", "source", "destination", "document"));
 
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(metricCalls == 4);
             Check(metricHandler.LastBody?.Contains("\"model_id\":\"mdl-test\"") == true);
             Check(metricHandler.LastBody?.Contains("\"throttle_count\":1") == true);
@@ -328,6 +693,65 @@ internal static class ConnectorReliabilityTests
                 new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message)) }, CancellationToken.None);
             Check(receiver.Completed == 0 && receiver.Abandoned == 1);
         });
+        Test("Benchmark mock embedding bypasses DocGrok only when explicitly enabled", async () =>
+        {
+            var calls = 0;
+            var writer = new ReliabilityWriter();
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+            {
+                calls++;
+                throw new Exception("DocGrok must not be called");
+            })), writer, options: new WorkerOptions
+            {
+                MaxConcurrentCalls = 2,
+                EnableBenchmarkMockEmbedding = true,
+            });
+            var receiver = new ReliabilityReceiver();
+            var message = TextMessage();
+            message.BenchmarkMockEmbedding = true;
+            message.BenchmarkMockEmbeddingDimensions = 384;
+            await Invoke(worker, "ProcessBatchAsync", receiver,
+                new List<(Message, ServiceBusReceivedMessage)> {
+                    (message, Delivery(message)),
+                }, CancellationToken.None);
+            Check(calls == 0);
+            Check(receiver.Completed == 1 && receiver.Abandoned == 0);
+            Check(writer.Written.TryPeek(out var written)
+                && written.Embedding.Length == 384);
+        });
+        Test("Benchmark mock embedding fails closed when the worker flag is disabled", async () =>
+        {
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+                throw new Exception("DocGrok must not be called"))));
+            var receiver = new ReliabilityReceiver();
+            var message = TextMessage();
+            message.BenchmarkMockEmbedding = true;
+            await Invoke(worker, "ProcessBatchAsync", receiver,
+                new List<(Message, ServiceBusReceivedMessage)> {
+                    (message, Delivery(message)),
+                }, CancellationToken.None);
+            Check(receiver.Completed == 0 && receiver.Abandoned == 1);
+        });
+        Test("Telemetry export cannot block broker acknowledgement", async () =>
+        {
+            var writer = new ReliabilityWriter();
+            var metrics = new MetricsReporter(
+                new HttpClient(new LocalHttpHandler(_ => new(HttpStatusCode.Unauthorized)))
+                {
+                    BaseAddress = new("http://local.invalid"),
+                },
+                NullLogger<MetricsReporter>.Instance);
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+                new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.1,0.2]]}""") })),
+                writer, metrics: metrics);
+            var receiver = new ReliabilityReceiver();
+            var message = TextMessage();
+            await Invoke(worker, "ProcessBatchAsync", receiver,
+                new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message)) }, CancellationToken.None);
+            Check(writer.Written.Count == 1, "Destination write should remain idempotently replayable");
+            Check(receiver.Completed == 1 && receiver.Abandoned == 0,
+                "Local metric recording must not sit on the settlement path");
+        });
         Test("Confirmed poison dead-letter reports failure with a stable key, never indexed success", async () =>
         {
             var reports = new List<JsonElement>();
@@ -342,10 +766,28 @@ internal static class ConnectorReliabilityTests
             var message = TextMessage();
             await Invoke(worker, "ProcessBatchAsync", receiver,
                 new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message, "poison-1")) }, CancellationToken.None);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(receiver.DeadLettered == 1 && receiver.Completed == 0 && reports.Count == 1);
             Check(reports[0].GetProperty("processed").GetInt32() == 0);
             Check(reports[0].GetProperty("failed").GetInt32() == 1);
             Check(reports[0].GetProperty("batch_key").GetString() == "worker-dlq:poison-1");
+        });
+        Test("Worker batch completes while the metrics endpoint is blocked (non-blocking reporting)", async () =>
+        {
+            var blocked = new MetricsTransportTests.BlockedHandler();
+            var metrics = new MetricsReporter(new HttpClient(blocked) { BaseAddress = new("http://local.invalid") },
+                NullLogger<MetricsReporter>.Instance);
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+                new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.25,0.5]]}""") })), metrics: metrics);
+            var receiver = new ReliabilityReceiver();
+            var message = TextMessage();
+            await Invoke(worker, "ProcessBatchAsync", receiver,
+                new List<(Message, ServiceBusReceivedMessage)> { (message, Delivery(message)) }, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Check(receiver.Completed == 1 && metrics.Transport.Sent == 0, "batch waited on metrics I/O");
+            await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            blocked.Release();
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)) && metrics.Transport.Sent == 1);
         });
         Test("Failed dead-letter settlement does not claim terminal-failure metrics", async () =>
         {
@@ -357,15 +799,123 @@ internal static class ConnectorReliabilityTests
             var receiver = new ReliabilityReceiver { FailDeadLetter = true };
             await Fails(() => Invoke(worker, "DeadLetterWithMetricsAsync", receiver, Delivery(TextMessage()),
                 "Poison", "bad input", CancellationToken.None));
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
             Check(reports == 0 && receiver.DeadLettered == 0);
         });
-        Test("Rejected metrics HTTP responses are logged instead of silently treated as delivered", async () =>
+        Test("Metrics delivery failures do not fail local admission", async () =>
         {
+            var calls = 0;
             var logger = new MetricsLogger();
-            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ => new(HttpStatusCode.Unauthorized)))
+            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ =>
+                { calls++; return new(HttpStatusCode.Unauthorized); }))
                 { BaseAddress = new("http://local.invalid") }, logger);
             await metrics.ReportInlineMetricsAsync("pipeline", 0, 1, 0, "failure");
-            Check(logger.Warnings == 1);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(calls == 1 && metrics.Transport.Failed == 1 && logger.Warnings == 1);
+        });
+        Test("Concurrent metric admission completes and drains", async () =>
+        {
+            var calls = 0;
+            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(_ =>
+                { calls++; return new(HttpStatusCode.OK); }))
+                { BaseAddress = new("http://local.invalid") }, NullLogger<MetricsReporter>.Instance);
+            var pending = Enumerable.Range(0, 20).Select(index =>
+                metrics.ReportInlineMetricsAsync($"pipeline-{index % 2}", 1, 0, 1, $"batch-{index}")).ToArray();
+            await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(5));
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(calls == 20 && pending.All(task => task.IsCompletedSuccessfully));
+        });
+        Test("Scheduler wait does not consume the admitted processing budget", async () =>
+        {
+            var calls = 0;
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+            {
+                calls++;
+                return new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.1]]}""") };
+            })));
+            worker.ProcessingBudget = TimeSpan.FromSeconds(1);
+            var scheduler = (PipelineFairScheduler)Get(worker, "_pipelineScheduler")!;
+            await using var blocker = await scheduler.AcquireAsync("pipeline", 10, 1, "normal", "shared", 1, default);
+            var message = TextMessage();
+            message.MaxConcurrencyPerWorker = 1;
+            var receiver = new ReliabilityReceiver();
+            var processing = Invoke(worker, "ProcessReceivedBatchAsync", receiver,
+                new[] { Delivery(message) }, CancellationToken.None);
+            await Task.Delay(TimeSpan.FromMilliseconds(1200));
+            Check(!processing.IsCompleted && calls == 0);
+            await blocker.DisposeAsync();
+            await processing.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(receiver.Completed == 1 && calls == 1);
+        });
+        Test("Model request packing respects mixed limits and headroom", async () =>
+        {
+            async Task CheckPacking(int textLength)
+            {
+            var requestSizes = new List<(int Count, int Tokens)>();
+            using var worker = Worker(Client(new LocalHttpHandler(request =>
+            {
+                var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                using var parsed = JsonDocument.Parse(body);
+                var texts = parsed.RootElement.GetProperty("texts").EnumerateArray()
+                    .Select(item => item.GetString()!).ToList();
+                requestSizes.Add((texts.Count, texts.Sum(TokenEstimator.Estimate)));
+                return new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(JsonSerializer.Serialize(new { outputs = texts.Select(_ => new[] { 0.1f }).ToArray() })),
+                };
+            })));
+            var messages = Enumerable.Range(0, 8).Select(index =>
+            {
+                var message = TextMessage();
+                message.Content = new string('a', textLength);
+                message.EmbedBatchSize = 100;
+                message.ModelMaxBatchSize = index < 4 ? 3 : 2;
+                message.ModelContextWindowTokens = 100;
+                message.ModelMaxBatchTokens = 150;
+                message.SourceRef = $"doc-{index}";
+                return Delivery(message, $"message-{index}");
+            }).ToArray();
+            var receiver = new ReliabilityReceiver();
+            await Invoke(worker, "ProcessReceivedBatchAsync", receiver, messages, CancellationToken.None);
+            Check(receiver.Completed == 8 && receiver.DeadLettered == 0);
+            Check(requestSizes.All(batch => batch.Count <= 3 && batch.Tokens <= 142));
+            Check(requestSizes.Sum(batch => batch.Count) == 8);
+            if (textLength == 20)
+                Check(requestSizes.Select(batch => batch.Count).SequenceEqual(new[] { 3, 2, 2, 1 }),
+                    "Each request must honor the smallest model count limit of its members");
+            }
+            await CheckPacking(20);
+            await CheckPacking(1000);
+        });
+        Test("Context errors shrink singleton requests but unrelated errors never truncate", async () =>
+        {
+            foreach (var contextError in new[] { true, false })
+            {
+                var lengths = new List<int>();
+                using var worker = Worker(Client(new LocalHttpHandler(request =>
+                {
+                    using var body = JsonDocument.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+                    var length = body.RootElement.GetProperty("texts")[0].GetString()!.Length;
+                    lengths.Add(length);
+                    if (contextError && length <= 20)
+                        return new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.1]]}""") };
+                    return new(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent(contextError
+                            ? """{"error":{"code":"context_length_exceeded","message":"maximum context length is 10 tokens"}}"""
+                            : """{"error":{"message":"Unsupported token encoding"}}"""),
+                    };
+                })));
+                var message = TextMessage();
+                message.Content = new string('a', 100);
+                var receiver = new ReliabilityReceiver();
+                await Invoke(worker, "ProcessReceivedBatchAsync", receiver, new[] { Delivery(message) }, CancellationToken.None);
+                if (contextError)
+                    Check(receiver.Completed == 1 && receiver.DeadLettered == 0
+                        && lengths.Count <= 7 && lengths.Zip(lengths.Skip(1)).All(pair => pair.First > pair.Second));
+                else
+                    Check(receiver.DeadLettered == 1 && lengths.Count == 1 && message.Content.Length == 100);
+            }
         });
         Test("HTTP timeout does not permanently terminate the receive loop", async () =>
         {
@@ -377,7 +927,7 @@ internal static class ConnectorReliabilityTests
             await Invoke(worker, "ReceiveLoopAsync", receiver, cancellation.Token);
             Check(calls == 4 && receiver.Receives == 2 && receiver.Abandoned == 1 && receiver.Completed == 0);
         });
-        Test("Local receive-loop end-to-end: permanent and timeout failures emit telemetry while healthy queue work progresses", async () =>
+        Test("Local receive-loop end-to-end: completed work and permanent failures emit telemetry while timeouts remain recoverable", async () =>
         {
             var timeoutCalls = 0;
             var client = Client(new AsyncHandler(async (request, ct) =>
@@ -393,16 +943,11 @@ internal static class ConnectorReliabilityTests
                 }
                 return new(HttpStatusCode.OK) { Content = new StringContent("""{"outputs":[[0.25,0.5]]}""") };
             }));
-            var telemetry = new ConcurrentQueue<(string Path, JsonElement Body)>();
-            var healthyReports = 0;
-            var metricsComplete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var metrics = new MetricsReporter(new HttpClient(new AsyncHandler(async (request, ct) =>
+            var reports = new List<JsonElement>();
+            var metrics = new MetricsReporter(new HttpClient(new LocalHttpHandler(request =>
             {
-                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
-                var path = request.RequestUri!.AbsolutePath;
-                telemetry.Enqueue((path, body.RootElement.Clone()));
-                if (path.Contains("/healthy/") && Interlocked.Increment(ref healthyReports) == 2)
-                    metricsComplete.TrySetResult();
+                using var body = JsonDocument.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+                reports.Add(body.RootElement.Clone());
                 return new(HttpStatusCode.OK);
             })) { BaseAddress = new("http://local.invalid") }, NullLogger<MetricsReporter>.Instance);
             var logs = new WorkerLogger();
@@ -424,21 +969,20 @@ internal static class ConnectorReliabilityTests
             ]);
 
             await Invoke(worker, "ReceiveLoopAsync", receiver, cancellation.Token);
-            await metricsComplete.Task.WaitAsync(TimeSpan.FromSeconds(2));
             Check(receiver.Receives == 3 && timeoutCalls == 4);
             Check(receiver.Completed == 2 && receiver.CompletedIds.Contains("healthy-after"));
             Check(receiver.DeadLettered == 1 && receiver.DeadLetterIds.Single() == "permanent");
             Check(receiver.Abandoned == 1 && receiver.AbandonedIds.Single() == "timeout");
             Check(writer.Written.Count == 2 && writer.Written.All(result => result.PipelineId == "healthy"));
-            var failed = telemetry.Single(record => record.Path.Contains("/permanent/")).Body;
-            Check(failed.GetProperty("processed").GetInt32() == 0 && failed.GetProperty("failed").GetInt32() == 1);
-            Check(failed.GetProperty("batch_key").GetString() == "worker-dlq:permanent");
-            Check(telemetry.Where(record => record.Path.Contains("/healthy/"))
-                .Sum(record => record.Body.GetProperty("processed").GetInt32()) == 2);
+            Check(await metrics.Transport.FlushAsync(TimeSpan.FromSeconds(5)));
+            Check(reports.Count == 3);
+            Check(reports.Where(report => report.GetProperty("model_id").GetString() == "mdl-healthy")
+                .Sum(report => report.GetProperty("processed").GetInt32()) == 2);
+            Check(reports.Single(report => report.GetProperty("model_id").GetString() == "mdl-permanent")
+                .GetProperty("failed").GetInt32() == 1);
+            Check(reports.All(report => report.GetProperty("model_id").GetString() != "mdl-timeout"));
             Check(logs.Entries.Any(entry => entry.Level == LogLevel.Error
                 && entry.Error is TimeoutException && entry.Message.Contains("mdl-timeout")));
-            Check(!telemetry.Any(record => record.Path.Contains("/timeout/")),
-                "A retryable timeout must not claim indexed success or a terminal DLQ failure");
         });
         Test("Unrelated pipelines process while one model request is blocked", async () =>
         {
@@ -513,6 +1057,34 @@ internal static class ConnectorReliabilityTests
             await Invoke(worker, "ProcessReceivedBatchAsync", receiver,
                 new[] { Delivery(SharePoint("first")), Delivery(SharePoint("second")) }, CancellationToken.None);
             Check(receiver.Completed == 2 && maximum == 1);
+        });
+        Test("Oversized SharePoint files are terminal policy failures, not repeated download retries", async () =>
+        {
+            var downloads = 0;
+            var graph = new SharePointContentClient(new HttpClient(new LocalHttpHandler(request =>
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/content"))
+                    return new(HttpStatusCode.OK) { Content = new StringContent("""{"eTag":"v1"}""") };
+                downloads++;
+                return new(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[11]) };
+            })));
+            Set(graph, "_credential", new LocalCredential());
+            using var worker = Worker(Client(new LocalHttpHandler(_ =>
+                throw new Exception("Oversized files must never reach the embedder"))), sharePoint: graph);
+            var message = TextMessage();
+            message.ContentType = "sharepoint_ref";
+            message.SharePointSiteId = "site";
+            message.SharePointDriveId = "drive";
+            message.SharePointItemId = "item";
+            message.SharePointETag = "v1";
+            message.SharePointRevision = 1;
+            message.SharePointFileName = "large.pdf";
+            message.SharePointMaxFileSizeBytes = 10;
+            var receiver = new ReliabilityReceiver();
+            await Invoke(worker, "ProcessReceivedBatchAsync", receiver,
+                new[] { Delivery(message) }, CancellationToken.None);
+            Check(downloads == 1 && receiver.DeadLettered == 1
+                && receiver.Completed == 0 && receiver.Abandoned == 0);
         });
         Test("Processing budget cancels work and abandons only unfinished deliveries", async () =>
         {
@@ -1056,12 +1628,17 @@ internal static class ConnectorReliabilityTests
     {
         public string DestinationType => "cosmosdb-vector";
         public bool Fail { get; init; }
+        public int FailOnWrite { get; init; }
+        private int _writeCalls;
         public bool SupportDelete { get; init; }
         public ConcurrentQueue<EmbeddingResult> Written { get; } = new();
+        public ConcurrentQueue<int> BatchSizes { get; } = new();
         public ConcurrentQueue<DeleteRequest> Deletes { get; } = new();
         public Task WriteBatchAsync(Dictionary<string, object> config, List<EmbeddingResult> results, CancellationToken ct)
         {
-            if (Fail) return Task.FromException(new InvalidOperationException("Destination failed"));
+            if (Fail || Interlocked.Increment(ref _writeCalls) == FailOnWrite)
+                return Task.FromException(new InvalidOperationException("Destination failed"));
+            BatchSizes.Enqueue(results.Count);
             foreach (var result in results) Written.Enqueue(result);
             return Task.CompletedTask;
         }
@@ -1074,6 +1651,22 @@ internal static class ConnectorReliabilityTests
             foreach (var request in requests) Deletes.Enqueue(request);
             return Task.CompletedTask;
         }
+    }
+    private sealed class EnvelopeBlockingWriter : IDestinationWriter
+    {
+        public string DestinationType => "cosmosdb-vector";
+        public TaskCompletionSource BadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseBad { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task WriteBatchAsync(Dictionary<string, object> config, List<EmbeddingResult> results, CancellationToken ct)
+        {
+            if (results[0].PipelineId != "blocked") return;
+            BadStarted.TrySetResult();
+            await ReleaseBad.Task.WaitAsync(ct);
+        }
+    }
+    private sealed class EnvelopeBus(LocalSender sender) : ServiceBusClient
+    {
+        public override ServiceBusSender CreateSender(string queueOrTopicName) => sender;
     }
     private class ReliabilityReceiver : ServiceBusReceiver
     {

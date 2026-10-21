@@ -3,6 +3,8 @@ using System.Text;
 using Azure.Identity;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
+using Microsoft.Azure.Cosmos;
+using Newtonsoft.Json;
 using OmniVec.ChangeFeed.Configuration;
 using OmniVec.ChangeFeed.Models;
 
@@ -23,9 +25,11 @@ public class BlobSourceWatcher : ISourceWatcher
     private readonly ContentHasher _hasher;
     private readonly ServiceBusPublisher? _sbPublisher;
     private readonly ILogger<BlobSourceWatcher> _logger;
+    private readonly SourceStateContainerManager? _stateStore;
 
     private CancellationTokenSource? _cts;
     private Task? _pollTask;
+    private Container? _stateContainer;
 
     private List<Pipeline> _activePipelines = new();
     private readonly object _pipelineLock = new();
@@ -56,7 +60,8 @@ public class BlobSourceWatcher : ISourceWatcher
         ContentHasher hasher,
         ILogger<BlobSourceWatcher> logger,
         string? generation = null,
-        ServiceBusPublisher? sbPublisher = null)
+        ServiceBusPublisher? sbPublisher = null,
+        SourceStateContainerManager? stateStore = null)
     {
         _source = source;
         _options = options;
@@ -67,6 +72,7 @@ public class BlobSourceWatcher : ISourceWatcher
         // Throwing would crash the entire ReconcileAsync pass and silently stall discovery.
         _sbPublisher = sbPublisher;
         _logger = logger;
+        _stateStore = stateStore;
         Generation = generation ?? "0";
     }
 
@@ -93,6 +99,11 @@ public class BlobSourceWatcher : ISourceWatcher
         var client = CreateBlobServiceClient();
         var container = client.GetBlobContainerClient(_source.BlobContainer);
         await container.GetPropertiesAsync(cancellationToken: ct);
+        if (_stateStore is not null)
+        {
+            _stateContainer = await _stateStore.GetContainerAsync(ct);
+            await LoadStateAsync(ct);
+        }
 
         _logger.LogInformation(
             "Blob source connected: {Name} container={Container} prefix={Prefix} fileType={FileType}",
@@ -117,14 +128,14 @@ public class BlobSourceWatcher : ISourceWatcher
 
     private async Task RunAsync(CancellationToken ct)
     {
-        _lastPollTime = UtcNow();
+        _lastPollTime ??= UtcNow();
         // Phase 1: Prefill — enumerate all existing blobs with backpressure
         while (!ct.IsCancellationRequested && !_prefillDone)
         {
             try
             {
                 // Check backpressure before enumerating more
-                if (!await _sbPublisher!.HasCapacityAsync(ct))
+                if (!await HasSourceCapacityAsync(ct))
                 {
                     _logger.LogInformation("Blob prefill paused (backpressure), waiting {Seconds}s",
                         _options.BackpressurePauseSeconds);
@@ -209,6 +220,7 @@ public class BlobSourceWatcher : ISourceWatcher
         if (blobs.Count == 0 && string.IsNullOrEmpty(nextContinuation))
         {
             _prefillDone = true;
+            await PersistStateAsync(ct);
             return;
         }
 
@@ -229,6 +241,9 @@ public class BlobSourceWatcher : ISourceWatcher
     {
         await PublishBlobMessagesAsync(blobs, ct);
         _continuationToken = nextContinuation;
+        if (string.IsNullOrEmpty(_continuationToken))
+            _prefillDone = true;
+        await PersistStateAsync(ct);
     }
 
     private async Task PollForNewBlobsAsync(CancellationToken ct)
@@ -274,7 +289,7 @@ public class BlobSourceWatcher : ISourceWatcher
         if (newBlobs.Count > 0)
         {
             // Check backpressure before publishing
-            if (!await _sbPublisher!.HasCapacityAsync(ct))
+            if (!await HasSourceCapacityAsync(ct))
             {
                 _logger.LogWarning("Blob live poll: {Count} new blobs found but backpressure active, will retry",
                     newBlobs.Count);
@@ -290,6 +305,7 @@ public class BlobSourceWatcher : ISourceWatcher
         // Retain only versions that the next overlapping scan can encounter.
         // Commit/prune after publication succeeds, never on failure/backpressure.
         _processedBlobs.IntersectWith(overlapVersions);
+        await PersistStateAsync(ct);
     }
 
     /// <summary>
@@ -306,6 +322,7 @@ public class BlobSourceWatcher : ISourceWatcher
         if (relevantPipelines.Count == 0)
             throw new InvalidOperationException("No active pipeline; retaining Blob checkpoint");
 
+        var laneMessages = new List<EmbeddingMessage>();
         foreach (var pipeline in relevantPipelines)
         {
             var dest = _destinations.FirstOrDefault(d => d.Id == pipeline.DestinationId);
@@ -341,6 +358,14 @@ public class BlobSourceWatcher : ISourceWatcher
                     MetadataFields = pipeline.MetadataFields,
                     ResourceWeight = pipeline.ResourcePolicy.Weight,
                     MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                    EmbedBatchSize = pipeline.ResourcePolicy.EmbedBatchSize,
+                    QueueDocumentsPerMessage = pipeline.ResourcePolicy.QueueDocumentsPerMessage,
+                    QueueMaxEnvelopeBytes = pipeline.ResourcePolicy.QueueMaxEnvelopeBytes,
+                    QueueSendBatchMaxBytes = pipeline.ResourcePolicy.QueueSendBatchMaxBytes,
+                    QueuePublishBatchSize = pipeline.ResourcePolicy.QueuePublishBatchSize,
+                    ModelMaxBatchSize = pipeline.ModelLimits.MaxBatchSize,
+                    ModelContextWindowTokens = pipeline.ModelLimits.ContextWindowTokens,
+                    ModelMaxBatchTokens = pipeline.ModelLimits.MaxBatchTokens,
                     ResourcePriority = pipeline.ResourcePolicy.Priority,
                     WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
                     ContentType = "blob_ref",
@@ -351,9 +376,99 @@ public class BlobSourceWatcher : ISourceWatcher
                 };
             }).ToList();
 
-            await _sbPublisher!.PublishBatchAsync(messages, ct);
+            if (_sbPublisher!.PipelineLanesEnabled) laneMessages.AddRange(messages);
+            else await _sbPublisher.PublishBatchAsync(messages, ct);
         }
+        if (_sbPublisher!.PipelineLanesEnabled) await _sbPublisher.PublishBatchAsync(laneMessages, ct);
         foreach (var blob in blobs) _processedBlobs.Add($"{blob.Name}:{blob.Properties.ETag}");
+    }
+
+    private async Task LoadStateAsync(CancellationToken ct)
+    {
+        if (_stateContainer is null) return;
+        try
+        {
+            var response = await _stateContainer.ReadItemAsync<BlobPollingState>(
+                GetStateDocumentId(),
+                new PartitionKey(_source.Id),
+                cancellationToken: ct);
+            var state = response.Resource;
+            _prefillDone = state.PrefillDone;
+            _continuationToken = state.ContinuationToken;
+            _lastPollTime = state.LastPollTime;
+            _processedBlobs.Clear();
+            _processedBlobs.UnionWith(state.ProcessedBlobVersions);
+            _logger.LogInformation(
+                "Loaded Blob checkpoint for {Source}: prefill={PrefillDone} watermark={Watermark} versions={VersionCount}",
+                _source.Name, _prefillDone, _lastPollTime, _processedBlobs.Count);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            _logger.LogInformation("No Blob checkpoint found for {Source}; starting initial enumeration", _source.Name);
+        }
+    }
+
+    private async Task PersistStateAsync(CancellationToken ct)
+    {
+        if (_stateContainer is null) return;
+        var state = new BlobPollingState
+        {
+            Id = GetStateDocumentId(),
+            ScopeId = _source.Id,
+            Generation = Generation,
+            PrefillDone = _prefillDone,
+            ContinuationToken = _continuationToken,
+            LastPollTime = _lastPollTime,
+            ProcessedBlobVersions = _processedBlobs.Order(StringComparer.Ordinal).ToList(),
+            UpdatedAt = UtcNow(),
+        };
+        await _stateContainer.UpsertItemAsync(
+            state,
+            new PartitionKey(_source.Id),
+            cancellationToken: ct);
+    }
+
+    private string GetStateDocumentId()
+    {
+        var identity = System.Text.Json.JsonSerializer.Serialize(new[]
+        {
+            "blob-state",
+            _source.Id,
+            Generation,
+            _source.BlobAccountUrl ?? _source.BlobConnectionString ?? "",
+            _source.BlobContainer ?? "",
+            _source.BlobPrefix ?? "",
+            _source.BlobFileType ?? "pdf",
+        });
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
+        return $"blob-{Convert.ToHexString(hash).ToLowerInvariant()}";
+    }
+
+    private sealed class BlobPollingState
+    {
+        [JsonProperty("id")]
+        public string Id { get; set; } = "";
+
+        [JsonProperty("scopeId")]
+        public string ScopeId { get; set; } = "";
+
+        [JsonProperty("generation")]
+        public string Generation { get; set; } = "";
+
+        [JsonProperty("prefillDone")]
+        public bool PrefillDone { get; set; }
+
+        [JsonProperty("continuationToken")]
+        public string? ContinuationToken { get; set; }
+
+        [JsonProperty("lastPollTime")]
+        public DateTimeOffset? LastPollTime { get; set; }
+
+        [JsonProperty("processedBlobVersions")]
+        public List<string> ProcessedBlobVersions { get; set; } = [];
+
+        [JsonProperty("updatedAt")]
+        public DateTimeOffset UpdatedAt { get; set; }
     }
 
     public async ValueTask DisposeAsync()
@@ -362,5 +477,13 @@ public class BlobSourceWatcher : ISourceWatcher
         if (_pollTask is not null)
             try { await _pollTask; } catch { }
         _cts?.Dispose();
+    }
+
+    private Task<bool> HasSourceCapacityAsync(CancellationToken ct)
+    {
+        string[] ids;
+        lock (_pipelineLock)
+            ids = _activePipelines.Where(p => p.Sources.Any(s => s.SourceId == _source.Id)).Select(p => p.Id).ToArray();
+        return _sbPublisher!.HasSourceCapacityAsync(ids, ct);
     }
 }

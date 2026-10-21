@@ -136,7 +136,9 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         {
             try
             {
-                if (!await _sbPublisher.HasCapacityAsync(ct))
+                string[] ids;
+                lock (_pipelineLock) ids = _pipelineIds.ToArray();
+                if (!await _sbPublisher.HasSourceCapacityAsync(ids, ct))
                 {
                     await Task.Delay(TimeSpan.FromSeconds(_options.BackpressurePauseSeconds), ct);
                     continue;
@@ -515,6 +517,14 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 MetadataFields = pipeline.MetadataFields,
                 ResourceWeight = pipeline.ResourcePolicy.Weight,
                 MaxConcurrencyPerWorker = pipeline.ResourcePolicy.MaxConcurrencyPerWorker,
+                EmbedBatchSize = pipeline.ResourcePolicy.EmbedBatchSize,
+                QueueDocumentsPerMessage = pipeline.ResourcePolicy.QueueDocumentsPerMessage,
+                QueueMaxEnvelopeBytes = pipeline.ResourcePolicy.QueueMaxEnvelopeBytes,
+                QueueSendBatchMaxBytes = pipeline.ResourcePolicy.QueueSendBatchMaxBytes,
+                QueuePublishBatchSize = pipeline.ResourcePolicy.QueuePublishBatchSize,
+                ModelMaxBatchSize = pipeline.ModelLimits.MaxBatchSize,
+                ModelContextWindowTokens = pipeline.ModelLimits.ContextWindowTokens,
+                ModelMaxBatchTokens = pipeline.ModelLimits.MaxBatchTokens,
                 ResourcePriority = pipeline.ResourcePolicy.Priority,
                 WorkloadClass = pipeline.ResourcePolicy.WorkloadClass,
                 ContentType = "sharepoint_ref",

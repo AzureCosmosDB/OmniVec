@@ -5,6 +5,33 @@
 Add Azure-native observability to OmniVec using Application Insights + Azure Monitor.
 All metrics should be viewable in the OmniVec web UI dashboard AND in Azure Portal.
 
+## Current worker reporting contract
+
+Embedding and change-feed reporters enqueue into a bounded process-local queue;
+they never await telemetry HTTP delivery. One hosted background sender performs
+bounded retries and timeouts. Full queues, rejected reports, exhausted retries,
+and shutdown losses are counted and logged. Shutdown drains for at most 10 seconds.
+Metrics are best-effort: a restart or sustained exporter outage can lose reports.
+
+The API no longer reads or updates the legacy CosmosDB metrics document. It
+records `omnivec.embedding.batch` events through the Azure Monitor SDK's bounded
+background log processor, without waiting for App Insights export. Historical
+queries use workspace `AppEvents`, deduplicate by pipeline and batch key across
+API replicas, and apply pipeline reset cutoffs to the original report timestamp.
+Summaries cover the last seven days of exported batches, not the legacy document.
+App Insights ingestion is eventually consistent; reported counts are not a
+replacement for verifying persisted destination vectors.
+
+When historical queries are unavailable, responses either identify history as
+unavailable or explicitly return process-local counters since API restart.
+Local counters are not cluster-wide. Existing Cosmos metrics data is preserved,
+but is no longer a reporting fallback.
+
+Historical queries require workspace-scoped **Log Analytics Reader** on the API
+workload identity, not the AKS kubelet identity. The infrastructure module grants
+this role to the application identity. Existing installations need the same
+assignment; RBAC changes can take several minutes to become effective.
+
 ## What gets added
 
 ### 1. Infrastructure (Bicep)

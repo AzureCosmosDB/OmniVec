@@ -3,7 +3,7 @@ param workspaceName string
 param appInsightsName string
 param location string
 param tags object = {}
-param principalId string = ''  // AKS managed identity to grant Log Analytics Reader
+param principalId string = ''  // API workload identity to grant workspace-only Log Analytics Reader
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
   name: workspaceName

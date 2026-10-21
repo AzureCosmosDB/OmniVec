@@ -67,11 +67,45 @@ api:
       initialDelaySeconds: 10
       periodSeconds: 30
     readiness:
-      path: /health
+      path: /ready
       port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
+    startup:
+      path: /ready
+      port: 8080
+      periodSeconds: 5
+      failureThreshold: 60
   adminToken: ""  # Set via --set api.adminToken=<token> during deploy
+  mockBenchmark:
+    enabled: false
+    configRefreshSeconds: 300
+    shardCount: 1
+    sourceImage:
+      repository: omnivec-mock-source
+      tag: latest
+    destinationImage:
+      repository: omnivec-mock-destination
+      tag: latest
+    model:
+      replicaCount: 1
+      image:
+        repository: docgrok-mock-embedding
+        tag: latest
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "128Mi"
+        limits:
+          cpu: "2"
+          memory: "512Mi"
+    sinkResources:
+      requests:
+        cpu: "1"
+        memory: "512Mi"
+      limits:
+        cpu: "4"
+        memory: "2Gi"
   entra:
     enabled: false
     tenantId: ""
@@ -167,6 +201,7 @@ controller:
 changefeed:
   enabled: true
   replicaCount: 15
+  enableGarnetSources: true
   image:
     repository: omnivec-changefeed
     tag: latest
@@ -271,11 +306,18 @@ sharepointWatcher:
 # =============================================================================
 dotnetWorker:
   enabled: true
+  enableBenchmarkMockEmbedding: false
   replicaCount: 2
   image:
     repository: omnivec-dotnet-worker
     tag: latest
     pullPolicy: Always
+  maxConcurrentCalls: 10
+  receivePumpCount: 4
+  prefetchCount: 0
+  embedBatchSize: 50
+  maxReceiveBatchSize: 256
+  batchAccumulateMs: 500
   # Health/liveness HTTP port exposed by the worker (HealthEndpointService)
   healthPort: 8080
   probes:
@@ -410,6 +452,11 @@ azure:
     namespace: "" # Set from Terraform output
     jobsQueue: jobs
     embeddingsTopic: embeddings
+    pipelineLanes:
+      # Provision infra enablePipelineLanes separately. Migration switches are independent.
+      producersEnabled: false
+      workerEnabled: false
+      topicName: "" # Explicitly set embeddings-lanes-v1 after provisioning/validation.
 
   # Key Vault
   keyVault:
@@ -460,6 +507,11 @@ docgrok:
       DSE_QWEN2_URL: "http://dse-qwen2-svc:8000"
       CLIP_URL: "http://clip-svc:8000"
       BGE_URL: "http://bge-svc:8000"
+      BGE_SMALL_URL: "http://bge-small-svc:8000"
+      NATIVE_BACKEND_MAX_IDLE_PER_HOST: "0"
+      NATIVE_BACKEND_IDLE_TIMEOUT_SECONDS: "1"
+      NATIVE_BACKEND_MAX_ATTEMPTS: "3"
+      DOCGROK_UNPOOLED_MODEL_HOSTS: ""
 
   # DocGrok controller (background health checks, autoscaling)
   controller:
@@ -496,6 +548,12 @@ docgrok:
     env:
       DOCGROK_ROUTER_URL: "http://docgrok:80"
       DEFAULT_MODEL_ID: ""
+      DOCGROK_MAX_BUFFERED_BLOB_BYTES: "52428800"
+      DOCGROK_MAX_STREAMED_BLOB_BYTES: "1073741824"
+      DOCGROK_EMBED_MODE: "router"
+      DOCGROK_DIRECT_EMBEDDING_ROUTES: "{}"
+      DOCGROK_DIRECT_EMBED_CONCURRENCY: "8"
+      DOCGROK_DIRECT_EMBED_TIMEOUT_SECONDS: "180"
 
   # ML Models — disabled by default, start on-demand via UI/API
   models:

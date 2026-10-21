@@ -83,6 +83,9 @@ metadata:
     omnivec/role: model
 spec:
   type: ClusterIP
+  {{- if $model.service.headless }}
+  clusterIP: None
+  {{- end }}
   ports:
   - port: {{ $model.service.port }}
     targetPort: {{ $model.service.targetPort | default $model.service.port }}

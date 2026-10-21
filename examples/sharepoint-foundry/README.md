@@ -1,17 +1,42 @@
 # Isolated SharePoint to Foundry example
 
+[README](../../README.md) | [SharePoint setup](../../docs/sharepoint-source.md) | [Cloud deployments](../../docs/cloud-deployments.md)
+
 The three `.txt` files in this directory contain synthetic policies with distinctive
 test values. They are not real company policies.
+
+## Prerequisites
+
+Use an authorized test environment with a working SharePoint watcher, Graph
+site/library access, embedding model, and a **separate Cosmos vector container
+partitioned by `/document_id`**, not `/id`. Match its vector dimensions to the
+registered model. Also prepare the hosting resource group, Foundry project/chat
+deployment, deployment allowlist, and necessary Azure grants.
+
+You can prepare the container through OmniVec without adopting an existing one:
+
+```powershell
+omnivec cloud plan container `
+  --cosmos-account-id "<cosmos-account-resource-id>" `
+  --database "<existing-database>" `
+  --container "sharepoint-foundry-demo-20260923" `
+  --embedding-model "<registered-azure-openai-model-id>" `
+  --partition-key-path /document_id
+```
+
+Review the returned plan, then approve that job explicitly with
+`omnivec cloud approve <job-id> --wait`. Register its resulting container as a
+destination and test it. Preparing a plan does not provision the container.
 
 ## Upload once, then use OmniVec
 
 Create a new folder named **OmniVec-Foundry-Demo-20260923** at the root of the
 document library already connected to OmniVec. Upload all three `.txt` files.
 Do not put this folder inside an existing watched folder such as `Policies`.
-Do not alter any existing document. Creating the folder and uploading these files
-is the only step performed outside OmniVec.
+Do not alter any existing document. After the prerequisites are in place,
+uploading the fixtures is the only source-data change required.
 
-## Two-to-five-minute CLI demo
+## CLI workflow
 
 For a timed demonstration, pre-create the isolated Cosmos vector destination,
 Foundry project/chat deployment, deployment allowlist, and Azure role grants.
@@ -27,7 +52,7 @@ omnivec demo sharepoint-foundry `
   --drive-id "<graph-drive-id>" `
   --folder "OmniVec-Foundry-Demo-20260923" `
   --destination "<isolated-cosmos-destination-id>" `
-  --pipeline-model "text-azure" `
+  --pipeline-model "<registered-model-id-or-matching-transform>" `
   --embedding-model "<registered-azure-openai-model-id>" `
   --resource-group-id "/subscriptions/<sub>/resourceGroups/<rg>" `
   --cosmos-account-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.DocumentDB/databaseAccounts/<account>" `
@@ -51,7 +76,7 @@ Foundry agent, asks the test question, and prints the answer plus inspectable
 vector-search source references. A timeout stops the CLI wait but does not
 cancel ingestion.
 
-For the fastest repeatable two-minute path, pre-create the MCP/Foundry resources
+To avoid provisioning on each run, pre-create the MCP/Foundry resources
 against the same destination and replace the Azure provisioning flags with:
 
 ```powershell
@@ -78,10 +103,10 @@ The expected answer is **47 USD per day; receipts for individual meals over
 
 After the upload, the same workflow can be completed in the OmniVec portal:
 
-1. **MCP servers > Need a new isolated Cosmos vector container?** Prepare a
-   container plan in an existing database, choosing the registered
-   `text-embedding-3-small` model. Use a distinct container such as
-   `sharepoint-foundry-demo-20260923`. Review and separately approve the plan.
+1. Prepare the isolated vector container from the prerequisites. If using the
+   console's container planner, verify its plan selects `/document_id`; use
+   the CLI's `--partition-key-path` override if the form only exposes `/id`.
+   Review and separately approve the plan.
 2. **Destinations:** register that newly created Cosmos vector container using
    its returned endpoint/database/container. Test the connection and vector
    policy. Use managed identity, not an account key.
@@ -90,8 +115,9 @@ After the upload, the same workflow can be completed in the OmniVec portal:
    `OmniVec-Foundry-Demo-20260923`; do not register the entire drive.
 4. **Pipelines:** create a new pipeline from this new source to this new
    destination, using the same embedding model, vector field `embedding`,
-   process-existing enabled and stored text enabled in field `content`.
-   Wait for the three source documents to be processed. Inspect processing
+   queue mode, process-existing enabled and stored text enabled in field `content`.
+   Explicitly **Run or Resume** the new pipeline, then wait for the three source
+   documents to be processed. Inspect processing
    status and search results; registration/readiness is not ingestion proof.
 5. **Vector Search:** search the new destination for
    `NORTHSTAR-DEMO-TRAVEL-2026`. Confirm the synthetic travel policy is returned.

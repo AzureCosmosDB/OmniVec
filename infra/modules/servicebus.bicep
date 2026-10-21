@@ -1,16 +1,39 @@
-// Service Bus — Standard namespace + jobs queue + RBAC
+// Service Bus namespace + jobs queue + RBAC
 param namespaceName string
 param location string
 param tags object = {}
 param identityPrincipalId string
+@description('Provision a separate stage-1 pipeline lane topic with no catch-all subscription. Does not activate producers or workers.')
+param enablePipelineLanes bool = false
+
+@allowed([
+  'Standard'
+  'Premium'
+])
+param skuName string = 'Standard'
+
+@allowed([
+  1
+  2
+  4
+  8
+  16
+])
+param premiumMessagingUnits int = 1
 
 resource sbNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' = {
   name: namespaceName
   location: location
-  sku: {
-    name: 'Standard'
-    tier: 'Standard'
-  }
+  sku: skuName == 'Premium'
+    ? {
+        name: 'Premium'
+        tier: 'Premium'
+        capacity: premiumMessagingUnits
+      }
+    : {
+        name: 'Standard'
+        tier: 'Standard'
+      }
   properties: {
     disableLocalAuth: true
   }
@@ -61,6 +84,17 @@ resource workerSubscription 'Microsoft.ServiceBus/namespaces/topics/subscription
   }
 }
 
+// The 2026-01-01 ARM API supports topic UserMetadata; the legacy 2022 schema does not.
+resource pipelineLanesTopic 'Microsoft.ServiceBus/namespaces/topics@2026-01-01' = if (enablePipelineLanes) {
+  parent: sbNamespace
+  name: 'embeddings-lanes-v1'
+  properties: {
+    maxSizeInMegabytes: 5120
+    defaultMessageTimeToLive: 'P1D'
+    userMetadata: 'omnivec-pipeline-lanes-v1'
+  }
+}
+
 // Azure Service Bus Data Owner role
 var serviceBusDataOwnerRoleId = '090c5cfd-751d-490a-894a-3ce6f1109419'
 
@@ -76,5 +110,7 @@ resource sbDataOwnerRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
 
 output namespaceName string = sbNamespace.name
 output endpoint string = '${sbNamespace.name}.servicebus.windows.net'
+output skuName string = skuName
+output messagingUnits int = skuName == 'Premium' ? premiumMessagingUnits : 0
 output blobEventsQueueName string = blobEventsQueue.name
 output blobEventsQueueResourceId string = blobEventsQueue.id
