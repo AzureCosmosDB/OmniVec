@@ -58,17 +58,37 @@ control. Mitigated organisationally by the two-reviewer rule on the
 default branch.
 
 ### T-CI-2 (High) — Third-party action takeover
-`docker/build-push-action`, `actions/checkout`, `sigstore/cosign-installer`
-etc. are pinned to **major version** (`@v5`, `@v3`). If an upstream
-maintainer is compromised, a tag re-point can land on every subsequent
-build.
+An action referenced by a mutable tag or branch (`@v5`, `@stable`) runs
+whatever commit that reference points to. If an upstream maintainer is
+compromised, a re-pointed reference lands on every subsequent build.
 
-**Mitigation TODO** (next batch): pin to **commit SHA**, e.g.
-`docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75`.
-Renovate / dependabot can auto-PR digest bumps.
+**Mitigation** (done, November 2026):
+* Every `uses:` reference in `.github/workflows/` is pinned to a
+  full-length commit SHA, with the release as a trailing comment, e.g.
+  `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
+  Landed in PR #208 and completed by PR #213.
+* The AzureCosmosDB organization enforces SHA pinning (1ES, since
+  November 6, 2026). GitHub rejects a job that references an unpinned
+  action before the job starts.
+* Dependabot (`.github/dependabot.yml`) opens weekly, grouped SHA-bump
+  PRs with a 7-day cooldown. Each bump still requires review.
 
-**Residual**: Until the SHA pin lands, a re-tag attack is possible.
-Tracked as `T-CI-2` in the review doc backlog.
+See [github-actions-pinning.md](github-actions-pinning.md) for the
+remediation record.
+
+**Residual**:
+* A pin freezes the action's code, not what it downloads at run time.
+  `dtolnay/rust-toolchain` still installs the current stable Rust, and
+  `sigstore/cosign-installer` downloads the release set in
+  `cosign-release`.
+* A malicious upstream commit can still be pinned if a bump PR is
+  approved without review.
+* Neither the pinning PR nor Dependabot pinned the branch reference
+  `dtolnay/rust-toolchain@stable`. Check branch references in new
+  workflows by hand.
+* Tools installed by `run:` steps are outside this control. Pin their
+  versions explicitly; for example, `binskim.yml` pins the BinSkim
+  NuGet package (PR #215).
 
 ### T-CI-3 (Med) — Secret exfiltration via build script
 A Dockerfile or script invoked by the build can print secrets into the
@@ -126,7 +146,7 @@ applicable.
 | BinSkim scan on Rust binaries | ✅ pre-batch |
 | CodeQL scan on Python + C# | ✅ pre-batch |
 | SBOM generation | ❌ — backlog (T-CI-7) |
-| SHA-pinned third-party actions | ❌ — backlog (T-CI-2) |
+| SHA-pinned third-party actions | ✅ November 2026 (T-CI-2; enforced by org policy) |
 | ACR via Workload Identity Federation | ❌ — backlog (T-CI-4 follow-up) |
 | AKS deploy via OIDC federated identity | ❌ — backlog (T-CI-5) |
 
@@ -135,13 +155,14 @@ applicable.
 Tracked in this doc; promote to the main `threat-model-review-*.md`
 backlog at the start of each quarterly review.
 
-1. **T-CI-2**: SHA-pin all third-party actions; auto-PR digest bumps.
-2. **T-CI-4 follow-up**: replace ACR push secret with WIF.
-3. **T-CI-5**: AKS deploy via OIDC federated identity (kill kubeconfig).
-4. **T-CI-7**: SBOM (CycloneDX) generation + attestation alongside
+1. **T-CI-4 follow-up**: replace ACR push secret with WIF.
+2. **T-CI-5**: AKS deploy via OIDC federated identity (kill kubeconfig).
+3. **T-CI-7**: SBOM (CycloneDX) generation + attestation alongside
    cosign signatures (`cosign attest --predicate sbom.json`).
-5. **CodeQL coverage extension**: add JavaScript (web/) and HCL
+4. **CodeQL coverage extension**: add JavaScript (web/) and HCL
    (terraform/) scanners.
+
+T-CI-2 (SHA-pin third-party actions) was completed in November 2026.
 
 ## 6. Verification
 
