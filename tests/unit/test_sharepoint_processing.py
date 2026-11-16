@@ -94,14 +94,20 @@ def test_sharepoint_destination_requires_transaction_compatible_partition(api_ap
     )
     destination = {"type": "cosmosdb-vector", "config": {"partition_key_path": "/document_id"}}
     api._require_sharepoint_compatible(store, request, destination)
-    for path in ("/id", "/source_id", "/_omnivec_sync", "/embedding", ""):
+    for path in ("/id", "/source_id", "/_omnivec_sync", "/_omnivec_provenance/key", "/embedding", ""):
         destination["config"]["partition_key_path"] = path
         with pytest.raises(HTTPException):
             api._require_sharepoint_compatible(store, request, destination)
     destination["config"]["partition_key_path"] = "/document_id"
-    request.content_field = "_omnivec_sync"
-    with pytest.raises(HTTPException):
-        api._require_sharepoint_compatible(store, request, destination)
+    for field in ("_omnivec_sync", "_omnivec_provenance"):
+        request.content_field = field
+        with pytest.raises(HTTPException):
+            api._require_sharepoint_compatible(store, request, destination)
+        request.content_field = "content"
+        request.vector_index_path = field
+        with pytest.raises(HTTPException):
+            api._require_sharepoint_compatible(store, request, destination)
+    request.vector_index_path = "embedding"
     # Existing non-SharePoint pipeline configurations remain unaffected.
     api._require_sharepoint_compatible(SimpleNamespace(get=lambda *_: {"type": "cosmosdb"}), request, destination)
 

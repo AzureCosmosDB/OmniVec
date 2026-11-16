@@ -7,6 +7,7 @@
 | Methodology | STRIDE-at-boundaries, manually identified (per DPSS / SQL Security Review Board guidance) |
 | Companion artifact | [`threat-model.tm7`](./threat-model.tm7) — open in [Microsoft Threat Modeling Tool](https://aka.ms/threatmodelingtool); **TMT auto-threat-generation is intentionally disabled** (Settings → Disable Threat Generation) |
 | Companion (CI/CD) | [`cicd-threat-model.md`](./cicd-threat-model.md) |
+| Companion (SharePoint document permissions) | [`sharepoint-acl-enforcement.md`](./sharepoint-acl-enforcement.md) - detailed ingestion, Cosmos provenance, delegated MCP enforcement, and verification requirements |
 | Latest review notes | [`threat-model-review-2026-05.md`](./threat-model-review-2026-05.md) |
 
 ---

@@ -1,3 +1,5 @@
+using OmniVec.Worker.Models;
+
 namespace OmniVec.Worker.Destinations;
 
 public record EmbeddingResult(
@@ -78,4 +80,5 @@ public record SharePointReplacement(
     string SourceId,
     string PipelineId,
     string SourceRef,
-    List<EmbeddingResult> Chunks);
+    List<EmbeddingResult> Chunks,
+    SharePointProvenance Provenance);

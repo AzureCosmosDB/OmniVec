@@ -26,6 +26,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     private readonly ServiceBusPublisher _sbPublisher;
     private readonly ILogger<SharePointSourceWatcher> _logger;
     private readonly TokenCredential _credential;
+    private readonly string? _graphTenantId;
     private readonly string _stateScopeId;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(60) };
     private readonly Dictionary<string, string> _knownRefs = new(StringComparer.Ordinal);
@@ -42,6 +43,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     private string? _deltaUrl;
     private SharePointStateDocument _state = new();
     private string? _stateEtag;
+    private string? _resourceTenantId;
 
     public string SourceId => _source.Id;
     public string Generation { get; }
@@ -66,6 +68,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         _sbPublisher = sbPublisher
             ?? throw new InvalidOperationException("SharePoint sources require Service Bus");
         _credential = SharePointGraphCredentialFactory.Create(pipelineSource?.SharePointIdentity);
+        _graphTenantId = pipelineSource?.SharePointIdentity?.TenantId;
         _stateScopeId = stateScopeId ?? source.Id;
         Generation = generation ?? "0";
     }
@@ -126,8 +129,26 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         var siteId = Uri.EscapeDataString(_source.SharePointSiteId!);
         var driveId = Uri.EscapeDataString(_source.SharePointDriveId!);
         using var response = await GraphGetAsync(
-            $"https://graph.microsoft.com/v1.0/sites/{siteId}/drives/{driveId}", ct);
+            $"https://graph.microsoft.com/v1.0/sites/{siteId}/drives/{driveId}/root?$select=id,sharepointIds", ct);
         response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        if (!document.RootElement.TryGetProperty("sharepointIds", out var ids)
+            || !Guid.TryParse(GetString(ids, "tenantId"), out var tenantId) || tenantId == Guid.Empty)
+            throw new InvalidOperationException("Graph did not return a SharePoint resource tenant");
+        _resourceTenantId = tenantId.ToString();
+        if (!string.IsNullOrEmpty(_graphTenantId)
+            && !string.Equals(_graphTenantId, _resourceTenantId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("SharePoint resource tenant does not match the pipeline identity");
+        ValidateResourceTenant();
+    }
+
+    private void ValidateResourceTenant()
+    {
+        if (string.IsNullOrEmpty(_resourceTenantId))
+            throw new InvalidOperationException("SharePoint resource tenant has not been verified");
+        if (!string.IsNullOrEmpty(_state.ResourceTenantId)
+            && !string.Equals(_state.ResourceTenantId, _resourceTenantId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("SharePoint resource tenant changed; register a new source");
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -166,6 +187,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         // Reload after every failure, including an ambiguous state-write result.
         // A persisted outbox is always replayed before reading another Graph page.
         await LoadStateAsync(ct);
+        ValidateResourceTenant();
         if (!string.IsNullOrEmpty(_state.PendingJson))
             await FlushPendingAsync(ct);
         if (_state.Reconcile)
@@ -173,7 +195,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         bool reset;
         lock (_pipelineLock)
         {
-            reset = _resetDeltaForNewPipeline || _state.SchemaVersion < 2 || string.IsNullOrEmpty(_deltaUrl)
+            reset = _resetDeltaForNewPipeline || _state.SchemaVersion < 3 || string.IsNullOrEmpty(_deltaUrl)
                 || _state.Generation != Generation || SkipContentHash;
             _resetDeltaForNewPipeline = false;
         }
@@ -231,7 +253,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private async Task StartScanAsync(CancellationToken ct)
     {
-        _state.SchemaVersion = 2;
+        _state.SchemaVersion = 3;
         _state.Generation = Generation;
         _state.ScanId = ++_state.Revision;
         _state.FullScan = true;
@@ -262,6 +284,17 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
     {
         var page = JsonSerializer.Deserialize<PendingPage>(_state.PendingJson)
             ?? throw new InvalidOperationException("Invalid SharePoint outbox");
+        ValidateResourceTenant();
+        foreach (var message in page.Messages)
+        {
+            if (message.SharePointSiteId != _source.SharePointSiteId
+                || message.SharePointDriveId != _source.SharePointDriveId
+                || (message.SharePointResourceTenantId is not null
+                    && message.SharePointResourceTenantId != _resourceTenantId))
+                throw new InvalidOperationException("SharePoint outbox provenance does not match the source");
+            // Old durable outboxes can be enriched from the verified drive without changing event IDs.
+            message.SharePointResourceTenantId = _resourceTenantId;
+        }
         await _sbPublisher.PublishBatchAsync(page.Messages, ct);
         await PersistReferencesAsync(page.Changes, ct);
         _deltaUrl = page.NextUrl;
@@ -448,6 +481,8 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private async Task PersistDeltaUrlAsync(CancellationToken ct)
     {
+        ValidateResourceTenant();
+        _state.ResourceTenantId = _resourceTenantId!;
         if (_stateContainer is null || string.IsNullOrEmpty(_deltaUrl)) return;
         _state.DeltaUrl = _deltaUrl;
         _state.Id = GetStateDocumentId();
@@ -483,6 +518,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
 
     private List<EmbeddingMessage> BuildMessages(List<SharePointChange> changes)
     {
+        ValidateResourceTenant();
         var allMessages = new List<EmbeddingMessage>();
         List<Pipeline> pipelines;
         lock (_pipelineLock) { pipelines = new List<Pipeline>(_activePipelines); }
@@ -530,6 +566,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
                 ContentType = "sharepoint_ref",
                 MessageType = change.Deleted ? "delete" : "upsert",
                 SharePointSiteId = _source.SharePointSiteId,
+                SharePointResourceTenantId = _resourceTenantId,
                 SharePointDriveId = _source.SharePointDriveId,
                 SharePointItemId = change.ItemId,
                 SharePointRevision = _state.Revision,
@@ -594,6 +631,7 @@ public sealed class SharePointSourceWatcher : ISourceWatcher
         public List<string> PipelineIds { get; set; } = new();
 
         public int SchemaVersion { get; set; }
+        public string ResourceTenantId { get; set; } = "";
         public string Generation { get; set; } = "";
         public long Revision { get; set; }
         public long ScanId { get; set; }

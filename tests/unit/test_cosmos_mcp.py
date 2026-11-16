@@ -1,4 +1,8 @@
 import importlib.util
+import os
+import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +39,13 @@ def test_vector_query_only_interpolates_validated_identifiers():
     assert "VectorDistance" in query
     assert "c.source_id = @source_id" in query
     assert "c.pipeline_id = @pipeline_id" in query
+    assert "NOT IS_DEFINED(c._omnivec_provenance)" in query
+
+
+def test_list_query_never_serves_permission_protected_rows():
+    assert cosmos_tools.list_query(3, "id").endswith(
+        "FROM c WHERE NOT IS_DEFINED(c._omnivec_provenance)"
+    )
 
 
 def test_container_allowlist_is_enforced():
@@ -107,4 +118,26 @@ def test_function_app_indexes_all_mcp_and_http_endpoints():
         "list_documents",
         "mcp_http",
         "vector_search",
+        "oauth_protected_resource",
     }
+
+
+@pytest.mark.parametrize("recipe_parts", [("Dockerfile",), ("api", "Dockerfile")])
+def test_packaged_mcp_inputs_index_without_the_repository_on_python_path(recipe_parts, tmp_path):
+    root = MCP_PATH.parents[1]
+    stage = root.joinpath(*recipe_parts).read_text().split("\nFROM ", 1)[0]
+    for line in stage.splitlines():
+        if not line.startswith("COPY "):
+            continue
+        parts = shlex.split(line)
+        assert parts[-1] in {".", "./"}
+        for pattern in parts[1:-1]:
+            sources = list(root.glob(pattern))
+            assert sources, f"Missing package input: {pattern}"
+            for source in sources:
+                shutil.copyfile(source, tmp_path / source.name)
+    result = subprocess.run(
+        [sys.executable, "-c", "import function_app; function_app.app.get_functions()"],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": ""}, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

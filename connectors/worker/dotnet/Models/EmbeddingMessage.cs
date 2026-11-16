@@ -144,6 +144,9 @@ public class EmbeddingMessage
     [JsonPropertyName("sharepoint_site_id")]
     public string? SharePointSiteId { get; set; }
 
+    [JsonPropertyName("sharepoint_resource_tenant_id")]
+    public string? SharePointResourceTenantId { get; set; }
+
     [JsonPropertyName("sharepoint_drive_id")]
     public string? SharePointDriveId { get; set; }
 

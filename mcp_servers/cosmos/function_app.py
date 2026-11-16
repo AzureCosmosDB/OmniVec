@@ -21,9 +21,19 @@ from cosmos_tools import (
     select_container,
     vector_query,
 )
+from mcp_auth import (
+    AuthenticationRequired,
+    AuthorizationUnavailable,
+    Caller,
+    EntraAuthenticator,
+    SecuritySettings,
+    load_security_settings,
+)
+from sharepoint_retrieval import SharePointAuthorizer, protected_documents
 
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+_PROTECTED_HTTP = bool(os.getenv("COSMOS_SHAREPOINT_PROTECTED_CONTAINERS", "").strip())
 
 _MCP_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 _MCP_TOOLS = [
@@ -90,6 +100,40 @@ def _allowed_containers() -> tuple[str, ...]:
     return parse_allowed_containers(_required_env("COSMOS_ALLOWED_CONTAINERS"))
 
 
+@lru_cache(maxsize=1)
+def _security() -> SecuritySettings | None:
+    return load_security_settings(_allowed_containers())
+
+
+@lru_cache(maxsize=1)
+def _authenticator() -> EntraAuthenticator:
+    settings = _security()
+    if settings is None:
+        raise RuntimeError("Protected MCP authentication is not configured")
+    return EntraAuthenticator(settings)
+
+
+def _require_caller(caller: Caller | None) -> SecuritySettings | None:
+    settings = _security()
+    if settings is not None and (caller is None or caller.tenant_id != settings.tenant_id):
+        raise AuthenticationRequired()
+    return settings
+
+
+def _read_protected(
+    client, caller: Caller | None, settings: SecuritySettings, fields: str, limit: int, **kwargs,
+) -> list[dict]:
+    if caller is None:
+        raise AuthenticationRequired()
+    authorizer = SharePointAuthorizer(caller, lambda: _authenticator().graph_token(caller))
+    try:
+        return protected_documents(
+            client, authorizer, fields, settings.allowed_fields, limit, **kwargs,
+        )
+    finally:
+        authorizer.close()
+
+
 def _container(requested: str | None):
     selected = select_container(
         requested,
@@ -111,7 +155,8 @@ def _embedding_client() -> AzureOpenAI:
     )
 
 
-def _list_allowed_containers() -> str:
+def _list_allowed_containers(*, _caller: Caller | None = None) -> str:
+    _require_caller(_caller)
     return json.dumps(
         {
             "database": _required_env("COSMOS_DATABASE"),
@@ -131,19 +176,25 @@ def _list_documents(
     container: str = "",
     top_k: int = 10,
     fields: str = "id,title,body,source_ref",
+    *,
+    _caller: Caller | None = None,
 ) -> str:
+    settings = _require_caller(_caller)
     limit = normalize_top_k(top_k)
     selected, client = _container(container)
     try:
-        rows = client.query_items(
-            query=list_query(limit, fields),
-            enable_cross_partition_query=True,
-        )
-        documents = [public_document(row) for row in rows]
+        if settings is not None and selected in settings.containers:
+            documents = _read_protected(client, _caller, settings, fields, limit)
+        else:
+            rows = client.query_items(
+                query=list_query(limit, fields),
+                enable_cross_partition_query=True,
+            )
+            documents = [public_document(row) for row in rows]
         return json.dumps(
             {"container": selected, "count": len(documents), "documents": documents}
         )
-    except ValueError:
+    except (ValueError, AuthenticationRequired, AuthorizationUnavailable):
         raise
     except Exception:
         logging.exception("Failed to list Cosmos documents")
@@ -184,7 +235,10 @@ def _vector_search(
     source_id: str = "",
     pipeline_id: str = "",
     source_ref: str = "",
+    *,
+    _caller: Caller | None = None,
 ) -> str:
+    settings = _require_caller(_caller)
     question = (question or "").strip()
     if not question:
         raise ValueError("question must not be blank")
@@ -207,18 +261,24 @@ def _vector_search(
             input=question,
         )
         embedding = response.data[0].embedding
-        rows = client.query_items(
-            query=vector_query(limit, vector_field, fields, filters),
-            parameters=[
-                {"name": "@embedding", "value": embedding},
-                *[
-                    {"name": f"@{key}", "value": value}
-                    for key, value in filters.items()
+        if settings is not None and selected in settings.containers:
+            matches = _read_protected(
+                client, _caller, settings, fields, limit,
+                vector_field=vector_field, embedding=embedding, filters=filters,
+            )
+        else:
+            rows = client.query_items(
+                query=vector_query(limit, vector_field, fields, filters),
+                parameters=[
+                    {"name": "@embedding", "value": embedding},
+                    *[
+                        {"name": f"@{key}", "value": value}
+                        for key, value in filters.items()
+                    ],
                 ],
-            ],
-            enable_cross_partition_query=True,
-        )
-        matches = [public_document(row) for row in rows]
+                enable_cross_partition_query=True,
+            )
+            matches = [public_document(row) for row in rows]
         return json.dumps(
             {
                 "container": selected,
@@ -228,7 +288,7 @@ def _vector_search(
                 "matches": matches,
             }
         )
-    except ValueError:
+    except (ValueError, AuthenticationRequired, AuthorizationUnavailable):
         raise
     except Exception:
         logging.exception("Failed to vector-search Cosmos documents")
@@ -305,7 +365,7 @@ def _mcp_error(request_id, code: int, message: str) -> dict:
     }
 
 
-def _call_tool(name: str, arguments: dict) -> dict:
+def _call_tool(name: str, arguments: dict, caller: Caller | None = None) -> dict:
     tools = {
         "list_allowed_containers": _list_allowed_containers,
         "list_documents": _list_documents,
@@ -315,7 +375,10 @@ def _call_tool(name: str, arguments: dict) -> dict:
     if tool is None:
         raise KeyError(name)
     try:
-        text = tool(**arguments)
+        schema = next(item["inputSchema"] for item in _MCP_TOOLS if item["name"] == name)
+        if set(arguments) - set(schema["properties"]):
+            raise ValueError("Unsupported tool arguments")
+        text = tool(**arguments, _caller=caller)
         return {"content": [{"type": "text", "text": text}], "isError": False}
     except (TypeError, ValueError) as error:
         return {
@@ -329,7 +392,7 @@ def _call_tool(name: str, arguments: dict) -> dict:
         }
 
 
-def _handle_mcp_message(message: object) -> tuple[dict | None, int]:
+def _handle_mcp_message(message: object, caller: Caller | None = None) -> tuple[dict | None, int]:
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _mcp_error(None, -32600, "Invalid Request"), 400
 
@@ -372,7 +435,7 @@ def _handle_mcp_message(message: object) -> tuple[dict | None, int]:
         if not isinstance(name, str) or not isinstance(arguments, dict):
             return _mcp_error(request_id, -32602, "Invalid params"), 400
         try:
-            result = _call_tool(name, arguments)
+            result = _call_tool(name, arguments, caller)
         except KeyError:
             return _mcp_error(request_id, -32602, f"Unknown tool: {name}"), 400
         return _mcp_result(request_id, result), 200
@@ -382,15 +445,40 @@ def _handle_mcp_message(message: object) -> tuple[dict | None, int]:
     return _mcp_error(request_id, -32601, "Method not found"), 404
 
 
-@app.route(route="mcp", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
+@app.route(
+    route="mcp", methods=["POST"],
+    auth_level=func.AuthLevel.ANONYMOUS if _PROTECTED_HTTP else func.AuthLevel.FUNCTION,
+)
 def mcp_http(req: func.HttpRequest) -> func.HttpResponse:
-    """Serve the MCP Streamable HTTP JSON-RPC surface without preview middleware."""
+    """Authenticate protected deployments before processing any MCP message."""
+    settings = None
     try:
-        message = req.get_json()
-    except ValueError:
-        payload, status = _mcp_error(None, -32700, "Parse error"), 400
-    else:
-        payload, status = _handle_mcp_message(message)
+        if _PROTECTED_HTTP:
+            settings = _security()
+            if settings is None:
+                raise AuthorizationUnavailable()
+        caller = _authenticator().authenticate(req.headers.get("Authorization")) if settings else None
+        try:
+            message = req.get_json()
+        except ValueError:
+            payload, status = _mcp_error(None, -32700, "Parse error"), 400
+        else:
+            payload, status = _handle_mcp_message(message, caller)
+    except AuthenticationRequired as error:
+        return func.HttpResponse(
+            json.dumps({"error": "authentication_required"}), status_code=401,
+            mimetype="application/json",
+            headers={
+                "WWW-Authenticate": settings.challenge(error.claims) if settings else "Bearer",
+                "Cache-Control": "no-store",
+            },
+        )
+    except (ValueError, AuthorizationUnavailable):
+        logging.warning("Protected MCP authentication unavailable or misconfigured")
+        return func.HttpResponse(
+            json.dumps({"error": "authorization_unavailable"}), status_code=503,
+            mimetype="application/json", headers={"Cache-Control": "no-store"},
+        )
 
     if payload is None:
         return func.HttpResponse(status_code=status)
@@ -398,4 +486,30 @@ def mcp_http(req: func.HttpRequest) -> func.HttpResponse:
         json.dumps(payload),
         status_code=status,
         mimetype="application/json",
+        headers={"Cache-Control": "no-store"},
     )
+
+
+@app.route(
+    route=".well-known/oauth-protected-resource", methods=["GET"],
+    auth_level=func.AuthLevel.ANONYMOUS,
+)
+def oauth_protected_resource(req: func.HttpRequest) -> func.HttpResponse:
+    if not _PROTECTED_HTTP:
+        return func.HttpResponse(status_code=404)
+    try:
+        settings = _security()
+        if settings is None:
+            raise AuthorizationUnavailable()
+        return func.HttpResponse(
+            json.dumps({
+                "resource": settings.public_url,
+                "authorization_servers": [f"{settings.authority}/v2.0"],
+                "scopes_supported": [settings.scope],
+                "bearer_methods_supported": ["header"],
+            }),
+            mimetype="application/json", headers={"Cache-Control": "no-store"},
+        )
+    except (ValueError, AuthorizationUnavailable):
+        logging.warning("Protected MCP OAuth metadata unavailable or misconfigured")
+        return func.HttpResponse(status_code=503)

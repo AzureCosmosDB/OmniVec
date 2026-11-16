@@ -29,7 +29,8 @@ public sealed class SharePointContentClient
         string? expectedETag = null,
         string? graphTenantId = null,
         string? graphClientId = null,
-        string? pipelineId = null)
+        string? pipelineId = null,
+        string? expectedResourceTenantId = null)
     {
         if (maxBytes <= 0 || maxBytes > 50L * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maxBytes), "SharePoint files must be limited to at most 50 MiB");
@@ -38,7 +39,8 @@ public sealed class SharePointContentClient
         var url =
             $"https://graph.microsoft.com/v1.0/sites/{Uri.EscapeDataString(siteId)}" +
             $"/drives/{Uri.EscapeDataString(driveId)}/items/{Uri.EscapeDataString(itemId)}";
-        if (expectedETag is not null) await VerifyVersionAsync(url, token.Token, expectedETag, ct);
+        if (expectedETag is not null)
+            await VerifyVersionAsync(url, token.Token, expectedETag, expectedResourceTenantId, ct);
         using var request = new HttpRequestMessage(HttpMethod.Get, url + "/content");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -64,7 +66,8 @@ public sealed class SharePointContentClient
         }
         // Graph's content endpoint redirects to storage; do not rely on a storage
         // ETag matching Graph's eTag, or on If-Match being forwarded on redirect.
-        if (expectedETag is not null) await VerifyVersionAsync(url, token.Token, expectedETag, ct);
+        if (expectedETag is not null)
+            await VerifyVersionAsync(url, token.Token, expectedETag, expectedResourceTenantId, ct);
         return buffer.ToArray();
     }
 
@@ -79,9 +82,10 @@ public sealed class SharePointContentClient
             key, _ => SharePointGraphCredentialFactory.Create(tenantId, clientId));
     }
 
-    private async Task VerifyVersionAsync(string url, string token, string expected, CancellationToken ct)
+    private async Task VerifyVersionAsync(
+        string url, string token, string expected, string? expectedTenantId, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url + "?$select=id,eTag");
+        using var request = new HttpRequestMessage(HttpMethod.Get, url + "?$select=id,eTag,sharepointIds");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         using var response = await _http.SendAsync(request, ct);
         if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
@@ -90,6 +94,12 @@ public sealed class SharePointContentClient
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         if (!json.RootElement.TryGetProperty("eTag", out var etag) || etag.GetString() != expected)
             throw new SharePointVersionChangedException("Item eTag no longer matches the queued version");
+        if (expectedTenantId is not null
+            && (!json.RootElement.TryGetProperty("sharepointIds", out var ids)
+                || !ids.TryGetProperty("tenantId", out var tenant)
+                || !Guid.TryParse(tenant.GetString(), out var actualTenant)
+                || actualTenant.ToString() != expectedTenantId))
+            throw new InvalidOperationException("Downloaded SharePoint item does not match the queued resource tenant");
     }
 }
 

@@ -232,7 +232,7 @@ try {
     $apiSpec = Get-SourceBuildSpec -Name 'omnivec-api'
     $apiBytes = (Get-ChildItem $apiSpec.Context -File -Recurse | Measure-Object Length -Sum).Sum
     Check (Test-Path $apiSpec.Dockerfile) 'staged API context contains its Dockerfile'
-    foreach ($file in @('function_app.py', 'cosmos_tools.py', 'host.json', 'requirements.txt')) {
+    foreach ($file in @('function_app.py', 'cosmos_tools.py', 'mcp_auth.py', 'sharepoint_retrieval.py', 'host.json', 'requirements.txt')) {
         Check (Test-Path (Join-Path $apiSpec.Context "mcp_servers\cosmos\$file")) "staged API context contains MCP package input $file"
     }
     Check ($apiSpec.Tag -match '^src-[a-f0-9]{16}$') 'staged API context produces a valid immutable tag'

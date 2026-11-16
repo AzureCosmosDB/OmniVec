@@ -5132,7 +5132,7 @@ def _require_sharepoint_compatible(store, req, destination):
     pk_path = config.get("partition_key_path") or ""
     pk_parts = pk_path.lstrip("/").split("/")
     reserved = {
-        "id", "_omnivec_sync", "source_id", "pipeline_id", "source_ref",
+        "id", "_omnivec_sync", "_omnivec_provenance", "source_id", "pipeline_id", "source_ref",
         "embedded_at", "pipeline_generation", "pipeline_name", "content_hash", "embedding_dims", "ttl",
     }
     vector_field = req.vector_index_path.lstrip("/")
