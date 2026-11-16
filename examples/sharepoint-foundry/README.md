@@ -5,11 +5,16 @@
 The three `.txt` files in this directory contain synthetic policies with distinctive
 test values. They are not real company policies.
 
-The automated CLI/portal workflow below uses a **shared Function key** and is
-only a synthetic ingestion/retrieval demonstration. It does not enforce each
-user's SharePoint permissions. For private documents, use the
-[per-user OAuth workflow](#per-user-oauth-workflow) instead of its MCP/Foundry
-deployment and inference steps.
+**Use the [per-user OAuth workflow](#per-user-oauth-workflow) for SharePoint
+retrieval, including these synthetic documents.** Generic shared-key MCP queries
+exclude all rows carrying `_omnivec_provenance`; they cannot return chunks from
+the current SharePoint ingestion pipeline.
+
+The legacy automated CLI/portal workflow below uses a **shared Function key**.
+Its source/container/ingestion setup remains useful, but its MCP/Foundry
+deployment and inference steps are not compatible with current SharePoint
+chunks. Do not remove provenance or protection to make the legacy demo return
+results.
 
 ## Prerequisites
 
@@ -42,7 +47,7 @@ Do not put this folder inside an existing watched folder such as `Policies`.
 Do not alter any existing document. After the prerequisites are in place,
 uploading the fixtures is the only source-data change required.
 
-## CLI workflow
+## Legacy shared-key CLI workflow (not supported for SharePoint retrieval)
 
 For a timed demonstration, pre-create the isolated Cosmos vector destination,
 Foundry project/chat deployment, deployment allowlist, and Azure role grants.
@@ -105,7 +110,7 @@ omnivec cloud permissions <job-id>
 The expected answer is **47 USD per day; receipts for individual meals over
 18 USD; submission within 12 calendar days after the trip ends.**
 
-## Manual portal workflow
+## Legacy shared-key portal workflow (use OAuth for retrieval)
 
 After the upload, the same workflow can be completed in the OmniVec portal:
 

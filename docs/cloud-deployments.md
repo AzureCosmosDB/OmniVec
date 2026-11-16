@@ -83,8 +83,10 @@ authorization.** For private SharePoint documents, deploy a separate
 with Entra/OBO settings and a Foundry custom per-user OAuth connection.
 Do not reuse this builder against that protected app; its generated settings,
 shared-key readiness checks and connection creation do not support that mode.
-The synthetic SharePoint CLI demo and administrative search do not prove user
-permission enforcement.
+Generic shared-key MCP queries exclude rows carrying `_omnivec_provenance`,
+including synthetic SharePoint chunks. The legacy SharePoint CLI demo cannot
+complete retrieval with this builder; use the protected per-user OAuth workflow.
+Administrative search does not prove user permission enforcement.
 
 Readiness verifies anonymous requests are rejected, authenticated initialization
 identifies this deployment, the expected tools are advertised, and one bounded

@@ -901,7 +901,9 @@ downgrade still loses user authentication and must be detected.
 
 The existing shared-key cloud deployment builder/demo does not configure this
 protected OBO model. Do not run it against the protected Function App or present
-its synthetic SharePoint example as permission-enforcement evidence.
+its synthetic SharePoint example as permission-enforcement evidence. Its
+shared-key MCP retrieval steps cannot return current SharePoint chunks, because
+the generic provenance filter applies to synthetic documents too.
 
 The Helm chart does not deploy or configure the protected MCP Function App; none
 of the settings above are Helm values. For SharePoint, Helm only deploys the
