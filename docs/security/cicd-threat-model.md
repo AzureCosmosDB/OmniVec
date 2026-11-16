@@ -169,5 +169,5 @@ T-CI-2 (SHA-pin third-party actions) was completed in November 2026.
 | Check | Status |
 |---|---|
 | All `.github/workflows/` reviewed | ✅ batch 8 |
-| Cosign signing dry-run on dev branch | ⏳ pending first push after merge |
+| Cosign signing on dev branch | ✅ November 2026: all 11 `:dev` images signed by digest ([run 43811236393](https://github.com/AzureCosmosDB/OmniVec/actions/runs/43811236393)) |
 | Policy-controller installation runbook drafted | ⏳ ops follow-up |

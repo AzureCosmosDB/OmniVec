@@ -38,6 +38,7 @@ This was a workflow security-policy failure, not a failing Rust test or an appli
 | November 16, 04:43 | PR #213 merged by an admin; required review bypassed. `python-tests`, CodeQL, and `build-and-push-images` passed on `main`. Dependabot replaced PR #212 with [PR #214](https://github.com/AzureCosmosDB/OmniVec/pull/214), which keeps every reference SHA-pinned. |
 | November 16 | Nine stale remote branches that still had mutable references were deleted. Their work was already merged or closed through PRs. |
 | November 16, 05:01 | PR #214 approved and merged normally, with no bypass. Its SHAs were checked against the upstream release tags. `python-tests`, CodeQL, and `build-and-push-images` passed on `bb79260`. |
+| November 16, 05:35 | `dev` fast-forwarded to `main` (`58f3d4e..bb79260`) and given the same branch protection as `main`. The `dev` push rebuilt and cosign-signed all 11 `:dev` images, and CodeQL passed. BinSkim failed on known issues fixed by [PR #215](https://github.com/AzureCosmosDB/OmniVec/pull/215). |
 
 ## Why did the notice also list `actions/checkout` and `actions/setup-dotnet`?
 
@@ -61,11 +62,16 @@ Deleted, because their work was already merged or closed through a PR. Each can 
 
 `feat/playground-fts-hybrid` ([#181](https://github.com/AzureCosmosDB/OmniVec/pull/181)) had already been deleted.
 
-Kept, because they contain work that is not on `main` or need an owner decision:
+Kept and updated:
 
 | Branch | Reason |
 | --- | --- |
-| `dev` | It has no unique work missing from `main`, and it is not protected. Its workflows run on pushes to `dev`, so they still contain mutable references that policy would reject. |
+| `dev` | The `dev` image release channel: pushes publish `:dev` images, and `hooks/postprovision.sh` deploys them from a `dev` checkout. It had no work missing from `main`, so it was fast-forwarded to `main` and now has the same protection as `main`: 1 approving review and the 3 required image-build checks, with force pushes and deletion blocked. |
+
+Kept, because they contain work that is not on `main`:
+
+| Branch | Reason |
+| --- | --- |
 | `feature/onelake-iceberg-garnet` | Unmerged work with no PR. |
 | `prsasatt/parametric-card-extract` | Unmerged work with no PR. |
 
@@ -114,12 +120,12 @@ The follow-ups from the original remediation are complete:
 - Stale branches: the nine branches listed above were deleted.
 - Dependabot [PR #214](https://github.com/AzureCosmosDB/OmniVec/pull/214) was reviewed and merged. It did not change the Rust action pin.
 - `T-CI-2` in [cicd-threat-model.md](cicd-threat-model.md) is marked as mitigated.
+- `dev` was fast-forwarded to `main` and protected like `main`, so its workflows are pinned and the threat model's "Branch protection on `main` / `dev`" statement is now accurate.
 
 Still open:
 
 1. PR #213 was merged without an approving review, using the admin override, because its author could not approve it. A reviewer may optionally review it after the fact.
-2. Reset `dev` to `main` or delete it, and decide whether it should be protected.
-3. BinSkim: after this remediation, a manual BinSkim run on `main` failed for two reasons unrelated to pinning. Under setup-go v7, the hard-coded Go 1.22 could no longer upgrade itself to the Go version required by `cli/go.mod`. The unversioned BinSkim NuGet install also picked up a release that moved `BinSkim.exe`. [PR #215](https://github.com/AzureCosmosDB/OmniVec/pull/215) fixes both and adds the workflow file to its own path filters. Without that filter entry, PR #211's change to `binskim.yml` never ran BinSkim.
+2. BinSkim: after this remediation, a manual BinSkim run on `main` failed for two reasons unrelated to pinning. Under setup-go v7, the hard-coded Go 1.22 could no longer upgrade itself to the Go version required by `cli/go.mod`. The unversioned BinSkim NuGet install also picked up a release that moved `BinSkim.exe`. [PR #215](https://github.com/AzureCosmosDB/OmniVec/pull/215) fixes both and adds the workflow file to its own path filters. Without that filter entry, PR #211's change to `binskim.yml` never ran BinSkim. After #215 merges, update `dev` from `main` again.
 
 ## Preventing recurrence
 
