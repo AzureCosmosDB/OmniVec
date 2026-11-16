@@ -8,6 +8,8 @@ from typing import Any
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}$")
 _FILTER_FIELDS = ("source_id", "pipeline_id", "source_ref")
+# Rows with source provenance (SharePoint) are only served by the permission-aware path.
+_UNPROTECTED_ROWS = "NOT IS_DEFINED(c._omnivec_provenance)"
 
 
 def normalize_top_k(value: Any) -> int:
@@ -72,7 +74,7 @@ def list_query(top_k: Any, fields: str | None) -> str:
     """Build a bounded read-only document-list query."""
     limit = normalize_top_k(top_k)
     selected_fields = parse_fields(fields)
-    return f"SELECT TOP {limit} {_projection(selected_fields)} FROM c"
+    return f"SELECT TOP {limit} {_projection(selected_fields)} FROM c WHERE {_UNPROTECTED_ROWS}"
 
 
 def normalize_filters(filters: dict[str, Any] | None) -> dict[str, str]:
@@ -101,7 +103,7 @@ def vector_query(
         raise ValueError("vector_field must be a top-level property name")
     selected_fields = parse_fields(fields)
     normalized_filters = normalize_filters(filters)
-    predicates = [f"IS_DEFINED(c.{vector_field})"]
+    predicates = [f"IS_DEFINED(c.{vector_field})", _UNPROTECTED_ROWS]
     predicates.extend(f"c.{field} = @{field}" for field in normalized_filters)
     return (
         f"SELECT TOP {limit} {_projection(selected_fields)}, "

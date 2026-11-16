@@ -39,6 +39,13 @@ def test_vector_query_only_interpolates_validated_identifiers():
     assert "VectorDistance" in query
     assert "c.source_id = @source_id" in query
     assert "c.pipeline_id = @pipeline_id" in query
+    assert "NOT IS_DEFINED(c._omnivec_provenance)" in query
+
+
+def test_list_query_never_serves_permission_protected_rows():
+    assert cosmos_tools.list_query(3, "id").endswith(
+        "FROM c WHERE NOT IS_DEFINED(c._omnivec_provenance)"
+    )
 
 
 def test_container_allowlist_is_enforced():

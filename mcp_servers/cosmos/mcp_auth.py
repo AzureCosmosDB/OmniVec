@@ -59,6 +59,7 @@ class SecuritySettings:
     client_secret: str = field(repr=False)
     public_url: str
     allowed_fields: tuple[str, ...]
+    allowed_client_ids: frozenset[str] = frozenset()
 
     @property
     def authority(self) -> str:
@@ -97,10 +98,14 @@ def load_security_settings(allowed_containers: tuple[str, ...]) -> SecuritySetti
     ))
     if any(name.startswith("_") or name == "distance" for name in fields):
         raise ValueError("Protected result fields must not include internal metadata")
+    client_ids = frozenset(
+        canonical_guid(item.strip())
+        for item in os.getenv("MCP_ALLOWED_CLIENT_IDS", "").split(",") if item.strip()
+    )
     return SecuritySettings(
         containers, canonical_guid(_required("MCP_ENTRA_TENANT_ID")),
         canonical_guid(_required("MCP_ENTRA_CLIENT_ID")), _required("MCP_ENTRA_CLIENT_SECRET"),
-        public_url, fields,
+        public_url, fields, client_ids,
     )
 
 
@@ -151,6 +156,9 @@ class EntraAuthenticator:
             scopes = claims["scp"]
             if (tenant_id != self.settings.tenant_id or claims.get("ver") != "2.0"
                     or not isinstance(scopes, str) or "access_as_user" not in scopes.split()):
+                raise AuthenticationRequired()
+            if (self.settings.allowed_client_ids
+                    and canonical_guid(claims.get("azp")) not in self.settings.allowed_client_ids):
                 raise AuthenticationRequired()
         except jwt.PyJWKClientConnectionError:
             logging.warning("MCP signing-key service unavailable")

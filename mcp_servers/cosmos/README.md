@@ -52,6 +52,10 @@ Function key in the `x-functions-key` header.
 
 ## Protected SharePoint deployment
 
+For the end-to-end trust boundaries, authorization diagrams, Cosmos provenance,
+revocation behavior, and security sign-off requirements, see the
+[SharePoint permission-enforcement review](../../docs/security/sharepoint-acl-enforcement.md).
+
 Use a **separate Function App and dedicated SharePoint-only Cosmos containers**.
 Only trusted, upgraded OmniVec SharePoint workers may write to those containers.
 Provenance is writer-controlled authorization metadata, not a signature: an
@@ -69,7 +73,13 @@ MCP_ENTRA_CLIENT_ID=<mcp-api-app-client-guid>
 MCP_ENTRA_CLIENT_SECRET=@Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/<obo-secret>/)
 MCP_PUBLIC_URL=https://<function-app>.azurewebsites.net/api/mcp
 COSMOS_SHAREPOINT_ALLOWED_FIELDS=id,title,content,source_ref
+MCP_ALLOWED_CLIENT_IDS=<approved-client-app-guid>[,<another-client-app-guid>]
 ```
+
+`MCP_ALLOWED_CLIENT_IDS` is optional but recommended: when set, only tokens whose
+`azp` claim is a listed client application are accepted. Generic (non-protected)
+queries never return rows that carry `_omnivec_provenance`, so SharePoint chunks
+are served only through the permission-aware path.
 
 `COSMOS_SHAREPOINT_PROTECTED_CONTAINERS` is a comma-separated subset of
 `COSMOS_ALLOWED_CONTAINERS`. Omitting it leaves the original shared-key mode

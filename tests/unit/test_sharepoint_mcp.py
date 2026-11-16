@@ -89,6 +89,24 @@ def test_jwt_requires_own_audience_same_tenant_and_user_scope(
     assert caller.access_token not in repr(caller)
 
 
+def test_jwt_client_allowlist_rejects_unlisted_or_missing_azp(
+    modules, settings, signing_key, monkeypatch,
+):
+    approved = "55555555-5555-5555-5555-555555555555"
+    monkeypatch.setenv("MCP_ALLOWED_CLIENT_IDS", f" {approved.upper()} ")
+    restricted = modules.auth.load_security_settings(("protected", "public"))
+    authenticator = modules.auth.EntraAuthenticator(restricted)
+    monkeypatch.setattr(authenticator._keys, "get_signing_key_from_jwt",
+                        lambda _: SimpleNamespace(key=signing_key.public_key()))
+    for changes in ({}, {"azp": "66666666-6666-6666-6666-666666666666"}):
+        with pytest.raises(modules.auth.AuthenticationRequired):
+            authenticator.authenticate("Bearer " + user_token(signing_key, **changes))
+    assert authenticator.authenticate("Bearer " + user_token(signing_key, azp=approved)).object_id == USER
+    monkeypatch.setenv("MCP_ALLOWED_CLIENT_IDS", "not-a-guid")
+    with pytest.raises(ValueError):
+        modules.auth.load_security_settings(("protected", "public"))
+
+
 def test_jwt_signature_and_missing_bearer_fail_without_function_key_fallback(
     modules, settings, signing_key, monkeypatch,
 ):
